@@ -140,6 +140,21 @@ function setStatus(status) {
   post({ type: MSG.STATE, engine: engineStatus });
 }
 
+/**
+ * The one path that flips the master switch, whether it came from the popup
+ * toggle or from a gesture bound to `DISABLE`. Writing to storage is what
+ * actually drives it: the change listener pushes the new settings to the
+ * offscreen document and re-runs `syncEngine()`.
+ */
+async function setEnabled(enabled) {
+  const settings = await getSettings();
+  settingsCache = { ...settings, enabled };
+  await chrome.storage.local.set({ settings: settingsCache });
+  if (enabled) setStatus({ state: ENGINE.STARTING, detail: '' });
+  await syncEngine();
+  return { ok: true, detail: enabled ? 'Jester on' : 'Camera stopped' };
+}
+
 // ---------------------------------------------------------------------------
 // Target resolution — which <video> should receive the action?
 // ---------------------------------------------------------------------------
@@ -434,6 +449,15 @@ async function announce(action, result) {
 async function dispatchAction(action, meta) {
   if (!action || action === 'NONE') return;
 
+  if (action === 'DISABLE') {
+    // Toast first: once the engine is down this is the only thing that tells
+    // you the gesture landed rather than the camera having simply dropped out.
+    await announce(action, { ok: true, detail: 'Camera stopped' });
+    const result = await setEnabled(false);
+    await recordAction({ ...meta, action, ok: result.ok, detail: result.detail });
+    return;
+  }
+
   if (action === 'FULLSCREEN_TOGGLE' || action === 'EXIT_FULLSCREEN') {
     const result = await toggleFullscreen(action);
     await announce(action, result);
@@ -475,13 +499,80 @@ async function recordAction(entry) {
 }
 
 // ---------------------------------------------------------------------------
+// Virtual pointer relay
+//
+// The cursor isn't aimed at a <video> — it belongs to whatever the user is
+// looking at — so it resolves its own target: the active tab's *top* frame.
+// These arrive at the inference rate, so the lookup is cached hard and stale
+// motion is dropped rather than queued.
+// ---------------------------------------------------------------------------
+
+const CURSOR_TAB_CACHE_MS = 1000;
+
+let cursorTab = null;
+let cursorTabAt = 0;
+let cursorInFlight = false;
+/** A tab we already failed to reach; retrying every frame would be a storm. */
+let cursorUnreachable = null;
+
+async function cursorTarget() {
+  const now = Date.now();
+  if (cursorTabAt && now - cursorTabAt < CURSOR_TAB_CACHE_MS) return cursorTab;
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  cursorTab = tab && injectable(tab.url) ? tab.id : null;
+  cursorTabAt = now;
+  return cursorTab;
+}
+
+function invalidateCursorTab() {
+  cursorTab = null;
+  cursorTabAt = 0;
+  cursorUnreachable = null;
+}
+
+async function relayCursor(cursor) {
+  // A click, or the cursor going away, must never be dropped. Plain motion can:
+  // the next frame supersedes it anyway.
+  if (cursorInFlight && cursor.active && !cursor.click) return;
+
+  const tabId = await cursorTarget();
+  if (tabId === null || tabId === cursorUnreachable) return;
+
+  const message = { type: MSG.CURSOR, cursor };
+  cursorInFlight = true;
+  try {
+    await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
+  } catch {
+    // No content script in that frame yet — inject and retry once.
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        files: ['src/content/content.js']
+      });
+      await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
+    } catch {
+      // Restricted page, or Jester has no host permission for this site. Stop
+      // trying until the tab changes or the user switches away and back.
+      cursorUnreachable = tabId;
+    }
+  } finally {
+    cursorInFlight = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // HUD relay — forward only meaningful changes, not every inference frame
 // ---------------------------------------------------------------------------
 
 async function relayHud(telemetry) {
+  // The cursor is its own feedback — a pill hovering over it is just noise, so
+  // the pointer collapses to one signature that reads as "no hand".
+  const pointing = !!telemetry.pointer?.active;
   // Cheapest check first: most telemetry frames say the same thing as the last.
   const bucket = Math.round((telemetry.progress || 0) * 10);
-  const signature = `${telemetry.gesture || ''}|${bucket}|${telemetry.handPresent ? 1 : 0}`;
+  const signature = pointing
+    ? 'pointer'
+    : `${telemetry.gesture || ''}|${bucket}|${telemetry.handPresent ? 1 : 0}`;
   if (signature === lastHudSignature) return;
   lastHudSignature = signature;
 
@@ -500,7 +591,7 @@ async function relayHud(telemetry) {
           label: telemetry.label || null,
           score: telemetry.score || 0,
           progress: telemetry.progress || 0,
-          handPresent: !!telemetry.handPresent
+          handPresent: !pointing && !!telemetry.handPresent
         }
       },
       { frameId: target.frameId }
@@ -541,6 +632,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case MSG.TELEMETRY:
       relayHud(message.telemetry || {}).catch(() => undefined);
+      return false;
+
+    case MSG.CURSOR:
+      relayCursor(message.cursor || {}).catch(() => undefined);
+      return false;
+
+    case MSG.CURSOR_CLICK:
+      recordAction({
+        source: 'pointer',
+        action: 'POINTER_CLICK',
+        label: 'Click',
+        ok: !!message.ok,
+        detail: message.detail || ''
+      }).catch(() => undefined);
       return false;
 
     case MSG.ENGINE_STATUS:
@@ -592,14 +697,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case MSG.SET_ENABLED:
-      (async () => {
-        const settings = await getSettings();
-        settingsCache = { ...settings, enabled: !!message.enabled };
-        await chrome.storage.local.set({ settings: settingsCache });
-        if (message.enabled) setStatus({ state: ENGINE.STARTING, detail: '' });
-        await syncEngine();
-        sendResponse({ ok: true });
-      })();
+      setEnabled(!!message.enabled)
+        .then(sendResponse)
+        .catch((err) => sendResponse({ ok: false, detail: String(err?.message || err) }));
       return true;
 
     case MSG.RESTART_ENGINE:
@@ -628,6 +728,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 chrome.tabs.onActivated.addListener(() => {
   invalidateTarget();
+  invalidateCursorTab();
   updateSuspendState();
 });
 
@@ -636,6 +737,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (videoFrames.get(key).tabId === tabId) videoFrames.delete(key);
   }
   invalidateTarget();
+  invalidateCursorTab();
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -644,10 +746,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (videoFrames.get(key).tabId === tabId) videoFrames.delete(key);
   }
   invalidateTarget();
+  // A reload can bring the content script with it, so give the tab another go.
+  if (tabId === cursorTab || tabId === cursorUnreachable) invalidateCursorTab();
 });
 
 chrome.windows.onFocusChanged.addListener(() => {
   invalidateTarget();
+  invalidateCursorTab();
   updateSuspendState();
 });
 

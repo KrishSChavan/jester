@@ -14,6 +14,19 @@ const MODEL_PATH = chrome.runtime.getURL('models/gesture_recognizer.task');
 
 /** Landmarks that together form a stable palm centre, ignoring finger flex. */
 const PALM_LANDMARKS = [0, 5, 9, 13, 17];
+/**
+ * `[knuckle, tip]` for index, middle, ring and pinky. The thumb is left out on
+ * purpose: it swings across to pinch, and would drag the reading of how open
+ * the hand is along with it.
+ */
+const FINGERS = [
+  [5, 8],
+  [9, 12],
+  [13, 16],
+  [17, 20]
+];
+const THUMB_TIP = 4;
+const INDEX_TIP = 8;
 const TRAIL_MS = 700;
 const SPEED_WINDOW_MS = 150;
 const HAND_LOST_MS = 150;
@@ -23,6 +36,33 @@ const TELEMETRY_INTERVAL_MS = 80;
 const CAMERA_TIMEOUT_MS = 8000;
 const MODEL_TIMEOUT_MS = 30000;
 const TIMED_OUT = Symbol('timed-out');
+
+/**
+ * What `reach()` returns at each end of a finger's range. Everything in between
+ * is scaled onto 0 (folded away) to 1 (straight out), and a hand steers when
+ * every finger sits near the middle.
+ */
+const REACH_FIST = 0.95;
+const REACH_FLAT = 1.9;
+
+/**
+ * Two independent tests, each `[strict, loose]` interpolated by the
+ * `pointerTolerance` setting.
+ *
+ *   BAND   — how far the average of the four fingers may sit from half open.
+ *            Rules out a flat palm and a fist.
+ *   SPREAD — how far apart the most and least extended finger may be. Rules out
+ *            ✌️, ☝️ and 🤟, which average out to half open while being nothing
+ *            of the sort. Kept separate from the band because a relaxed hand
+ *            genuinely curls unevenly — the pinky more than the index.
+ */
+const POINTER_BAND = [0.22, 0.33];
+const POINTER_SPREAD = [0.35, 0.6];
+const POINTER_HOLD_MARGIN = 0.1; // extra slack once you're already steering
+
+const POINTER_MIN_PALM = 0.03; // below this the hand is too far away to judge
+const POINTER_RELEASE_MS = 320; // shape may drop out this long without ending
+const POINTER_PINCH_HYSTERESIS = 0.15; // gap between the click and release points
 
 const GESTURE_LABELS = Object.fromEntries(GESTURES.map((g) => [g.id, g.label]));
 
@@ -58,6 +98,19 @@ const rec = {
   lastActionAt: 0,
   lastHandAt: 0,
   trail: []
+};
+
+const ptr = {
+  poseSince: 0,
+  lastPoseAt: 0,
+  active: false,
+  x: 0.5,
+  y: 0.5,
+  raw: null, // un-mirrored frame coordinates, for the preview overlay only
+  lastAt: 0,
+  pinched: false,
+  filterX: null,
+  filterY: null
 };
 
 // ---------------------------------------------------------------------------
@@ -252,6 +305,9 @@ function resetRecognitionState() {
   rec.lastActionAt = 0;
   rec.lastHandAt = 0;
   rec.trail.length = 0;
+  endPointer();
+  ptr.poseSince = 0;
+  ptr.lastPoseAt = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -296,7 +352,7 @@ function step(now) {
   const hand = readHand(lastResult);
   const view = processHand(now, hand);
   emitTelemetry(now, view);
-  drawPreview(now, hand);
+  drawPreview(now, hand, view);
 }
 
 /** Pick the most confident hand and reduce it to what the state machine needs. */
@@ -377,7 +433,252 @@ function fire(action, source, gesture) {
   post({ type: MSG.TRIGGER, action, source, gesture });
 }
 
+// ---------------------------------------------------------------------------
+// Pointer shapes — a half-open hand steers, a thumb-to-index pinch clicks
+//
+// Neither is a model gesture, so both are measured straight off the landmarks.
+// Every measurement is a ratio, so the same numbers work whether your hand is
+// 30cm or 1m from the lens.
+// ---------------------------------------------------------------------------
+
+const lerp = (a, b, t) => a + (b - a) * t;
+
+const dist2d = (landmarks, a, b) =>
+  Math.hypot(landmarks[a].x - landmarks[b].x, landmarks[a].y - landmarks[b].y);
+
+/**
+ * How far a finger reaches: the tip's distance from the wrist over its own
+ * knuckle's. ~1.9 straight out, ~0.95 folded back into the palm.
+ *
+ * Measuring from the wrist rather than within the finger is deliberate. Most of
+ * what changes between a flat palm and a relaxed hand is flexion at the
+ * knuckle, which leaves the finger itself straight — a curl measured along the
+ * finger's own bones can't see it at all. Both distances share an origin, so
+ * hand size and in-plane rotation cancel.
+ */
+function reach(landmarks, mcp, tip) {
+  const base = dist2d(landmarks, 0, mcp);
+  if (base < 1e-4) return 1;
+  return dist2d(landmarks, 0, tip) / base;
+}
+
+/**
+ * @returns `{ posed, openness, pinch }`, or `null` if the hand can't be read.
+ *          `posed` is whether the hand is half open enough to steer and `pinch`
+ *          is the thumb-to-index gap in palm widths. `openness` is the 0…1
+ *          average behind `posed`, carried out for diagnostics — the state
+ *          machine doesn't read it, but it's what the shape tests assert on.
+ * @param engaged whether the cursor is already up — it takes a looser hand to
+ *          keep it than to raise it, because your hand drifts while steering.
+ */
+function pointerReading(landmarks, tolerance, engaged) {
+  if (!landmarks || landmarks.length < 21) return null;
+
+  const palmWidth = dist2d(landmarks, 5, 17);
+  if (palmWidth < POINTER_MIN_PALM) return null;
+
+  const t = clamp(tolerance, 0, 1);
+  let band = lerp(POINTER_BAND[0], POINTER_BAND[1], t);
+  let spread = lerp(POINTER_SPREAD[0], POINTER_SPREAD[1], t);
+  if (engaged) {
+    band += POINTER_HOLD_MARGIN;
+    spread += POINTER_HOLD_MARGIN;
+  }
+
+  let total = 0;
+  let least = 1;
+  let most = 0;
+  for (const [mcp, tip] of FINGERS) {
+    const value = clamp(
+      (reach(landmarks, mcp, tip) - REACH_FIST) / (REACH_FLAT - REACH_FIST),
+      0,
+      1
+    );
+    total += value;
+    least = Math.min(least, value);
+    most = Math.max(most, value);
+  }
+  const openness = total / FINGERS.length;
+
+  return {
+    posed: Math.abs(openness - 0.5) <= band && most - least <= spread,
+    openness,
+    pinch: dist2d(landmarks, THUMB_TIP, INDEX_TIP) / palmWidth
+  };
+}
+
+/**
+ * One Euro filter. A plain moving average has to choose between jitter at rest
+ * and lag while moving; this one widens its own cutoff with speed, so the
+ * cursor sits still when your hand does and still keeps up when it doesn't.
+ */
+function makeFilter(minCutoff, beta) {
+  let value = null;
+  let derivative = 0;
+  const alpha = (cutoff, dt) => 1 / (1 + 1 / (2 * Math.PI * cutoff * dt));
+
+  return (next, dt) => {
+    if (value === null) {
+      value = next;
+      return value;
+    }
+    const rate = (next - value) / dt;
+    derivative += alpha(1, dt) * (rate - derivative);
+    const cutoff = minCutoff + beta * Math.abs(derivative);
+    value += alpha(cutoff, dt) * (next - value);
+    return value;
+  };
+}
+
+/**
+ * Palm centre -> viewport fractions, via the configured active area. Takes the
+ * mirrored palm `readHand` already computes, so moving your hand to *your*
+ * right moves the cursor right.
+ */
+function mapToViewport(palm) {
+  const rangeX = clamp(settings.pointerRangeX, 0.2, 1);
+  const rangeY = clamp(settings.pointerRangeY, 0.2, 1);
+  return {
+    x: clamp((palm.x - (0.5 - rangeX / 2)) / rangeX, 0, 1),
+    y: clamp((palm.y - (0.5 - rangeY / 2)) / rangeY, 0, 1)
+  };
+}
+
+function startPointer(now, palm, reading) {
+  const smoothing = clamp(settings.pointerSmoothing, 0, 1);
+  // Snappy at 0 (4 Hz cutoff), heavily damped at 1 (0.6 Hz).
+  const minCutoff = lerp(4, 0.6, smoothing);
+  const beta = lerp(0.9, 0.1, smoothing);
+  ptr.filterX = makeFilter(minCutoff, beta);
+  ptr.filterY = makeFilter(minCutoff, beta);
+
+  const target = mapToViewport(palm);
+  ptr.active = true;
+  ptr.x = ptr.filterX(target.x, 0.05);
+  ptr.y = ptr.filterY(target.y, 0.05);
+  ptr.lastAt = now;
+  // Adopt the pinch as it stands rather than counting it as a fresh click —
+  // raising the cursor with your fingers already together shouldn't click.
+  ptr.pinched = reading.pinch <= pinchThresholds().close;
+}
+
+function endPointer() {
+  if (!ptr.active) return;
+  ptr.active = false;
+  ptr.poseSince = 0;
+  ptr.pinched = false;
+  ptr.raw = null;
+  ptr.filterX = null;
+  ptr.filterY = null;
+  post({ type: MSG.CURSOR, cursor: { active: false } });
+}
+
+/**
+ * The gap that closes a pinch and the wider one that releases it. Two separate
+ * points, or a hand hovering on the threshold would fire clicks continuously.
+ */
+function pinchThresholds() {
+  const close = clamp(settings.pointerPinchDistance, 0.1, 0.9);
+  return { close, open: close + POINTER_PINCH_HYSTERESIS };
+}
+
+/**
+ * Runs every frame, hand or no hand, so the cursor can time itself out.
+ *
+ * @returns `{ active, arming, armProgress, pinch }` — the two truthy states
+ *          both mean the pointer owns this hand and nothing else may act on it.
+ */
+function updatePointer(now, hand) {
+  const reading =
+    hand && settings.pointerEnabled
+      ? pointerReading(hand.landmarks, settings.pointerTolerance, ptr.active)
+      : null;
+
+  // Pinching deforms the hand, so once you are steering a held pinch keeps the
+  // cursor up on its own. Clicking must never cost you the cursor.
+  const holding = !!reading && (reading.posed || (ptr.active && ptr.pinched));
+
+  if (!holding) {
+    // Detection flickers; one dropped frame shouldn't drop the cursor.
+    if (now - ptr.lastPoseAt > POINTER_RELEASE_MS) {
+      endPointer();
+      ptr.poseSince = 0;
+      return { active: false, arming: false };
+    }
+    const armMs = Math.max(1, settings.pointerArmMs);
+    return {
+      active: ptr.active,
+      arming: !ptr.active && ptr.poseSince > 0,
+      armProgress: ptr.poseSince ? clamp((now - ptr.poseSince) / armMs, 0, 1) : 0
+    };
+  }
+
+  ptr.lastPoseAt = now;
+  if (!ptr.poseSince) ptr.poseSince = now;
+
+  const armMs = Math.max(0, settings.pointerArmMs);
+  if (!ptr.active && now - ptr.poseSince < armMs) {
+    return {
+      active: false,
+      arming: true,
+      armProgress: clamp((now - ptr.poseSince) / Math.max(1, armMs), 0, 1)
+    };
+  }
+
+  if (!ptr.active) startPointer(now, hand.palm, reading);
+  else {
+    const dt = clamp((now - ptr.lastAt) / 1000, 0.005, 0.2);
+    const target = mapToViewport(hand.palm);
+    ptr.x = ptr.filterX(target.x, dt);
+    ptr.y = ptr.filterY(target.y, dt);
+    ptr.lastAt = now;
+  }
+  // Frame coordinates, un-mirrored again, purely for the preview overlay.
+  ptr.raw = { x: 1 - hand.palm.x, y: hand.palm.y };
+
+  // The click is the *closing* edge. Holding the pinch does nothing more, and
+  // the fingers have to separate past `open` before another click can fire.
+  const { close, open } = pinchThresholds();
+  let click = false;
+  if (!ptr.pinched && reading.pinch <= close) {
+    ptr.pinched = true;
+    click = true;
+  } else if (ptr.pinched && reading.pinch >= open) {
+    ptr.pinched = false;
+  }
+
+  // 0 when the fingers are apart, 1 when they meet — the cursor's pinch ring,
+  // and the readout to tune `pointerPinchDistance` against.
+  const pinch = clamp((open - reading.pinch) / Math.max(0.01, open - close), 0, 1);
+
+  post({
+    type: MSG.CURSOR,
+    cursor: { active: true, x: ptr.x, y: ptr.y, pinch, down: ptr.pinched, click }
+  });
+  return { active: true, arming: false, armProgress: 1, pinch, down: ptr.pinched };
+}
+
 function processHand(now, hand) {
+  // Runs even with no hand and even when the pointer is switched off, so a
+  // cursor that is already up always gets its release timer.
+  const pointer = updatePointer(now, hand);
+
+  // Steering owns the hand outright: sweeping across the screen must not read
+  // as a swipe, and a half-open hand must not read as a pose on the way past.
+  if (pointer.active || pointer.arming) {
+    rec.candidate = null;
+    rec.fired = false;
+    rec.trail.length = 0;
+    rec.lastHandAt = now;
+    return {
+      gesture: null,
+      score: hand?.score ?? 0,
+      progress: pointer.active ? 1 : pointer.armProgress,
+      handPresent: !!hand,
+      pointer
+    };
+  }
+
   if (!hand) {
     if (now - rec.lastHandAt > HAND_LOST_MS) rec.trail.length = 0;
     if (rec.candidate && now - rec.candidateSeenAt > settings.releaseMs) {
@@ -472,13 +773,18 @@ function emitTelemetry(now, view) {
       progress: view.progress,
       handPresent: view.handPresent,
       swipe: view.swipe || null,
+      pointer: view.pointer?.active
+        ? { active: true, pinch: view.pointer.pinch || 0, down: !!view.pointer.down }
+        : view.pointer?.arming
+          ? { active: false, arming: true }
+          : null,
       fps: Math.round(fps),
       delegate: activeDelegate
     }
   });
 }
 
-function drawPreview(now, hand) {
+function drawPreview(now, hand, view) {
   if (now > previewWantedUntil) return;
   if (now - lastPreviewAt < PREVIEW_INTERVAL_MS) return;
   lastPreviewAt = now;
@@ -514,6 +820,31 @@ function drawPreview(now, hand) {
       previewCtx.arc(toX(lm), toY(lm), 2.5, 0, Math.PI * 2);
       previewCtx.fill();
     }
+  }
+
+  // While steering, show the active area and the hot spot inside it — the only
+  // practical way to see why the cursor stops short of a screen edge.
+  if (view?.pointer?.active && ptr.raw) {
+    const rangeX = clamp(settings.pointerRangeX, 0.2, 1);
+    const rangeY = clamp(settings.pointerRangeY, 0.2, 1);
+    previewCtx.strokeStyle = 'rgba(125, 211, 252, 0.75)';
+    previewCtx.setLineDash([5, 4]);
+    previewCtx.lineWidth = 1.5;
+    // The active area is symmetric about the centre, so mirroring can't move it.
+    previewCtx.strokeRect(
+      ((1 - rangeX) / 2) * width,
+      ((1 - rangeY) / 2) * height,
+      rangeX * width,
+      rangeY * height
+    );
+    previewCtx.setLineDash([]);
+
+    const hotX = (settings.mirrorPreview ? 1 - ptr.raw.x : ptr.raw.x) * width;
+    const hotY = ptr.raw.y * height;
+    previewCtx.fillStyle = 'rgba(125, 211, 252, 0.95)';
+    previewCtx.beginPath();
+    previewCtx.arc(hotX, hotY, 6, 0, Math.PI * 2);
+    previewCtx.fill();
   }
 
   post({ type: MSG.PREVIEW_FRAME, dataUrl: previewCanvas.toDataURL('image/jpeg', 0.6) });

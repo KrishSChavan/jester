@@ -80,7 +80,18 @@ function renderEngine(engine = {}) {
 }
 
 function renderTelemetry(t) {
-  if (t.handPresent && t.gesture) {
+  // While the pointer owns the hand the bar tracks how closed the pinch is —
+  // the readout to tune the pinch distance against.
+  let bar = t.progress || 0;
+
+  if (t.pointer?.active) {
+    ui.gestureLabel.textContent = t.pointer.down ? '👌 Pinched — click' : '🖐 Pointer — steering';
+    ui.gestureScore.textContent = '';
+    bar = t.pointer.pinch || 0;
+  } else if (t.pointer?.arming) {
+    ui.gestureLabel.textContent = '🖐 Pointer — hold it there…';
+    ui.gestureScore.textContent = '';
+  } else if (t.handPresent && t.gesture) {
     ui.gestureLabel.textContent = t.label || t.gesture;
     ui.gestureScore.textContent = `${Math.round((t.score || 0) * 100)}%`;
   } else if (t.handPresent) {
@@ -90,7 +101,7 @@ function renderTelemetry(t) {
     ui.gestureLabel.textContent = 'No hand detected';
     ui.gestureScore.textContent = '';
   }
-  ui.gestureBar.style.width = `${Math.round((t.progress || 0) * 100)}%`;
+  ui.gestureBar.style.width = `${Math.round(bar * 100)}%`;
 
   if (t.fps) {
     ui.statusMeta.hidden = false;
@@ -103,14 +114,15 @@ function renderHistory(entries) {
   if (!entries.length) {
     const li = document.createElement('li');
     li.className = 'small muted';
-    li.textContent = 'Nothing yet — try holding an open palm at your camera.';
+    li.textContent = 'Nothing yet — try holding a closed fist at your camera to pause.';
     ui.history.append(li);
     return;
   }
   for (const entry of entries) {
     const li = document.createElement('li');
     const name = document.createElement('span');
-    name.textContent = ACTIONS[entry.action]?.label || entry.action;
+    // Pointer clicks carry their own label — they aren't bindable actions.
+    name.textContent = entry.label || ACTIONS[entry.action]?.label || entry.action;
     if (!entry.ok) name.className = 'fail';
 
     const detail = document.createElement('span');

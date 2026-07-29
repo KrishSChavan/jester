@@ -3,7 +3,10 @@ v1 (ongoing):
       by default, optional true fullscreen via chrome.debugger
 
 v2:
-- move mouse / click
+- [x] move mouse / click — a half-open hand raises an in-page cursor, thumb-to-
+      index pinch clicks. Can't move the *OS* cursor from an extension, so that
+      waits for v3.
+- scroll with the pointer pose
 - move tabs / windows
 - voice dictation for input fields / keyboard commands
 

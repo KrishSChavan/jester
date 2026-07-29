@@ -6,7 +6,15 @@
  * passed to it inside messages rather than imported from here.
  */
 
-/** The canned gesture labels the MediaPipe GestureRecognizer model emits. */
+/**
+ * The canned gesture labels the MediaPipe GestureRecognizer model emits.
+ *
+ * The pointer shapes — a half-open hand to steer, a thumb-to-index pinch to
+ * click — are deliberately *not* here: the model can't recognise either, so
+ * they're measured off the raw landmarks in the offscreen document, and they
+ * drive a mode rather than firing an action, so neither is bindable. See
+ * `pointerReading()`.
+ */
 export const GESTURES = [
   { id: 'Open_Palm', label: 'Open palm', glyph: '✋' },
   { id: 'Closed_Fist', label: 'Closed fist', glyph: '✊' },
@@ -43,7 +51,10 @@ export const ACTIONS = {
   EXIT_FULLSCREEN: { label: 'Exit fullscreen', repeatable: false },
   FULLSCREEN_TOGGLE: { label: 'Fullscreen toggle', repeatable: false },
   SKIP_AD: { label: 'Skip ad', repeatable: false },
-  NEXT_VIDEO: { label: 'Next video / episode', repeatable: false }
+  NEXT_VIDEO: { label: 'Next video / episode', repeatable: false },
+  // One-way by nature: it stops the camera, so no gesture can undo it. Switching
+  // back on has to come from the popup or the options page.
+  DISABLE: { label: 'Turn Jester off', repeatable: false }
 };
 
 /** Message envelope types. Every message is `{ type, ...payload }`. */
@@ -71,6 +82,10 @@ export const MSG = {
   // service worker -> popup
   STATE: 'jester/state',
   ACTION_RESULT: 'jester/action-result',
+  // offscreen -> service worker -> content script (virtual pointer, ~20/s)
+  CURSOR: 'jester/cursor',
+  // content script -> service worker
+  CURSOR_CLICK: 'jester/cursor-click',
   // service worker <-> content script
   DO_ACTION: 'jester/do-action',
   PROBE: 'jester/probe',
@@ -144,6 +159,19 @@ export const DEFAULT_SETTINGS = {
   swipeMaxDurationMs: 400,
   swipeAxisRatio: 1.8, // dominant axis must beat the other by this factor
 
+  // --- pointer (virtual mouse): a half-open hand steers, a pinch clicks ---
+  pointerEnabled: true,
+  pointerTolerance: 0.5, // how far from "half open" the hand may stray
+  pointerArmMs: 350, // hand must hold the shape this long before the cursor appears
+  pointerSmoothing: 0.5, // 0 = raw and twitchy, 1 = heavily damped
+  // Fraction of the camera frame mapped onto the full viewport. Deliberately
+  // most of it: a small box turns every twitch into a screen-wide jump. The
+  // last sliver at each edge is left out because a palm centred there has half
+  // the hand out of frame, where the landmarks go unreliable.
+  pointerRangeX: 0.9,
+  pointerRangeY: 0.75,
+  pointerPinchDistance: 0.35, // thumb-to-index gap that counts as touching, in palm widths
+
   // --- playback ---
   seekSeconds: 10,
   volumeStep: 0.1,
@@ -158,13 +186,15 @@ export const DEFAULT_SETTINGS = {
   pauseWhenNoVideo: false,
 
   bindings: {
-    Open_Palm: { action: 'PLAY_PAUSE', repeat: false },
-    Closed_Fist: { action: 'NONE', repeat: false },
+    // Play and pause are separate poses rather than one toggle: a toggle you
+    // can't see the state of fires blind if a hold is missed.
+    Open_Palm: { action: 'PLAY', repeat: false },
+    Closed_Fist: { action: 'PAUSE', repeat: false },
     Victory: { action: 'MUTE_TOGGLE', repeat: false },
     Thumb_Up: { action: 'VOLUME_UP', repeat: true },
     Thumb_Down: { action: 'VOLUME_DOWN', repeat: true },
     Pointing_Up: { action: 'SKIP_AD', repeat: false },
-    ILoveYou: { action: 'NONE', repeat: false }
+    ILoveYou: { action: 'FULLSCREEN_TOGGLE', repeat: false }
   },
 
   swipeBindings: {

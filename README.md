@@ -10,10 +10,11 @@ the repo, the extension declares no network permissions, and no frame ever leave
 your machine.
 
 ```
-✋ hold  →  play / pause          ➡️ swipe  →  skip forward 10s
-✌️ hold  →  mute / unmute         ⬅️ swipe  →  skip back 10s
-👍 hold  →  volume up             ⬆️ ⬇️ swipe →  volume up / down
-☝️ hold  →  skip ad
+✋ hold  →  play                  ➡️ swipe  →  skip forward 10s
+✊ hold  →  pause                 ⬅️ swipe  →  skip back 10s
+✌️ hold  →  mute / unmute         ⬆️ ⬇️ swipe →  volume up / down
+👍 hold  →  volume up             🤟 hold   →  fullscreen
+☝️ hold  →  skip ad               🖐 half-open hand → move the cursor, 👌 pinch to click
 ```
 
 ## Quick start
@@ -28,8 +29,9 @@ your machine.
    Chrome's prompt. **Don't skip this step** — the engine lives in an offscreen
    document with no UI, so it can't raise the prompt itself; it has to happen in
    a real tab.
-5. Flip **Enabled** on, open a YouTube video, and hold an open palm ✋ steady at
-   the camera for about half a second.
+5. Flip **Enabled** on, open a YouTube video, and hold a closed fist ✊ steady at
+   the camera for about half a second — it should pause. Open palm ✋ starts it
+   again.
 
 Pin Jester to the toolbar for the popup: a live preview with the hand skeleton
 drawn on it, the gesture currently recognised, hold progress, achieved frame
@@ -59,7 +61,7 @@ the offscreen document is a long-lived page, so it owns the camera, the inferenc
 loop, the hold timers and the swipe buffer. The worker only decides *which tab*
 receives an already-made decision, and relays the on-page HUD.
 
-Two recognition channels run over the same landmark stream:
+Three recognition channels run over the same landmark stream:
 
 - **Held poses** — a pose must stay above the confidence floor *and* stay
   reasonably still for `holdMs` before it fires, then won't re-fire until you
@@ -70,9 +72,50 @@ Two recognition channels run over the same landmark stream:
   `swipeMinDistance` of the frame within `swipeMaxDurationMs` with one axis
   beating the other by `swipeAxisRatio`, and that's a swipe. Swipes win over
   poses and reset the pose state machine.
+- **Pointer** — a half-open hand raises a cursor, and a thumb-to-index pinch
+  clicks it. It outranks both of the above: while you are steering, nothing else
+  can fire. See below.
 
 A global `cooldownMs` sits after every action so one gesture can't machine-gun.
-Every threshold, and every gesture binding, is editable in the options page.
+Every threshold, and every gesture binding, is editable in the options page —
+including **Turn Jester off**, unbound by default, which stops the camera on a
+gesture. That one is one-way: with the camera down nothing can recognise a
+gesture to switch it back, so switching on stays with the popup.
+
+## Pointer
+
+```
+🖐  hand half open — relaxed, neither flat nor a fist  →  cursor appears, follows your hand
+👌  touch thumb and index fingertip together           →  click
+    flatten or close your hand                         →  cursor goes away
+```
+
+An extension cannot move your *operating system's* cursor — nothing in the
+Chrome API surface reaches outside the browser, so that stays on the roadmap for
+the desktop app. What Jester can do is draw a cursor on the page and synthesise
+the pointer and mouse events the page would otherwise have seen: links, buttons,
+menus and player controls all respond, and hover-driven UI (YouTube's control
+bar, dropdowns) comes alive as it passes.
+
+Both shapes are measured off the raw landmarks rather than classified by the
+model — MediaPipe's canned set has neither. Each finger is scored on how far its
+tip reaches from the wrist relative to its own knuckle, which puts a flat palm
+at 1, a fist at 0 and a relaxed hand near the middle. Two tests then have to
+agree: the average sits near half open, *and* the fingers are curled to similar
+degrees. The second is what rules out ✌️, ☝️ and 🤟 — they average out to half
+open while being nothing of the sort. Pinching is the thumb-to-index gap
+measured in palm widths, with separate close and release points so a hand
+hovering on the threshold can't machine-gun clicks.
+
+Because a pinch curls the index finger, clicking would otherwise deform the hand
+out of the steering shape — so once the cursor is up, a held pinch keeps it up
+on its own. Position runs through a one-euro filter: still when your hand is,
+and no lag when it isn't.
+
+**Settings → Pointer** has hand tolerance, pinch distance, reach and smoothing.
+Open the popup while steering — it draws the active area and hot spot on the
+camera preview, and the ring around the cursor fills as your fingers close,
+which is the quickest way to tune both.
 
 ## Layout
 
@@ -137,8 +180,14 @@ hand the page a real gesture. Either way, Escape gets you out.
   where to fix it.
 - **One camera at a time.** If Zoom or Teams holds the camera, the engine reports
   "camera is already in use".
-- **Seven poses only** — MediaPipe's canned set. Adding your own means training a
-  custom classifier and repointing `MODEL_PATH`.
+- **Seven poses only** — MediaPipe's canned set, plus the pointer shapes, which
+  are measured geometrically. Adding more means training a custom classifier and
+  repointing `MODEL_PATH`.
+- **The pointer is a page cursor, not the system cursor.** It can't leave the
+  tab, reach Chrome's own UI, or click through into a cross-origin iframe — the
+  click lands on the iframe element, not inside it. Its events are synthetic and
+  therefore untrusted, so they can't unlock anything gated on real user
+  activation (the site's own fullscreen button, clipboard, sound-on autoplay).
 
 ## More
 

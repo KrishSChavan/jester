@@ -25,7 +25,8 @@
         <h2>Two steps to get going</h2>
         <ol>
           <li>Click <strong>Allow camera access</strong> below and accept Chrome's prompt.</li>
-          <li>Flip <strong>Enabled</strong> on, open a video, and hold an open palm ✋ at the camera.</li>
+          <li>Flip <strong>Enabled</strong> on, open a video, and hold a closed fist ✊ at the
+            camera to pause it. An open palm ✋ starts it again.</li>
         </ol>
       </section>
 
@@ -47,6 +48,8 @@
       <section class="card">
         <h2>Gestures</h2>
         <p class="small muted">Hold a pose steadily to trigger its action. Moving your hand never fires a pose — that's what swipes are for.</p>
+        <p class="small muted"><strong>Turn Jester off</strong> is one-way: it stops the camera, so no
+          gesture can switch it back on. Use the toolbar popup or the toggle at the top of this page.</p>
         <table class="bindings" id="gestureTable">
           <thead>
             <tr><th>Pose</th><th>Action</th><th class="center">Repeat while held</th></tr>
@@ -77,6 +80,59 @@
             <p class="small muted">Longer = slower swipes still count.</p>
           </div>
         </div>
+      </section>
+
+      <section class="card">
+        <h2>Pointer ✊✋</h2>
+        <p class="small muted">
+          Hold your hand half open — fingers relaxed and curled, neither a flat palm nor a
+          fist — and a cursor appears on the page. Move your hand to steer it.
+          Touch your thumb and index fingertip together to click. Flatten or close your
+          hand and the cursor goes away.
+        </p>
+        <p class="small muted">
+          This is a cursor <em>inside the page</em>, not your system mouse — an extension
+          can't reach outside the browser. It hovers and clicks, and works on any site
+          Jester runs on (see <strong>Where it runs</strong> below).
+        </p>
+        <label class="row check"><input type="checkbox" data-setting="pointerEnabled" />
+          <span>Enable the pointer</span></label>
+        <div class="grid">
+          <div class="field">
+            <label>Hand tolerance <output data-output="pointerTolerance"></output></label>
+            <input type="range" min="0" max="1" step="0.05" data-setting="pointerTolerance" data-format="percent" />
+            <p class="small muted">How far from half open your hand may stray. Raise it if the cursor won't come up, lower it if it appears when you didn't ask.</p>
+          </div>
+          <div class="field">
+            <label>Time to engage <output data-output="pointerArmMs"></output></label>
+            <input type="range" min="100" max="1200" step="50" data-setting="pointerArmMs" data-format="ms" />
+            <p class="small muted">How long the hand must hold its shape before the cursor appears.</p>
+          </div>
+          <div class="field">
+            <label>Smoothing <output data-output="pointerSmoothing"></output></label>
+            <input type="range" min="0" max="1" step="0.05" data-setting="pointerSmoothing" data-format="percent" />
+            <p class="small muted">Higher is steadier but lags behind your hand.</p>
+          </div>
+          <div class="field">
+            <label>Pinch distance <output data-output="pointerPinchDistance"></output></label>
+            <input type="range" min="0.15" max="0.7" step="0.05" data-setting="pointerPinchDistance" data-format="ratio" />
+            <p class="small muted">How close your thumb and index tip must come, measured against your palm width. Raise it if clicks don't register.</p>
+          </div>
+          <div class="field">
+            <label>Horizontal reach <output data-output="pointerRangeX"></output></label>
+            <input type="range" min="0.25" max="1" step="0.05" data-setting="pointerRangeX" data-format="percent" />
+            <p class="small muted">How much of the camera frame covers the full page width. Larger = more hand movement, finer control.</p>
+          </div>
+          <div class="field">
+            <label>Vertical reach <output data-output="pointerRangeY"></output></label>
+            <input type="range" min="0.25" max="1" step="0.05" data-setting="pointerRangeY" data-format="percent" />
+            <p class="small muted">The popup preview draws this area while you steer. Shrink it if you can't reach the screen edges.</p>
+          </div>
+        </div>
+        <p class="small muted">
+          Open the popup while steering — the ring around the cursor fills as your fingers
+          close, which is the quickest way to find a pinch distance that fits your hand.
+        </p>
       </section>
 
       <section class="card">

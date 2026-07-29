@@ -18,7 +18,9 @@
     FULLSCREEN: 'jester/fullscreen',
     TOAST: 'jester/toast',
     FULLSCREEN_EXIT: 'jester/fullscreen-exit',
-    FULLSCREEN_DETACHED: 'jester/fullscreen-detached'
+    FULLSCREEN_DETACHED: 'jester/fullscreen-detached',
+    CURSOR: 'jester/cursor',
+    CURSOR_CLICK: 'jester/cursor-click'
   };
 
   const HOST = location.hostname;
@@ -48,7 +50,8 @@
     EXIT_FULLSCREEN: 'Exit fullscreen',
     FULLSCREEN_TOGGLE: 'Fullscreen',
     SKIP_AD: 'Skip ad',
-    NEXT_VIDEO: 'Next'
+    NEXT_VIDEO: 'Next',
+    DISABLE: 'Jester off'
   };
 
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -493,6 +496,7 @@
 
   for (const evt of ['fullscreenchange', 'webkitfullscreenchange']) {
     document.addEventListener(evt, mountHud, true);
+    document.addEventListener(evt, mountCursor, true);
   }
 
   function showHud(hud) {
@@ -521,6 +525,316 @@
     toast.lastChild.textContent = result.detail || '';
     hudToasts.appendChild(toast);
     setTimeout(() => toast.remove(), 1400);
+  }
+
+  // -------------------------------------------------------------------------
+  // Virtual pointer
+  //
+  // An extension can't move the operating system's cursor — nothing in the
+  // Chrome API surface reaches outside the browser — so Jester draws its own
+  // and synthesises the pointer/mouse events the page would otherwise have
+  // seen. Those events are untrusted, which ordinary click and hover handlers
+  // don't care about, but it does mean a hand click can't unlock anything gated
+  // on real user activation (fullscreen, clipboard, sound-on autoplay).
+  //
+  // Rendered in the top frame only: the worker addresses frameId 0, and hit
+  // testing runs against the top document.
+  // -------------------------------------------------------------------------
+
+  const POINTER_IDLE_MS = 1200; // no update for this long and the cursor goes
+  const RING_CIRCUMFERENCE = 2 * Math.PI * 20;
+
+  /** What counts as "clickable" for the halo. Missing one costs only the halo. */
+  const INTERACTIVE = [
+    'a[href]',
+    'button',
+    'input',
+    'select',
+    'textarea',
+    'summary',
+    'label',
+    '[role="button"]',
+    '[role="link"]',
+    '[role="menuitem"]',
+    '[role="option"]',
+    '[role="tab"]',
+    '[role="checkbox"]',
+    '[role="switch"]',
+    '[onclick]',
+    '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  const CURSOR_CSS = `
+    :host { all: initial; }
+    .layer { position: fixed; inset: 0; pointer-events: none; z-index: 2147483647; }
+    .halo {
+      position: absolute; left: 0; top: 0; width: 0; height: 0;
+      border: 2px solid rgba(125, 211, 252, .95); border-radius: 8px;
+      box-shadow: 0 0 0 4px rgba(125, 211, 252, .15);
+      opacity: 0; transition: opacity .12s ease;
+    }
+    .halo.show { opacity: 1; }
+    .cursor {
+      position: absolute; left: 0; top: 0; width: 48px; height: 48px;
+      margin: -24px 0 0 -24px;
+      opacity: 0; transform: translate3d(-300px, -300px, 0);
+      /* Frames arrive at the inference rate; the transition fills the gaps. */
+      transition: opacity .16s ease, transform .07s linear;
+      will-change: transform;
+    }
+    .cursor.show { opacity: 1; }
+    .cursor svg {
+      position: absolute; inset: 0; width: 100%; height: 100%;
+      transform: rotate(-90deg) scale(1);
+      transition: transform .08s ease;
+    }
+    /* The pinch has landed: the ring snaps in, the way a button depresses. */
+    .cursor.down svg { transform: rotate(-90deg) scale(.78); }
+    .track { fill: rgba(15, 18, 24, .32); stroke: rgba(255, 255, 255, .6); stroke-width: 2.5; }
+    .cursor.over .track { stroke: #7dd3fc; }
+    .cursor.down .track { fill: rgba(125, 211, 252, .3); }
+    .ring {
+      fill: none; stroke: #7dd3fc; stroke-width: 4; stroke-linecap: round;
+      stroke-dasharray: ${RING_CIRCUMFERENCE};
+      stroke-dashoffset: ${RING_CIRCUMFERENCE};
+    }
+    .dot {
+      position: absolute; left: 50%; top: 50%; width: 8px; height: 8px;
+      margin: -4px 0 0 -4px; border-radius: 50%;
+      background: #fff; box-shadow: 0 0 6px rgba(0, 0, 0, .55);
+      transition: transform .08s ease;
+    }
+    .cursor.down .dot { transform: scale(1.5); background: #7dd3fc; }
+    .ripple {
+      position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+      border-radius: 50%; border: 2px solid #7dd3fc;
+      animation: ripple .45s ease-out forwards;
+    }
+    @keyframes ripple { to { transform: scale(3); opacity: 0; } }
+  `;
+
+  let cursorHost = null;
+  let cursorLayer = null;
+  let cursorEl = null;
+  let cursorHalo = null;
+  let cursorRing = null;
+  let cursorIdleTimer = null;
+  let cursorVisible = false;
+  let haloTarget = null;
+  let hoverEl = null;
+  let lastPointerX = 0;
+  let lastPointerY = 0;
+
+  function ensureCursor() {
+    if (cursorHost && cursorHost.isConnected) return;
+    cursorHost = document.createElement('div');
+    cursorHost.id = 'jester-cursor-host';
+    // `all: initial` resets pointer-events to auto, so re-clear it after.
+    cursorHost.style.cssText = 'all: initial; pointer-events: none;';
+    const root = cursorHost.attachShadow({ mode: 'open' });
+
+    const style = document.createElement('style');
+    style.textContent = CURSOR_CSS;
+
+    cursorLayer = document.createElement('div');
+    cursorLayer.className = 'layer';
+    cursorLayer.innerHTML = `
+      <div class="halo"></div>
+      <div class="cursor">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <circle class="track" cx="24" cy="24" r="20"></circle>
+          <circle class="ring" cx="24" cy="24" r="20"></circle>
+        </svg>
+        <i class="dot"></i>
+      </div>`;
+
+    root.append(style, cursorLayer);
+    cursorEl = cursorLayer.querySelector('.cursor');
+    cursorHalo = cursorLayer.querySelector('.halo');
+    cursorRing = cursorLayer.querySelector('.ring');
+    mountCursor();
+  }
+
+  /** Fixed-position elements are invisible while another element is fullscreen. */
+  function mountCursor() {
+    if (!cursorHost) return;
+    const parent = document.fullscreenElement || document.documentElement;
+    if (cursorHost.parentNode !== parent) parent.appendChild(cursorHost);
+  }
+
+  function interactiveTarget(el) {
+    try {
+      return el?.closest?.(INTERACTIVE) || null;
+    } catch {
+      return null; // element in a shadow tree without closest(), or detached
+    }
+  }
+
+  function mouseInit(px, py, extra) {
+    return {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: window,
+      clientX: px,
+      clientY: py,
+      screenX: px + (window.screenX || 0),
+      screenY: py + (window.screenY || 0),
+      button: 0,
+      buttons: 0,
+      detail: 0,
+      ...extra
+    };
+  }
+
+  function dispatchPointer(el, types, px, py, extra) {
+    if (!el?.isConnected) return;
+    const init = mouseInit(px, py, extra);
+    const pointerInit = { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1 };
+    for (const type of types) {
+      const usePointer = type.startsWith('pointer');
+      el.dispatchEvent(
+        usePointer ? new PointerEvent(type, pointerInit) : new MouseEvent(type, init)
+      );
+    }
+  }
+
+  function setHalo(target) {
+    if (!cursorHalo) return;
+    const rect = target?.getBoundingClientRect?.();
+    const useless =
+      !rect ||
+      rect.width < 4 ||
+      rect.height < 4 ||
+      // A page-sized wrapper that happens to be focusable — outlining it is noise.
+      (rect.width > window.innerWidth * 0.9 && rect.height > window.innerHeight * 0.9);
+
+    if (useless) {
+      if (!haloTarget) return;
+      haloTarget = null;
+      cursorHalo.classList.remove('show');
+      cursorEl.classList.remove('over');
+      return;
+    }
+
+    haloTarget = target;
+    cursorHalo.style.left = `${rect.left - 3}px`;
+    cursorHalo.style.top = `${rect.top - 3}px`;
+    cursorHalo.style.width = `${rect.width + 6}px`;
+    cursorHalo.style.height = `${rect.height + 6}px`;
+    cursorHalo.classList.add('show');
+    cursorEl.classList.add('over');
+  }
+
+  function syncHover(px, py) {
+    const el = document.elementFromPoint(px, py);
+    if (el !== hoverEl) {
+      if (hoverEl) dispatchPointer(hoverEl, ['pointerout', 'mouseout'], px, py);
+      hoverEl = el;
+      if (el) dispatchPointer(el, ['pointerover', 'mouseover'], px, py);
+    }
+    // Players reveal their controls on mousemove, not on hover state alone.
+    if (hoverEl) dispatchPointer(hoverEl, ['pointermove', 'mousemove'], px, py);
+    setHalo(interactiveTarget(hoverEl));
+  }
+
+  /**
+   * Names the clicked element for the popup's history list. Deliberately never
+   * reads `value` — that would put whatever is typed in a field, password
+   * included, into stored history.
+   */
+  function describeTarget(el) {
+    const name = el.tagName ? el.tagName.toLowerCase() : 'element';
+    const label = String(
+      el.getAttribute?.('aria-label') ||
+        el.title ||
+        el.getAttribute?.('placeholder') ||
+        el.textContent ||
+        ''
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+    return label ? `${name} · ${label.slice(0, 40)}` : name;
+  }
+
+  function ripple(px, py) {
+    if (!cursorLayer) return;
+    const dot = document.createElement('div');
+    dot.className = 'ripple';
+    dot.style.left = `${px}px`;
+    dot.style.top = `${py}px`;
+    cursorLayer.append(dot);
+    setTimeout(() => dot.remove(), 500);
+  }
+
+  function clickAt(px, py) {
+    const el = document.elementFromPoint(px, py);
+    if (!el) return { ok: false, detail: 'Nothing under the cursor' };
+    const target = interactiveTarget(el) || el;
+
+    // Dispatch on the deepest element so the event path matches a real click;
+    // it bubbles to whatever handler actually cares.
+    dispatchPointer(el, ['pointerdown', 'mousedown'], px, py, { buttons: 1, detail: 1 });
+    if (typeof target.focus === 'function') target.focus({ preventScroll: true });
+    dispatchPointer(el, ['pointerup', 'mouseup', 'click'], px, py, { detail: 1 });
+
+    ripple(px, py);
+    return { ok: true, detail: describeTarget(target) };
+  }
+
+  function hideCursor() {
+    clearTimeout(cursorIdleTimer);
+    if (!cursorHost) return;
+    cursorVisible = false;
+    cursorEl.classList.remove('show', 'down');
+    setHalo(null);
+    if (hoverEl) {
+      dispatchPointer(hoverEl, ['pointerout', 'mouseout'], lastPointerX, lastPointerY);
+      hoverEl = null;
+    }
+  }
+
+  function applyCursor(cursor) {
+    if (!cursor.active) {
+      hideCursor();
+      return;
+    }
+
+    ensureCursor();
+    mountCursor();
+    // If the engine dies mid-gesture nothing sends the closing frame, so the
+    // cursor times itself out rather than hanging on screen forever.
+    clearTimeout(cursorIdleTimer);
+    cursorIdleTimer = setTimeout(hideCursor, POINTER_IDLE_MS);
+
+    // Stay a pixel inside the viewport: elementFromPoint returns null on the edge.
+    lastPointerX = clamp((cursor.x ?? 0.5) * window.innerWidth, 0, window.innerWidth - 1);
+    lastPointerY = clamp((cursor.y ?? 0.5) * window.innerHeight, 0, window.innerHeight - 1);
+
+    // The transition that smooths motion between frames would otherwise fly the
+    // cursor in from wherever it was parked, so the first frame jumps instead.
+    const appearing = !cursorVisible;
+    if (appearing) cursorEl.style.transition = 'none';
+    cursorEl.style.transform = `translate3d(${lastPointerX}px, ${lastPointerY}px, 0)`;
+    if (appearing) {
+      void cursorEl.offsetWidth; // flush the jump before re-enabling the fade
+      cursorEl.style.transition = '';
+      cursorVisible = true;
+      cursorEl.classList.add('show');
+    }
+    cursorRing.style.strokeDashoffset = String(
+      RING_CIRCUMFERENCE * (1 - clamp(cursor.pinch || 0, 0, 1))
+    );
+    cursorEl.classList.toggle('down', !!cursor.down);
+
+    syncHover(lastPointerX, lastPointerY);
+
+    if (cursor.click) {
+      const result = clickAt(lastPointerX, lastPointerY);
+      chrome.runtime
+        .sendMessage({ type: MSG.CURSOR_CLICK, ok: result.ok, detail: result.detail })
+        .catch(() => undefined);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -600,6 +914,12 @@
 
       case MSG.HUD:
         showHud(message.hud || {});
+        return false;
+
+      case MSG.CURSOR:
+        // The worker addresses frameId 0, but a stray broadcast must not paint
+        // a second cursor inside an iframe.
+        if (window.top === window) applyCursor(message.cursor || {});
         return false;
 
       default:
