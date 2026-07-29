@@ -1,0 +1,132 @@
+main {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 28px 20px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+header h1 {
+  font-size: 20px;
+}
+
+header p {
+  margin: 2px 0 0;
+}
+
+header img {
+  margin-right: 4px;
+}
+
+section h2 {
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+section > p.small {
+  margin: 0 0 12px;
+}
+
+.welcome {
+  border-color: var(--accent);
+}
+
+.welcome ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+.welcome li + li {
+  margin-top: 4px;
+}
+
+.camera-status {
+  margin-bottom: 14px;
+}
+
+.field {
+  margin: 12px 0;
+}
+
+.field > label {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 5px;
+}
+
+.field output {
+  font-weight: 500;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.field p {
+  margin: 4px 0 0;
+}
+
+.field select {
+  width: 100%;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 4px 22px;
+}
+
+label.check {
+  margin: 8px 0;
+  cursor: pointer;
+}
+
+table.bindings {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+}
+
+table.bindings th {
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+table.bindings th.center,
+table.bindings td.center {
+  text-align: center;
+}
+
+table.bindings td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+}
+
+table.bindings tr:last-child td {
+  border-bottom: none;
+}
+
+table.bindings td:first-child {
+  white-space: nowrap;
+}
+
+table.bindings select {
+  width: 100%;
+}
+
+.glyph {
+  font-size: 17px;
+  margin-right: 8px;
+}
+
+footer {
+  padding-top: 4px;
+}

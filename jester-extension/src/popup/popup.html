@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jester</title>
+    <link rel="stylesheet" href="../ui/ui.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="row between">
+      <div class="row">
+        <img src="../../icons/icon32.png" width="22" height="22" alt="" />
+        <h1>Jester</h1>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="enabled" />
+        <span></span>
+      </label>
+    </header>
+
+    <div class="card status">
+      <div class="row">
+        <i class="dot" id="statusDot"></i>
+        <strong id="statusText" class="grow">Off</strong>
+        <span class="pill" id="statusMeta" hidden></span>
+      </div>
+      <p class="small muted" id="statusDetail"></p>
+      <button class="primary" id="grantBtn" hidden>Grant camera access</button>
+    </div>
+
+    <div class="card preview-card">
+      <div class="preview">
+        <img id="preview" alt="" />
+        <div class="placeholder" id="previewPlaceholder">Camera preview appears here</div>
+      </div>
+      <div class="row gesture">
+        <span class="grow" id="gestureLabel">No hand detected</span>
+        <span class="small muted" id="gestureScore"></span>
+      </div>
+      <div class="meter"><i id="gestureBar"></i></div>
+    </div>
+
+    <div class="card">
+      <div class="row between">
+        <h2 class="small">Recent actions</h2>
+        <span class="small muted" id="targetState"></span>
+      </div>
+      <ul class="history" id="history">
+        <li class="small muted">Nothing yet.</li>
+      </ul>
+    </div>
+
+    <footer class="row">
+      <button id="optionsBtn" class="grow">Settings &amp; gestures</button>
+      <button id="restartBtn" title="Restart the camera engine">Restart</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

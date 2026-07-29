@@ -1,0 +1,99 @@
+body {
+  width: 340px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+header h1 {
+  font-size: 16px;
+}
+
+.status p {
+  margin: 6px 0 0;
+}
+
+.status p:empty {
+  display: none;
+}
+
+.status button {
+  margin-top: 10px;
+  width: 100%;
+}
+
+.preview-card {
+  padding: 10px;
+}
+
+.preview {
+  position: relative;
+  aspect-ratio: 4 / 3;
+  border-radius: 9px;
+  overflow: hidden;
+  background: #000;
+}
+
+.preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+}
+
+.preview img.live {
+  display: block;
+}
+
+.placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 0 20px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.placeholder[hidden] {
+  display: none;
+}
+
+.gesture {
+  margin: 9px 0 6px;
+  font-weight: 600;
+}
+
+.history {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 116px;
+  overflow-y: auto;
+}
+
+.history li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.history .when {
+  margin-left: auto;
+  color: var(--muted);
+  flex: none;
+}
+
+.history .fail {
+  color: var(--danger);
+}
+
+footer button {
+  padding: 8px 12px;
+}

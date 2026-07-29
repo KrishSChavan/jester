@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jester engine</title>
+  </head>
+  <body>
+    <!--
+      This document is never displayed. It exists so the webcam stream and the
+      MediaPipe WASM runtime have a long-lived page to live in — a service
+      worker can't hold a MediaStream or run a per-frame loop.
+    -->
+    <video id="camera" autoplay muted playsinline></video>
+    <canvas id="preview" width="320" height="240"></canvas>
+    <script src="boot.js"></script>
+    <script type="module" src="offscreen.js"></script>
+  </body>
+</html>

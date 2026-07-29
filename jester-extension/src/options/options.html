@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jester — settings</title>
+    <link rel="stylesheet" href="../ui/ui.css" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <header class="row between">
+        <div class="row">
+          <img src="../../icons/icon48.png" width="34" height="34" alt="" />
+          <div>
+            <h1>Jester</h1>
+            <p class="small muted">Hand gesture control for web video — all tracking runs on your machine.</p>
+          </div>
+        </div>
+        <label class="row"><span class="small muted">Enabled</span>
+          <span class="switch"><input type="checkbox" data-setting="enabled" /><span></span></span>
+        </label>
+      </header>
+
+      <section class="card welcome" id="welcome" hidden>
+        <h2>Two steps to get going</h2>
+        <ol>
+          <li>Click <strong>Allow camera access</strong> below and accept Chrome's prompt.</li>
+          <li>Flip <strong>Enabled</strong> on, open a video, and hold an open palm ✋ at the camera.</li>
+        </ol>
+      </section>
+
+      <section class="card" id="cameraSection">
+        <h2>Camera</h2>
+        <div class="row between camera-status">
+          <div class="row"><i class="dot" id="camDot"></i><span id="camText">Checking…</span></div>
+          <button class="primary" id="grantBtn">Allow camera access</button>
+        </div>
+        <div class="field">
+          <label for="deviceSelect">Camera</label>
+          <select id="deviceSelect" data-setting="cameraDeviceId"></select>
+          <p class="small muted">Device names appear once camera access is granted.</p>
+        </div>
+        <label class="row check"><input type="checkbox" data-setting="mirrorPreview" />
+          <span>Mirror the preview (selfie view)</span></label>
+      </section>
+
+      <section class="card">
+        <h2>Gestures</h2>
+        <p class="small muted">Hold a pose steadily to trigger its action. Moving your hand never fires a pose — that's what swipes are for.</p>
+        <table class="bindings" id="gestureTable">
+          <thead>
+            <tr><th>Pose</th><th>Action</th><th class="center">Repeat while held</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+
+      <section class="card">
+        <h2>Swipes</h2>
+        <label class="row check"><input type="checkbox" data-setting="swipeEnabled" />
+          <span>Detect hand swipes</span></label>
+        <table class="bindings" id="swipeTable">
+          <thead>
+            <tr><th>Direction</th><th>Action</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="grid">
+          <div class="field">
+            <label>Swipe distance <output data-output="swipeMinDistance"></output></label>
+            <input type="range" min="0.08" max="0.5" step="0.01" data-setting="swipeMinDistance" data-format="ratio" />
+            <p class="small muted">Fraction of the camera frame your hand must cross.</p>
+          </div>
+          <div class="field">
+            <label>Swipe window <output data-output="swipeMaxDurationMs"></output></label>
+            <input type="range" min="150" max="800" step="25" data-setting="swipeMaxDurationMs" data-format="ms" />
+            <p class="small muted">Longer = slower swipes still count.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Sensitivity</h2>
+        <div class="grid">
+          <div class="field">
+            <label>Hold time <output data-output="holdMs"></output></label>
+            <input type="range" min="150" max="1500" step="50" data-setting="holdMs" data-format="ms" />
+            <p class="small muted">How long a pose must be steady before it fires.</p>
+          </div>
+          <div class="field">
+            <label>Cooldown <output data-output="cooldownMs"></output></label>
+            <input type="range" min="200" max="3000" step="100" data-setting="cooldownMs" data-format="ms" />
+            <p class="small muted">Quiet period after every action.</p>
+          </div>
+          <div class="field">
+            <label>Repeat rate <output data-output="repeatMs"></output></label>
+            <input type="range" min="150" max="1500" step="50" data-setting="repeatMs" data-format="ms" />
+            <p class="small muted">Used by actions marked "repeat while held".</p>
+          </div>
+          <div class="field">
+            <label>Confidence floor <output data-output="minGestureScore"></output></label>
+            <input type="range" min="0.2" max="0.95" step="0.05" data-setting="minGestureScore" data-format="percent" />
+            <p class="small muted">Raise it if gestures fire by accident.</p>
+          </div>
+          <div class="field">
+            <label>Stillness required <output data-output="maxHoldSpeed"></output></label>
+            <input type="range" min="0.1" max="1.5" step="0.05" data-setting="maxHoldSpeed" data-format="ratio" />
+            <p class="small muted">Max hand speed that still counts as "holding".</p>
+          </div>
+          <div class="field">
+            <label>Inference rate <output data-output="targetFps"></output></label>
+            <input type="range" min="8" max="30" step="1" data-setting="targetFps" data-format="fps" />
+            <p class="small muted">Lower it if your fan spins up.</p>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="field">
+            <label for="delegate">Compute</label>
+            <select id="delegate" data-setting="delegate">
+              <option value="GPU">GPU (falls back to CPU)</option>
+              <option value="CPU">CPU only</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="numHands">Hands tracked</label>
+            <select id="numHands" data-setting="numHands" data-type="number">
+              <option value="1">1</option>
+              <option value="2">2</option>
+            </select>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Playback</h2>
+        <div class="grid">
+          <div class="field">
+            <label>Skip amount <output data-output="seekSeconds"></output></label>
+            <input type="range" min="5" max="60" step="5" data-setting="seekSeconds" data-format="seconds" />
+          </div>
+          <div class="field">
+            <label>Volume step <output data-output="volumeStep"></output></label>
+            <input type="range" min="0.05" max="0.5" step="0.05" data-setting="volumeStep" data-format="percent" />
+          </div>
+          <div class="field">
+            <label>Speed step <output data-output="speedStep"></output></label>
+            <input type="range" min="0.1" max="1" step="0.05" data-setting="speedStep" data-format="times" />
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Feedback &amp; power</h2>
+        <label class="row check"><input type="checkbox" data-setting="showHud" />
+          <span>Show the gesture indicator on the page</span></label>
+        <label class="row check"><input type="checkbox" data-setting="showToasts" />
+          <span>Show a toast when an action fires</span></label>
+        <label class="row check"><input type="checkbox" data-setting="pauseWhenNoVideo" />
+          <span>Turn the camera off when no video tab is in focus</span></label>
+      </section>
+
+      <section class="card">
+        <h2>Where it runs</h2>
+        <p class="small muted">Jester ships with YouTube, Netflix, Hulu, Disney+, Prime Video, Max, Peacock, Paramount+, Crunchyroll, Twitch, Vimeo and Apple TV enabled.</p>
+        <label class="row check"><input type="checkbox" id="allSites" />
+          <span>Also run on every other site with a video</span></label>
+        <p class="small muted" id="allSitesNote"></p>
+      </section>
+
+      <footer class="row between">
+        <span class="small muted" id="savedNote"></span>
+        <button id="resetBtn">Reset everything to defaults</button>
+      </footer>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>
