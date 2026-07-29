@@ -603,15 +603,19 @@ async function relayHud(telemetry) {
 // Power management
 // ---------------------------------------------------------------------------
 
+/**
+ * `pauseWhenNoVideo` is opt-in: left off, Jester keeps watching on every tab, so
+ * gestures and the pointer stay live while you browse.
+ */
+async function shouldSuspend() {
+  const settings = await getSettings();
+  if (!settings.enabled || !settings.pauseWhenNoVideo) return false;
+  return !(await resolveTarget({ allowProbe: false }));
+}
+
 async function updateSuspendState() {
   try {
-    const settings = await getSettings();
-    if (!settings.enabled || !settings.pauseWhenNoVideo) {
-      post({ type: MSG.ENGINE_CONFIG, suspend: false });
-      return;
-    }
-    const target = await resolveTarget({ allowProbe: false });
-    post({ type: MSG.ENGINE_CONFIG, suspend: !target });
+    post({ type: MSG.ENGINE_CONFIG, suspend: await shouldSuspend() });
   } catch (err) {
     console.error('[jester] suspend check failed', err);
   }
@@ -693,7 +697,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case MSG.SETTINGS_REQUEST:
       // The offscreen document can't read storage itself; it asks us on boot.
-      (async () => sendResponse({ settings: await getSettings() }))();
+      // The suspend flag rides along, so a freshly booted engine starts in the
+      // right state instead of running until the first tab switch.
+      (async () =>
+        sendResponse({ settings: await getSettings(), suspend: await shouldSuspend() }))();
       return true;
 
     case MSG.SET_ENABLED:
@@ -724,6 +731,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const before = changes.settings.oldValue?.enabled;
   const after = changes.settings.newValue?.enabled;
   if (before !== after) syncEngine();
+  // The engine owns the suspend flag and has no way to know the setting behind
+  // it just changed. Without this, switching `pauseWhenNoVideo` off leaves an
+  // already-suspended engine stuck until the next tab switch.
+  updateSuspendState();
 });
 
 chrome.tabs.onActivated.addListener(() => {
@@ -738,6 +749,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
   invalidateTarget();
   invalidateCursorTab();
+  updateSuspendState();
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -746,6 +758,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (videoFrames.get(key).tabId === tabId) videoFrames.delete(key);
   }
   invalidateTarget();
+  updateSuspendState();
   // A reload can bring the content script with it, so give the tab another go.
   if (tabId === cursorTab || tabId === cursorUnreachable) invalidateCursorTab();
 });

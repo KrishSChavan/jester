@@ -225,7 +225,14 @@
         <label class="row check"><input type="checkbox" data-setting="showToasts" />
           <span>Show a toast when an action fires</span></label>
         <label class="row check"><input type="checkbox" data-setting="pauseWhenNoVideo" />
-          <span>Turn the camera off when no video tab is in focus</span></label>
+          <span>Pause gesture detection when no video tab is in focus</span></label>
+        <p class="small muted">
+          Leave this off — the default — and Jester keeps watching on every tab, so gestures
+          and the pointer still work while you browse. Turn it on to stop inference whenever
+          there's no video to act on, which is easier on the battery. The camera stream stays
+          open either way so it can resume instantly; use the toggle at the top of this page
+          to release the camera entirely.
+        </p>
       </section>
 
       <section class="card">

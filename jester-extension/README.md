@@ -189,8 +189,10 @@ Two consequences worth knowing:
 
 - The cursor only exists where the content script runs, so tick **"Also run on
   every other site"** if you want it everywhere.
-- If you turned on **"Turn the camera off when no video tab is in focus"**, the
-  engine suspends on ordinary pages and the pointer goes with it.
+- If you turned on **"Pause gesture detection when no video tab is in focus"**,
+  the engine suspends on ordinary pages and the pointer goes with it. It ships
+  off, so out of the box Jester keeps watching everywhere; untick it again and
+  the engine resumes immediately rather than waiting for the next tab switch.
 
 ## Supported sites
 

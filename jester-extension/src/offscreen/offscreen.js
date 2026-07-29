@@ -278,7 +278,7 @@ async function start() {
   running = true;
   starting = false;
   lastVideoTime = -1;
-  report(ENGINE.RUNNING, `${activeDelegate} delegate`);
+  report(suspended ? ENGINE.SUSPENDED : ENGINE.RUNNING, `${activeDelegate} delegate`);
   scheduleTick(0);
 }
 
@@ -891,7 +891,7 @@ async function applySettings(next) {
  */
 async function requestSettings() {
   const response = await chrome.runtime.sendMessage({ type: MSG.SETTINGS_REQUEST });
-  return mergeSettings(response?.settings);
+  return { settings: mergeSettings(response?.settings), suspend: !!response?.suspend };
 }
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -926,7 +926,9 @@ window.addEventListener('pagehide', () => stop(ENGINE.OFF));
 
 (async () => {
   try {
-    settings = await requestSettings();
+    const initial = await requestSettings();
+    settings = initial.settings;
+    suspended = initial.suspend;
   } catch (err) {
     report(ENGINE.ERROR, `Could not read settings: ${err?.message || err}`);
     return;
