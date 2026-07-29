@@ -31,6 +31,8 @@
     "*://tv.apple.com/*"
   ],
 
+  "optional_permissions": ["debugger"],
+
   "optional_host_permissions": ["*://*/*"],
 
   "background": {

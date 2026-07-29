@@ -88,8 +88,28 @@ jester-extension/               the extension — load this unpacked
     content/content.js             video discovery, action execution, on-page HUD
     content/page-bridge.js         Netflix player API bridge (main world)
     popup/  options/  ui/          toolbar popup, settings, shared styles
+build-zip.ps1                   validates the extension, then repacks the zip
 jester-extension.zip            packaged build of the same folder
 ```
+
+## Rebuilding the zip
+
+```powershell
+.\build-zip.ps1
+```
+
+It validates before packing — the manifest parses and every path it names
+exists, the HTML pages' `src`/`href` references resolve, the model and WASM
+assets are present, and every first-party `.js` parses. A failure exits non-zero
+and leaves the existing zip alone.
+
+| flag | |
+| --- | --- |
+| `-Flat` | put `manifest.json` at the zip root, which the Chrome Web Store requires |
+| `-Versioned` | name it after the manifest version, e.g. `jester-extension-0.1.0.zip` |
+| `-IncludeDevFiles` | keep the source map and `.d.ts` (excluded by default, ~0.5 MB) |
+| `-Output <path>` | write somewhere other than `jester-extension.zip` |
+| `-SkipChecks` | pack without validating |
 
 ## Privacy
 
@@ -99,10 +119,19 @@ and a downscaled preview image, and the preview is only produced while the popup
 is actually open. There are no network permissions and no remote code; MV3
 forbids it and nothing here needs it.
 
+## Fullscreen
+
+Chrome only grants `requestFullscreen()` off a real user gesture, and a webcam
+gesture isn't one. Jester goes around it: by default it puts the *browser window*
+into fullscreen — an API with no gesture requirement — and pins the player to
+fill it, which looks the same and costs no extra permission. **Settings →
+Fullscreen** can switch to true fullscreen, which borrows Chrome's debugger to
+hand the page a real gesture. Either way, Escape gets you out.
+
 ## Known limitations
 
-- **Entering fullscreen doesn't work.** Chrome only grants fullscreen off a real
-  user gesture, and a webcam gesture isn't one. *Exiting* works fine.
+- **Cinema mode is CSS layered over the site's own player.** It works on the
+  built-in sites; an unusual player may need its selector added.
 - **Skip ad / next episode rely on site-specific selectors.** Streaming sites
   reshuffle their DOM regularly; the selector list in `src/content/content.js` is
   where to fix it.

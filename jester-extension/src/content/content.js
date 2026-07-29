@@ -14,7 +14,11 @@
     DO_ACTION: 'jester/do-action',
     PROBE: 'jester/probe',
     VIDEO_STATE: 'jester/video-state',
-    HUD: 'jester/hud'
+    HUD: 'jester/hud',
+    FULLSCREEN: 'jester/fullscreen',
+    TOAST: 'jester/toast',
+    FULLSCREEN_EXIT: 'jester/fullscreen-exit',
+    FULLSCREEN_DETACHED: 'jester/fullscreen-detached'
   };
 
   const HOST = location.hostname;
@@ -146,7 +150,7 @@
 
   async function perform(action, params = {}) {
     const video = findVideo();
-    const needsVideo = !['SKIP_AD', 'NEXT_VIDEO', 'EXIT_FULLSCREEN'].includes(action);
+    const needsVideo = !['SKIP_AD', 'NEXT_VIDEO'].includes(action);
     if (!video && needsVideo) return { ok: false, detail: 'No video in this frame' };
 
     switch (action) {
@@ -181,23 +185,9 @@
         return { ok: true, detail: `${video.playbackRate}×` };
       }
 
-      case 'EXIT_FULLSCREEN':
-        if (!document.fullscreenElement) return { ok: true, detail: 'Already windowed' };
-        await document.exitFullscreen().catch(() => undefined);
-        return { ok: true, detail: 'Exited fullscreen' };
-
-      case 'FULLSCREEN_TOGGLE':
-        if (document.fullscreenElement) {
-          await document.exitFullscreen().catch(() => undefined);
-          return { ok: true, detail: 'Exited fullscreen' };
-        }
-        try {
-          await fullscreenTarget(video).requestFullscreen();
-          return { ok: true, detail: 'Fullscreen' };
-        } catch {
-          // Chrome only grants fullscreen off a real user gesture.
-          return { ok: false, detail: 'Chrome blocked fullscreen (needs a click)' };
-        }
+      // FULLSCREEN_TOGGLE / EXIT_FULLSCREEN are not handled here: they need
+      // chrome.windows, which only exists in the service worker. It drives them
+      // through MSG.FULLSCREEN instead.
 
       case 'SKIP_AD': {
         const skipped = clickFirst([
@@ -228,6 +218,201 @@
         return { ok: false, detail: `Unknown action ${action}` };
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Cinema mode
+  //
+  // `requestFullscreen()` needs transient user activation, and a gesture
+  // recognised off-screen has none. So instead of asking the page to go
+  // fullscreen we pin the player to the viewport ourselves; the service worker
+  // pairs this with chrome.windows fullscreen, which needs no activation, and
+  // the two together are indistinguishable from the real thing.
+  // -------------------------------------------------------------------------
+
+  const CINEMA_STYLE_ID = 'jester-cinema-style';
+
+  /**
+   * A `position: fixed` element is trapped by any ancestor with a transform,
+   * filter, perspective or paint containment — all of which real players use —
+   * so every ancestor gets neutralised as well as the target itself.
+   */
+  const CINEMA_CSS = `
+    html.jester-cinema, html.jester-cinema body {
+      overflow: hidden !important;
+    }
+    [data-jester-cinema-anc] {
+      transform: none !important;
+      filter: none !important;
+      backdrop-filter: none !important;
+      perspective: none !important;
+      will-change: auto !important;
+      contain: none !important;
+      overflow: visible !important;
+      clip-path: none !important;
+      mask: none !important;
+      opacity: 1 !important;
+    }
+    [data-jester-cinema] {
+      position: fixed !important;
+      inset: 0 !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      min-width: 0 !important;
+      min-height: 0 !important;
+      max-width: none !important;
+      max-height: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      border: 0 !important;
+      border-radius: 0 !important;
+      transform: none !important;
+      z-index: 2147483000 !important;
+      background: #000 !important;
+    }
+    /* Wrappers between the player and the <video>, which players size in JS. */
+    [data-jester-cinema-fill] {
+      position: absolute !important;
+      inset: 0 !important;
+      width: 100% !important;
+      height: 100% !important;
+      max-width: none !important;
+      max-height: none !important;
+      margin: 0 !important;
+      padding: 0 !important;
+      transform: none !important;
+    }
+    [data-jester-cinema] video {
+      width: 100% !important;
+      height: 100% !important;
+      left: 0 !important;
+      top: 0 !important;
+      margin: 0 !important;
+      object-fit: contain !important;
+      transform: none !important;
+    }
+  `;
+
+  const CINEMA_ATTRS = ['data-jester-cinema', 'data-jester-cinema-anc', 'data-jester-cinema-fill'];
+
+  let cinemaTarget = null;
+
+  /**
+   * Players size their own control bars in JS off a resize event. Fire a few,
+   * spread out, because some of them re-layout asynchronously.
+   */
+  function nudgeLayout() {
+    for (const delay of [0, 120, 400]) {
+      setTimeout(() => window.dispatchEvent(new Event('resize')), delay);
+    }
+  }
+
+  function cinemaOn() {
+    if (cinemaTarget?.isConnected) return { ok: true, detail: 'Fullscreen' };
+    const video = findVideo();
+    if (!video) return { ok: false, detail: 'No video in this frame' };
+
+    if (!document.getElementById(CINEMA_STYLE_ID)) {
+      const style = document.createElement('style');
+      style.id = CINEMA_STYLE_ID;
+      style.textContent = CINEMA_CSS;
+      (document.head || document.documentElement).append(style);
+    }
+
+    const target = fullscreenTarget(video);
+    target.setAttribute('data-jester-cinema', '');
+    for (let node = target.parentElement; node; node = node.parentElement) {
+      node.setAttribute('data-jester-cinema-anc', '');
+    }
+    // `target` may sit several wrappers above the <video>; each of those is
+    // usually sized in JS to the old player box, so make them fill instead.
+    for (let node = video.parentElement; node && node !== target; node = node.parentElement) {
+      node.setAttribute('data-jester-cinema-fill', '');
+    }
+    document.documentElement.classList.add('jester-cinema');
+    cinemaTarget = target;
+    nudgeLayout();
+    return { ok: true, detail: 'Fullscreen' };
+  }
+
+  function cinemaOff() {
+    if (!cinemaTarget) return;
+    cinemaTarget = null;
+    document.documentElement.classList.remove('jester-cinema');
+    for (const node of document.querySelectorAll(CINEMA_ATTRS.map((a) => `[${a}]`).join(','))) {
+      for (const attr of CINEMA_ATTRS) node.removeAttribute(attr);
+    }
+    document.getElementById(CINEMA_STYLE_ID)?.remove();
+    nudgeLayout();
+  }
+
+  function fullscreenState() {
+    // An SPA navigation can tear the player out from under us.
+    if (cinemaTarget && !cinemaTarget.isConnected) cinemaOff();
+    return {
+      ok: true,
+      native: !!document.fullscreenElement,
+      cinema: !!cinemaTarget,
+      // True for ~5s after a real click or keypress, and the one window in which
+      // the page is allowed to ask for genuine fullscreen.
+      canActivate: !!navigator.userActivation?.isActive
+    };
+  }
+
+  async function fullscreenOp(op) {
+    switch (op) {
+      case 'state':
+        return fullscreenState();
+
+      case 'native-enter': {
+        const video = findVideo();
+        if (!video) return { ok: false, detail: 'No video in this frame' };
+        if (!navigator.userActivation?.isActive) return { ok: false, detail: 'No user activation' };
+        try {
+          await fullscreenTarget(video).requestFullscreen();
+          return { ok: true, detail: 'Fullscreen' };
+        } catch (err) {
+          return { ok: false, detail: String(err?.message || err) };
+        }
+      }
+
+      case 'native-exit':
+        if (document.fullscreenElement) await document.exitFullscreen().catch(() => undefined);
+        return { ok: true };
+
+      case 'cinema-enter':
+        return cinemaOn();
+
+      case 'cinema-exit':
+        cinemaOff();
+        return { ok: true };
+
+      default:
+        return { ok: false, detail: `Unknown fullscreen op ${op}` };
+    }
+  }
+
+  // Escape is the reflex for leaving fullscreen, but nothing is natively
+  // fullscreen in cinema mode, so Chrome would ignore it. Hand it to the worker,
+  // which also has to put the window back.
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (!cinemaTarget || document.fullscreenElement) return;
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      chrome.runtime.sendMessage({ type: MSG.FULLSCREEN_EXIT }).catch(() => undefined);
+    },
+    true
+  );
+
+  // If the user takes the window out of fullscreen themselves (F11), drop the
+  // overlay too rather than leaving a fake-fullscreen page in a normal window.
+  const windowFullscreen = window.matchMedia('(display-mode: fullscreen)');
+  windowFullscreen.addEventListener('change', () => {
+    if (!cinemaTarget || windowFullscreen.matches) return;
+    cinemaOff();
+    chrome.runtime.sendMessage({ type: MSG.FULLSCREEN_DETACHED }).catch(() => undefined);
+  });
 
   // -------------------------------------------------------------------------
   // HUD (shadow DOM so no site stylesheet can touch it)
@@ -400,6 +585,14 @@
           sendResponse(result);
         });
         return true;
+
+      case MSG.FULLSCREEN:
+        fullscreenOp(message.op).then(sendResponse);
+        return true;
+
+      case MSG.TOAST:
+        showToast(message.action, message.result || {});
+        return false;
 
       case MSG.PROBE:
         sendResponse(describeVideo());

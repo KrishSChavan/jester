@@ -89,12 +89,38 @@ on most sites. Netflix is the exception: its player snaps `currentTime` back, so
 seeking and play/pause route through `src/content/page-bridge.js`, which runs in
 the page's main world and drives Netflix's own player API.
 
+## Fullscreen
+
+`Element.requestFullscreen()` is gated on *transient user activation*, and a
+gesture recognised in the offscreen document has none. No extension permission
+lifts that — so `FULLSCREEN_TOGGLE` routes through the service worker
+(`toggleFullscreen()`), which tries three things in order:
+
+1. **Native.** If the user happens to have clicked in the page in the last few
+   seconds, `navigator.userActivation.isActive` is still true and the content
+   script can just call `requestFullscreen()`. Free, and the best result.
+2. **True fullscreen** (opt-in, **Settings → Fullscreen**). Attaches
+   `chrome.debugger` and runs `Runtime.evaluate` with `userGesture: true`, which
+   forges real activation, so the site's own fullscreen engages. Costs the
+   optional `debugger` permission and a brief "being debugged" bar, and cannot
+   attach while DevTools is open on that tab.
+3. **Cinema mode** (default). `chrome.windows.update(id, {state:'fullscreen'})`
+   needs no activation at all, so the *window* goes fullscreen; the content
+   script then pins the player to the viewport with a stylesheet. Visually the
+   same as the real thing, with no extra permission.
+
+Cinema mode ends on Escape (the content script forwards it, since nothing is
+natively fullscreen for Chrome to handle) or when the user leaves window
+fullscreen themselves, watched via `(display-mode: fullscreen)`.
+
+The overlay neutralises `transform` / `filter` / `contain` on every ancestor of
+the player, because any of those would trap a `position: fixed` element.
+
 ## Known limitations
 
-- **Entering fullscreen doesn't work.** Chrome only grants fullscreen off a real
-  user gesture, and a webcam gesture isn't one. *Exiting* fullscreen works fine,
-  so `EXIT_FULLSCREEN` is a usable binding; `FULLSCREEN_TOGGLE` will report
-  "Chrome blocked fullscreen" when trying to enter.
+- **Cinema mode is CSS over a site's own layout.** It works on the built-in
+  sites; a player with an unusual structure may need its selector added to
+  `fullscreenTarget()` in `src/content/content.js`.
 - **Skip ad / next episode rely on site-specific selectors** (in
   `src/content/content.js`). Streaming sites reshuffle their DOM regularly; if
   one stops working, that selector list is the place to fix it.
@@ -124,6 +150,10 @@ src/
   options/                            all settings, gesture bindings, camera setup
   ui/ui.css                           shared styles
 ```
+
+Repack with `..\build-zip.ps1` from the parent folder — it validates the
+manifest, the HTML references, the runtime assets and the JavaScript before
+writing anything. `-Flat` produces the layout the Chrome Web Store expects.
 
 The division of labour worth knowing: **all gesture logic lives in the offscreen
 document**, not the service worker. A service worker gets evicted while idle,

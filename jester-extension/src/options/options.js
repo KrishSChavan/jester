@@ -1,6 +1,7 @@
 import {
   ACTIONS,
   DEFAULT_SETTINGS,
+  FULLSCREEN_MODES,
   GESTURES,
   MSG,
   SWIPES,
@@ -10,6 +11,7 @@ import {
 
 const ALL_SITES = { origins: ['*://*/*'] };
 const ALL_SITES_SCRIPT_ID = 'jester-all-sites';
+const DEBUGGER = { permissions: ['debugger'] };
 
 let settings = await loadSettings();
 
@@ -227,6 +229,45 @@ grantBtn.addEventListener('click', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fullscreen strategy — "true fullscreen" is behind an optional permission
+// ---------------------------------------------------------------------------
+
+const fullscreenMode = document.getElementById('fullscreenMode');
+const fullscreenNote = document.getElementById('fullscreenNote');
+
+for (const [id, meta] of Object.entries(FULLSCREEN_MODES)) {
+  const option = document.createElement('option');
+  option.value = id;
+  option.textContent = meta.label;
+  fullscreenMode.append(option);
+}
+
+function paintFullscreenMode() {
+  const mode = settings.fullscreenMode in FULLSCREEN_MODES ? settings.fullscreenMode : 'cinema';
+  fullscreenMode.value = mode;
+  fullscreenNote.textContent = FULLSCREEN_MODES[mode].hint;
+}
+
+async function refreshFullscreenMode() {
+  // The permission can be revoked from chrome://extensions behind our back.
+  if (settings.fullscreenMode === 'debugger' && !(await chrome.permissions.contains(DEBUGGER))) {
+    await patch({ fullscreenMode: 'cinema' });
+  }
+  paintFullscreenMode();
+}
+
+fullscreenMode.addEventListener('change', async () => {
+  const mode = fullscreenMode.value;
+  if (mode === 'debugger' && !(await chrome.permissions.request(DEBUGGER))) {
+    paintFullscreenMode();
+    return;
+  }
+  if (mode !== 'debugger') await chrome.permissions.remove(DEBUGGER).catch(() => {});
+  await patch({ fullscreenMode: mode });
+  paintFullscreenMode();
+});
+
+// ---------------------------------------------------------------------------
 // Optional "run everywhere" permission
 // ---------------------------------------------------------------------------
 
@@ -280,6 +321,7 @@ document.getElementById('resetBtn').addEventListener('click', async () => {
   buildGestureTable();
   buildSwipeTable();
   refreshCamera();
+  refreshFullscreenMode();
   markSaved();
 });
 
@@ -297,6 +339,7 @@ buildGestureTable();
 buildSwipeTable();
 refreshCamera();
 refreshAllSites();
+refreshFullscreenMode();
 
 // Another surface (the popup) may flip `enabled` while this page is open.
 chrome.storage.onChanged.addListener(async (changes, area) => {

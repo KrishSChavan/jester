@@ -258,8 +258,189 @@ async function sendToFrame(target, message) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Fullscreen
+//
+// `requestFullscreen()` is gated on transient user activation, and a gesture
+// recognised in the offscreen document has none — that is a Chrome invariant,
+// not something a permission unlocks. Three ways around it, best result first:
+//
+//   1. native   — free whenever the user happens to have clicked in the last
+//                 few seconds, and the only path that costs nothing.
+//   2. debugger — Runtime.evaluate({userGesture:true}) forges real activation,
+//                 so the site's own fullscreen engages. Opt-in permission.
+//   3. cinema   — chrome.windows fullscreen (no activation required at all)
+//                 plus a CSS layer pinning the player to it. Always available.
+// ---------------------------------------------------------------------------
+
+/** windowId -> the state the window was in before *we* made it fullscreen. */
+const restoreWindowState = new Map();
+
+function playerSelector(url) {
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return '';
+  }
+  if (/(^|\.)youtube(-nocookie)?\.com$/.test(host)) return '#movie_player';
+  if (/(^|\.)netflix\.com$/.test(host)) return '.watch-video';
+  if (/(^|\.)disneyplus\.com$|(^|\.)hotstar\.com$/.test(host)) return '[data-testid="webAppRoot"]';
+  if (/(^|\.)twitch\.tv$/.test(host)) return '[data-a-target="video-player"]';
+  return '';
+}
+
+/** Goes through sendToFrame so it inherits the inject-and-retry fallback. */
+function frameFullscreenOp(target, op) {
+  return sendToFrame(target, { type: MSG.FULLSCREEN, op });
+}
+
+async function enterWindowFullscreen(windowId) {
+  const win = await chrome.windows.get(windowId);
+  if (win.state === 'fullscreen') return;
+  restoreWindowState.set(windowId, win.state || 'normal');
+  await chrome.windows.update(windowId, { state: 'fullscreen' });
+}
+
+async function exitWindowFullscreen(windowId) {
+  const previous = restoreWindowState.get(windowId);
+  // No entry means the window was already fullscreen when we got here — the
+  // user's own F11. Leave it exactly as we found it.
+  if (!previous) return;
+  restoreWindowState.delete(windowId);
+  await chrome.windows.update(windowId, { state: previous }).catch(() => undefined);
+}
+
+/** Runs in the page's main world, under a forged user gesture. */
+function fullscreenExpression(selector) {
+  const preferred = JSON.stringify(selector || '');
+  return `(() => {
+    if (document.fullscreenElement) return 'already';
+    let el = ${preferred} && document.querySelector(${preferred});
+    if (!el) {
+      let best = null, rank = -1;
+      for (const v of document.querySelectorAll('video')) {
+        const r = v.getBoundingClientRect();
+        const score = (v.paused ? 0 : 1e9) + Math.max(0, r.width) * Math.max(0, r.height);
+        if (score > rank) { rank = score; best = v; }
+      }
+      el = best && (best.parentElement || best);
+    }
+    if (!el) return 'No video on this page';
+    return el.requestFullscreen().then(() => 'ok', (e) => String(e && e.message || e));
+  })()`;
+}
+
+async function trueFullscreen(tabId, url) {
+  if (!(await chrome.permissions.contains({ permissions: ['debugger'] }))) {
+    return { ok: false, detail: 'Debugger permission not granted' };
+  }
+  const debuggee = { tabId };
+  try {
+    await chrome.debugger.attach(debuggee, '1.3');
+  } catch (err) {
+    // Most often: DevTools is already attached to this tab.
+    return { ok: false, detail: String(err?.message || err) };
+  }
+  try {
+    const response = await chrome.debugger.sendCommand(debuggee, 'Runtime.evaluate', {
+      expression: fullscreenExpression(playerSelector(url)),
+      userGesture: true,
+      awaitPromise: true,
+      returnByValue: true
+    });
+    const value = response?.result?.value;
+    if (value === 'ok' || value === 'already') return { ok: true, detail: 'Fullscreen' };
+    return { ok: false, detail: String(value ?? 'Evaluation failed') };
+  } catch (err) {
+    return { ok: false, detail: String(err?.message || err) };
+  } finally {
+    // Let the transition settle before dropping the "being debugged" bar.
+    setTimeout(() => chrome.debugger.detach(debuggee).catch(() => undefined), 400);
+  }
+}
+
+async function toggleFullscreen(action) {
+  const settings = await getSettings();
+  const target = await resolveTarget();
+  if (!target) return { ok: false, detail: 'No video tab found' };
+
+  let tab;
+  try {
+    tab = await chrome.tabs.get(target.tabId);
+  } catch {
+    invalidateTarget();
+    return { ok: false, detail: 'That tab is gone' };
+  }
+
+  // The user may have dropped out of window fullscreen behind our back (F11),
+  // in which case there is nothing left for us to restore.
+  if (restoreWindowState.has(tab.windowId)) {
+    const win = await chrome.windows.get(tab.windowId).catch(() => null);
+    if (win && win.state !== 'fullscreen') restoreWindowState.delete(tab.windowId);
+  }
+
+  const state = await frameFullscreenOp(target, 'state');
+  const isFullscreen = !!(state?.native || state?.cinema);
+
+  if (isFullscreen || action === 'EXIT_FULLSCREEN') {
+    if (!isFullscreen && !restoreWindowState.has(tab.windowId)) {
+      return { ok: true, detail: 'Already windowed' };
+    }
+    if (state?.native) await frameFullscreenOp(target, 'native-exit');
+    // Always clear the overlay before restoring the window, so the content
+    // script's own display-mode watcher sees nothing left to clean up.
+    if (state?.cinema) await frameFullscreenOp(target, 'cinema-exit');
+    await exitWindowFullscreen(tab.windowId);
+    return { ok: true, detail: 'Exited fullscreen' };
+  }
+
+  // 1. Real fullscreen, for free, if the user clicked in the page recently.
+  if (state?.canActivate) {
+    const native = await frameFullscreenOp(target, 'native-enter');
+    if (native?.ok) return native;
+  }
+
+  // 2. Real fullscreen via a forged gesture, if the user opted in.
+  if (settings.fullscreenMode === 'debugger') {
+    const forged = await trueFullscreen(tab.id, tab.url);
+    if (forged.ok) return forged;
+    console.warn('[jester] true fullscreen failed, falling back to cinema —', forged.detail);
+  }
+
+  // 3. Cinema mode. Window first: the overlay is sized in viewport units, so it
+  //    should be applied against the final viewport.
+  await enterWindowFullscreen(tab.windowId).catch((err) =>
+    console.warn('[jester] window fullscreen failed', err)
+  );
+  const cinema = await frameFullscreenOp(target, 'cinema-enter');
+  if (!cinema?.ok) {
+    await exitWindowFullscreen(tab.windowId);
+    return cinema?.detail ? cinema : { ok: false, detail: 'Could not enter fullscreen' };
+  }
+  return cinema;
+}
+
+async function announce(action, result) {
+  const settings = await getSettings();
+  if (!settings.showToasts) return;
+  const target = await resolveTarget({ allowProbe: false });
+  if (!target) return;
+  chrome.tabs
+    .sendMessage(target.tabId, { type: MSG.TOAST, action, result }, { frameId: target.frameId })
+    .catch(() => undefined);
+}
+
 async function dispatchAction(action, meta) {
   if (!action || action === 'NONE') return;
+
+  if (action === 'FULLSCREEN_TOGGLE' || action === 'EXIT_FULLSCREEN') {
+    const result = await toggleFullscreen(action);
+    await announce(action, result);
+    await recordAction({ ...meta, action, ok: !!result.ok, detail: result.detail || '' });
+    return;
+  }
+
   const settings = await getSettings();
   const target = await resolveTarget();
 
@@ -375,6 +556,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       return false;
 
+    case MSG.FULLSCREEN_EXIT:
+      // The user pressed Escape inside cinema mode.
+      dispatchAction('EXIT_FULLSCREEN', { source: 'keyboard' }).catch((err) =>
+        console.error('[jester] fullscreen exit failed', err)
+      );
+      return false;
+
+    case MSG.FULLSCREEN_DETACHED:
+      // The user took the window out of fullscreen themselves; the overlay has
+      // already cleaned itself up, so just forget the restore entry.
+      if (sender.tab) restoreWindowState.delete(sender.tab.windowId);
+      return false;
+
     case MSG.GET_STATE:
       (async () => {
         const settings = await getSettings();
@@ -456,6 +650,8 @@ chrome.windows.onFocusChanged.addListener(() => {
   invalidateTarget();
   updateSuspendState();
 });
+
+chrome.windows.onRemoved.addListener((windowId) => restoreWindowState.delete(windowId));
 
 chrome.runtime.onStartup.addListener(() => syncEngine());
 

@@ -41,7 +41,7 @@ export const ACTIONS = {
   SPEED_UP: { label: 'Speed up', repeatable: true },
   SPEED_DOWN: { label: 'Slow down', repeatable: true },
   EXIT_FULLSCREEN: { label: 'Exit fullscreen', repeatable: false },
-  FULLSCREEN_TOGGLE: { label: 'Fullscreen toggle (entering may be blocked)', repeatable: false },
+  FULLSCREEN_TOGGLE: { label: 'Fullscreen toggle', repeatable: false },
   SKIP_AD: { label: 'Skip ad', repeatable: false },
   NEXT_VIDEO: { label: 'Next video / episode', repeatable: false }
 };
@@ -75,7 +75,35 @@ export const MSG = {
   DO_ACTION: 'jester/do-action',
   PROBE: 'jester/probe',
   VIDEO_STATE: 'jester/video-state',
-  HUD: 'jester/hud'
+  HUD: 'jester/hud',
+  // Fullscreen needs window-level control, so the worker drives it step by step
+  // instead of handing the whole action to the frame.
+  FULLSCREEN: 'jester/fullscreen',
+  TOAST: 'jester/toast',
+  // content script -> service worker
+  FULLSCREEN_EXIT: 'jester/fullscreen-exit',
+  FULLSCREEN_DETACHED: 'jester/fullscreen-detached'
+};
+
+/**
+ * How `FULLSCREEN_TOGGLE` gets around the fact that `requestFullscreen()` needs
+ * transient user activation, which a recognised gesture never has.
+ */
+export const FULLSCREEN_MODES = {
+  cinema: {
+    label: 'Cinema mode (recommended)',
+    hint:
+      "Puts the browser window itself into fullscreen — an API that doesn't need a " +
+      'click — and pins the player to fill it. Looks the same as real fullscreen and ' +
+      'needs no extra permission.'
+  },
+  debugger: {
+    label: 'True fullscreen (needs the debugger permission)',
+    hint:
+      "Uses Chrome's debugger to hand the page a real user gesture, so the site's own " +
+      'fullscreen engages. Chrome shows a "being debugged" bar for a moment each time, ' +
+      'and it cannot attach while DevTools is open on that tab.'
+  }
 };
 
 /** Engine lifecycle states surfaced in the popup. */
@@ -120,6 +148,7 @@ export const DEFAULT_SETTINGS = {
   seekSeconds: 10,
   volumeStep: 0.1,
   speedStep: 0.25,
+  fullscreenMode: 'cinema', // see FULLSCREEN_MODES
 
   // --- feedback ---
   showHud: true,
