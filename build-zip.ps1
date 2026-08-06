@@ -9,7 +9,11 @@
     - manifest.json parses, and every path it names exists
     - every local src=/href= in the HTML pages resolves
     - the runtime assets the offscreen document fetches by URL exist
+    - .env parses, and CURSOR is a boolean
     - every first-party .js parses (needs node on PATH; skipped if absent)
+
+  .env ships inside the zip — it's read at runtime, not compiled in — so a
+  published build carries whatever AI key is in it. The script says so.
 
   Then writes the zip with forward-slash entry names. Windows' own zip tools
   write backslashes, which the Chrome Web Store rejects.
@@ -25,12 +29,19 @@
 .PARAMETER Versioned
   Name the zip after the manifest version, e.g. jester-extension-0.1.0.zip.
 
+.NOTES
+  Windows ships PowerShell as Restricted, so calling this file directly fails
+  with "running scripts is disabled on this system". build-zip.cmd beside it
+  runs it with -ExecutionPolicy Bypass for that one process, without changing
+  anything on the machine. Prefer the .cmd unless your policy already allows
+  scripts.
+
 .EXAMPLE
-  .\build-zip.ps1
+  .\build-zip.cmd
   Rebuilds jester-extension.zip in place.
 
 .EXAMPLE
-  .\build-zip.ps1 -Flat -Versioned
+  .\build-zip.cmd -Flat -Versioned
   Builds jester-extension-0.1.0.zip laid out for a Web Store upload.
 #>
 
@@ -55,7 +66,9 @@ if (-not (Test-Path $Src)) {
 
 # Dev-only files. Dropping the source map costs nothing at runtime — Chrome only
 # looks for it when DevTools is open on the vendor bundle.
-$DevPatterns = @('*.map', '*.d.ts')
+# .env.example is the committed template; the real .env has to ship, because
+# src/common/env.js fetches it at runtime.
+$DevPatterns = @('*.map', '*.d.ts', '.env.example')
 $JunkPatterns = @('.DS_Store', 'Thumbs.db', 'desktop.ini', '*.zip', '*.orig', '*.rej', '*~')
 
 $problems = New-Object System.Collections.Generic.List[string]
@@ -161,6 +174,62 @@ function Test-RuntimeAssets {
   Test-Asset 'models/gesture_recognizer.task' 'Gesture model'
 }
 
+# .env is read at runtime by src/common/env.js. A missing file isn't fatal —
+# every flag falls back to "leave it as it is" — but a *malformed* one silently
+# switches a feature off, which is worth catching here rather than in Chrome.
+#
+# It also mirrors .env to env.txt. env.js tries the dotfile first and falls back
+# to the mirror, because it isn't settled whether Chrome serves a dotfile out of
+# an extension folder and it can't be checked from a script (Chrome 137 dropped
+# --load-extension). Mirroring here is what keeps the fallback from going stale.
+function Test-EnvFile {
+  $envPath = Join-Path $Src '.env'
+  $mirrorPath = Join-Path $Src 'env.txt'
+
+  if (-not (Test-Path $envPath)) {
+    $notes.Add('.env not found - the extension will fall back to CURSOR=true and no AI key') | Out-Null
+    return
+  }
+
+  # Byte-for-byte, so the two can never differ by a line ending.
+  $envBytes = [System.IO.File]::ReadAllBytes($envPath)
+  $mirrorBytes = if (Test-Path $mirrorPath) { [System.IO.File]::ReadAllBytes($mirrorPath) } else { $null }
+  $inStep = $null -ne $mirrorBytes -and
+            $mirrorBytes.Length -eq $envBytes.Length -and
+            -not (Compare-Object $mirrorBytes $envBytes -SyncWindow 0)
+  if (-not $inStep) {
+    [System.IO.File]::WriteAllBytes($mirrorPath, $envBytes)
+    $notes.Add('refreshed env.txt from .env (the fallback the extension reads if Chrome will not serve a dotfile)') | Out-Null
+  }
+
+  $values = @{}
+  foreach ($line in Get-Content -Encoding UTF8 $envPath) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+    $eq = $trimmed.IndexOf('=')
+    if ($eq -lt 1) { continue }
+    $key = $trimmed.Substring(0, $eq).Trim()
+    $value = $trimmed.Substring($eq + 1).Trim()
+    $values[$key] = $value
+  }
+
+  $cursor = if ($values.ContainsKey('CURSOR')) { $values['CURSOR'].ToLower() } else { '' }
+  if ($cursor -and $cursor -notin @('true', 'false', '1', '0', 'yes', 'no', 'on', 'off')) {
+    Add-Problem ".env: CURSOR is '$($values['CURSOR'])' - expected true or false"
+  }
+  if (-not $values.ContainsKey('CURSOR')) {
+    $notes.Add('.env has no CURSOR line - defaulting to true') | Out-Null
+  } else {
+    $notes.Add("cursor feature: $(if ($cursor -in @('false','0','no','off')) { 'off' } else { 'on' })") | Out-Null
+  }
+
+  if (-not $values.ContainsKey('AI') -or -not $values['AI']) {
+    $notes.Add('.env has no AI key - Jester will say so in the popup and options page') | Out-Null
+  } else {
+    $notes.Add('AI key present (never validated here, and it ships inside the zip)') | Out-Null
+  }
+}
+
 function Test-JavaScript {
   $node = Get-Command node -ErrorAction SilentlyContinue
   if ($null -eq $node) {
@@ -187,6 +256,7 @@ if ($SkipChecks) {
   foreach ($entry in Get-ManifestPaths) { Test-Asset $entry.Path "manifest $($entry.Why)" }
   Test-HtmlReferences
   Test-RuntimeAssets
+  Test-EnvFile
   Test-JavaScript
 
   if ($problems.Count -gt 0) {
@@ -294,4 +364,10 @@ if (-not $Flat) {
   Write-Host ""
   Write-Host "Note: the Chrome Web Store needs manifest.json at the zip root." -ForegroundColor DarkGray
   Write-Host "      Build with -Flat when you are ready to publish." -ForegroundColor DarkGray
+} elseif ((Test-Path (Join-Path $Src '.env')) -and
+          (Select-String -Path (Join-Path $Src '.env') -Pattern '^\s*AI\s*=\s*[^#\s]' -Quiet)) {
+  Write-Host ""
+  Write-Host "Warning: this zip contains .env, and .env contains an AI key." -ForegroundColor Yellow
+  Write-Host "         Anyone who downloads the extension can read it. Blank AI= before" -ForegroundColor Yellow
+  Write-Host "         publishing, or move the key behind a server you control." -ForegroundColor Yellow
 }

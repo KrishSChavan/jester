@@ -19,8 +19,10 @@
     TOAST: 'jester/toast',
     FULLSCREEN_EXIT: 'jester/fullscreen-exit',
     FULLSCREEN_DETACHED: 'jester/fullscreen-detached',
+    VIEW_CONTEXT: 'jester/view-context',
     CURSOR: 'jester/cursor',
-    CURSOR_CLICK: 'jester/cursor-click'
+    CURSOR_CLICK: 'jester/cursor-click',
+    VOICE: 'jester/voice'
   };
 
   const HOST = location.hostname;
@@ -51,6 +53,21 @@
     FULLSCREEN_TOGGLE: 'Fullscreen',
     SKIP_AD: 'Skip ad',
     NEXT_VIDEO: 'Next',
+    SCROLL_UP: 'Scroll up',
+    SCROLL_DOWN: 'Scroll down',
+    PAGE_TOP: 'Top',
+    PAGE_BOTTOM: 'Bottom',
+    HISTORY_BACK: 'Back',
+    HISTORY_FORWARD: 'Forward',
+    RELOAD: 'Reload',
+    TAB_NEXT: 'Next tab',
+    TAB_PREV: 'Previous tab',
+    TAB_MOVE_RIGHT: 'Move tab right',
+    TAB_MOVE_LEFT: 'Move tab left',
+    TAB_NEW: 'New tab',
+    TAB_CLOSE: 'Close tab',
+    TAB_REOPEN: 'Reopen tab',
+    WINDOW_NEXT: 'Next window',
     DISABLE: 'Jester off'
   };
 
@@ -121,6 +138,62 @@
   }
 
   // -------------------------------------------------------------------------
+  // Scrolling
+  //
+  // `window.scrollBy` is right for an ordinary page and wrong for the many
+  // sites that scroll an inner pane instead and leave the document itself
+  // fixed at 100vh, so the container has to be found rather than assumed.
+  // -------------------------------------------------------------------------
+
+  function canScrollY(el) {
+    if (!el || el.scrollHeight <= el.clientHeight + 4) return false;
+    const overflow = getComputedStyle(el).overflowY;
+    return overflow === 'auto' || overflow === 'scroll' || overflow === 'overlay';
+  }
+
+  function scrollTarget() {
+    const root = document.scrollingElement || document.documentElement;
+    // The document scrolls: the common case, and the cheap one.
+    if (root && root.scrollHeight > root.clientHeight + 4) return root;
+
+    // Otherwise take the biggest thing on screen that can scroll. Biggest,
+    // rather than first, because sidebars and menus are scrollable too.
+    let best = null;
+    let bestArea = 0;
+    for (const el of document.querySelectorAll('div, main, section, article, ul, ol')) {
+      if (!canScrollY(el)) continue;
+      const rect = el.getBoundingClientRect();
+      const area = Math.max(0, rect.width) * Math.max(0, rect.height);
+      if (area > bestArea) {
+        bestArea = area;
+        best = el;
+      }
+    }
+    return best || root;
+  }
+
+  function scrollPage(direction, fraction) {
+    const el = scrollTarget();
+    if (!el) return { ok: false, detail: 'Nothing to scroll' };
+
+    const room = el.scrollHeight - el.clientHeight;
+    if (room <= 4) return { ok: false, detail: 'Nothing to scroll' };
+    const at = el.scrollTop;
+    if (direction < 0 && at <= 1) return { ok: false, detail: 'At the top' };
+    if (direction > 0 && at >= room - 1) return { ok: false, detail: 'At the bottom' };
+
+    el.scrollBy({ top: direction * clamp(fraction, 0.1, 1) * el.clientHeight, behavior: 'smooth' });
+    return { ok: true, detail: direction < 0 ? 'Up' : 'Down' };
+  }
+
+  function scrollToEnd(direction) {
+    const el = scrollTarget();
+    if (!el) return { ok: false, detail: 'Nothing to scroll' };
+    el.scrollTo({ top: direction < 0 ? 0 : el.scrollHeight, behavior: 'smooth' });
+    return { ok: true, detail: direction < 0 ? 'Top' : 'Bottom' };
+  }
+
+  // -------------------------------------------------------------------------
   // Actions
   // -------------------------------------------------------------------------
 
@@ -151,10 +224,19 @@
     return shouldPlay ? 'Playing' : 'Paused';
   }
 
+  /** Actions that act on the page rather than on a player. */
+  const WITHOUT_VIDEO = new Set([
+    'SKIP_AD',
+    'NEXT_VIDEO',
+    'SCROLL_UP',
+    'SCROLL_DOWN',
+    'PAGE_TOP',
+    'PAGE_BOTTOM'
+  ]);
+
   async function perform(action, params = {}) {
     const video = findVideo();
-    const needsVideo = !['SKIP_AD', 'NEXT_VIDEO'].includes(action);
-    if (!video && needsVideo) return { ok: false, detail: 'No video in this frame' };
+    if (!video && !WITHOUT_VIDEO.has(action)) return { ok: false, detail: 'No video in this frame' };
 
     switch (action) {
       case 'PLAY_PAUSE':
@@ -216,6 +298,15 @@
         ]);
         return advanced ? { ok: true, detail: 'Next' } : { ok: false, detail: 'No next button' };
       }
+
+      case 'SCROLL_UP':
+        return scrollPage(-1, params.scrollStep ?? 0.6);
+      case 'SCROLL_DOWN':
+        return scrollPage(1, params.scrollStep ?? 0.6);
+      case 'PAGE_TOP':
+        return scrollToEnd(-1);
+      case 'PAGE_BOTTOM':
+        return scrollToEnd(1);
 
       default:
         return { ok: false, detail: `Unknown action ${action}` };
@@ -334,6 +425,7 @@
     document.documentElement.classList.add('jester-cinema');
     cinemaTarget = target;
     nudgeLayout();
+    reportContext();
     return { ok: true, detail: 'Fullscreen' };
   }
 
@@ -346,6 +438,7 @@
     }
     document.getElementById(CINEMA_STYLE_ID)?.remove();
     nudgeLayout();
+    reportContext();
   }
 
   function fullscreenState() {
@@ -412,10 +505,51 @@
   // overlay too rather than leaving a fake-fullscreen page in a normal window.
   const windowFullscreen = window.matchMedia('(display-mode: fullscreen)');
   windowFullscreen.addEventListener('change', () => {
+    reportContext();
     if (!cinemaTarget || windowFullscreen.matches) return;
     cinemaOff();
     chrome.runtime.sendMessage({ type: MSG.FULLSCREEN_DETACHED }).catch(() => undefined);
   });
+
+  // -------------------------------------------------------------------------
+  // View context
+  //
+  // Which of the two binding sets is live depends on whether this tab is
+  // filling the screen. The worker can see the *window* state but not the
+  // page's own fullscreen, so the answer is assembled here and pushed up.
+  // -------------------------------------------------------------------------
+
+  let lastContext = null;
+
+  function viewContext() {
+    // All three read the same to a user: a video with nothing else on screen.
+    // `display-mode` covers F11 and, in Chrome, element fullscreen too — the
+    // other two are belt and braces for the moments it lags a frame behind.
+    const full = !!document.fullscreenElement || !!cinemaTarget || windowFullscreen.matches;
+    return full ? 'fullscreen' : 'windowed';
+  }
+
+  function reportContext() {
+    // One answer per tab: an iframe is never fullscreen on its own terms.
+    if (window.top !== window) return;
+    const context = viewContext();
+    if (context === lastContext) return;
+    lastContext = context;
+    chrome.runtime.sendMessage({ type: MSG.VIEW_CONTEXT, context }).catch(() => undefined);
+  }
+
+  for (const evt of ['fullscreenchange', 'webkitfullscreenchange']) {
+    document.addEventListener(evt, reportContext, true);
+  }
+  // The worker forgets everything when it's evicted, so re-assert on the way
+  // back into view rather than waiting for the next fullscreen change.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      lastContext = null;
+      reportContext();
+    }
+  });
+  reportContext();
 
   // -------------------------------------------------------------------------
   // HUD (shadow DOM so no site stylesheet can touch it)
@@ -497,6 +631,7 @@
   for (const evt of ['fullscreenchange', 'webkitfullscreenchange']) {
     document.addEventListener(evt, mountHud, true);
     document.addEventListener(evt, mountCursor, true);
+    document.addEventListener(evt, mountVoicePill, true);
   }
 
   function showHud(hud) {
@@ -838,6 +973,157 @@
   }
 
   // -------------------------------------------------------------------------
+  // Voice pill
+  //
+  // A black lozenge that slides in when the engine says the microphone is live
+  // — by default, when you raise your index finger. Five vertical bars sit as
+  // dots in the middle of it and grow with the corresponding frequency band, so
+  // it reads as your voice rather than as a level meter.
+  //
+  // The levels are computed in the offscreen document (that's where the
+  // microphone is) and arrive at ~25/s. The bars carry a 70 ms transition,
+  // which interpolates between frames the same way the cursor's does.
+  //
+  // Top frame only, like the cursor: the worker addresses frameId 0.
+  // -------------------------------------------------------------------------
+
+  const VOICE_BARS = 5;
+  /** No frame for this long and the pill leaves — the engine died mid-sentence. */
+  const VOICE_IDLE_MS = 1600;
+  const VOICE_BAR_MIN = 6; // the resting dot, in px
+  const VOICE_BAR_MAX = 28;
+
+  const VOICE_POSITIONS = ['bottom-center', 'top-center', 'bottom-left', 'bottom-right'];
+
+  const VOICE_CSS = `
+    :host { all: initial; }
+    .layer { position: fixed; inset: 0; pointer-events: none; z-index: 2147483646; }
+    /* Positioning lives on the anchor so the pill keeps its own transform for
+       the entrance, which would otherwise fight translateX(-50%). */
+    .anchor { position: absolute; }
+    .anchor.bottom-center { left: 50%; bottom: 34px; transform: translateX(-50%); }
+    .anchor.top-center { left: 50%; top: 28px; transform: translateX(-50%); }
+    .anchor.bottom-left { left: 28px; bottom: 34px; }
+    .anchor.bottom-right { right: 28px; bottom: 34px; }
+    .pill {
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      box-sizing: border-box;
+      height: 46px; min-width: 152px; padding: 0 22px;
+      border-radius: 999px;
+      background: #0a0c11;
+      border: 2px solid rgba(255, 255, 255, .92);
+      box-shadow: 0 10px 34px rgba(0, 0, 0, .5);
+      opacity: 0; transform: translateY(10px) scale(.94);
+      transition: opacity .18s ease, transform .18s cubic-bezier(.2, .8, .3, 1);
+    }
+    .pill.show { opacity: 1; transform: translateY(0) scale(1); }
+    .bar {
+      flex: none;
+      width: 6px; height: ${VOICE_BAR_MIN}px;
+      border-radius: 999px;
+      background: #e8ecf2;
+      /* Frames arrive at ~25/s; the transition fills the gaps. */
+      transition: height .07s linear;
+    }
+  `;
+
+  let voiceHost = null;
+  let voiceAnchor = null;
+  let voicePill = null;
+  let voiceBars = [];
+  let voiceIdleTimer = null;
+  let voicePosition = '';
+
+  function ensureVoicePill() {
+    if (voiceHost && voiceHost.isConnected) return;
+    voiceHost = document.createElement('div');
+    voiceHost.id = 'jester-voice-host';
+    // `all: initial` resets pointer-events to auto, so re-clear it after.
+    voiceHost.style.cssText = 'all: initial; pointer-events: none;';
+    const root = voiceHost.attachShadow({ mode: 'open' });
+
+    const style = document.createElement('style');
+    style.textContent = VOICE_CSS;
+
+    const layer = document.createElement('div');
+    layer.className = 'layer';
+    voiceAnchor = document.createElement('div');
+    voiceAnchor.className = 'anchor bottom-center';
+    voicePill = document.createElement('div');
+    voicePill.className = 'pill';
+
+    voiceBars = [];
+    for (let i = 0; i < VOICE_BARS; i += 1) {
+      const bar = document.createElement('i');
+      bar.className = 'bar';
+      voicePill.append(bar);
+      voiceBars.push(bar);
+    }
+
+    voiceAnchor.append(voicePill);
+    layer.append(voiceAnchor);
+    root.append(style, layer);
+    voicePosition = 'bottom-center';
+    mountVoicePill();
+    // The caller adds `show` in this same task. Flush the hidden state to the
+    // layout first, or there's nothing to transition *from* and the pill snaps
+    // in instead of sliding.
+    void voicePill.offsetWidth;
+  }
+
+  /** Fixed-position elements are invisible while another element is fullscreen. */
+  function mountVoicePill() {
+    if (!voiceHost) return;
+    const parent = document.fullscreenElement || document.documentElement;
+    if (voiceHost.parentNode !== parent) parent.appendChild(voiceHost);
+  }
+
+  function hideVoicePill() {
+    clearTimeout(voiceIdleTimer);
+    if (!voicePill) return;
+    voicePill.classList.remove('show');
+    for (const bar of voiceBars) bar.style.height = `${VOICE_BAR_MIN}px`;
+  }
+
+  function applyVoice(voice) {
+    if (voice.transcript?.text) {
+      const { text, final } = voice.transcript;
+      // Nothing consumes this yet. It's also logged in the offscreen document's
+      // own console; this copy is here because it's the console you're actually
+      // looking at while you talk to a page.
+      console.log(`[jester] voice${final ? '' : ' (interim)'}: ${text}`);
+    }
+
+    // A transcript-only frame carries no `active` field: it says nothing about
+    // whether the pill should be up, so it must not answer that question.
+    if (voice.active === undefined) return;
+    if (!voice.active) {
+      hideVoicePill();
+      return;
+    }
+
+    ensureVoicePill();
+    mountVoicePill();
+    // If the engine dies while the pill is up nothing sends the closing frame,
+    // so it times itself out rather than hanging on screen forever.
+    clearTimeout(voiceIdleTimer);
+    voiceIdleTimer = setTimeout(hideVoicePill, VOICE_IDLE_MS);
+
+    if (voice.position && voice.position !== voicePosition && VOICE_POSITIONS.includes(voice.position)) {
+      voicePosition = voice.position;
+      voiceAnchor.className = `anchor ${voice.position}`;
+    }
+
+    voicePill.classList.add('show');
+
+    if (!Array.isArray(voice.levels)) return;
+    for (let i = 0; i < voiceBars.length; i += 1) {
+      const level = clamp(Number(voice.levels[i]) || 0, 0, 1);
+      voiceBars[i].style.height = `${VOICE_BAR_MIN + level * (VOICE_BAR_MAX - VOICE_BAR_MIN)}px`;
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Video state reporting
   // -------------------------------------------------------------------------
 
@@ -920,6 +1206,10 @@
         // The worker addresses frameId 0, but a stray broadcast must not paint
         // a second cursor inside an iframe.
         if (window.top === window) applyCursor(message.cursor || {});
+        return false;
+
+      case MSG.VOICE:
+        if (window.top === window) applyVoice(message.voice || {});
         return false;
 
       default:

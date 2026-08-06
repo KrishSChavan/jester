@@ -66,6 +66,34 @@ header h1 {
   font-weight: 600;
 }
 
+.notice {
+  margin: 8px 0 0;
+  color: var(--warn);
+}
+
+.notice[hidden] {
+  display: none;
+}
+
+.pointer-setting {
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.pointer-setting[hidden] {
+  display: none;
+}
+
+.pointer-setting > span {
+  display: flex;
+  flex-direction: column;
+}
+
+.pointer-setting input {
+  flex: none;
+  cursor: pointer;
+}
+
 .history {
   list-style: none;
   margin: 8px 0 0;

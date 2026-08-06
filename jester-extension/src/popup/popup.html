@@ -25,6 +25,7 @@
         <span class="pill" id="statusMeta" hidden></span>
       </div>
       <p class="small muted" id="statusDetail"></p>
+      <p class="small notice" id="notice" hidden></p>
       <button class="primary" id="grantBtn" hidden>Grant camera access</button>
     </div>
 
@@ -39,6 +40,19 @@
       </div>
       <div class="meter"><i id="gestureBar"></i></div>
     </div>
+
+    <!--
+      Hidden until .env is read, and stays hidden on a CURSOR=false build.
+      Default-hidden rather than default-shown so the card can never flash into
+      view on a build where the feature doesn't exist.
+    -->
+    <label class="card row between pointer-setting" id="pointerCard" hidden>
+      <span>
+        <strong>Cursor control</strong>
+        <span class="small muted">Move and click with your hand</span>
+      </span>
+      <input type="checkbox" id="pointerEnabled" />
+    </label>
 
     <div class="card">
       <div class="row between">

@@ -1,0 +1,10 @@
+# Real flag file — holds an API key. The committed template is .env.example.
+jester-extension/.env
+# ...and the mirror build-zip.ps1 generates from it, for the same reason.
+jester-extension/env.txt
+
+# Build output
+jester-extension-*.zip
+*.zip.building
+
+node_modules/

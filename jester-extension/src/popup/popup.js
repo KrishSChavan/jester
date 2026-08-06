@@ -1,9 +1,13 @@
-import { MSG, ENGINE, ACTIONS } from '../common/constants.js';
+import { MSG, ENGINE, ACTIONS, saveSettings } from '../common/constants.js';
+import { loadEnv } from '../common/env.js';
 
 const el = (id) => document.getElementById(id);
 
 const ui = {
   enabled: el('enabled'),
+  pointerCard: el('pointerCard'),
+  pointerEnabled: el('pointerEnabled'),
+  notice: el('notice'),
   statusDot: el('statusDot'),
   statusText: el('statusText'),
   statusMeta: el('statusMeta'),
@@ -40,6 +44,34 @@ const DOT_CLASS = {
 let previewSeenAt = 0;
 let cameraGranted = true;
 let lastEngine = {};
+let env = { ok: true, error: '', cursor: true, aiOk: true, aiMessage: '' };
+/** Set from telemetry, and only when the microphone is in a state worth saying. */
+let micProblem = '';
+/** The pill is up but this page can't be reached. @see MSG.VOICE_BLOCKED */
+let voiceBlocked = false;
+
+const VOICE_BLOCKED_NOTE =
+  'Jester can’t draw on this page — it has no content script here. Tick “Also run on ' +
+  'every other site” in Settings and reload the tab, or try it on a supported site.';
+
+/**
+ * One line, for the most pressing thing wrong. Ordered by how much it stops
+ * Jester working: an unreadable .env leaves every flag guessed, a page Jester
+ * can't touch means the pill is invisible however well the gesture reads, a
+ * blocked microphone leaves the bars dead, and a missing AI key is the one that
+ * costs nothing today.
+ */
+function renderNotice() {
+  const stale = env.mirrored
+    ? 'Flags came from env.txt, not .env — Chrome won’t serve the dotfile here, so re-run ' +
+      'build-zip.ps1 after editing .env or the change won’t reach the extension.'
+    : '';
+  const message = !env.ok
+    ? env.error
+    : (voiceBlocked && VOICE_BLOCKED_NOTE) || micProblem || stale || (env.aiOk ? '' : env.aiMessage);
+  ui.notice.textContent = message;
+  ui.notice.hidden = !message;
+}
 
 /**
  * The engine lives in an offscreen document, which can't show a camera prompt.
@@ -80,16 +112,29 @@ function renderEngine(engine = {}) {
 }
 
 function renderTelemetry(t) {
+  const mic = t.mic?.detail || (t.mic?.state ? `Microphone: ${t.mic.state}` : '');
+  if (mic !== micProblem) {
+    micProblem = mic;
+    renderNotice();
+  }
+
   // While the pointer owns the hand the bar tracks how closed the pinch is —
   // the readout to tune the pinch distance against.
   let bar = t.progress || 0;
 
-  if (t.pointer?.active) {
+  if (env.cursor && t.pointer?.active) {
     ui.gestureLabel.textContent = t.pointer.down ? '👌 Pinched — click' : '🖐 Pointer — steering';
     ui.gestureScore.textContent = '';
     bar = t.pointer.pinch || 0;
-  } else if (t.pointer?.arming) {
+  } else if (env.cursor && t.pointer?.arming) {
     ui.gestureLabel.textContent = '🖐 Pointer — hold it there…';
+    ui.gestureScore.textContent = '';
+  } else if (t.pointing?.active) {
+    ui.gestureLabel.textContent = '☝️ Listening';
+    ui.gestureScore.textContent = '';
+    bar = 1;
+  } else if (t.pointing?.arming) {
+    ui.gestureLabel.textContent = '☝️ Hold it there…';
     ui.gestureScore.textContent = '';
   } else if (t.handPresent && t.gesture) {
     ui.gestureLabel.textContent = t.label || t.gesture;
@@ -152,6 +197,15 @@ ui.enabled.addEventListener('change', () => {
   chrome.runtime.sendMessage({ type: MSG.SET_ENABLED, enabled: ui.enabled.checked });
 });
 
+ui.pointerEnabled.addEventListener('change', async () => {
+  ui.pointerEnabled.disabled = true;
+  try {
+    await saveSettings({ pointerEnabled: ui.pointerEnabled.checked });
+  } finally {
+    ui.pointerEnabled.disabled = false;
+  }
+});
+
 ui.optionsBtn.addEventListener('click', () => {
   chrome.runtime.openOptionsPage();
   window.close();
@@ -176,6 +230,10 @@ chrome.runtime.onMessage.addListener((message) => {
       return false;
     case MSG.TELEMETRY:
       renderTelemetry(message.telemetry || {});
+      return false;
+    case MSG.VOICE_BLOCKED:
+      voiceBlocked = !!message.blocked;
+      renderNotice();
       return false;
     case MSG.PREVIEW_FRAME:
       ui.preview.src = message.dataUrl;
@@ -210,12 +268,26 @@ setInterval(() => {
 
 (async () => {
   refreshCameraPermission();
+
+  // Before the first paint: on a CURSOR=false build the card must never flash
+  // into view on its way to being removed.
+  env = await loadEnv();
+  ui.pointerCard.hidden = !env.cursor;
+  renderNotice();
+
   const state = await chrome.runtime.sendMessage({ type: MSG.GET_STATE });
   if (!state) return;
   ui.enabled.checked = !!state.settings.enabled;
+  ui.pointerEnabled.checked = !!state.settings.pointerEnabled;
+  // The pill may already be up and blocked before this popup was even opened.
+  voiceBlocked = !!state.voiceBlocked;
+  renderNotice();
   renderEngine(state.engine);
   renderHistory(state.history || []);
-  ui.targetState.textContent = state.hasTarget ? 'video tab found' : 'no video tab';
+  // Which binding set is live is otherwise invisible, and it's the first thing
+  // you want to check when a pose does something you didn't expect.
+  const context = state.context === 'windowed' ? 'windowed' : 'fullscreen';
+  ui.targetState.textContent = `${context} · ${state.hasTarget ? 'video tab found' : 'no video tab'}`;
   if (!state.settings.enabled) {
     ui.previewPlaceholder.textContent = 'Turn Jester on to start the camera.';
   }

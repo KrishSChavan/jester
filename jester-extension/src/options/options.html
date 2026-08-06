@@ -46,14 +46,25 @@
       </section>
 
       <section class="card">
+        <h2>Fullscreen vs. windowed</h2>
+        <p class="small muted">
+          Jester can tell whether a video is filling your screen. Leave this off and every
+          gesture does the same thing everywhere. Turn it on and you get a second set of
+          bindings for when you're <em>not</em> in fullscreen — so a swipe can seek through
+          a film in fullscreen and flip between tabs while you're browsing.
+        </p>
+        <label class="row check"><input type="checkbox" id="windowedSplit" />
+          <span>Use a different set of bindings when I'm not in fullscreen</span></label>
+        <p class="small muted" id="contextNote"></p>
+      </section>
+
+      <section class="card">
         <h2>Gestures</h2>
         <p class="small muted">Hold a pose steadily to trigger its action. Moving your hand never fires a pose — that's what swipes are for.</p>
         <p class="small muted"><strong>Turn Jester off</strong> is one-way: it stops the camera, so no
           gesture can switch it back on. Use the toolbar popup or the toggle at the top of this page.</p>
         <table class="bindings" id="gestureTable">
-          <thead>
-            <tr><th>Pose</th><th>Action</th><th class="center">Repeat while held</th></tr>
-          </thead>
+          <thead><tr></tr></thead>
           <tbody></tbody>
         </table>
       </section>
@@ -63,9 +74,7 @@
         <label class="row check"><input type="checkbox" data-setting="swipeEnabled" />
           <span>Detect hand swipes</span></label>
         <table class="bindings" id="swipeTable">
-          <thead>
-            <tr><th>Direction</th><th>Action</th></tr>
-          </thead>
+          <thead><tr></tr></thead>
           <tbody></tbody>
         </table>
         <div class="grid">
@@ -82,7 +91,11 @@
         </div>
       </section>
 
-      <section class="card">
+      <!--
+        Hidden until .env is read, and stays hidden on a CURSOR=false build —
+        default-hidden so it can never flash into view on a build without it.
+      -->
+      <section class="card" id="pointerSection" hidden>
         <h2>Pointer ✊✋</h2>
         <p class="small muted">
           Hold your hand half open — fingers relaxed and curled, neither a flat palm nor a
@@ -133,6 +146,57 @@
           Open the popup while steering — the ring around the cursor fills as your fingers
           close, which is the quickest way to find a pinch distance that fits your hand.
         </p>
+      </section>
+
+      <section class="card" id="voiceSection">
+        <h2>Voice ☝️</h2>
+        <p class="small muted">
+          Raise your index finger — the other fingers curled — and a black pill slides in
+          at the edge of the page. Its five bars sit as dots and move with your voice.
+          While it's up Jester is listening; drop your hand and it stops.
+        </p>
+        <p class="small muted">
+          Raising your finger takes over the hand, so <strong>☝️ Pointing up</strong> won't
+          fire whatever it's bound to while the pill is on screen.
+        </p>
+        <p class="small muted">
+          The pill is drawn into the page, so it only appears where Jester runs — see
+          <strong>Where it runs</strong> below. On an ordinary site like a search page you'll
+          need <em>“Also run on every other site”</em> ticked, or the gesture will register in
+          the popup with nothing to show for it.
+        </p>
+        <div class="row between camera-status">
+          <div class="row"><i class="dot" id="micDot"></i><span id="micText">Checking…</span></div>
+          <button class="primary" id="micGrantBtn">Allow microphone access</button>
+        </div>
+        <div class="grid">
+          <div class="field">
+            <label for="voicePillMode">Show the pill</label>
+            <select id="voicePillMode" data-setting="voicePillMode"></select>
+            <p class="small muted" id="voicePillNote"></p>
+          </div>
+          <div class="field">
+            <label for="voicePillPosition">Where it sits</label>
+            <select id="voicePillPosition" data-setting="voicePillPosition"></select>
+          </div>
+        </div>
+        <p class="small muted">
+          Speech-to-text uses Chrome's own recognition service, which means the audio
+          <strong>does leave your machine</strong> while the pill is up — unlike hand
+          tracking, which never does. Nothing is done with the text yet: it's printed to
+          the console and that's all.
+        </p>
+      </section>
+
+      <section class="card" id="aiSection">
+        <h2>AI assistant</h2>
+        <p class="small muted">
+          The key is read from <code>AI=</code> in the extension's <code>.env</code> file.
+          Nothing is sent anywhere yet — this only checks that a key is there and looks
+          like one, so a blank or mis-pasted value shows up now rather than later.
+        </p>
+        <div class="row"><i class="dot" id="aiDot"></i><span id="aiText">Checking…</span></div>
+        <p class="small muted" id="envSource"></p>
       </section>
 
       <section class="card">
@@ -188,7 +252,7 @@
       </section>
 
       <section class="card">
-        <h2>Playback</h2>
+        <h2>Step sizes</h2>
         <div class="grid">
           <div class="field">
             <label>Skip amount <output data-output="seekSeconds"></output></label>
@@ -201,6 +265,11 @@
           <div class="field">
             <label>Speed step <output data-output="speedStep"></output></label>
             <input type="range" min="0.1" max="1" step="0.05" data-setting="speedStep" data-format="times" />
+          </div>
+          <div class="field">
+            <label>Scroll amount <output data-output="scrollStep"></output></label>
+            <input type="range" min="0.15" max="1" step="0.05" data-setting="scrollStep" data-format="percent" />
+            <p class="small muted">As a fraction of the window height.</p>
           </div>
         </div>
       </section>
@@ -215,6 +284,7 @@
           <label for="fullscreenMode">When a gesture asks for fullscreen</label>
           <select id="fullscreenMode"></select>
           <p class="small muted" id="fullscreenNote"></p>
+          <p class="small notice" id="fullscreenBlockedNote" hidden></p>
         </div>
       </section>
 
@@ -238,8 +308,14 @@
       <section class="card">
         <h2>Where it runs</h2>
         <p class="small muted">Jester ships with YouTube, Netflix, Hulu, Disney+, Prime Video, Max, Peacock, Paramount+, Crunchyroll, Twitch, Vimeo and Apple TV enabled.</p>
+        <p class="small muted">
+          Anything Jester <em>draws on the page</em> only exists where it runs — the voice
+          pill and the cursor both. Tab, window and playback actions work everywhere
+          regardless, because those run in the extension itself. So if the pill won't appear
+          on an ordinary site, this is why.
+        </p>
         <label class="row check"><input type="checkbox" id="allSites" />
-          <span>Also run on every other site with a video</span></label>
+          <span>Also run on every other site — needed for the voice pill and the cursor off the list above</span></label>
         <p class="small muted" id="allSitesNote"></p>
       </section>
 

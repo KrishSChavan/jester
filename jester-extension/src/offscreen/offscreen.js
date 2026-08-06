@@ -7,7 +7,18 @@
  */
 
 import { GestureRecognizer, FilesetResolver } from '../../vendor/tasks-vision/vision_bundle.mjs';
-import { MSG, ENGINE, GESTURES, mergeSettings, post, clamp } from '../common/constants.js';
+import {
+  MSG,
+  ENGINE,
+  GESTURES,
+  bindingsFor,
+  swipeBindingsFor,
+  mergeSettings,
+  post,
+  clamp
+} from '../common/constants.js';
+import { loadEnv } from '../common/env.js';
+import { createVoice, MIC } from './voice.js';
 
 const WASM_PATH = chrome.runtime.getURL('vendor/tasks-vision/wasm');
 const MODEL_PATH = chrome.runtime.getURL('models/gesture_recognizer.task');
@@ -32,6 +43,8 @@ const SPEED_WINDOW_MS = 150;
 const HAND_LOST_MS = 150;
 const PREVIEW_GRACE_MS = 2000;
 const PREVIEW_INTERVAL_MS = 100;
+const PILL_KEEPALIVE_MS = 500;
+const SHAPE_LOG_MS = 500;
 const TELEMETRY_INTERVAL_MS = 80;
 const CAMERA_TIMEOUT_MS = 8000;
 const MODEL_TIMEOUT_MS = 30000;
@@ -64,6 +77,24 @@ const POINTER_MIN_PALM = 0.03; // below this the hand is too far away to judge
 const POINTER_RELEASE_MS = 320; // shape may drop out this long without ending
 const POINTER_PINCH_HYSTERESIS = 0.15; // gap between the click and release points
 
+/**
+ * ☝️ — index finger out, the other three curled. Raises the voice pill and opens
+ * the microphone.
+ *
+ * Measured off the landmarks rather than taken from the model's `Pointing_Up`,
+ * for two reasons: that class insists the finger points *upward*, and this shape
+ * drives a mode rather than firing an action, so it has to hold whichever way
+ * your hand is turned and it has to be readable every frame.
+ *
+ * Each pair is `[raise, hold]` — it takes less to keep the pill up than to raise
+ * it, because a finger held out for a sentence drifts.
+ */
+const POINT_INDEX_MIN = [0.72, 0.6]; // how far the index must reach
+const POINT_OTHERS_MAX = [0.45, 0.58]; // how curled the other three must stay
+const POINT_SEPARATION = [0.32, 0.22]; // and how far apart those two readings sit
+const POINT_ARM_MS = 220; // hold the shape this long before the pill appears
+const POINT_RELEASE_MS = 400; // shape may drop out this long without ending
+
 const GESTURE_LABELS = Object.fromEntries(GESTURES.map((g) => [g.id, g.label]));
 
 const videoEl = document.getElementById('camera');
@@ -71,6 +102,11 @@ const previewCanvas = document.getElementById('preview');
 const previewCtx = previewCanvas.getContext('2d', { willReadFrequently: false });
 
 let settings = null;
+/**
+ * Build flags from `.env`. Read once at boot, before the camera opens, so the
+ * cursor is never briefly live on a `CURSOR=false` build.
+ */
+let features = { cursor: true };
 let recognizer = null;
 let stream = null;
 let timer = null;
@@ -78,6 +114,14 @@ let running = false;
 let starting = false;
 let suspended = false;
 let activeDelegate = null;
+/**
+ * Which binding set is live. Only the service worker can see whether the front
+ * window is fullscreen, so it owns this and pushes changes here.
+ *
+ * Starts at `fullscreen` because that is the set everything falls back to —
+ * a boot that raced the first push must not quietly run the *other* bindings.
+ */
+let viewContext = 'fullscreen';
 
 let lastVideoTime = -1;
 let lastTimestamp = 0;
@@ -93,6 +137,8 @@ const rec = {
   candidate: null,
   candidateSince: 0,
   candidateSeenAt: 0,
+  contextLatch: null,
+  contextLatchSeenAt: 0,
   fired: false,
   lastFireAt: 0,
   lastActionAt: 0,
@@ -112,6 +158,19 @@ const ptr = {
   filterX: null,
   filterY: null
 };
+
+/** The ☝️ shape that raises the voice pill. @see indexPointReading */
+const point = {
+  poseSince: 0,
+  lastPoseAt: 0,
+  active: false
+};
+
+/** Last `indexPointReading()`, kept only so `logShape()` can print it. */
+let lastPointReading = null;
+let lastShapeLogAt = 0;
+
+let micStatus = { state: MIC.IDLE, detail: '' };
 
 // ---------------------------------------------------------------------------
 // Status reporting
@@ -278,6 +337,9 @@ async function start() {
   running = true;
   starting = false;
   lastVideoTime = -1;
+  // Again now that `running` is true: `always` mode wants the pill up from the
+  // moment the engine is, without waiting for a hand to appear.
+  syncVoice();
   report(suspended ? ENGINE.SUSPENDED : ENGINE.RUNNING, `${activeDelegate} delegate`);
   scheduleTick(0);
 }
@@ -300,6 +362,8 @@ function resetRecognitionState() {
   rec.candidate = null;
   rec.candidateSince = 0;
   rec.candidateSeenAt = 0;
+  rec.contextLatch = null;
+  rec.contextLatchSeenAt = 0;
   rec.fired = false;
   rec.lastFireAt = 0;
   rec.lastActionAt = 0;
@@ -308,6 +372,13 @@ function resetRecognitionState() {
   endPointer();
   ptr.poseSince = 0;
   ptr.lastPoseAt = 0;
+  point.active = false;
+  point.poseSince = 0;
+  point.lastPoseAt = 0;
+  // Unconditional rather than via endIndexPoint(): clearing the state above is
+  // exactly what makes the microphone unwanted, and stop() reaches here with
+  // `running` already false, so this is what releases it.
+  syncVoice();
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +423,59 @@ function step(now) {
   const hand = readHand(lastResult);
   const view = processHand(now, hand);
   emitTelemetry(now, view);
+  keepPillAlive(now);
+  logShape(now, hand);
   drawPreview(now, hand, view);
+}
+
+/**
+ * Prints the numbers behind the ☝️ decision, so "the pill won't come up" is
+ * answerable rather than guessable — which of the three tests is failing, and
+ * by how much.
+ *
+ * Gated on `previewWantedUntil`, which is only live while the popup is open, so
+ * it costs a normal session nothing. Open the popup, hold the shape, and read it
+ * in the offscreen document's console.
+ */
+function logShape(now, hand) {
+  if (now > previewWantedUntil || now - lastShapeLogAt < SHAPE_LOG_MS) return;
+  lastShapeLogAt = now;
+  if (!hand?.landmarks) return;
+
+  const r = lastPointReading;
+  if (!r) {
+    console.log('[jester] ☝️ no reading — hand too far from the camera, or the pill is not on the finger');
+    return;
+  }
+  const t = point.active ? 1 : 0;
+  const test = (ok, name, got, op, want) =>
+    `${ok ? '✓' : '✗'} ${name} ${got.toFixed(2)} ${op} ${want}`;
+  console.log(
+    `[jester] ☝️ ${r.posed ? 'POSED' : 'no'} — ` +
+      [
+        test(r.index >= POINT_INDEX_MIN[t], 'index', r.index, '>=', POINT_INDEX_MIN[t]),
+        test(r.others <= POINT_OTHERS_MAX[t], 'others', r.others, '<=', POINT_OTHERS_MAX[t]),
+        test(r.index - r.others >= POINT_SEPARATION[t], 'gap', r.index - r.others, '>=', POINT_SEPARATION[t])
+      ].join('  ')
+  );
+}
+
+/**
+ * The pill hides itself if frames stop arriving, which is what should happen
+ * when the engine dies mid-sentence. But level frames only flow while the
+ * microphone is actually open — if it's blocked, or the mode is `always` and
+ * nobody is talking to a failed mic, the pill would fade out while still being
+ * wanted. A slow heartbeat keeps it honest.
+ */
+function keepPillAlive(now) {
+  if (!voicePillUp || now - lastVoiceAt < PILL_KEEPALIVE_MS) return;
+  lastVoiceAt = now;
+  // Explicit zeroes rather than no levels at all: a microphone that worked and
+  // then died should leave the bars resting, not frozen mid-syllable.
+  post({
+    type: MSG.VOICE,
+    voice: { active: true, levels: [0, 0, 0, 0, 0], position: settings.voicePillPosition }
+  });
 }
 
 /** Pick the most confident hand and reduce it to what the state machine needs. */
@@ -430,7 +553,7 @@ function detectSwipe(now) {
 
 function fire(action, source, gesture) {
   if (!action || action === 'NONE') return;
-  post({ type: MSG.TRIGGER, action, source, gesture });
+  post({ type: MSG.TRIGGER, action, source, gesture, context: viewContext });
 }
 
 // ---------------------------------------------------------------------------
@@ -589,8 +712,10 @@ function pinchThresholds() {
  *          both mean the pointer owns this hand and nothing else may act on it.
  */
 function updatePointer(now, hand) {
+  // `features.cursor` is the .env kill switch: off, and the shape is never even
+  // measured, so nothing downstream can see a pointer that shouldn't exist.
   const reading =
-    hand && settings.pointerEnabled
+    hand && features.cursor && settings.pointerEnabled
       ? pointerReading(hand.landmarks, settings.pointerTolerance, ptr.active)
       : null;
 
@@ -658,10 +783,195 @@ function updatePointer(now, hand) {
   return { active: true, arming: false, armProgress: 1, pinch, down: ptr.pinched };
 }
 
+// ---------------------------------------------------------------------------
+// The pointing finger — raises the voice pill and, with it, the microphone
+// ---------------------------------------------------------------------------
+
+/**
+ * Is the index finger out on its own?
+ *
+ * Reuses `reach()`, so the same reasoning applies: hand size and in-plane
+ * rotation cancel, and what's being measured is flexion at the knuckle.
+ *
+ * Three tests rather than one, and the third is what earns its keep. ✌️ and 🤟
+ * both have the index fully out and *some* fingers curled; only "how far apart
+ * the most and least extended of the other three sit from the index" separates
+ * them cleanly from a genuine point.
+ *
+ * @param engaged whether the pill is already up — see POINT_INDEX_MIN.
+ */
+function indexPointReading(landmarks, engaged) {
+  if (!landmarks || landmarks.length < 21) return null;
+  if (dist2d(landmarks, 5, 17) < POINTER_MIN_PALM) return null;
+
+  const scale = (value) => clamp((value - REACH_FIST) / (REACH_FLAT - REACH_FIST), 0, 1);
+  const index = scale(reach(landmarks, ...FINGERS[0]));
+
+  let others = 0;
+  for (let i = 1; i < FINGERS.length; i += 1) {
+    others = Math.max(others, scale(reach(landmarks, ...FINGERS[i])));
+  }
+
+  const t = engaged ? 1 : 0;
+  return {
+    posed:
+      index >= POINT_INDEX_MIN[t] &&
+      others <= POINT_OTHERS_MAX[t] &&
+      index - others >= POINT_SEPARATION[t],
+    index,
+    others
+  };
+}
+
+function endIndexPoint() {
+  if (!point.active) return;
+  point.active = false;
+  point.poseSince = 0;
+  syncVoice();
+}
+
+/**
+ * Runs every frame, hand or no hand, so the pill can time itself out.
+ *
+ * @returns `{ active, arming }` — either one means the finger owns this hand and
+ *          nothing else may act on it.
+ */
+function updateIndexPoint(now, hand) {
+  // `always` keeps the pill up regardless, so there is nothing to detect; `off`
+  // means the shape is never measured at all.
+  const wanted = settings.voicePillMode === 'pointer-finger';
+  const reading = wanted && hand ? indexPointReading(hand.landmarks, point.active) : null;
+  lastPointReading = reading;
+  const posed = !!reading?.posed;
+
+  if (!posed) {
+    // Detection flickers; one dropped frame shouldn't cut you off mid-sentence.
+    if (now - point.lastPoseAt > POINT_RELEASE_MS) {
+      point.poseSince = 0;
+      endIndexPoint();
+      return { active: false, arming: false };
+    }
+    return { active: point.active, arming: !point.active && point.poseSince > 0 };
+  }
+
+  point.lastPoseAt = now;
+  if (!point.poseSince) point.poseSince = now;
+
+  if (!point.active && now - point.poseSince < POINT_ARM_MS) {
+    return { active: false, arming: true };
+  }
+
+  if (!point.active) {
+    point.active = true;
+    syncVoice();
+  }
+  return { active: true, arming: false };
+}
+
+// ---------------------------------------------------------------------------
+// Voice — the microphone follows the pill, so the OS indicator tracks it exactly
+// ---------------------------------------------------------------------------
+
+let voicePillUp = false;
+let lastVoiceAt = 0;
+
+const voice = createVoice({
+  onLevels: (levels) => {
+    lastVoiceAt = performance.now();
+    post({
+      type: MSG.VOICE,
+      voice: { active: true, levels, position: settings?.voicePillPosition }
+    });
+  },
+  onTranscript: ({ text, final }) => {
+    // Nothing consumes this yet — printing it is the whole feature for now.
+    console.log(`[jester] voice${final ? '' : ' (interim)'}: ${text}`);
+    // No `active` field: a transcript says nothing about whether the pill should
+    // be up, and it must not disturb the bars on its way to the page console.
+    post({ type: MSG.VOICE, voice: { transcript: { text, final } } });
+  },
+  onStatus: (status) => {
+    micStatus = status;
+    if (status.state === MIC.NO_PERMISSION || status.state === MIC.ERROR) {
+      console.warn(`[jester] microphone: ${status.detail || status.state}`);
+    }
+  }
+});
+
+/** Whether the pill should be on screen right now — and the microphone with it. */
+function voiceWanted() {
+  if (!settings || !running || suspended) return false;
+  switch (settings.voicePillMode) {
+    case 'off':
+      return false;
+    case 'always':
+      return true;
+    default:
+      return point.active;
+  }
+}
+
+/**
+ * Brings the microphone and the on-page pill in line with `voiceWanted()`.
+ * Idempotent, and called from every path that could change the answer.
+ */
+function syncVoice() {
+  const wanted = voiceWanted();
+  if (wanted === voicePillUp) {
+    // Nothing to announce, but the microphone may have failed to open earlier —
+    // start() is idempotent, so this is also the retry.
+    if (wanted) voice.start();
+    return;
+  }
+  voicePillUp = wanted;
+
+  if (wanted) {
+    voice.start();
+    // Show it immediately rather than on the first level frame — opening a
+    // microphone takes a moment and the pill shouldn't lag your finger.
+    post({
+      type: MSG.VOICE,
+      voice: { active: true, levels: [0, 0, 0, 0, 0], position: settings.voicePillPosition }
+    });
+    lastVoiceAt = performance.now();
+    return;
+  }
+
+  voice.stop();
+  post({ type: MSG.VOICE, voice: { active: false } });
+}
+
 function processHand(now, hand) {
   // Runs even with no hand and even when the pointer is switched off, so a
   // cursor that is already up always gets its release timer.
   const pointer = updatePointer(now, hand);
+
+  // Only a cursor that is actually *up* hides the hand from the finger check.
+  //
+  // The two shapes are mutually exclusive by construction — POINTER_SPREAD
+  // exists precisely to reject ☝️ — so there is no real contest between them.
+  // What there *is*, is a race: raising your hand into a point sweeps through
+  // the half-open shape on the way, which arms the cursor for `pointerArmMs`.
+  // Blocking on that speculative arming made the pill wait out two timers
+  // before it could even start its own.
+  const pointing = updateIndexPoint(now, pointer.active ? null : hand);
+
+  // A raised index finger owns the hand, the same way steering does. Without
+  // this the pill would come up *and* ☝️ Pointing_Up would fire whatever it's
+  // bound to — you'd skip the ad every time you asked a question.
+  if (pointing.active || pointing.arming) {
+    rec.candidate = null;
+    rec.fired = false;
+    rec.trail.length = 0;
+    rec.lastHandAt = now;
+    return {
+      gesture: null,
+      score: hand?.score ?? 0,
+      progress: pointing.active ? 1 : 0,
+      handPresent: !!hand,
+      pointing
+    };
+  }
 
   // Steering owns the hand outright: sweeping across the screen must not read
   // as a swipe, and a half-open hand must not read as a pose on the way past.
@@ -681,6 +991,10 @@ function processHand(now, hand) {
 
   if (!hand) {
     if (now - rec.lastHandAt > HAND_LOST_MS) rec.trail.length = 0;
+    if (rec.contextLatch && now - rec.contextLatchSeenAt > settings.releaseMs) {
+      rec.contextLatch = null;
+      rec.contextLatchSeenAt = 0;
+    }
     if (rec.candidate && now - rec.candidateSeenAt > settings.releaseMs) {
       rec.candidate = null;
       rec.fired = false;
@@ -700,7 +1014,7 @@ function processHand(now, hand) {
       rec.lastActionAt = now;
       rec.candidate = null;
       rec.fired = false;
-      fire(settings.swipeBindings[direction], 'swipe', direction);
+      fire(swipeBindingsFor(settings, viewContext)[direction], 'swipe', direction);
       return { gesture: null, score: 0, progress: 0, handPresent: true, swipe: direction };
     }
   }
@@ -710,11 +1024,31 @@ function processHand(now, hand) {
   const recognised = name && name !== 'None' && hand.score >= settings.minGestureScore;
 
   if (!recognised) {
+    if (rec.contextLatch && now - rec.contextLatchSeenAt > settings.releaseMs) {
+      rec.contextLatch = null;
+      rec.contextLatchSeenAt = 0;
+    }
     if (rec.candidate && now - rec.candidateSeenAt > settings.releaseMs) {
       rec.candidate = null;
       rec.fired = false;
     }
     return { gesture: null, score: hand.score, progress: 0, handPresent: true };
+  }
+
+  // A fullscreen transition changes the active binding context. Do not let
+  // the pose that caused that transition immediately fire again in the new
+  // context (FULLSCREEN_TOGGLE would otherwise enter and then exit while the
+  // user was still holding the same hand shape). It must be released first.
+  if (rec.contextLatch) {
+    if (name === rec.contextLatch) {
+      rec.contextLatchSeenAt = now;
+      return { gesture: name, score: hand.score, progress: 1, handPresent: true };
+    }
+    if (now - rec.contextLatchSeenAt <= settings.releaseMs) {
+      return { gesture: name, score: hand.score, progress: 0, handPresent: true };
+    }
+    rec.contextLatch = null;
+    rec.contextLatchSeenAt = 0;
   }
 
   if (rec.candidate !== name) {
@@ -730,7 +1064,7 @@ function processHand(now, hand) {
     return { gesture: name, score: hand.score, progress: 0, handPresent: true };
   }
 
-  const binding = settings.bindings[name] || { action: 'NONE', repeat: false };
+  const binding = bindingsFor(settings, viewContext)[name] || { action: 'NONE', repeat: false };
   const held = now - rec.candidateSince;
   const progress = clamp(held / Math.max(1, settings.holdMs), 0, 1);
 
@@ -778,6 +1112,14 @@ function emitTelemetry(now, view) {
         : view.pointer?.arming
           ? { active: false, arming: true }
           : null,
+      pointing: view.pointing?.active
+        ? { active: true }
+        : view.pointing?.arming
+          ? { active: false, arming: true }
+          : null,
+      // Only worth surfacing when it's stopping the pill from working; the
+      // popup has no room for "the microphone is fine".
+      mic: micStatus.state === MIC.IDLE || micStatus.state === MIC.LISTENING ? null : micStatus,
       fps: Math.round(fps),
       delegate: activeDelegate
     }
@@ -883,6 +1225,10 @@ async function applySettings(next) {
   }
 
   if (!running && !starting) await start();
+  // The pill's mode may have just changed under a running engine — switching to
+  // `always` has to open the microphone without waiting for the next frame, and
+  // switching to `off` has to release it now rather than at the next tick.
+  else syncVoice();
 }
 
 /**
@@ -891,7 +1237,28 @@ async function applySettings(next) {
  */
 async function requestSettings() {
   const response = await chrome.runtime.sendMessage({ type: MSG.SETTINGS_REQUEST });
-  return { settings: mergeSettings(response?.settings), suspend: !!response?.suspend };
+  return {
+    settings: mergeSettings(response?.settings),
+    suspend: !!response?.suspend,
+    context: response?.context
+  };
+}
+
+/**
+ * Entering or leaving fullscreen re-points every pose at a different action.
+ * Latch the current pose until it has been released: a part-way hold must not
+ * be credited to the new set, and a pose that just fired must not fire again
+ * merely because its action changed the context.
+ */
+function setContext(context) {
+  if (context !== 'fullscreen' && context !== 'windowed') return;
+  if (context === viewContext) return;
+  viewContext = context;
+  rec.contextLatch = rec.candidate;
+  rec.contextLatchSeenAt = rec.candidateSeenAt;
+  rec.candidate = null;
+  rec.fired = false;
+  rec.trail.length = 0;
 }
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -908,7 +1275,12 @@ chrome.runtime.onMessage.addListener((message) => {
       if (typeof message.suspend === 'boolean' && message.suspend !== suspended) {
         suspended = message.suspend;
         if (running) report(suspended ? ENGINE.SUSPENDED : ENGINE.RUNNING, `${activeDelegate} delegate`);
+        // A suspended engine stops reading frames, so it must also let go of the
+        // microphone — leaving it open would keep the OS indicator lit for a
+        // pill that has stopped responding to anything.
+        syncVoice();
       }
+      if (message.context) setContext(message.context);
       return false;
     case MSG.ENGINE_QUERY:
       // The worker restarted and lost its copy of our state.
@@ -925,10 +1297,17 @@ chrome.runtime.onMessage.addListener((message) => {
 window.addEventListener('pagehide', () => stop(ENGINE.OFF));
 
 (async () => {
+  // Before anything else: a CURSOR=false build must never have a live pointer,
+  // not even for the frames between the camera opening and the flag arriving.
+  const env = await loadEnv();
+  features = { cursor: env.cursor };
+  if (!env.ok) console.warn(`[jester] ${env.error}`);
+
   try {
     const initial = await requestSettings();
     settings = initial.settings;
     suspended = initial.suspend;
+    if (initial.context) viewContext = initial.context;
   } catch (err) {
     report(ENGINE.ERROR, `Could not read settings: ${err?.message || err}`);
     return;

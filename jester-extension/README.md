@@ -4,8 +4,48 @@ A Chrome (Manifest V3) extension that watches your webcam with **MediaPipe's
 Gesture Recognizer** and turns hand poses and swipes into playback commands on
 YouTube, Netflix, Hulu, Disney+, Prime Video and friends.
 
-Everything runs on-device. The extension makes no network requests at all — the
-WASM runtime and the `.task` model are bundled in this folder.
+Hand tracking runs entirely on-device: the WASM runtime and the `.task` model
+are bundled in this folder, and camera frames never leave it.
+
+The one exception is the [voice pill](#voice), which is off unless you raise
+your index finger. Chrome's speech recognition is a network service, so while
+the pill is on screen your audio does go to Google. Nothing else here makes a
+network request.
+
+---
+
+## Build flags — `.env`
+
+Two switches live in `.env`, beside `manifest.json`. It's read at runtime by
+`src/common/env.js`, so there's no build step: edit it and hit **Reload** on
+`chrome://extensions`.
+
+| Flag | Effect |
+| --- | --- |
+| `CURSOR=true` \| `false` | `false` switches the [virtual cursor](#pointer) off end to end and removes it from the UI — no card in the popup, no section in the options page. The code stays in the tree; only whether it runs changes. |
+| `AI=` | API key for the assistant. Nothing is sent anywhere yet: Jester only checks it looks like a key at all and says so in the popup and the options page when it doesn't. |
+
+`.env` is gitignored — `.env.example` is the committed template. If no flag file
+can be read at all, every flag falls back to leaving things as they are
+(`CURSOR=true`, no key) and the popup says why.
+
+### Why there is also an `env.txt`
+
+It isn't settled whether Chrome will serve a *dotfile* out of an extension
+folder, and it can't be checked from a script any more — Chrome 137 dropped
+`--load-extension`. So `src/common/env.js` tries `.env` first and falls back to
+`env.txt`, a byte-for-byte mirror that `build-zip.ps1` refreshes on every build.
+
+Edit `.env`. The mirror is generated, and gitignored for the same reason.
+
+The options page says which file actually answered, under **AI assistant**. If
+it says `env.txt`, Chrome is refusing the dotfile on your machine, and edits to
+`.env` won't reach the extension until you re-run `build-zip.ps1`.
+
+It ships **inside** the zip, because it's fetched at runtime rather than
+compiled in. So a published build carries whatever key is in it, where anyone
+who downloads the extension can read it; `build-zip.ps1 -Flat` warns when that's
+about to happen.
 
 ---
 
@@ -47,6 +87,7 @@ not firing.
 | ⬆️ / ⬇️ Swipe up / down | Volume up / down |
 | 🖐 Hand held half open | Move the cursor — see [Pointer](#pointer) |
 | 👌 Thumb and index touching | Click, while the cursor is up |
+| ☝️ Index finger raised | Voice pill + microphone — see [Voice](#voice) |
 
 Play and pause are separate poses rather than one toggle, so a missed hold can
 never leave you fighting the video — repeat the pose and you still get what you
@@ -59,9 +100,49 @@ editable in the options page.
 One action worth knowing about is unbound by default: **Turn Jester off** stops
 the camera on a gesture. It is one-way — with the camera down nothing can
 recognise a gesture to switch it back — so switching on stays with the toolbar
-popup and the options page. The
-two pointer shapes are the exception: they drive a mode rather than firing an
-action, so they aren't in the bindings table.
+popup and the options page. The three shapes at the bottom of the table are the
+exception in the other direction: they drive a mode rather than firing an
+action, so they aren't in the bindings table at all.
+
+Note the collision on ☝️. A raised index finger is measured off the landmarks
+and takes over the hand, so while the voice pill is up the model's
+`Pointing_Up` pose does **not** fire whatever it's bound to.
+
+That only applies on the default setting, where the finger is what summons the
+pill. Set **Settings → Voice → Show the pill** to **Never** or **Always** and
+the finger stops being a trigger, so ☝️ goes back to skipping ads.
+
+## Fullscreen vs. windowed
+
+The table above is what a gesture does when a video is filling your screen. Turn
+on **Use a different set of bindings when I'm not in fullscreen** in the options
+page and you get a second column: the same poses and swipes, bound to whatever
+you want for the rest of the time.
+
+The starting point for that second set keeps play/pause, mute and fullscreen on
+the same poses — a windowed player is still a player, and a sign that means two
+different things depending on the window is exactly what's worth avoiding. What
+changes is everything that only made sense against a video:
+
+| Gesture | Not in fullscreen |
+| --- | --- |
+| ➡️ / ⬅️ Swipe right / left | Next / previous tab |
+| ⬆️ / ⬇️ Swipe up / down | Scroll up / down |
+| 👍 / 👎 Thumb up / down (hold) | Scroll up / down — repeats while held |
+| ☝️ Pointing up (hold) | Jump to the top of the page |
+
+Alongside the playback actions, the full list now covers scrolling, jumping to
+the top or bottom of a page, back / forward / reload, switching, moving, opening,
+closing and reopening tabs, and cycling browser windows. Tab and window actions
+run in the service worker, so they work on pages Jester itself can't touch —
+including the new tab page.
+
+"Fullscreen" means all three ways a video can fill the screen: cinema mode, the
+site's own fullscreen, and a window you put fullscreen yourself with F11. From
+where you're sitting they're the same thing, so Jester treats them the same.
+
+Switching contexts drops any pose you were part-way through holding, so a hold
+that started under one set can't fire the other set's action.
 
 ## How recognition works
 
@@ -84,6 +165,11 @@ It outranks the other two: while you steer, no pose may fire and no swipe may
 register, so sweeping across the screen can't seek the video. Details below.
 
 A global `cooldownMs` sits after every action so one gesture can't machine-gun.
+
+Two of those channels are *modes* rather than actions — the pointer, and the
+raised index finger behind the voice pill. Both own the hand outright while
+they're engaged, and both are measured off the landmarks rather than coming
+from the model. The pointer wins if a frame somehow reads as both.
 
 ### Tuning notes
 
@@ -194,6 +280,73 @@ Two consequences worth knowing:
   off, so out of the box Jester keeps watching everywhere; untick it again and
   the engine resumes immediately rather than waiting for the next tab switch.
 
+## Voice
+
+Raise your index finger, other fingers curled, and a black pill slides in at the
+bottom of the page. Five vertical bars sit as dots in the middle of it and move
+with your voice. While it's up Jester is listening; drop your hand and both the
+pill and the microphone go.
+
+Two things are configurable in **Settings → Voice**: when the pill appears (on
+the finger, always while Jester is on, or never) and where it sits (bottom
+centre, top centre, or either bottom corner).
+
+**It only appears where Jester runs.** The pill is an element drawn into the
+page by the content script, exactly like the cursor, so on a site outside the
+built-in list you need **"Also run on every other site"** ticked — otherwise the
+gesture registers in the popup with nothing to show for it. The popup says so
+when that happens rather than failing silently.
+
+**Grant microphone access from the options page**, the same way as the camera
+and for the same reason — the engine lives in an offscreen document with no UI,
+so Chrome has nowhere to show the prompt and `getUserMedia` simply never
+returns. Jester checks the permission up front and says so rather than hanging.
+
+### Detecting the shape
+
+`indexPointReading()` scores the four fingers with the same `reach()` the
+pointer uses, then applies three tests, each a `[raise, hold]` pair — it takes
+less to keep the pill up than to raise it, because a finger held out for a
+sentence drifts:
+
+| test | what it measures |
+| --- | --- |
+| `POINT_INDEX_MIN` | the index reaches far enough to count as out |
+| `POINT_OTHERS_MAX` | the other three stay curled |
+| `POINT_SEPARATION` | and those two readings sit far enough apart |
+
+The third is what earns its keep. ✌️ and 🤟 both have the index fully out and
+*some* fingers curled, and only the gap between the index and the most extended
+of the other three separates them cleanly from a real point.
+
+This is deliberately not the model's `Pointing_Up` class: that one insists the
+finger points upward, and this drives a mode rather than firing an action, so it
+has to hold whichever way your hand is turned and be readable every frame.
+`POINT_ARM_MS` debounces the way in and `POINT_RELEASE_MS` the way out, so one
+dropped frame can't cut you off mid-sentence.
+
+### Levels and words
+
+Both come off the microphone in the offscreen document (`src/offscreen/voice.js`),
+which is where the stream can live.
+
+**Levels** are an `AnalyserNode` sampled on a 40 ms timer — 25 Hz, the same
+order as the inference loop — reduced to five roughly logarithmic bands between
+85 Hz and 4 kHz, stopped there because speech carries almost nothing above it.
+Each band gets a noise floor, a gain, and an asymmetric attack/decay so the bars
+jump to a sound and fall away from it. The bars carry a 70 ms CSS transition,
+which interpolates between frames exactly as the cursor's transform does.
+
+**Words** come from Chrome's `webkitSpeechRecognition`. It's set `continuous`,
+but Chrome ends a session on its own after a pause, so `onend` re-opens it —
+with a flood guard, because a session that dies the instant it starts is failing
+rather than finishing. Interim results are throttled and de-duplicated.
+
+Nothing consumes the transcript yet. It's printed to two consoles: the offscreen
+document's (`chrome://extensions` → Jester → **Inspect views** → `offscreen.html`),
+which is where recognition actually happens, and the page's, which is the one
+you're looking at while you talk.
+
 ## Supported sites
 
 Enabled out of the box: YouTube, Netflix, Hulu, Disney+ / Hotstar, Prime Video,
@@ -261,25 +414,51 @@ the player, because any of those would trap a `position: fixed` element.
 
 ```
 manifest.json
+.env                                  build flags — see above. Read at runtime.
+env.txt                               generated mirror of it; build-zip.ps1 owns this
+.env.example                          committed template for both
 models/gesture_recognizer.task        MediaPipe canned-gesture model (8 MB)
 vendor/tasks-vision/                  MediaPipe Tasks Vision 1.0.0 + WASM runtime
 src/
   common/constants.js                 settings schema, action list, message types
+  common/env.js                       .env reader, flag + API-key validation
   background/service-worker.js        offscreen lifecycle, target tab resolution,
-                                      action dispatch, HUD relay
+                                      action dispatch, HUD / cursor / voice relays
   offscreen/offscreen.js              camera + inference + gesture state machine,
-                                      pointer shapes + cursor smoothing
+                                      pointer shapes + cursor smoothing,
+                                      the index-finger shape behind the pill
+  offscreen/voice.js                  microphone: band levels + speech recognition
   content/content.js                  video discovery, action execution, on-page HUD,
-                                      the virtual cursor and its synthetic events
+                                      the virtual cursor and its synthetic events,
+                                      the voice pill
   content/page-bridge.js              Netflix player API bridge (main world)
   popup/                              toolbar popup: preview, status, history
   options/                            all settings, gesture bindings, camera setup
   ui/ui.css                           shared styles
 ```
 
-Repack with `..\build-zip.ps1` from the parent folder — it validates the
-manifest, the HTML references, the runtime assets and the JavaScript before
-writing anything. `-Flat` produces the layout the Chrome Web Store expects.
+Repack from the parent folder with:
+
+```
+..\build-zip.cmd            # nested layout, for "unzip, then Load unpacked"
+..\build-zip.cmd -Flat      # manifest.json at the root, for the Web Store
+..\build-zip.cmd -Versioned # names it after the manifest version
+```
+
+It validates the manifest, the HTML references, the runtime assets, `.env` and
+every first-party `.js` before writing anything, and refreshes `env.txt` from
+`.env` on the way through. Nothing is written if a check fails.
+
+**Use the `.cmd`, not the `.ps1` directly.** Windows ships PowerShell as
+`Restricted`, so `.\build-zip.ps1` fails with *"running scripts is disabled on
+this system"* unless you've changed that. The wrapper passes
+`-ExecutionPolicy Bypass` for its own process only, which leaves your machine's
+setting alone, and works from cmd, PowerShell and Git Bash alike. Run it from a
+terminal — it deliberately doesn't `pause`, so a double-click closes the window
+before you can read the output.
+
+The `.ps1` is still the thing doing the work; call it directly if your policy
+already allows scripts.
 
 The division of labour worth knowing: **all gesture logic lives in the offscreen
 document**, not the service worker. A service worker gets evicted while idle,
@@ -293,8 +472,20 @@ already-made decision.
 Camera frames stay inside the offscreen document. Nothing is recorded, stored or
 uploaded. The only data that leaves that document is the name of a recognised
 gesture and a downscaled preview image — and the preview is only produced while
-the popup is actually open. There are no network permissions and no remote code;
-MV3 forbids it and nothing here needs it.
+the popup is actually open. There is no remote code; MV3 forbids it and nothing
+here needs it.
+
+**Audio is the exception, and it's worth being clear about.** While the voice
+pill is on screen, Jester runs Chrome's `webkitSpeechRecognition`, which is a
+*network* service — the audio goes to Google's servers to be transcribed, the
+same as dictation in any Chrome text field. Band levels for the bars are
+computed locally and never leave, but the speech itself does.
+
+The microphone is only ever open while the pill is up, so with the default
+setting it tracks your index finger exactly: finger up, OS microphone indicator
+on; hand down, released. Set **Settings → Voice → Show the pill** to **Never**
+and the microphone is never opened at all. Choosing **Always** means it stays
+live for as long as Jester is running.
 
 ## Updating the bundled MediaPipe assets
 
@@ -326,6 +517,13 @@ half.
 | Gesture recognised but nothing happens | No target video was found. The popup footer says "no video tab" when that's the case. Reload the video tab. |
 | Nothing works after installing | Tabs opened *before* the extension loaded have no content script. The worker re-injects on demand, but reloading the tab is the reliable fix. |
 | Actions fire twice | Cooldown is too short for your hold time, or two frames both claim a video. Raise **Cooldown**. |
+| Pill never appears, popup says "☝️ Listening" | The gesture is fine — the page is the problem. The pill is drawn by the content script, which only runs on the sites in the manifest, so on an ordinary page there is nothing there to draw it. Tick **"Also run on every other site"** and reload the tab. The popup now says so outright rather than leaving you guessing. |
+| Pill never appears, popup says something else | The shape isn't reading. Open the popup (which switches on the shape log) and read the offscreen document's console: it prints which of the three tests is failing and by how much. Usually it's the other three fingers not being curled far enough in. |
+| Pill appears, bars never move | The popup shows the microphone problem under the status line. Most often access was never granted: **Settings → Voice → Allow microphone access**, then **Restart** in the popup. |
+| No transcript in the console | Two consoles carry it — the page's, and the offscreen document's under **Inspect views**. If neither shows anything, check the popup for a microphone error; recognition is a network service, so it also needs a working connection. |
+| ☝️ stopped skipping ads | Expected: a raised index finger now takes over the hand for the voice pill. Set **Settings → Voice → Show the pill** to **Never** to get the pose back. |
+| No Pointer section in Settings | `CURSOR=false` in `.env`. That's the flag doing its job — set it to `true` and reload the extension. |
+| Editing `.env` changes nothing | Check the line under **Settings → AI assistant**. If it says the flags came from `env.txt`, Chrome won't serve the dotfile here, so re-run `build-zip.ps1` to refresh the mirror before reloading. |
 | Cursor never appears | Watch the popup while making the shape — it says "Pointer" the moment it registers. If it never does, raise **Hand tolerance**, and check you're neither flattening your hand nor closing it far enough to read as a fist. If the popup *does* say it, the tab can't be reached: Jester has no content script there, so tick **"Also run on every other site"** and reload. |
 | Cursor appears when you didn't mean it | Lower **Hand tolerance**, or raise **Time to engage**. A resting hand often sits close to half open. |
 | Pinch doesn't click | Raise **Pinch distance** — the threshold is measured against your palm width, so a large hand on a distant camera needs more slack. The popup's bar fills as your fingers close; if it never reaches full, the threshold is too tight. |

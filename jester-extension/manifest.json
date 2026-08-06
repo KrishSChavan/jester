@@ -9,7 +9,8 @@
     "offscreen",
     "storage",
     "tabs",
-    "scripting"
+    "scripting",
+    "sessions"
   ],
 
   "host_permissions": [
@@ -30,8 +31,6 @@
     "*://*.vimeo.com/*",
     "*://tv.apple.com/*"
   ],
-
-  "optional_permissions": ["debugger"],
 
   "optional_host_permissions": ["*://*/*"],
 
