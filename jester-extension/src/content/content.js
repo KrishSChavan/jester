@@ -20,6 +20,7 @@
     FULLSCREEN_EXIT: 'jester/fullscreen-exit',
     FULLSCREEN_DETACHED: 'jester/fullscreen-detached',
     VIEW_CONTEXT: 'jester/view-context',
+    VIEW_VISIBILITY: 'jester/view-visibility',
     CURSOR: 'jester/cursor',
     CURSOR_CLICK: 'jester/cursor-click',
     VOICE: 'jester/voice',
@@ -551,15 +552,37 @@
   for (const evt of ['fullscreenchange', 'webkitfullscreenchange']) {
     document.addEventListener(evt, reportContext, true);
   }
+  /**
+   * Whether this tab is actually being shown.
+   *
+   * Not the same question as which window has the focus, and the worker can't
+   * answer it for itself: a window that is fully covered by another one still
+   * reports itself focused to `chrome.windows`, while Chrome's occlusion
+   * tracking flips this to `hidden`. Backgrounded tabs and minimized windows
+   * land here too, which makes it a useful second opinion on both.
+   */
+  let lastVisible = null;
+
+  function reportVisibility() {
+    // One answer per tab: an iframe has no visibility of its own.
+    if (window.top !== window) return;
+    const visible = document.visibilityState === 'visible';
+    if (visible === lastVisible) return;
+    lastVisible = visible;
+    chrome.runtime.sendMessage({ type: MSG.VIEW_VISIBILITY, visible }).catch(() => undefined);
+  }
+
   // The worker forgets everything when it's evicted, so re-assert on the way
   // back into view rather than waiting for the next fullscreen change.
   document.addEventListener('visibilitychange', () => {
+    reportVisibility();
     if (document.visibilityState === 'visible') {
       lastContext = null;
       reportContext();
     }
   });
   reportContext();
+  reportVisibility();
 
   // -------------------------------------------------------------------------
   // HUD (shadow DOM so no site stylesheet can touch it)

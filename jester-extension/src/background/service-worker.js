@@ -175,61 +175,83 @@ async function setEnabled(enabled) {
 // so every caller reads `null` as "there is nothing to act on" and stops there.
 // ---------------------------------------------------------------------------
 
-/**
- * The window with the OS focus, or `WINDOW_ID_NONE` when Chrome is behind
- * something else entirely.
- *
- * Event-driven rather than polled: `onFocusChanged` lands the moment the user
- * alt-tabs away, and any cache short enough to catch that on its own would mean
- * re-querying on every cursor frame. `null` means this worker has been revived
- * since the last event and has to go and ask.
- */
-let focusedWindowId = null;
-
 /** Long enough to keep the ~20/s cursor path cheap, short enough to feel instant. */
-const FRONT_CACHE_MS = 400;
+const FRONT_CACHE_MS = 300;
 let frontTabCache = null;
 let frontTabCacheAt = 0;
 
-async function readFocus() {
-  try {
-    const win = await chrome.windows.getLastFocused();
-    // `getLastFocused` answers even when Chrome has no focus at all — the flag
-    // on what it returns is the only part that says which of the two it is.
-    return win?.focused ? win.id : chrome.windows.WINDOW_ID_NONE;
-  } catch {
-    return chrome.windows.WINDOW_ID_NONE;
-  }
-}
+/**
+ * Tabs whose top frame has told us it isn't being shown.
+ *
+ * The second of the two signals, and the one that catches what the windows API
+ * can't see: a window that still holds the focus on paper while being entirely
+ * covered by another one. Chrome's own occlusion tracking flips
+ * `document.visibilityState` for exactly that case, and the page is the only
+ * place that reading exists. Absence means visible — a tab that has never
+ * reported is a tab Jester has no reason to doubt.
+ */
+const hiddenTabs = new Set();
+
+/** Whether the front tab last flipped to nothing, so the log stays quiet. */
+let hadFront = null;
 
 /**
  * The active tab of the focused, on-screen window.
  *
+ * Chrome is asked outright every time this refreshes rather than the answer
+ * being kept up to date from `chrome.windows.onFocusChanged`. That event is not
+ * dependable enough to be the only thing standing between a backgrounded window
+ * and a gesture: it can be missed entirely when focus leaves for another
+ * application, and it fires a spurious re-focus for Chrome's own native widgets,
+ * either of which leaves a cached answer confidently wrong. `getLastFocused()`
+ * reports the live state of the window, so it can only be wrong for as long as
+ * the cache above.
+ *
  * @returns null whenever Jester should be keeping its hands to itself: Chrome is
- *          in the background, the window that has the focus is minimized, or
- *          what's focused is a devtools window with no page in it.
+ *          behind another application, the focused window is minimized or
+ *          covered over, or what's focused is a devtools window with no page.
  */
+let frontTabPending = null;
+
 async function frontTab() {
   const now = Date.now();
   if (frontTabCacheAt && now - frontTabCacheAt < FRONT_CACHE_MS) return frontTabCache;
 
-  if (focusedWindowId === null) focusedWindowId = await readFocus();
-
-  let tab = null;
-  if (focusedWindowId !== chrome.windows.WINDOW_ID_NONE) {
-    const win = await chrome.windows.get(focusedWindowId).catch(() => null);
-    if (win && win.state !== 'minimized' && win.type !== 'devtools') {
-      [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
-    }
+  // Callers arrive in bursts — the cursor relay, a toast and the HUD can all ask
+  // inside the same tick. Share one read, or the first to arrive hands the rest
+  // the very answer it is in the middle of replacing.
+  if (!frontTabPending) {
+    frontTabPending = readFrontTab().then((tab) => {
+      frontTabPending = null;
+      frontTabCache = tab;
+      frontTabCacheAt = Date.now();
+      const has = !!tab;
+      if (has !== hadFront) {
+        hadFront = has;
+        console.log(`[jester] in front: ${has ? tab.title?.slice(0, 40) || 'a tab' : 'nothing'}`);
+      }
+      return tab;
+    });
   }
+  return frontTabPending;
+}
 
-  frontTabCache = tab || null;
-  frontTabCacheAt = now;
-  return frontTabCache;
+/** Never rejects: "couldn't tell" and "nothing there" are the same answer here. */
+async function readFrontTab() {
+  const win = await chrome.windows.getLastFocused().catch(() => null);
+
+  // The whole rule, in one flag. `getLastFocused` answers with the window the
+  // user was last in whether or not Chrome has the focus now, and this is the
+  // only part of its answer that says which of the two it is.
+  if (!win?.focused) return null;
+  if (win.state === 'minimized' || win.type === 'devtools') return null;
+
+  const [tab] = await chrome.tabs.query({ active: true, windowId: win.id }).catch(() => []);
+  if (!tab || hiddenTabs.has(tab.id)) return null;
+  return tab;
 }
 
 function invalidateFront() {
-  frontTabCache = null;
   frontTabCacheAt = 0;
 }
 
@@ -1378,6 +1400,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       return false;
 
+    case MSG.VIEW_VISIBILITY:
+      if (sender.tab) {
+        if (message.visible) hiddenTabs.delete(sender.tab.id);
+        else hiddenTabs.add(sender.tab.id);
+        // This is a page going behind or coming back, which is precisely what
+        // the cached answer is about — never let it ride out its 300ms.
+        invalidateActiveTab();
+        if (!message.visible) retireOverlays();
+        refreshContext().catch(() => undefined);
+      }
+      return false;
+
     case MSG.GET_STATE:
       (async () => {
         const settings = await getSettings();
@@ -1455,6 +1489,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (videoFrames.get(key).tabId === tabId) videoFrames.delete(key);
   }
   tabContext.delete(tabId);
+  hiddenTabs.delete(tabId);
   invalidateActiveTab();
   updateSuspendState();
   refreshContext();
@@ -1468,17 +1503,19 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // A navigation drops any fullscreen the old page was in, and the new page
   // re-reports as soon as its content script comes up.
   tabContext.delete(tabId);
+  // The new page reports for itself as soon as its content script comes up, and
+  // until then a stale "hidden" would leave the tab unusable.
+  hiddenTabs.delete(tabId);
   // A reload can bring the content script with it, so give the tab another go.
   invalidateActiveTab();
   updateSuspendState();
   refreshContext();
 });
 
-chrome.windows.onFocusChanged.addListener((windowId) => {
-  // `WINDOW_ID_NONE` here is the whole point of the front-window rule: the user
-  // has left Chrome for another application, and from now until they come back
-  // there is nothing Jester is allowed to touch.
-  focusedWindowId = windowId;
+// Only drops the cached answer — `frontTab()` goes and asks Chrome rather than
+// believing what this reports, because it is missed often enough that trusting
+// it is what let a backgrounded window keep taking gestures.
+chrome.windows.onFocusChanged.addListener(() => {
   invalidateActiveTab();
   retireOverlays();
   updateSuspendState();

@@ -212,7 +212,12 @@ export const MSG = {
   FULLSCREEN_DETACHED: 'jester/fullscreen-detached',
   // content script -> service worker: "this tab just entered / left a fullscreen
   // view". The worker turns that into the context it pushes to the engine.
-  VIEW_CONTEXT: 'jester/view-context'
+  VIEW_CONTEXT: 'jester/view-context',
+  // content script -> service worker: "this tab is / isn't being shown". Chrome's
+  // occlusion tracking is what makes this worth having — a window buried under
+  // another one still reports itself focused to the windows API, and this is the
+  // only reading that notices. @see frontTab
+  VIEW_VISIBILITY: 'jester/view-visibility'
 };
 
 /**
