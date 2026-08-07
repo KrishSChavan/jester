@@ -29,15 +29,27 @@
 const ENV_PATHS = ['.env', 'env.txt'];
 
 /** Used when `.env` is missing or unreadable — i.e. leave things as they are. */
-const FALLBACK = { CURSOR: 'true', AI: '' };
+const FALLBACK = { CURSOR: 'true', AI: '', AI_MODEL: '' };
+
+/**
+ * The Groq model the assistant talks to when `.env` doesn't name one.
+ *
+ * Groq retires models on its own schedule, so `runAssistant()` falls through a
+ * short list rather than trusting this one to still exist — see MODELS there.
+ * This is only the first thing it tries.
+ */
+export const DEFAULT_AI_MODEL = 'llama-3.3-70b-versatile';
 
 const TRUTHY = new Set(['1', 'true', 'yes', 'on', 'y']);
 const FALSY = new Set(['0', 'false', 'no', 'off', 'n', '']);
 
 /**
- * What we can say about the AI key without talking to anyone. Provider-agnostic
- * on purpose: which service it belongs to isn't decided yet, so this only rules
- * out the values that cannot be a key under any of them.
+ * What we can say about the AI key without talking to Groq.
+ *
+ * Deliberately not a `gsk_` prefix check: Groq is what the key is *for* today,
+ * and the shape of a Groq key is theirs to change. These rules only rule out
+ * the values that cannot be a key under any provider, so the first real
+ * verdict on a key still comes from the first request that uses it.
  */
 export const AI_KEY = {
   MISSING: 'missing',
@@ -134,7 +146,7 @@ export function classifyAiKey(raw) {
 export function describeAiKey(state) {
   switch (state) {
     case AI_KEY.MISSING:
-      return 'No AI key set. Add one as AI= in the extension’s .env file.';
+      return 'No Groq API key set — voice commands can’t be understood without one. Add it as AI= in the extension’s .env file.';
     case AI_KEY.PLACEHOLDER:
       return 'The AI key in .env is still the placeholder from the template.';
     case AI_KEY.MALFORMED:
@@ -161,6 +173,8 @@ function build(values, source, error) {
     mirrored: source === 'env.txt',
     cursor: parseBoolean(values.CURSOR, true),
     aiKey: String(values.AI ?? '').trim(),
+    /** Blank means "whatever the assistant's own list starts with". */
+    aiModel: String(values.AI_MODEL ?? '').trim(),
     aiState: state,
     aiOk: aiKeyIsUsable(state),
     aiMessage: describeAiKey(state),

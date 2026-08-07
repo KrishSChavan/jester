@@ -29,6 +29,7 @@ const STATUS_TEXT = {
   [ENGINE.STARTING]: 'Starting…',
   [ENGINE.RUNNING]: 'Watching for gestures',
   [ENGINE.SUSPENDED]: 'Paused — no video tab',
+  [ENGINE.SLEEPING]: 'Asleep',
   [ENGINE.NO_PERMISSION]: 'Camera access needed',
   [ENGINE.ERROR]: 'Something went wrong'
 };
@@ -37,6 +38,7 @@ const DOT_CLASS = {
   [ENGINE.RUNNING]: 'running',
   [ENGINE.STARTING]: 'starting',
   [ENGINE.SUSPENDED]: 'starting',
+  [ENGINE.SLEEPING]: 'starting',
   [ENGINE.NO_PERMISSION]: 'error',
   [ENGINE.ERROR]: 'error'
 };
@@ -58,8 +60,8 @@ const VOICE_BLOCKED_NOTE =
  * One line, for the most pressing thing wrong. Ordered by how much it stops
  * Jester working: an unreadable .env leaves every flag guessed, a page Jester
  * can't touch means the pill is invisible however well the gesture reads, a
- * blocked microphone leaves the bars dead, and a missing AI key is the one that
- * costs nothing today.
+ * blocked microphone leaves the bars dead, and a missing AI key leaves the pill
+ * listening to sentences nothing can act on.
  */
 function renderNotice() {
   const stale = env.mirrored
@@ -122,7 +124,14 @@ function renderTelemetry(t) {
   // the readout to tune the pinch distance against.
   let bar = t.progress || 0;
 
-  if (env.cursor && t.pointer?.active) {
+  if (t.sleeping) {
+    // The engine masks every pose but the one that wakes it, so a gesture
+    // reaching here at all means the way out is being held right now.
+    ui.gestureLabel.textContent = t.gesture
+      ? '😴 Hold to wake…'
+      : `😴 Asleep${t.wake ? ` — ${t.wake} to wake` : ''}`;
+    ui.gestureScore.textContent = '';
+  } else if (env.cursor && t.pointer?.active) {
     ui.gestureLabel.textContent = t.pointer.down ? '👌 Pinched — click' : '🖐 Pointer — steering';
     ui.gestureScore.textContent = '';
     bar = t.pointer.pinch || 0;

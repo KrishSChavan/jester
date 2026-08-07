@@ -78,9 +78,18 @@ Three recognition channels run over the same landmark stream:
 
 A global `cooldownMs` sits after every action so one gesture can't machine-gun.
 Every threshold, and every gesture binding, is editable in the options page —
-including **Turn Jester off**, unbound by default, which stops the camera on a
-gesture. That one is one-way: with the camera down nothing can recognise a
-gesture to switch it back, so switching on stays with the popup.
+including **Sleep / wake Jester**, unbound by default, which puts Jester into a
+full stop on a gesture. Asleep, the camera stays open but nothing else is looked
+at — no other binding fires, the pointer never arms, the microphone is released
+— because the only thing that can wake it is seeing the same gesture again. That
+one gesture works regardless of what it happens to be bound to at the time, so
+changing bindings or going fullscreen mid-nap can't strand you.
+
+Jester only ever acts on the window you are actually looking at. If Chrome is
+behind another application, minimized, or the tab is in the background, gestures
+are still recognised but nothing lands — and the cursor and voice pill come off
+the page you left. Sleep is the one exception to that rule, because it acts on
+Jester rather than on a page.
 
 ## Pointer
 

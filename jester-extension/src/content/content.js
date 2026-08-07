@@ -22,7 +22,9 @@
     VIEW_CONTEXT: 'jester/view-context',
     CURSOR: 'jester/cursor',
     CURSOR_CLICK: 'jester/cursor-click',
-    VOICE: 'jester/voice'
+    VOICE: 'jester/voice',
+    PAGE_DIGEST: 'jester/page-digest',
+    RUN_STEPS: 'jester/run-steps'
   };
 
   const HOST = location.hostname;
@@ -68,7 +70,8 @@
     TAB_CLOSE: 'Close tab',
     TAB_REOPEN: 'Reopen tab',
     WINDOW_NEXT: 'Next window',
-    DISABLE: 'Jester off'
+    // The detail line carries the rest — "Asleep — ✊ Closed fist to wake".
+    SLEEP: 'Jester'
   };
 
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -172,7 +175,13 @@
     return best || root;
   }
 
-  function scrollPage(direction, fraction) {
+  /**
+   * @param behavior `smooth` for a gesture, which is someone watching the page
+   *        move. The assistant passes `instant`: it looks at the page again the
+   *        moment this returns, and a scroll still gliding would have it read
+   *        positions that are about to be wrong.
+   */
+  function scrollPage(direction, fraction, behavior = 'smooth') {
     const el = scrollTarget();
     if (!el) return { ok: false, detail: 'Nothing to scroll' };
 
@@ -182,14 +191,15 @@
     if (direction < 0 && at <= 1) return { ok: false, detail: 'At the top' };
     if (direction > 0 && at >= room - 1) return { ok: false, detail: 'At the bottom' };
 
-    el.scrollBy({ top: direction * clamp(fraction, 0.1, 1) * el.clientHeight, behavior: 'smooth' });
+    el.scrollBy({ top: direction * clamp(fraction, 0.1, 1) * el.clientHeight, behavior });
     return { ok: true, detail: direction < 0 ? 'Up' : 'Down' };
   }
 
-  function scrollToEnd(direction) {
+  /** @see scrollPage for `behavior`. */
+  function scrollToEnd(direction, behavior = 'smooth') {
     const el = scrollTarget();
     if (!el) return { ok: false, detail: 'Nothing to scroll' };
-    el.scrollTo({ top: direction < 0 ? 0 : el.scrollHeight, behavior: 'smooth' });
+    el.scrollTo({ top: direction < 0 ? 0 : el.scrollHeight, behavior });
     return { ok: true, detail: direction < 0 ? 'Top' : 'Bottom' };
   }
 
@@ -984,16 +994,46 @@
   // microphone is) and arrive at ~25/s. The bars carry a 70 ms transition,
   // which interpolates between frames the same way the cursor's does.
   //
+  // It has three faces, and one shape carries you between them:
+  //
+  //   listening — the bars, riding your voice.
+  //   thinking  — the same lozenge squeezed down to a ball with a spinner in
+  //               it, while the assistant reads the page and works.
+  //   answer    — opened back out around whatever there is to say, then gone.
+  //
+  // Which one is up is the *worker's* call once you stop talking, not the
+  // engine's. @see relayVoice.
+  //
   // Top frame only, like the cursor: the worker addresses frameId 0.
   // -------------------------------------------------------------------------
 
   const VOICE_BARS = 5;
   /** No frame for this long and the pill leaves — the engine died mid-sentence. */
   const VOICE_IDLE_MS = 1600;
+  /**
+   * The same safety net for the spinner, and far slacker on purpose: a run makes
+   * no frames of its own between turns, and a slow one is usually a page still
+   * loading. The worker ends this phase explicitly — this only catches a worker
+   * that was evicted mid-run, which would otherwise leave a ball spinning on
+   * the page forever.
+   */
+  const VOICE_THINKING_MS = 90000;
+  /** How long an answer stays up. Kept in step with ANSWER_MS in the worker. */
+  const VOICE_ANSWER_MS = 4500;
+  /**
+   * What a red one gets on top of that. A failure is nearly always a sentence
+   * you have to do something about — which model ran out, what to say instead,
+   * that "keep going" will carry on — and it is gone before you have read it
+   * twice. Kept in step with ANSWER_ERROR_EXTRA_MS in the worker.
+   */
+  const VOICE_ERROR_EXTRA_MS = 3000;
+  /** Long enough for the fade-out, so the shape doesn't snap back on the way. */
+  const VOICE_RESET_MS = 260;
   const VOICE_BAR_MIN = 6; // the resting dot, in px
   const VOICE_BAR_MAX = 28;
 
   const VOICE_POSITIONS = ['bottom-center', 'top-center', 'bottom-left', 'bottom-right'];
+  const VOICE_PHASES = ['listening', 'thinking', 'answer'];
 
   const VOICE_CSS = `
     :host { all: initial; }
@@ -1006,7 +1046,7 @@
     .anchor.bottom-left { left: 28px; bottom: 34px; }
     .anchor.bottom-right { right: 28px; bottom: 34px; }
     .pill {
-      display: flex; align-items: center; justify-content: center; gap: 7px;
+      display: flex; align-items: center; justify-content: center;
       box-sizing: border-box;
       height: 46px; min-width: 152px; padding: 0 22px;
       border-radius: 999px;
@@ -1014,9 +1054,23 @@
       border: 2px solid rgba(255, 255, 255, .92);
       box-shadow: 0 10px 34px rgba(0, 0, 0, .5);
       opacity: 0; transform: translateY(10px) scale(.94);
-      transition: opacity .18s ease, transform .18s cubic-bezier(.2, .8, .3, 1);
+      transition:
+        opacity .18s ease,
+        transform .18s cubic-bezier(.2, .8, .3, 1),
+        min-width .26s cubic-bezier(.2, .8, .3, 1),
+        max-width .26s cubic-bezier(.2, .8, .3, 1),
+        width .26s cubic-bezier(.2, .8, .3, 1),
+        height .26s cubic-bezier(.2, .8, .3, 1),
+        padding .26s cubic-bezier(.2, .8, .3, 1);
     }
     .pill.show { opacity: 1; transform: translateY(0) scale(1); }
+
+    /* --- listening --- */
+    .bars {
+      display: flex; align-items: center; gap: 7px;
+      max-width: 200px; overflow: hidden;
+      transition: max-width .26s cubic-bezier(.2, .8, .3, 1), opacity .14s ease;
+    }
     .bar {
       flex: none;
       width: 6px; height: ${VOICE_BAR_MIN}px;
@@ -1025,14 +1079,74 @@
       /* Frames arrive at ~25/s; the transition fills the gaps. */
       transition: height .07s linear;
     }
+
+    /* --- thinking: the lozenge squeezes into a ball around a spinner --- */
+    .spin {
+      flex: none; box-sizing: border-box;
+      width: 0; height: 20px; opacity: 0;
+      border-radius: 50%;
+      border: 2px solid rgba(255, 255, 255, .22);
+      border-top-color: #fff;
+      transition: width .26s cubic-bezier(.2, .8, .3, 1), opacity .14s ease .08s;
+    }
+    .pill.thinking { min-width: 46px; width: 46px; padding: 0; }
+    .pill.thinking .bars { max-width: 0; opacity: 0; }
+    .pill.thinking .spin {
+      width: 20px; opacity: 1;
+      animation: jester-spin .7s linear infinite;
+    }
+    @keyframes jester-spin { to { transform: rotate(360deg); } }
+
+    /* --- thinking, with something to say about it: the ball opens back out
+       around the step being attempted, and closes again when it runs out --- */
+    .step {
+      flex: none;
+      color: #cbd3e1;
+      font: 500 13px/1.35 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      /* max-width rather than display, for the same reason the answer phase
+         can't animate: "auto" is not a width you can transition from. The label
+         opens itself and the pill grows to follow. */
+      max-width: 0; opacity: 0; margin-left: 0;
+      transition:
+        max-width .26s cubic-bezier(.2, .8, .3, 1),
+        margin-left .26s cubic-bezier(.2, .8, .3, 1),
+        opacity .14s ease .08s;
+    }
+    .pill.thinking.stepped { width: auto; min-width: 46px; padding: 0 20px 0 15px; }
+    .pill.thinking.stepped .step { max-width: min(240px, 46vw); opacity: 1; margin-left: 11px; }
+    .pill.answer .step { display: none; }
+
+    /* --- answer --- */
+    .say {
+      display: none;
+      color: #e8ecf2;
+      font: 500 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      text-align: center;
+      /* Six lines is a paragraph nobody reads off a floating pill. */
+      max-height: 8.7em; overflow: hidden;
+      overflow-wrap: anywhere;
+    }
+    .pill.answer {
+      min-width: 0; width: auto; max-width: min(460px, 80vw);
+      height: auto; min-height: 46px; padding: 12px 22px;
+    }
+    .pill.answer .bars, .pill.answer .spin { display: none; }
+    .pill.answer .say { display: block; }
+    .pill.answer.bad { border-color: rgba(252, 165, 165, .92); }
+    .pill.answer.bad .say { color: #fca5a5; }
   `;
 
   let voiceHost = null;
   let voiceAnchor = null;
   let voicePill = null;
+  let voiceStep = null;
+  let voiceSay = null;
   let voiceBars = [];
   let voiceIdleTimer = null;
+  let voiceResetTimer = null;
   let voicePosition = '';
+  let voicePhase = '';
 
   function ensureVoicePill() {
     if (voiceHost && voiceHost.isConnected) return;
@@ -1052,18 +1166,29 @@
     voicePill = document.createElement('div');
     voicePill.className = 'pill';
 
+    const bars = document.createElement('div');
+    bars.className = 'bars';
     voiceBars = [];
     for (let i = 0; i < VOICE_BARS; i += 1) {
       const bar = document.createElement('i');
       bar.className = 'bar';
-      voicePill.append(bar);
+      bars.append(bar);
       voiceBars.push(bar);
     }
 
+    const spin = document.createElement('i');
+    spin.className = 'spin';
+    voiceStep = document.createElement('div');
+    voiceStep.className = 'step';
+    voiceSay = document.createElement('div');
+    voiceSay.className = 'say';
+
+    voicePill.append(bars, spin, voiceStep, voiceSay);
     voiceAnchor.append(voicePill);
     layer.append(voiceAnchor);
     root.append(style, layer);
     voicePosition = 'bottom-center';
+    voicePhase = '';
     mountVoicePill();
     // The caller adds `show` in this same task. Flush the hidden state to the
     // layout first, or there's nothing to transition *from* and the pill snaps
@@ -1083,15 +1208,106 @@
     if (!voicePill) return;
     voicePill.classList.remove('show');
     for (const bar of voiceBars) bar.style.height = `${VOICE_BAR_MIN}px`;
+
+    // Back to the plain lozenge, but only once it's actually gone: resetting the
+    // shape now would play the ball-to-pill animation on the way out. Skipped
+    // outright if something has put the pill back up in the meantime.
+    clearTimeout(voiceResetTimer);
+    voiceResetTimer = setTimeout(() => {
+      if (!voicePill || voicePill.classList.contains('show')) return;
+      voicePill.classList.remove('thinking', 'stepped', 'answer', 'bad');
+      voiceStep.textContent = '';
+      voiceSay.textContent = '';
+      voicePhase = '';
+    }, VOICE_RESET_MS);
+  }
+
+  const PHASE_TIMEOUT = {
+    listening: VOICE_IDLE_MS,
+    thinking: VOICE_THINKING_MS,
+    answer: VOICE_ANSWER_MS
+  };
+
+  /** The one phase whose length depends on what it says. @see VOICE_ERROR_EXTRA_MS */
+  const phaseTimeout = (phase, voice) =>
+    phase === 'answer' && voice.ok === false
+      ? VOICE_ANSWER_MS + VOICE_ERROR_EXTRA_MS
+      : PHASE_TIMEOUT[phase];
+
+  /**
+   * Puts the pill into one of its three faces and re-arms its timeout. Every
+   * frame that wants the pill on screen goes through here, so there is one
+   * place that decides what it looks like.
+   */
+  function showVoicePhase(phase, voice) {
+    if (!VOICE_PHASES.includes(phase)) return;
+    ensureVoicePill();
+    mountVoicePill();
+    clearTimeout(voiceResetTimer);
+
+    if (
+      voice.position &&
+      voice.position !== voicePosition &&
+      VOICE_POSITIONS.includes(voice.position)
+    ) {
+      voicePosition = voice.position;
+      voiceAnchor.className = `anchor ${voice.position}`;
+    }
+
+    const changed = phase !== voicePhase;
+    if (changed) {
+      voicePhase = phase;
+      voicePill.classList.toggle('thinking', phase === 'thinking');
+      voicePill.classList.toggle('answer', phase === 'answer');
+    }
+
+    // Deliberately outside the `changed` guard: the phase stays `thinking` for a
+    // whole run while this line changes once a turn, which is the point of it.
+    if (phase === 'thinking') {
+      const step = String(voice.step || '').replace(/\s+/g, ' ').trim();
+      voiceStep.textContent = step;
+      voicePill.classList.toggle('stepped', !!step);
+    } else if (changed) {
+      // Cleared before the answer flushes its geometry below, or the pill opens
+      // out from a width that includes a label it is no longer showing.
+      voicePill.classList.remove('stepped');
+      voiceStep.textContent = '';
+    }
+
+    if (phase === 'answer') {
+      voicePill.classList.toggle('bad', voice.ok === false);
+      voiceSay.textContent = String(voice.text || '');
+      // The ball's collapse animates because its width is a number; opening
+      // back out around a sentence can't, since that width is `auto`. So the
+      // answer plays the pill's own entrance instead of snapping into place —
+      // drop `show`, flush the new geometry to the layout as the starting
+      // point, and let the re-add fade and lift it in.
+      if (changed) {
+        voicePill.classList.remove('show');
+        void voicePill.offsetWidth;
+      }
+    }
+
+    voicePill.classList.add('show');
+
+    // If whoever owns the pill dies mid-phase nothing sends the closing frame,
+    // so it times itself out rather than hanging on screen forever.
+    clearTimeout(voiceIdleTimer);
+    voiceIdleTimer = setTimeout(hideVoicePill, phaseTimeout(phase, voice));
   }
 
   function applyVoice(voice) {
     if (voice.transcript?.text) {
       const { text, final } = voice.transcript;
-      // Nothing consumes this yet. It's also logged in the offscreen document's
-      // own console; this copy is here because it's the console you're actually
-      // looking at while you talk to a page.
+      // Also logged in the offscreen document's own console; this copy is here
+      // because it's the console you're actually looking at while you talk.
       console.log(`[jester] voice${final ? '' : ' (interim)'}: ${text}`);
+    }
+
+    // The assistant's frames say which face they want outright.
+    if (voice.phase) {
+      showVoicePhase(voice.phase, voice);
+      return;
     }
 
     // A transcript-only frame carries no `active` field: it says nothing about
@@ -1102,25 +1318,889 @@
       return;
     }
 
-    ensureVoicePill();
-    mountVoicePill();
-    // If the engine dies while the pill is up nothing sends the closing frame,
-    // so it times itself out rather than hanging on screen forever.
-    clearTimeout(voiceIdleTimer);
-    voiceIdleTimer = setTimeout(hideVoicePill, VOICE_IDLE_MS);
-
-    if (voice.position && voice.position !== voicePosition && VOICE_POSITIONS.includes(voice.position)) {
-      voicePosition = voice.position;
-      voiceAnchor.className = `anchor ${voice.position}`;
-    }
-
-    voicePill.classList.add('show');
+    showVoicePhase('listening', voice);
 
     if (!Array.isArray(voice.levels)) return;
     for (let i = 0; i < voiceBars.length; i += 1) {
       const level = clamp(Number(voice.levels[i]) || 0, 0, 1);
       voiceBars[i].style.height = `${VOICE_BAR_MIN + level * (VOICE_BAR_MAX - VOICE_BAR_MIN)}px`;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // The assistant's eyes: finding the one element it asked for
+  //
+  // The obvious design is to describe the whole page and let the model pick.
+  // It doesn't survive a real site: the description of a streaming front page
+  // is most of a Groq minute on its own, and a command spends two or three of
+  // them, so the thing that reads the page is also the thing that stops it
+  // working.
+  //
+  // So the model doesn't get the page. It gets a handful of names — enough to
+  // know roughly where it is — and it asks for things by description:
+  //
+  //     {"type":"click","target":"the search button"}
+  //
+  // and this is what turns "the search button" into an element. That inverts
+  // the cost: instead of sending everything on the chance some of it matters,
+  // we send the request and look for what it names.
+  //
+  // Which puts the weight on looking things up well. `findElement()` is a
+  // ladder of increasingly forgiving ways to search, tried in order, because a
+  // spoken description almost never matches a page's own wording: you say "the
+  // search bar", the page calls it "Titles, people, genres". When one rung
+  // comes up empty the next is tried, and when the whole ladder does, what
+  // comes back is the nearest few names so the next turn can aim again.
+  // -------------------------------------------------------------------------
+
+  /** Elements that are markup, not page. */
+  const SKIP_TAGS = new Set([
+    'script',
+    'style',
+    'noscript',
+    'template',
+    'svg',
+    'head',
+    'link',
+    'meta',
+    'title',
+    'br',
+    'hr'
+  ]);
+
+  /** Jester's own overlays. Offering the assistant its own pill would be absurd. */
+  const JESTER_HOSTS = new Set(['jester-hud-host', 'jester-cursor-host', 'jester-voice-host']);
+
+  /**
+   * What the assistant is allowed to aim at. Wider than INTERACTIVE above,
+   * which only decides whether the pointer draws a halo — a miss there costs a
+   * halo, a miss here costs the assistant the only handle it had on the thing
+   * you asked for.
+   */
+  const ACTIONABLE = [
+    'a[href]',
+    'button',
+    'input:not([type="hidden"])',
+    'select',
+    'textarea',
+    'summary',
+    '[contenteditable=""]',
+    '[contenteditable="true"]',
+    '[role="button"]',
+    '[role="link"]',
+    '[role="menuitem"]',
+    '[role="menuitemcheckbox"]',
+    '[role="menuitemradio"]',
+    '[role="option"]',
+    '[role="tab"]',
+    '[role="checkbox"]',
+    '[role="switch"]',
+    '[role="radio"]',
+    '[role="combobox"]',
+    '[role="textbox"]',
+    '[role="searchbox"]',
+    '[role="slider"]',
+    '[role="treeitem"]',
+    '[onclick]',
+    '[tabindex]:not([tabindex="-1"])'
+  ].join(',');
+
+  /** Never read, whatever is asked for. */
+  const SECRET_INPUT = /password|current-password|new-password|cc-number|cc-csc|one-time-code/i;
+
+  /** Attributes worth searching besides the name. The `data-` ones are how streaming sites label their own controls. */
+  const SEARCHABLE_ATTRS = [
+    'aria-label',
+    'placeholder',
+    'title',
+    'alt',
+    'name',
+    'data-uia',
+    'data-testid',
+    'data-test-id',
+    'data-a-target',
+    'aria-describedby'
+  ];
+
+  const LABEL_MAX = 90;
+  /** How many names the digest offers before it stops. */
+  const DIGEST_NAMES = 40;
+  const DIGEST_CHARS = 700;
+  /** Returned when nothing matched, so the next turn has something to aim at. */
+  const NEAR_MISSES = 6;
+
+  /**
+   * Words that describe *what kind of thing* rather than which one. Dropped
+   * from both sides before comparing, so "the search box" and "Search" are the
+   * same request.
+   */
+  const NOISE_WORDS = new Set([
+    'the', 'a', 'an', 'that', 'this', 'my',
+    'button', 'link', 'field', 'box', 'bar', 'input', 'icon', 'menu', 'item', 'option', 'element',
+    'dropdown', 'list', 'toggle', 'checkbox', 'entry', 'control',
+    'click', 'press', 'tap', 'select', 'choose', 'open', 'go', 'to', 'on', 'in', 'at', 'for', 'of',
+    'and', 'please'
+  ]);
+
+  /**
+   * The last rung of the ladder, and the one that earns its keep most often:
+   * what a person calls a control and what the page calls it are rarely the
+   * same string, but they are reliably the same *idea*.
+   */
+  const SYNONYMS = [
+    {
+      words: ['search', 'find', 'lookup', 'query'],
+      selectors: [
+        'input[type="search"]',
+        '[role="searchbox"]',
+        '[role="search"] input',
+        'input[name*="search" i]',
+        'input[placeholder*="search" i]',
+        '[aria-label*="search" i]',
+        '[data-uia*="search" i]',
+        '[class*="search" i]'
+      ]
+    },
+    {
+      words: ['play', 'watch', 'resume', 'start'],
+      selectors: ['[aria-label*="play" i]', '[data-uia*="play" i]', '[title*="play" i]', '[class*="play" i]']
+    },
+    {
+      words: ['pause', 'stop'],
+      selectors: ['[aria-label*="pause" i]', '[data-uia*="pause" i]', '[title*="pause" i]']
+    },
+    {
+      words: ['season'],
+      selectors: ['select', '[data-uia*="season" i]', '[aria-label*="season" i]', '[class*="season" i]']
+    },
+    {
+      words: ['episode'],
+      selectors: ['[data-uia*="episode" i]', '[aria-label*="episode" i]', '[class*="episode" i]']
+    },
+    {
+      words: ['close', 'dismiss', 'cancel', 'exit'],
+      selectors: ['[aria-label*="close" i]', '[title*="close" i]', '[class*="close" i]', '[aria-label*="dismiss" i]']
+    },
+    {
+      words: ['next', 'forward'],
+      selectors: ['[aria-label*="next" i]', '[title*="next" i]', '[class*="next" i]']
+    },
+    {
+      words: ['previous', 'back', 'prev'],
+      selectors: ['[aria-label*="previous" i]', '[aria-label*="back" i]', '[class*="prev" i]']
+    },
+    {
+      words: ['skip'],
+      selectors: ['[class*="skip" i]', '[aria-label*="skip" i]', '[data-uia*="skip" i]']
+    },
+    {
+      words: ['submit', 'enter', 'confirm', 'ok', 'done'],
+      selectors: ['button[type="submit"]', 'input[type="submit"]', '[aria-label*="submit" i]']
+    },
+    {
+      words: ['fullscreen', 'full'],
+      selectors: ['[aria-label*="full screen" i]', '[aria-label*="fullscreen" i]', '[class*="fullscreen" i]']
+    },
+    {
+      words: ['mute', 'volume', 'sound', 'audio'],
+      selectors: ['[aria-label*="mute" i]', '[aria-label*="volume" i]', '[class*="volume" i]']
+    },
+    {
+      words: ['profile', 'account', 'avatar', 'user'],
+      selectors: ['[aria-label*="profile" i]', '[aria-label*="account" i]', '[class*="avatar" i]']
+    },
+    {
+      words: ['home'],
+      selectors: ['[aria-label*="home" i]', 'a[href="/"]', 'a[href$="/browse"]']
+    }
+  ];
+
+  const tidy = (value, max) =>
+    String(value ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max);
+
+  const normalize = (value) =>
+    String(value ?? '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const meaningfulWords = (value) =>
+    normalize(value)
+      .split(' ')
+      .filter((word) => word && !NOISE_WORDS.has(word));
+
+  /**
+   * `null` means "skip this element and everything under it". A zero-sized box
+   * doesn't, on its own: `display: contents` is a real layout mode with real
+   * children, and so is a wrapper that has collapsed around visible content.
+   */
+  function boxState(el) {
+    const style = getComputedStyle(el);
+    if (style.display === 'none') return null;
+    if (style.visibility === 'hidden' || style.visibility === 'collapse') return null;
+    if (style.opacity === '0') return null;
+
+    const rect = el.getBoundingClientRect();
+    return {
+      rect,
+      painted: rect.width >= 2 && rect.height >= 2,
+      inViewport:
+        rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth
+    };
+  }
+
+  /**
+   * One walk of everything visible, used by both the digest and the finder.
+   * Descends open shadow trees — most of YouTube is one — and into same-origin
+   * iframes, which are just more page.
+   */
+  function walkVisible(root, visit) {
+    const stack = [root];
+    while (stack.length) {
+      const el = stack.pop();
+      if (!el || el.nodeType !== Node.ELEMENT_NODE) continue;
+
+      const tag = el.tagName.toLowerCase();
+      if (SKIP_TAGS.has(tag) || JESTER_HOSTS.has(el.id)) continue;
+      if (el.getAttribute('aria-hidden') === 'true' || el.hasAttribute('inert')) continue;
+
+      const box = boxState(el);
+      if (!box) continue;
+
+      visit(el, box, tag);
+
+      if (tag === 'iframe') {
+        let inner = null;
+        try {
+          inner = el.contentDocument?.body || null;
+        } catch {
+          inner = null; // cross-origin: opaque from here, and nothing to be done
+        }
+        if (inner) stack.push(inner);
+        continue;
+      }
+      if (tag === 'select') continue; // its options are its own business
+
+      // Pushed in reverse so they *pop* in document order. That ordering is
+      // not cosmetic: it's what makes "the third episode" the third one down
+      // the page rather than the third one this loop happened to reach.
+      const kids = el.shadowRoot ? [...el.shadowRoot.children, ...el.children] : [...el.children];
+      for (let i = kids.length - 1; i >= 0; i -= 1) stack.push(kids[i]);
+    }
+  }
+
+  /** The name a person would use for this element, in the order a screen reader would take it. */
+  function elementName(el) {
+    const aria = tidy(el.getAttribute('aria-label'), LABEL_MAX);
+    if (aria) return aria;
+
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const root = el.getRootNode();
+      const named = labelledBy
+        .split(/\s+/)
+        .map((id) => root.getElementById?.(id)?.textContent || '')
+        .join(' ');
+      const resolved = tidy(named, LABEL_MAX);
+      if (resolved) return resolved;
+    }
+
+    // `innerText` is the honest one — it respects layout, so it skips what is
+    // clipped or hidden — but it also *forces* layout, and on a focusable
+    // wrapper holding half the page it would build that whole string to throw
+    // most of it away. Past a paragraph, this isn't a control with a name.
+    const raw = el.textContent || '';
+    if (raw.length && raw.length <= 2000) {
+      const own = tidy(el.innerText || raw, LABEL_MAX);
+      if (own) return own;
+    }
+
+    // A card that is nothing but artwork — most of a streaming front page —
+    // carries its title on the image inside it.
+    const inner = el.querySelector?.('img[alt], [aria-label], [title]');
+    const borrowed = inner
+      ? tidy(inner.getAttribute('alt') || inner.getAttribute('aria-label') || inner.title, LABEL_MAX)
+      : '';
+    if (borrowed) return borrowed;
+
+    return tidy(el.title || el.getAttribute('placeholder') || el.name, LABEL_MAX);
+  }
+
+  /** Everything else worth matching against, so a nameless icon is still findable. */
+  function elementHints(el) {
+    const hints = [];
+    for (const attr of SEARCHABLE_ATTRS) {
+      const value = el.getAttribute?.(attr);
+      if (value) hints.push(value);
+    }
+    // Class names are noise on most pages and the only label on some. Kept, but
+    // only the words in them, so `.player-skip-btn` reads as "player skip btn".
+    const className = typeof el.className === 'string' ? el.className : '';
+    if (className) hints.push(className.replace(/[-_]+/g, ' '));
+    if (el.tagName === 'INPUT' && el.type && el.type !== 'text') hints.push(el.type);
+    return hints.join(' ').slice(0, 300);
+  }
+
+  const isTypable = (el) =>
+    el.isContentEditable ||
+    el.tagName === 'TEXTAREA' ||
+    (el.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|reset|file|image|range|color)$/i.test(el.type || 'text'));
+
+  function candidates({ typable = false, selectable = false } = {}) {
+    const found = [];
+    walkVisible(document.body || document.documentElement, (el, box, tag) => {
+      if (!box.painted) return;
+      if (typable) {
+        if (!isTypable(el)) return;
+      } else if (selectable) {
+        if (tag !== 'select') return;
+      } else if (!el.matches(ACTIONABLE)) {
+        return;
+      }
+      found.push({ el, box, name: elementName(el) });
+    });
+    return found;
+  }
+
+  /**
+   * How much of the request turns up in an element's attributes.
+   *
+   * Whole words, not substrings: `class="ytp-mute-button"` should answer "mute"
+   * — that's the only handle an icon with no text has — while "ute" and "on"
+   * should answer nothing. Splitting on the punctuation these names are built
+   * from is what makes the difference.
+   */
+  function hintScore(el, words, base) {
+    if (!words.length) return 0;
+    const hintWords = meaningfulWords(elementHints(el));
+    if (!hintWords.length) return 0;
+    const hit = words.filter((word) =>
+      hintWords.some((other) => other === word || (word.length >= 4 && other.startsWith(word)))
+    ).length;
+    return hit ? base * (hit / words.length) : 0;
+  }
+
+  /**
+   * How well one candidate answers the request, and by which rung of the ladder.
+   *
+   * The rungs are ordered by how much they assume. An exact name is a fact; a
+   * shared word is a guess. Only the best rung counts — adding them up would
+   * let a long, vague name out-score a short exact one.
+   */
+  function scoreCandidate(candidate, query, words, synonymHits) {
+    const name = normalize(candidate.name);
+    const target = normalize(query);
+    if (!name && !synonymHits.has(candidate.el)) {
+      // Nameless, and no selector reached it either. Its attributes are all
+      // there is — but for a thing with no name they are also the *only* thing
+      // there is, so they count for more here than they would on an element
+      // whose name was right there and didn't match.
+      const score = hintScore(candidate.el, words, 36);
+      return score ? { score, how: 'what it is called in the markup' } : null;
+    }
+
+    if (name && target && name === target) return { score: 100, how: 'its exact name' };
+
+    if (name && target) {
+      if (name.startsWith(target) || target.startsWith(name)) {
+        return { score: 82, how: 'its name, near enough' };
+      }
+      if (name.includes(target)) return { score: 74, how: 'its name containing that' };
+      if (target.length > 3 && target.includes(name) && name.length > 2) {
+        return { score: 66, how: 'that containing its name' };
+      }
+    }
+
+    const nameWords = meaningfulWords(candidate.name);
+    const synonym = synonymHits.has(candidate.el);
+
+    if (words.length && nameWords.length) {
+      const matched = words.filter((word) =>
+        nameWords.some((other) => other === word || other.startsWith(word) || word.startsWith(other))
+      );
+      if (matched.length === words.length) return { score: 60, how: 'every word of that in its name' };
+      if (matched.length) {
+        // Built on top of the synonym floor rather than scaled against it, so
+        // sharing a word always beats sharing none. That is the whole of what
+        // separates "episode 3" from "episode 1": both are episodes, only one
+        // of them says 3.
+        const share = matched.length / words.length;
+        return synonym
+          ? { score: 34 + 26 * share, how: 'what that means, and some of those words' }
+          : { score: 30 * share, how: 'some of those words' };
+      }
+    }
+
+    if (synonym) return { score: 34, how: 'what that usually means on a page' };
+
+    // It has a name, and the name said no. Its attributes are the last word,
+    // and worth less than they would be on something with nothing else to go on.
+    const score = hintScore(candidate.el, words, 24);
+    return score ? { score, how: 'a matching attribute' } : null;
+  }
+
+  /** Elements any of the synonym selectors reach. One pass, so the scorer can just ask. */
+  function synonymMatches(words) {
+    const hits = new Set();
+    const selectors = SYNONYMS.filter((entry) => entry.words.some((word) => words.includes(word)))
+      .flatMap((entry) => entry.selectors);
+    if (!selectors.length) return hits;
+
+    for (const selector of selectors) {
+      let matched;
+      try {
+        matched = document.querySelectorAll(selector);
+      } catch {
+        continue; // a selector some browser doesn't like; the others still stand
+      }
+      for (const el of matched) hits.add(el);
+    }
+    return hits;
+  }
+
+  /**
+   * The whole point of the file.
+   *
+   * @returns `{ ok, el, how }` when it is confident, and `{ ok: false, near }`
+   *          — the nearest few names — when it is not. Never a wrong element
+   *          quietly: a bad click is far more expensive to recover from than
+   *          being told to look again.
+   */
+  function findElement(query, { typable = false, selectable = false, index = 0 } = {}) {
+    const target = String(query || '').trim();
+    if (!target) return { ok: false, near: [], detail: 'no target given' };
+
+    const words = meaningfulWords(target);
+    const synonymHits = synonymMatches(words);
+    const pool = candidates({ typable, selectable });
+
+    const scored = [];
+    for (const candidate of pool) {
+      const verdict = scoreCandidate(candidate, target, words, synonymHits);
+      if (!verdict) continue;
+      let score = verdict.score;
+      // What you are looking at beats what you would have to scroll to, and a
+      // real control beats a div someone made focusable.
+      if (candidate.box.inViewport) score += 9;
+      if (/^(button|a|input|select|textarea)$/i.test(candidate.el.tagName)) score += 4;
+      if (candidate.el.disabled || candidate.el.getAttribute('aria-disabled') === 'true') score -= 25;
+      scored.push({ ...candidate, score, how: verdict.how });
+    }
+
+    // Document order within a score band, so "episode 3" and "the third one"
+    // count down the page rather than by whatever the walk happened to hit.
+    scored.sort((a, b) => b.score - a.score);
+
+    const usable = scored.filter((entry) => entry.score >= 40);
+    const wanted = usable[index];
+    if (wanted) {
+      return {
+        ok: true,
+        el: wanted.el,
+        how: wanted.how,
+        name: wanted.name || '(unnamed)',
+        alternatives: usable.length - 1
+      };
+    }
+
+    return {
+      ok: false,
+      near: scored.slice(0, NEAR_MISSES).map((entry) => tidy(entry.name, 50)).filter(Boolean),
+      detail: index > 0 && usable.length ? `only ${usable.length} of those on the page` : ''
+    };
+  }
+
+  /** Names only, for when the assistant wants to look before it aims. */
+  function listElements(match, limit = 25) {
+    const words = meaningfulWords(match || '');
+    const seen = new Set();
+    const names = [];
+
+    for (const candidate of candidates()) {
+      const name = tidy(candidate.name, 60);
+      if (!name || seen.has(name.toLowerCase())) continue;
+      if (words.length) {
+        const haystack = normalize(`${name} ${elementHints(candidate.el)}`);
+        if (!words.some((word) => haystack.includes(word))) continue;
+      }
+      seen.add(name.toLowerCase());
+      names.push(candidate.box.inViewport ? name : `${name} (off)`);
+      if (names.length >= limit) break;
+    }
+    return names;
+  }
+
+  /**
+   * Where the assistant is, in about a hundred tokens.
+   *
+   * Not a description of the page — a description of *roughly* the page, which
+   * is all that's needed to choose what to ask for next. The names are the
+   * useful part: they are what tell it there is a "Season 2" to aim at without
+   * anyone having to send the season list.
+   */
+  function pageDigest() {
+    const scroller = scrollTarget();
+    const room = scroller ? scroller.scrollHeight - scroller.clientHeight : 0;
+
+    const seen = new Set();
+    const onScreen = [];
+    const below = [];
+    for (const candidate of candidates()) {
+      const name = tidy(candidate.name, 40);
+      if (!name || seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      (candidate.box.inViewport ? onScreen : below).push(name);
+    }
+
+    // On screen first: it is what the user is looking at and talking about.
+    const names = [...onScreen, ...below].slice(0, DIGEST_NAMES);
+    let list = names.join(' · ');
+    if (list.length > DIGEST_CHARS) list = `${list.slice(0, DIGEST_CHARS)}…`;
+
+    const lines = [
+      `url: ${location.href.slice(0, 200)}`,
+      `title: ${tidy(document.title, 120)}`,
+      room > 4
+        ? `scroll: ${Math.round(scroller.scrollTop)} of ${Math.round(room)}px, so there is more page than this`
+        : 'scroll: the whole page fits on screen',
+      `you can see: ${list || '(nothing you can click)'}`
+    ];
+    if (below.length && onScreen.length) {
+      lines.push(`(${below.length} more further down the page — scroll, or just ask for one by name)`);
+    }
+
+    return {
+      ok: true,
+      url: location.href,
+      title: document.title,
+      count: seen.size,
+      text: lines.join('\n')
+    };
+  }
+
+  /**
+   * Waits for the page to stop rearranging itself, so a look taken after a
+   * click sees the search results rather than the spinner.
+   *
+   * Counts mutations instead of demanding silence: a playing video repaints its
+   * scrubber several times a second forever, and a rule that waited for a still
+   * DOM would simply always wait the maximum.
+   */
+  const QUIET_MS = 280;
+  const QUIET_MUTATIONS = 6;
+  const QUIET_TIMEOUT_MS = 2600;
+
+  function waitForQuiet(maxMs = QUIET_TIMEOUT_MS) {
+    return new Promise((resolve) => {
+      let seen = 0;
+      const observer = new MutationObserver((records) => {
+        seen += records.length;
+      });
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+
+      const startedAt = Date.now();
+      const tick = () => {
+        const busy = seen;
+        seen = 0;
+        if (busy <= QUIET_MUTATIONS || Date.now() - startedAt >= maxMs) {
+          observer.disconnect();
+          resolve();
+          return;
+        }
+        setTimeout(tick, QUIET_MS);
+      };
+      setTimeout(tick, QUIET_MS);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // The assistant's hands: running a step against the page
+  //
+  // Every step names what it wants and `findElement` goes and gets it. The
+  // events are synthesised, exactly as the virtual pointer's are, with the same
+  // limit: an untrusted click can't unlock anything gated on real user
+  // activation. That covers the site's own fullscreen button — which is why
+  // FULLSCREEN_TOGGLE stays a `command` step, handled by the worker.
+  // -------------------------------------------------------------------------
+
+  const MAX_STEPS_PER_TURN = 8;
+  /** Between steps: long enough for a menu to open under the next click. */
+  const STEP_GAP_MS = 220;
+  const MAX_WAIT_MS = 4000;
+
+  const KEY_CODES = {
+    Enter: 13,
+    Escape: 27,
+    Tab: 9,
+    Backspace: 8,
+    Delete: 46,
+    ArrowUp: 38,
+    ArrowDown: 40,
+    ArrowLeft: 37,
+    ArrowRight: 39,
+    ' ': 32
+  };
+
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  function pressKey(el, key) {
+    const target = el?.isConnected ? el : document.activeElement || document.body;
+    const keyCode = KEY_CODES[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+    const code = key === ' ' ? 'Space' : key.length === 1 ? `Key${key.toUpperCase()}` : key;
+    const init = {
+      key,
+      code,
+      keyCode,
+      which: keyCode,
+      bubbles: true,
+      cancelable: true,
+      composed: true
+    };
+
+    const live = target.dispatchEvent(new KeyboardEvent('keydown', init));
+    if (key.length === 1 || key === 'Enter') {
+      target.dispatchEvent(new KeyboardEvent('keypress', init));
+    }
+    target.dispatchEvent(new KeyboardEvent('keyup', init));
+
+    // A form that only listens for `submit` needs the nudge the browser would
+    // have given it. Only when nothing cancelled the keydown, which is the rule
+    // the browser itself follows — otherwise a page that handles Enter its own
+    // way would run the search twice.
+    if (key === 'Enter' && live && typeof target.form?.requestSubmit === 'function') {
+      target.form.requestSubmit();
+    }
+    return live;
+  }
+
+  /**
+   * Frameworks that own their inputs (React, and most of what streaming sites
+   * are built on) keep their own copy of the value and ignore a plain
+   * assignment. Going through the *prototype's* setter is what makes them
+   * notice, because it's the one their own property definition wraps.
+   */
+  function setNativeValue(el, value) {
+    if (el.isContentEditable) {
+      el.textContent = value;
+      el.dispatchEvent(
+        new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: value })
+      );
+      return;
+    }
+    const proto =
+      el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    if (setter) setter.call(el, value);
+    else el.value = value;
+
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+  }
+
+  async function clickElement(el) {
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const rect = el.getBoundingClientRect();
+    const px = clamp(rect.left + rect.width / 2, 0, window.innerWidth - 1);
+    const py = clamp(rect.top + rect.height / 2, 0, window.innerHeight - 1);
+
+    // The full sequence, not el.click(): plenty of sites open menus on
+    // mousedown and never see a bare click event at all.
+    dispatchPointer(el, ['pointerover', 'mouseover', 'pointermove', 'mousemove'], px, py);
+    dispatchPointer(el, ['pointerdown', 'mousedown'], px, py, { buttons: 1, detail: 1 });
+    if (typeof el.focus === 'function') el.focus({ preventScroll: true });
+    dispatchPointer(el, ['pointerup', 'mouseup', 'click'], px, py, { detail: 1 });
+    return describeTarget(el);
+  }
+
+  function selectOption(el, wanted) {
+    const target = String(wanted ?? '');
+    const lower = target.toLowerCase();
+    const options = Array.from(el.options || []);
+    const match =
+      options.find((option) => option.value === target) ||
+      options.find((option) => tidy(option.textContent) === target) ||
+      options.find((option) => tidy(option.textContent).toLowerCase().includes(lower));
+    if (!match) return null;
+
+    el.value = match.value;
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    return tidy(match.textContent, 60) || match.value;
+  }
+
+  function describeStep(step) {
+    const type = String(step?.type || '?');
+    const target = step?.target ? ` "${String(step.target).slice(0, 40)}"` : '';
+    const extra =
+      step?.text !== undefined
+        ? ` ${JSON.stringify(String(step.text).slice(0, 60))}`
+        : step?.value !== undefined
+          ? ` ${JSON.stringify(String(step.value).slice(0, 40))}`
+          : step?.key
+            ? ` ${step.key}`
+            : step?.direction
+              ? ` ${step.direction}`
+              : '';
+    return `${type}${target}${extra}`;
+  }
+
+  /**
+   * A miss is reported with the nearest names attached, which is the only
+   * useful thing to say: the next turn can aim at one of them instead of
+   * guessing again at the same wording that just failed.
+   */
+  function missed(step, found) {
+    const near = found.near?.length ? ` Nearest on the page: ${found.near.join(', ')}.` : '';
+    const note = found.detail ? ` (${found.detail})` : '';
+    return {
+      ok: false,
+      detail: `nothing on this page matches "${step.target}"${note}.${near}`
+    };
+  }
+
+  async function runStep(step) {
+    const type = String(step?.type || '').toLowerCase();
+    const needsTarget = type === 'click' || type === 'type' || type === 'select' || type === 'focus';
+
+    let found = null;
+    if (needsTarget) {
+      found = findElement(step.target, {
+        // What the step is about narrows the field enormously: "the search box"
+        // is ambiguous across a page, and obvious among the things you can type
+        // into.
+        typable: type === 'type',
+        selectable: type === 'select',
+        index: Math.max(0, (Number(step.index) || 1) - 1)
+      });
+      if (!found.ok) return missed(step, found);
+    }
+
+    const el = found?.el;
+    /** So the model learns which wording worked, and can reuse it. */
+    const via = found ? ` (matched "${found.name}" by ${found.how})` : '';
+
+    switch (type) {
+      case 'click':
+        return { ok: true, detail: `${await clickElement(el)}${via}` };
+
+      case 'focus':
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        el.focus?.({ preventScroll: true });
+        return { ok: true, detail: `${describeTarget(el)}${via}` };
+
+      case 'type': {
+        el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        el.focus?.({ preventScroll: true });
+        const text = String(step.text ?? '');
+        setNativeValue(el, text);
+        // Some suggestion boxes only wake on a key event, not on `input`. Not
+        // for a contenteditable, though: those are the one place where a page
+        // is likely to insert the character itself and end up with it twice.
+        if (text && !el.isContentEditable) pressKey(el, text.slice(-1));
+        if (step.submit) {
+          await pause(120);
+          pressKey(el, 'Enter');
+          return { ok: true, detail: `typed ${JSON.stringify(text)} and pressed Enter${via}` };
+        }
+        return { ok: true, detail: `typed ${JSON.stringify(text)}${via}` };
+      }
+
+      case 'select': {
+        const chosen = selectOption(el, step.value ?? step.text);
+        return chosen
+          ? { ok: true, detail: `chose ${JSON.stringify(chosen)}${via}` }
+          : {
+              ok: false,
+              detail:
+                `that dropdown${via} has no option matching ` +
+                `${JSON.stringify(String(step.value ?? ''))}. It offers: ` +
+                Array.from(el.options || [])
+                  .slice(0, 15)
+                  .map((option) => tidy(option.textContent, 30))
+                  .join(', ')
+            };
+      }
+
+      case 'press': {
+        const key = String(step.key || 'Enter');
+        // Whatever has focus, which after a click or a `type` is the thing the
+        // assistant was just working on.
+        pressKey(null, key);
+        return { ok: true, detail: `pressed ${key}` };
+      }
+
+      // Looking, rather than doing. The escape hatch for when the digest didn't
+      // carry enough to aim with — and much cheaper than describing the page,
+      // because it only answers the question that was actually asked.
+      case 'find': {
+        const names = listElements(step.target, 25);
+        return names.length
+          ? { ok: true, detail: `matching "${step.target}": ${names.join(', ')}` }
+          : { ok: false, detail: `nothing on this page matches "${step.target}"` };
+      }
+
+      case 'scroll': {
+        if (step.target) {
+          const to = findElement(step.target);
+          if (!to.ok) return missed(step, to);
+          to.el.scrollIntoView({ block: 'center', behavior: 'instant' });
+          return { ok: true, detail: `scrolled "${to.name}" into view` };
+        }
+        const direction = String(step.direction || 'down').toLowerCase();
+        if (direction === 'top') return scrollToEnd(-1, 'instant');
+        if (direction === 'bottom') return scrollToEnd(1, 'instant');
+        return scrollPage(direction === 'up' ? -1 : 1, 0.8, 'instant');
+      }
+
+      case 'wait':
+        await pause(clamp(Number(step.ms) || 600, 0, MAX_WAIT_MS));
+        return { ok: true, detail: 'waited' };
+
+      default:
+        return { ok: false, detail: `Jester has no step called "${type}"` };
+    }
+  }
+
+  /**
+   * Stops at the first failure on purpose: everything after it was planned
+   * against a page that didn't happen, and the assistant is about to be handed a
+   * fresh look at the page anyway.
+   */
+  async function runSteps(steps) {
+    const list = Array.isArray(steps) ? steps.slice(0, MAX_STEPS_PER_TURN) : [];
+    const results = [];
+
+    for (const step of list) {
+      let result;
+      try {
+        result = await runStep(step);
+      } catch (err) {
+        result = { ok: false, detail: String(err?.message || err) };
+      }
+      results.push({ step: describeStep(step), ok: !!result.ok, detail: result.detail || '' });
+      if (!result.ok) break;
+      await pause(STEP_GAP_MS);
+    }
+
+    // Said out loud rather than dropped quietly: a plan that looks like it all
+    // ran, and didn't, is the worst thing to hand back.
+    const dropped = (Array.isArray(steps) ? steps.length : 0) - list.length;
+    if (dropped > 0) {
+      results.push({
+        step: 'the rest',
+        ok: false,
+        detail: `${dropped} more step(s) were not run — ${MAX_STEPS_PER_TURN} is the most in one go`
+      });
+    }
+
+    return { ok: results.every((entry) => entry.ok), results };
   }
 
   // -------------------------------------------------------------------------
@@ -1193,6 +2273,19 @@
       case MSG.TOAST:
         showToast(message.action, message.result || {});
         return false;
+
+      case MSG.PAGE_DIGEST:
+        (async () => {
+          // The worker asks for this straight after acting on the page, so by
+          // default we let the page finish reacting before looking at it.
+          if (message.settle !== false) await waitForQuiet();
+          sendResponse(pageDigest());
+        })();
+        return true;
+
+      case MSG.RUN_STEPS:
+        runSteps(message.steps).then(sendResponse);
+        return true;
 
       case MSG.PROBE:
         sendResponse(describeVideo());

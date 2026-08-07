@@ -364,10 +364,28 @@ if (-not $Flat) {
   Write-Host ""
   Write-Host "Note: the Chrome Web Store needs manifest.json at the zip root." -ForegroundColor DarkGray
   Write-Host "      Build with -Flat when you are ready to publish." -ForegroundColor DarkGray
-} elseif ((Test-Path (Join-Path $Src '.env')) -and
-          (Select-String -Path (Join-Path $Src '.env') -Pattern '^\s*AI\s*=\s*[^#\s]' -Quiet)) {
+}
+
+# The key ships inside the zip either way — .env is fetched at runtime, so it has
+# to be in there. Warned about on every build rather than only on -Flat, because
+# publishing is not the only way this gets out: .gitignore covers .env itself,
+# and a zip built around it is the hole that leaves.
+if ((Test-Path (Join-Path $Src '.env')) -and
+    (Select-String -Path (Join-Path $Src '.env') -Pattern '^\s*AI\s*=\s*[^#\s]' -Quiet)) {
   Write-Host ""
   Write-Host "Warning: this zip contains .env, and .env contains an AI key." -ForegroundColor Yellow
-  Write-Host "         Anyone who downloads the extension can read it. Blank AI= before" -ForegroundColor Yellow
-  Write-Host "         publishing, or move the key behind a server you control." -ForegroundColor Yellow
+  Write-Host "         Anyone who reads the zip can read the key. Do not commit or publish" -ForegroundColor Yellow
+  Write-Host "         it as it stands - blank AI= first, or move the key behind a server" -ForegroundColor Yellow
+  Write-Host "         you control." -ForegroundColor Yellow
+
+  Push-Location $PSScriptRoot
+  $tracked = (& git ls-files --error-unmatch $Output 2>$null)
+  $isTracked = ($LASTEXITCODE -eq 0 -and $tracked)
+  Pop-Location
+  if ($isTracked) {
+    Write-Host ""
+    Write-Host "         git is tracking this zip, so committing would publish that key." -ForegroundColor Red
+    Write-Host "         .gitignore cannot help - it does not apply to tracked files. Run:" -ForegroundColor Red
+    Write-Host "           git rm --cached `"$(Split-Path -Leaf $Output)`"" -ForegroundColor Red
+  }
 }

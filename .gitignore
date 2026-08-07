@@ -3,7 +3,12 @@ jester-extension/.env
 # ...and the mirror build-zip.ps1 generates from it, for the same reason.
 jester-extension/env.txt
 
-# Build output
+# Build output. Every one of these carries .env — which carries the API key —
+# because env.js fetches it at runtime, so it has to be packed in.
+#
+# The bare name matters as much as the wildcard: it is what build-zip.cmd
+# writes by default, and the pattern below it used to miss.
+jester-extension.zip
 jester-extension-*.zip
 *.zip.building
 

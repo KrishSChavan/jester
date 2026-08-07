@@ -12,12 +12,18 @@ v2:
       through a film in fullscreen and flip between tabs while browsing.
 - scroll with the pointer pose (bound to poses and swipes today, not yet to the
   half-open hand itself)
-- [~] voice dictation for input fields / keyboard commands — a raised index
-      finger opens the mic and raises the voice pill, and Chrome's speech
-      recognition transcribes while it's up. The transcript only goes to the
-      console so far; routing it to a field or a command is what's left.
+- [x] voice commands — a raised index finger opens the mic and raises the voice
+      pill; drop it and the sentence goes to Groq with a digest of the page:
+      where you are and a few dozen names, not the HTML. It replies with steps
+      that name what they want ("click the search button") and the content
+      script finds them — exact name, then part of it, then the words in it,
+      then what the phrase usually means, then the markup, and if all of that
+      comes up empty it hands back the nearest names to aim at instead. Then it
+      looks again. The pill collapses into a spinning ball while it works and
+      opens back out around the answer. Questions are answered the same way,
+      with no actions.
 - [x] .env build flags — CURSOR toggles the virtual cursor off and out of the
-      UI entirely; AI holds the assistant key (shape-checked only, unused).
+      UI entirely; AI holds the Groq key, AI_MODEL optionally pins the model.
 
 
 v3:

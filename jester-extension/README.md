@@ -16,14 +16,15 @@ network request.
 
 ## Build flags — `.env`
 
-Two switches live in `.env`, beside `manifest.json`. It's read at runtime by
+Three switches live in `.env`, beside `manifest.json`. It's read at runtime by
 `src/common/env.js`, so there's no build step: edit it and hit **Reload** on
 `chrome://extensions`.
 
 | Flag | Effect |
 | --- | --- |
 | `CURSOR=true` \| `false` | `false` switches the [virtual cursor](#pointer) off end to end and removes it from the UI — no card in the popup, no section in the options page. The code stays in the tree; only whether it runs changes. |
-| `AI=` | API key for the assistant. Nothing is sent anywhere yet: Jester only checks it looks like a key at all and says so in the popup and the options page when it doesn't. |
+| `AI=` | Groq API key ([console.groq.com/keys](https://console.groq.com/keys)) — what powers [the assistant](#the-assistant). Blank is fine and everything else still works; Jester checks the key looks like a key and says so in the popup and options page when it doesn't. |
+| `AI_MODEL=` | Optional. A Groq model id to try first. Left blank, Jester falls through a short built-in list. Choose on the [token allowance](#fitting-inside-a-groq-minute), not on speed. |
 
 `.env` is gitignored — `.env.example` is the committed template. If no flag file
 can be read at all, every flag falls back to leaving things as they are
@@ -97,12 +98,21 @@ All seven canned poses are bound out of the box; set any of them to **Do
 nothing** to free the slot. Every binding, and every threshold below, is
 editable in the options page.
 
-One action worth knowing about is unbound by default: **Turn Jester off** stops
-the camera on a gesture. It is one-way — with the camera down nothing can
-recognise a gesture to switch it back — so switching on stays with the toolbar
-popup and the options page. The three shapes at the bottom of the table are the
-exception in the other direction: they drive a mode rather than firing an
-action, so they aren't in the bindings table at all.
+One action worth knowing about is unbound by default: **Sleep / wake Jester**.
+It is a full stop rather than an off switch — the camera stays open, but poses,
+swipes, the pointer and the microphone all stop, and the only thing that gets
+Jester back is the same gesture that put it under. That gesture is honoured
+whatever it is currently bound to, so a fullscreen change or an edit to the
+bindings table can't leave you with no way back. Switching Jester *off* outright
+stays with the toolbar popup and the options page. The three shapes at the bottom
+of the table are the exception in the other direction: they drive a mode rather
+than firing an action, so they aren't in the bindings table at all.
+
+Wherever a gesture lands, it lands on the window in front. A Chrome window that
+is unfocused, minimized, or behind another application receives nothing, and
+neither does a background tab — the cursor and the voice pill are taken off it
+as the focus moves away. Sleep is the one exception to that rule, since it acts
+on Jester and not on a page.
 
 Note the collision on ☝️. A raised index finger is measured off the landmarks
 and takes over the hand, so while the voice pill is up the model's
@@ -342,10 +352,148 @@ but Chrome ends a session on its own after a pause, so `onend` re-opens it —
 with a flood guard, because a session that dies the instant it starts is failing
 rather than finishing. Interim results are throttled and de-duplicated.
 
-Nothing consumes the transcript yet. It's printed to two consoles: the offscreen
-document's (`chrome://extensions` → Jester → **Inspect views** → `offscreen.html`),
-which is where recognition actually happens, and the page's, which is the one
-you're looking at while you talk.
+The transcript is also printed to two consoles: the offscreen document's
+(`chrome://extensions` → Jester → **Inspect views** → `offscreen.html`), which is
+where recognition actually happens, and the page's, which is the one you're
+looking at while you talk.
+
+Dropping your finger is the full stop on the sentence, and what's accumulated
+goes to the assistant below. The pending *interim* result is included, not just
+the finalised phrases: Chrome finalises about a second after you stop speaking,
+so the tail of nearly every command is still interim at the moment you drop your
+hand. In `always` mode there is no finger to drop, so a 1.5 s silence ends the
+sentence instead.
+
+## The assistant
+
+> Needs a Groq API key in `AI=`. Everything above works without one.
+
+Say *"search for Suits and play season 2 episode 3"* and Jester does it — clicks
+the search button, types into the field that appears, opens the title, picks the
+season, clicks the episode. Ask *"what's this about?"* and it just answers.
+
+The pill collapses into a spinning ball while it works, opens back out around
+the answer for a few seconds, and goes.
+
+### What Groq actually sees
+
+Not the page. The obvious design — describe everything and let the model pick —
+doesn't survive a real site: a description of a streaming front page is most of
+a free key's whole minute, and a command spends two or three turns inside that
+minute, so the thing that reads the page is also the thing that stops it
+working.
+
+So the model gets a **digest** — where it is, and a few dozen names:
+
+```
+url: https://www.netflix.com/browse
+title: Netflix
+scroll: 0 of 4210px, so there is more page than this
+you can see: Home · TV Shows · Movies · Search · Suits · Breaking Bad · …
+(212 more further down the page — scroll, or just ask for one by name)
+```
+
+That's about 150 tokens, against the 2,000–7,000 a page description costs. It
+isn't a description of the page; it's enough to know what to ask for next.
+
+### Asking for things by name
+
+The model doesn't address elements, it describes them:
+
+```json
+{"type":"click","target":"the search button"}
+```
+
+and `findElement()` in the content script goes and gets it. That inverts the
+cost: instead of sending everything on the chance some of it matters, we send
+the request and look for what it names — and looking is free.
+
+Which puts the weight on looking things up well, because a spoken description
+almost never matches a page's own wording. You say *"the search bar"*; Netflix
+calls it `data-uia="search-box-input"` with the placeholder *"Titles, people,
+genres"*. So it's a ladder of increasingly forgiving searches, tried in order,
+and each rung is a different way of asking:
+
+| | what it tries | scores |
+| --- | --- | --- |
+| 1 | the exact name | 100 |
+| 2 | the name starting with, or starting, what you asked | 82 |
+| 3 | the name containing it, or being contained by it | 74 / 66 |
+| 4 | every meaningful word of it somewhere in the name | 60 |
+| 5 | what that phrase *usually means* — a lexicon of `search`, `play`, `season`, `close`, `mute`… mapped to the selectors sites actually use | 34, +26 for shared words |
+| 6 | the words in its attributes — `class="ytp-mute-button"` answering "mute" | 36 |
+
+Whole words, not substrings, so `"ute"` matches nothing. Noise words (*the*,
+*button*, *click*, *dropdown*) are dropped from both sides, so "the search box"
+and "Search" are the same request. What's on screen scores above what you'd have
+to scroll to; a real `<button>` above a div someone made focusable; a disabled
+control below everything.
+
+**The step type narrows the field before any of that runs.** "The search box" is
+ambiguous across a page and obvious among the things you can *type into* — so a
+`type` step only ever considers those, and `select` only considers real
+`<select>` elements. That one filter does more work than any single rung.
+
+Nothing below a confidence floor is ever clicked. A miss comes back as a miss,
+with the nearest names attached:
+
+```
+2. click "season dropdown" -> FAILED: nothing on this page matches
+   "season dropdown". Nearest on the page: Seasons, Season 1, Episodes.
+```
+
+so the next turn aims at one of those. A wrong click is far more expensive to
+recover from than being told to look again. `find` does the same lookup without
+acting, for when the digest didn't carry enough to aim with, and `index` picks
+the nth match — which is how "the third episode" works.
+
+### The loop
+
+One turn is: look, ask, act. Not a plan up front — the season dropdown doesn't
+exist yet when the sentence arrives, and neither does the search field. Each
+turn the model is told what its last actions did *and which name each one
+matched*, so it learns what this page calls things. A slow page, a different
+layout or an *"are you still watching?"* interstitial is just the next turn
+rather than a plan that has quietly fallen apart.
+
+Six turns, up to eight steps each. `src/background/assistant.js` holds the loop
+and knows nothing about Chrome; `src/background/service-worker.js` supplies the
+half that does.
+
+Steps are `click`, `type`, `press`, `select`, `scroll`, `find` and `wait`, plus
+`command`, which runs one of Jester's own actions (`PAUSE`, `SEEK_FORWARD`,
+`FULLSCREEN_TOGGLE`, `TAB_NEXT`…). That last one exists because some things a
+click can't reach: the player may be in an iframe the content script can't see
+into, and fullscreen needs the worker's window-level route since a synthesised
+click carries no user activation.
+
+Only the newest digest goes in the conversation, and only the last exchange —
+older turns describe a page that no longer exists.
+
+### Fitting inside a Groq minute
+
+The limit that bites on a free key is **tokens per minute**, not requests:
+
+| model | tokens/min (free) | turns per minute |
+| --- | --- | --- |
+| `llama-3.3-70b-versatile` | 12,000 | ~13 |
+| `llama-3.1-8b-instant` | 6,000 | ~6 |
+
+A turn is around 900 tokens, nearly all of it the system prompt — which is why
+the digest is the shape it is. Sending the page instead put a turn at 3,000–8,000
+tokens, and a single Netflix-sized description could exceed a whole minute's
+allowance on the first request.
+
+Groq returns the real allowance for your key in `x-ratelimit-limit-tokens` on
+every response; the worker logs it next to the size of each look at the page, so
+`/offscreen` isn't the only place to find out what's going on.
+
+A 429 is waited out, not surfaced: Groq says how long in `retry-after` and it's
+usually a couple of seconds. A *daily* cap is surfaced immediately, because
+waiting two seconds won't help.
+
+`AI_MODEL` pins a model. Left blank, Jester falls through a short list, so a
+model being retired shows up as a slower first turn rather than a dead feature.
 
 ## Supported sites
 
@@ -423,14 +571,18 @@ src/
   common/constants.js                 settings schema, action list, message types
   common/env.js                       .env reader, flag + API-key validation
   background/service-worker.js        offscreen lifecycle, target tab resolution,
-                                      action dispatch, HUD / cursor / voice relays
+                                      action dispatch, HUD / cursor / voice relays,
+                                      and the Chrome half of the assistant
+  background/assistant.js             the Groq loop: page in, steps out. No chrome.*
   offscreen/offscreen.js              camera + inference + gesture state machine,
                                       pointer shapes + cursor smoothing,
-                                      the index-finger shape behind the pill
+                                      the index-finger shape behind the pill,
+                                      and the utterance the pill hands over
   offscreen/voice.js                  microphone: band levels + speech recognition
   content/content.js                  video discovery, action execution, on-page HUD,
                                       the virtual cursor and its synthetic events,
-                                      the voice pill
+                                      the voice pill and its three faces,
+                                      the element finder and the step runner
   content/page-bridge.js              Netflix player API bridge (main world)
   popup/                              toolbar popup: preview, status, history
   options/                            all settings, gesture bindings, camera setup
@@ -487,6 +639,15 @@ on; hand down, released. Set **Settings → Voice → Show the pill** to **Never
 and the microphone is never opened at all. Choosing **Always** means it stays
 live for as long as Jester is running.
 
+**The assistant is the second exception**, and only if you've set a key. When a
+sentence finishes, it goes to Groq along with [the digest](#what-groq-actually-sees)
+— the address, the title, and a few dozen names of things on the page. Not the
+HTML, and not the page's text: matching a description to an element happens on
+your machine, so what leaves it is a list of labels. The value of a password
+field is never read at all, and neither is anything marked as a one-time code or
+a card number. Nothing is sent between sentences — there is no background
+chatter, and with `AI=` blank nothing is sent at all.
+
 ## Updating the bundled MediaPipe assets
 
 ```bash
@@ -521,6 +682,8 @@ half.
 | Pill never appears, popup says something else | The shape isn't reading. Open the popup (which switches on the shape log) and read the offscreen document's console: it prints which of the three tests is failing and by how much. Usually it's the other three fingers not being curled far enough in. |
 | Pill appears, bars never move | The popup shows the microphone problem under the status line. Most often access was never granted: **Settings → Voice → Allow microphone access**, then **Restart** in the popup. |
 | No transcript in the console | Two consoles carry it — the page's, and the offscreen document's under **Inspect views**. If neither shows anything, check the popup for a microphone error; recognition is a network service, so it also needs a working connection. |
+| Pill says Groq is rate-limiting the key | The per-minute *token* budget, not a request count. A turn is ~900 tokens, so a free key should manage six of them a minute — if this is constant, something else is spending the allowance, or `AI_MODEL` is on `llama-3.1-8b-instant`, which has half the budget of `llama-3.3-70b-versatile`. The worker console logs what's left after every turn. |
+| It says a control isn't on the page, and it is | The description didn't match. The worker console shows what it looked for and the nearest names it found — say it the way the page says it, or ask it to `find` first. Genuinely unnamed controls are matched on their markup, which is a last resort and does miss. |
 | ☝️ stopped skipping ads | Expected: a raised index finger now takes over the hand for the voice pill. Set **Settings → Voice → Show the pill** to **Never** to get the pose back. |
 | No Pointer section in Settings | `CURSOR=false` in `.env`. That's the flag doing its job — set it to `true` and reload the extension. |
 | Editing `.env` changes nothing | Check the line under **Settings → AI assistant**. If it says the flags came from `env.txt`, Chrome won't serve the dotfile here, so re-run `build-zip.ps1` to refresh the mirror before reloading. |

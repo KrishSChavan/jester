@@ -9,6 +9,7 @@
 
 import { ACTIONS, MSG, ENGINE, loadSettings, mergeSettings, post } from '../common/constants.js';
 import { loadEnv } from '../common/env.js';
+import { runAssistant, rateLimits, spentModels } from './assistant.js';
 
 const OFFSCREEN_URL = 'src/offscreen/offscreen.html';
 const TARGET_CACHE_MS = 1500;
@@ -134,6 +135,7 @@ const BADGE = {
   [ENGINE.STARTING]: { text: '···', color: '#f59e0b' },
   [ENGINE.RUNNING]: { text: '●', color: '#22c55e' },
   [ENGINE.SUSPENDED]: { text: '❙❙', color: '#64748b' },
+  [ENGINE.SLEEPING]: { text: 'Zz', color: '#64748b' },
   [ENGINE.NO_PERMISSION]: { text: '!', color: '#ef4444' },
   [ENGINE.ERROR]: { text: '!', color: '#ef4444' }
 };
@@ -147,9 +149,10 @@ function setStatus(status) {
 }
 
 /**
- * The one path that flips the master switch, whether it came from the popup
- * toggle or from a gesture bound to `DISABLE`. Writing to storage is what
- * actually drives it: the change listener pushes the new settings to the
+ * The one path that flips the master switch. Only the popup and the options page
+ * reach it — no gesture does, because the gesture people want for "stop" is
+ * `SLEEP`, which the engine handles itself and can undo. Writing to storage is
+ * what actually drives it: the change listener pushes the new settings to the
  * offscreen document and re-runs `syncEngine()`.
  */
 async function setEnabled(enabled) {
@@ -159,6 +162,75 @@ async function setEnabled(enabled) {
   if (enabled) setStatus({ state: ENGINE.STARTING, detail: '' });
   await syncEngine();
   return { ok: true, detail: enabled ? 'Jester on' : 'Camera stopped' };
+}
+
+// ---------------------------------------------------------------------------
+// What's in front
+//
+// Every gesture is aimed at whatever the user is actually looking at, so all of
+// it funnels through `frontTab()`. `chrome.tabs.query({ lastFocusedWindow })` is
+// deliberately not that question: "last focused" still answers with a window
+// while the user is away in another application, or has minimized the very
+// window it names. A window Jester can't see is a window Jester doesn't touch,
+// so every caller reads `null` as "there is nothing to act on" and stops there.
+// ---------------------------------------------------------------------------
+
+/**
+ * The window with the OS focus, or `WINDOW_ID_NONE` when Chrome is behind
+ * something else entirely.
+ *
+ * Event-driven rather than polled: `onFocusChanged` lands the moment the user
+ * alt-tabs away, and any cache short enough to catch that on its own would mean
+ * re-querying on every cursor frame. `null` means this worker has been revived
+ * since the last event and has to go and ask.
+ */
+let focusedWindowId = null;
+
+/** Long enough to keep the ~20/s cursor path cheap, short enough to feel instant. */
+const FRONT_CACHE_MS = 400;
+let frontTabCache = null;
+let frontTabCacheAt = 0;
+
+async function readFocus() {
+  try {
+    const win = await chrome.windows.getLastFocused();
+    // `getLastFocused` answers even when Chrome has no focus at all — the flag
+    // on what it returns is the only part that says which of the two it is.
+    return win?.focused ? win.id : chrome.windows.WINDOW_ID_NONE;
+  } catch {
+    return chrome.windows.WINDOW_ID_NONE;
+  }
+}
+
+/**
+ * The active tab of the focused, on-screen window.
+ *
+ * @returns null whenever Jester should be keeping its hands to itself: Chrome is
+ *          in the background, the window that has the focus is minimized, or
+ *          what's focused is a devtools window with no page in it.
+ */
+async function frontTab() {
+  const now = Date.now();
+  if (frontTabCacheAt && now - frontTabCacheAt < FRONT_CACHE_MS) return frontTabCache;
+
+  if (focusedWindowId === null) focusedWindowId = await readFocus();
+
+  let tab = null;
+  if (focusedWindowId !== chrome.windows.WINDOW_ID_NONE) {
+    const win = await chrome.windows.get(focusedWindowId).catch(() => null);
+    if (win && win.state !== 'minimized' && win.type !== 'devtools') {
+      [tab] = await chrome.tabs.query({ active: true, windowId: win.id });
+    }
+  }
+
+  frontTabCache = tab || null;
+  frontTabCacheAt = now;
+  return frontTabCache;
+}
+
+function invalidateFront() {
+  frontTabCache = null;
+  frontTabCacheAt = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +252,7 @@ function rememberFrame(tabId, frameId, info) {
     hasVideo: true,
     playing: !!info.playing,
     area: info.area || 0,
-    updatedAt: Date.now(),
-    playingAt: info.playing ? Date.now() : videoFrames.get(key)?.playingAt || 0
+    updatedAt: Date.now()
   });
 }
 
@@ -223,12 +294,23 @@ async function probeTab(tabId) {
   }
 }
 
+/**
+ * Frames within the tab in front, and nowhere else.
+ *
+ * There used to be a fallback here to whatever video played most recently in
+ * any tab, so a gesture could pause a film two tabs over. That is exactly the
+ * case the front-window rule exists to stop: a background tab is as out of view
+ * as a background window, and an action landing somewhere the user can't see it
+ * is indistinguishable from one that didn't work.
+ */
 async function resolveTarget({ allowProbe = true } = {}) {
   const now = Date.now();
-  if (cachedTarget && now - cachedTargetAt < TARGET_CACHE_MS) return cachedTarget;
+  // The timestamp, not the target — a *miss* is worth caching too, or a page
+  // with no player would be re-probed on every call.
+  if (cachedTargetAt && now - cachedTargetAt < TARGET_CACHE_MS) return cachedTarget;
 
   let target = null;
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tab = await frontTab();
 
   if (tab && injectable(tab.url)) {
     target = bestFrameInTab(tab.id);
@@ -236,16 +318,6 @@ async function resolveTarget({ allowProbe = true } = {}) {
       await probeTab(tab.id);
       target = bestFrameInTab(tab.id);
     }
-  }
-
-  if (!target) {
-    // Nothing in the focused tab — fall back to whatever played most recently.
-    let best = null;
-    for (const frame of videoFrames.values()) {
-      const rank = frame.playingAt || frame.updatedAt;
-      if (!best || rank > best.rank) best = { ...frame, rank };
-    }
-    target = best;
   }
 
   cachedTarget = target;
@@ -284,8 +356,10 @@ async function pageTarget() {
 let viewContext = null;
 
 async function computeContext() {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab) return 'windowed';
+  const tab = await frontTab();
+  // Nothing in front means nothing is going to fire, so leave the engine reading
+  // the set it already has rather than churning it to a guess and back.
+  if (!tab) return viewContext || 'windowed';
   if (tabContext.get(tab.id) === 'fullscreen') return 'fullscreen';
   const win = await chrome.windows.get(tab.windowId).catch(() => null);
   return win?.state === 'fullscreen' ? 'fullscreen' : 'windowed';
@@ -447,7 +521,7 @@ async function trueFullscreen(tabId, url) {
  * video on it.
  */
 async function toggleWindowFullscreen(action) {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tab = await frontTab();
   const win = tab ? await chrome.windows.get(tab.windowId).catch(() => null) : null;
   if (!win) return { ok: false, detail: 'No window in front' };
 
@@ -541,15 +615,16 @@ function tabName(tab) {
   return title ? title.slice(0, 40) : 'Tab';
 }
 
-/** Anything that changes which tab is in front invalidates both caches. */
+/** Anything that changes what's in front invalidates every cache below it. */
 function invalidateActiveTab() {
+  invalidateFront();
   invalidateTarget();
   invalidateTopFrame();
 }
 
 async function performBrowserAction(action) {
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tab) return { ok: false, detail: 'No active tab' };
+  const tab = await frontTab();
+  if (!tab) return { ok: false, detail: 'Nothing in front' };
 
   switch (action) {
     case 'TAB_NEXT':
@@ -654,18 +729,30 @@ async function announce(action, result) {
     .catch(() => undefined);
 }
 
+/** @returns the `{ ok, detail }` the action produced — the assistant reads it. */
 async function dispatchAction(action, meta) {
-  if (!action || action === 'NONE') return;
+  if (!action || action === 'NONE') return { ok: false, detail: 'No action' };
   const scope = ACTIONS[action]?.scope || 'video';
 
   if (scope === 'system') {
-    // Toast first: once the engine is down this is the only thing that tells
-    // you the gesture landed rather than the camera having simply dropped out.
-    await announce(action, { ok: true, detail: 'Camera stopped' });
-    const result = await setEnabled(false);
-    await recordAction({ ...meta, action, ok: result.ok, detail: result.detail });
-    return;
+    // Sleep is about Jester, not about a window, so it is the one thing that
+    // still works with Chrome in the background — and the engine has already
+    // flipped by the time this arrives. All that's left here is to say so.
+    const { sleeping, hint, ...entry } = meta || {};
+    const result = {
+      ok: true,
+      detail: sleeping ? `Asleep — ${hint || 'the same gesture'} to wake` : 'Awake'
+    };
+    await announce(action, result);
+    await recordAction({ ...entry, action, ...result });
+    return result;
   }
+
+  // Everything below lands on a page, a tab or a window, and Jester only ever
+  // acts on the one the user is actually looking at. Nothing in front, nothing
+  // to do — and deliberately no history entry either: a repeatable pose held at
+  // a backgrounded Chrome would fill the whole list with the same non-event.
+  if (!(await frontTab())) return { ok: false, detail: 'Nothing in front' };
 
   if (scope === 'window') {
     const result = await toggleFullscreen(action);
@@ -674,7 +761,7 @@ async function dispatchAction(action, meta) {
     // report only covers tabs Jester runs on.
     await refreshContext();
     await recordAction({ ...meta, action, ok: !!result.ok, detail: result.detail || '' });
-    return;
+    return result;
   }
 
   if (scope === 'browser') {
@@ -683,7 +770,7 @@ async function dispatchAction(action, meta) {
     await refreshContext();
     await announce(action, result);
     await recordAction({ ...meta, action, ok: !!result.ok, detail: result.detail || '' });
-    return;
+    return result;
   }
 
   const settings = await getSettings();
@@ -692,13 +779,12 @@ async function dispatchAction(action, meta) {
   const target = scope === 'page' ? await pageTarget() : await resolveTarget();
 
   if (!target) {
-    recordAction({
-      ...meta,
-      action,
+    const result = {
       ok: false,
       detail: scope === 'page' ? 'No page to act on' : 'No video tab found'
-    });
-    return;
+    };
+    recordAction({ ...meta, action, ...result });
+    return result;
   }
 
   const result = await sendToFrame(target, {
@@ -717,6 +803,7 @@ async function dispatchAction(action, meta) {
     invalidateTarget();
   }
   recordAction({ ...meta, action, ok: !!result?.ok, detail: result?.detail || '' });
+  return result || { ok: false, detail: 'No response from the page' };
 }
 
 async function recordAction(entry) {
@@ -736,31 +823,37 @@ async function recordAction(entry) {
 // lookup is cached hard and stale frames are dropped rather than queued.
 // ---------------------------------------------------------------------------
 
-const TOP_FRAME_CACHE_MS = 1000;
-
-let topFrameTab = null;
-let topFrameTabAt = 0;
-
-/** The active tab, if Jester can reach it at all. Cached hard: see above. */
+/** The tab in front, if Jester can reach it at all. @see frontTab */
 async function activeTabId() {
-  const now = Date.now();
-  if (topFrameTabAt && now - topFrameTabAt < TOP_FRAME_CACHE_MS) return topFrameTab;
-  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  topFrameTab = tab && injectable(tab.url) ? tab.id : null;
-  topFrameTabAt = now;
-  return topFrameTab;
+  const tab = await frontTab();
+  return tab && injectable(tab.url) ? tab.id : null;
 }
 
 /**
- * One send channel to the active tab's top frame, with its own in-flight and
+ * One send channel to the front tab's top frame, with its own in-flight and
  * unreachable state so a blocked cursor can't stall the pill or vice versa.
+ *
+ * @param clearMessage what wipes whatever this channel draws. Both of these
+ *        leave something on the page that outlives the message that put it
+ *        there, so moving to a different tab — or to no tab at all — has to take
+ *        it down explicitly, or a cursor stays painted over the window you just
+ *        walked away from.
  */
-function topFrameChannel() {
+function topFrameChannel(clearMessage) {
   let inFlight = false;
   /** A tab we already failed to reach; retrying every frame would be a storm. */
   let unreachable = null;
   /** Did the last attempt land? Optimistic until something proves otherwise. */
   let delivered = true;
+  /** The tab this channel has something drawn on, or null. */
+  let owner = null;
+
+  function retire() {
+    const tabId = owner;
+    owner = null;
+    if (tabId === null) return;
+    chrome.tabs.sendMessage(tabId, clearMessage, { frameId: 0 }).catch(() => undefined);
+  }
 
   return {
     /** False once the page in front has refused us. @see relayVoice */
@@ -771,11 +864,16 @@ function topFrameChannel() {
       unreachable = null;
       delivered = true;
     },
+    retire,
     /** @param droppable frames the next one supersedes anyway. */
     async send(message, droppable) {
       if (inFlight && droppable) return;
 
       const tabId = await activeTabId();
+      // Includes the case that matters most: a tab id of null, because Chrome
+      // has gone behind something. Whatever we drew goes with the focus.
+      if (tabId !== owner) retire();
+
       // A restricted page — chrome://, the Web Store — has no tab id we can use.
       if (tabId === null || tabId === unreachable) {
         delivered = false;
@@ -786,6 +884,7 @@ function topFrameChannel() {
       try {
         await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
         delivered = true;
+        owner = tabId;
       } catch {
         // No content script in that frame yet — inject and retry once.
         try {
@@ -795,6 +894,7 @@ function topFrameChannel() {
           });
           await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
           delivered = true;
+          owner = tabId;
         } catch {
           // Restricted page, or Jester has no host permission for this site.
           // Stop trying until the tab changes or the user switches away and back.
@@ -808,14 +908,25 @@ function topFrameChannel() {
   };
 }
 
-const cursorChannel = topFrameChannel();
-const voiceChannel = topFrameChannel();
+const cursorChannel = topFrameChannel({ type: MSG.CURSOR, cursor: { active: false } });
+const voiceChannel = topFrameChannel({ type: MSG.VOICE, voice: { active: false } });
 
 function invalidateTopFrame() {
-  topFrameTab = null;
-  topFrameTabAt = 0;
   cursorChannel.forget();
   voiceChannel.forget();
+}
+
+/**
+ * Take the cursor and the pill down wherever they are.
+ *
+ * `send()` already retires a tab it has moved off, but only while frames are
+ * still arriving. Losing the focus mid-gesture is exactly when they might not
+ * be — the hand drops on the way to the other application — so the two events
+ * that mean "you're looking at something else now" clear it outright.
+ */
+function retireOverlays() {
+  cursorChannel.retire();
+  voiceChannel.retire();
 }
 
 async function relayCursor(cursor) {
@@ -835,7 +946,55 @@ async function relayCursor(cursor) {
  */
 let voiceBlocked = false;
 
+/**
+ * Gets a playing video out of the way of the microphone.
+ *
+ * Raising a finger to talk over a film means competing with it: the dialogue is
+ * what the recogniser hears, and the answer arrives over the top of a scene you
+ * are still watching. So the pill going up pauses what's playing.
+ *
+ * Only what is actually playing, and checked rather than assumed — `videoFrames`
+ * is fed by debounced reports and can be a beat behind, and pausing a video that
+ * the user had already paused is a change they didn't ask for. Deliberately not
+ * un-paused afterwards: what happens next is usually the whole point of having
+ * spoken, and second-guessing that is how you end up fighting the user's own
+ * hands.
+ */
+async function pauseForListening() {
+  // Only when the pill is a gesture. In `always` mode it goes up because Jester
+  // started, not because anybody asked for it, and pausing the film someone had
+  // running would be Jester acting entirely on its own.
+  const settings = await getSettings();
+  if (settings.voicePillMode !== 'pointer-finger') return;
+
+  const target = await resolveTarget();
+  if (!target) return;
+
+  let info;
+  try {
+    info = await chrome.tabs.sendMessage(target.tabId, { type: MSG.PROBE }, { frameId: target.frameId });
+  } catch {
+    return; // the frame went away between the probe and now
+  }
+  if (!info?.hasVideo || !info.playing) return;
+
+  await dispatchAction('PAUSE', { source: 'voice' });
+}
+
 async function relayVoice(voice) {
+  // The opening frame of a session is the index finger going up. @see offscreen.
+  if (voice.start) pauseForListening().catch(() => undefined);
+
+  // While the assistant has the pill the engine's frames are not just
+  // unwelcome, they're wrong: in `always` mode the microphone never stops, and
+  // a level frame arriving mid-run would paint the bars back over the spinner
+  // 25 times a second. The one exception is the opening frame of a *new*
+  // sentence, which is the user interrupting — that ends the run.
+  if (assistantRun || Date.now() < pillHeldUntil) {
+    if (!voice.start) return;
+    cancelAssistant();
+  }
+
   // The pill going away, and anything carrying words, must never be dropped.
   // Level frames can: the next one supersedes them.
   await voiceChannel.send({ type: MSG.VOICE, voice }, voice.active && !voice.transcript);
@@ -844,6 +1003,230 @@ async function relayVoice(voice) {
   if (blocked === voiceBlocked) return;
   voiceBlocked = blocked;
   post({ type: MSG.VOICE_BLOCKED, blocked });
+}
+
+// ---------------------------------------------------------------------------
+// The assistant
+//
+// The pill changes hands here. Up to the moment you stop talking it belongs to
+// the engine, which drives the bars off the microphone; from then until the run
+// finishes it belongs to this, which turns it into a spinner and finally into
+// whatever there is to say. `relayVoice` above is the seam.
+//
+// The loop itself is in assistant.js, which knows nothing about Chrome. This is
+// the half that does: reading the page in front, running steps on it, and
+// keeping the pill honest across a navigation that destroys it.
+// ---------------------------------------------------------------------------
+
+/** How long an answer sits on screen. Kept in step with VOICE_ANSWER_MS in the content script. */
+const ANSWER_MS = 4500;
+/**
+ * What a failure gets on top of that. Enough for a second read: a red pill is
+ * usually a sentence about what to do next — which model ran out, what to say
+ * instead, that "keep going" will carry on — and four seconds is comfortable
+ * for "Done." and short for anything you have to act on.
+ *
+ * Kept in step with VOICE_ERROR_EXTRA_MS in the content script.
+ */
+const ANSWER_ERROR_EXTRA_MS = 3000;
+
+/** The run in flight, or null. Holds the pill, and can be cancelled. */
+let assistantRun = null;
+/** Engine frames are ignored until this passes, so an answer isn't painted over. */
+let pillHeldUntil = 0;
+
+/**
+ * The last run that stopped with work still in it, so "keep going" can pick it
+ * up rather than making the user say the whole sentence again.
+ *
+ * Held here rather than in the assistant because it is a fact about this
+ * browser — which tab, how long ago — and the assistant is deliberately the
+ * half that knows nothing about Chrome.
+ */
+let pendingResume = null;
+/** A plan older than this is about a page that has since moved on. */
+const RESUME_TTL_MS = 300000;
+
+/** Said to carry on, rather than to ask for something new. */
+const CONTINUE = /^(keep (going|at it)|carry on|continu\w*|go on|finish (it|that|up)|resume|and then)\b[\s.!?]*$/i;
+
+/**
+ * @returns the state to resume from, or null if this is a new request.
+ *          Same tab only: "keep going" said at a different page means something
+ *          the stored plan has no bearing on.
+ */
+function continuation(command, tabId) {
+  if (!pendingResume) return null;
+  if (!CONTINUE.test(command)) return null;
+  if (pendingResume.tabId !== tabId || Date.now() - pendingResume.at > RESUME_TTL_MS) {
+    pendingResume = null;
+    return null;
+  }
+  return pendingResume;
+}
+
+/**
+ * Addressed at a tab rather than going through `voiceChannel`, which always
+ * aims at whatever is in front. A run is pinned to the page it was spoken to,
+ * and if the user wanders off to another tab while it works, the spinner and
+ * the answer belong back where the work is — not floating over something else.
+ */
+function setPill(tabId, voice) {
+  // Held for exactly as long as the content script will show it, or an engine
+  // frame lands in the gap and paints the bars over an answer still on screen.
+  pillHeldUntil =
+    voice.phase === 'answer'
+      ? Date.now() + ANSWER_MS + (voice.ok === false ? ANSWER_ERROR_EXTRA_MS : 0)
+      : 0;
+  if (tabId === null) return Promise.resolve();
+  return sendToFrame({ tabId, frameId: 0 }, { type: MSG.VOICE, voice });
+}
+
+function cancelAssistant() {
+  pillHeldUntil = 0;
+  if (!assistantRun) return;
+  const run = assistantRun;
+  assistantRun = null;
+  run.abort();
+}
+
+/**
+ * Deliberately *not* through `sendToFrame`: its inject-and-retry is exactly
+ * wrong here. A click that navigates tears down the content script with the
+ * reply still in it, and retrying would run the whole batch a second time
+ * against the page that replaced it. A lost reply means the page turned, which
+ * is the step having worked — the next look at the page says what it did.
+ */
+async function assistantAct(tabId, steps) {
+  try {
+    const result = await chrome.tabs.sendMessage(tabId, { type: MSG.RUN_STEPS, steps }, { frameId: 0 });
+    if (result?.results) return result;
+    return { results: [{ step: 'run', ok: false, detail: 'the page did not answer' }] };
+  } catch {
+    return { results: [], navigated: true };
+  }
+}
+
+/**
+ * Roughly where the assistant is — a few dozen names, not the page. The finding
+ * happens in the content script, where the elements are.
+ */
+async function assistantDigest(tabId) {
+  const digest = await sendToFrame({ tabId, frameId: 0 }, { type: MSG.PAGE_DIGEST });
+  if (digest?.ok) {
+    const { tokens, remaining } = rateLimits();
+    const out = spentModels();
+    console.log(
+      `[jester] where: ${digest.count} things to aim at, ${digest.text.length} chars sent` +
+        (tokens ? ` · ${remaining}/${tokens} tokens left this minute` : '') +
+        (out.length ? ` · out for the day: ${out.join(', ')}` : '')
+    );
+    return digest;
+  }
+  return {
+    ok: false,
+    detail:
+      'Jester can’t read this page. It runs on the streaming sites listed in its manifest — ' +
+      'tick “Also run on every other site” in Settings to use it anywhere.'
+  };
+}
+
+async function handleVoiceCommand(text) {
+  const command = String(text || '').trim();
+  if (!command) return;
+
+  // A second sentence supersedes the first: whatever the last one was doing,
+  // the user has moved on and is talking about something else.
+  cancelAssistant();
+
+  const tabId = await activeTabId();
+
+  // "keep going" is the previous sentence continued, not a new one. Anything
+  // else is a new one, and retires whatever was left over.
+  const resume = continuation(command, tabId);
+
+  // Asked to carry on with nothing to carry on with. Worth its own answer: run
+  // as a request it would send Jester hunting the page for a button called
+  // "keep going", which is a strange thing to watch happen.
+  if (!resume && CONTINUE.test(command)) {
+    const say = 'There’s nothing to carry on with — say what you’d like.';
+    await setPill(tabId, { phase: 'answer', text: say, ok: false });
+    await recordAction({ source: 'voice', action: 'ASSISTANT', label: `🗣 “${command.slice(0, 48)}”`, ok: false, detail: say });
+    return;
+  }
+
+  if (!resume) pendingResume = null;
+
+  const controller = new AbortController();
+  const run = { abort: () => controller.abort() };
+  assistantRun = run;
+
+  await setPill(tabId, { phase: 'thinking' });
+
+  let result;
+  try {
+    const env = await loadEnv();
+    if (!env.aiOk) {
+      result = { ok: false, say: env.aiMessage };
+    } else if (tabId === null) {
+      result = { ok: false, say: 'Jester can’t reach the page in front — try a normal web page.' };
+    } else {
+      result = await runAssistant({
+        text: command,
+        resume,
+        env,
+        signal: controller.signal,
+        host: {
+          digest: () => assistantDigest(tabId),
+          act: (steps) => assistantAct(tabId, steps),
+          // Both of these reach out and change something the user can see, and
+          // an abort does not unpark the await a cancelled run is sitting in —
+          // `assistantAct` is a plain sendMessage that runs to completion, and a
+          // batch carrying a `wait` step can hold a dead run for seconds. By the
+          // time it comes back the pill belongs to the sentence that replaced
+          // it, so the seam is where ownership has to be checked: `signal` says
+          // the run was cancelled, `assistantRun` says who the pill is for now.
+          command: (action) =>
+            assistantRun === run
+              ? dispatchAction(action, { source: 'voice' })
+              : Promise.resolve({ ok: false, detail: 'cancelled' }),
+          thinking: (step) => {
+            if (assistantRun !== run) return Promise.resolve();
+            return setPill(tabId, { phase: 'thinking', step: step || '' });
+          }
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[jester] assistant failed', err);
+    result = { ok: false, say: String(err?.message || err) };
+  }
+
+  // Cancelled, or overtaken by a newer sentence — either way the pill is
+  // somebody else's now and this run has nothing left to say on it.
+  if (assistantRun !== run) return;
+  assistantRun = null;
+
+  // Stopped with work left in it: keep the plan and the trail where "keep going"
+  // can find them. Only a run that *finished* clears the slot — a failure that
+  // produced no handle of its own (the page wasn't readable, the key was
+  // rejected) has said nothing about the plan, and clearing on it would mean a
+  // "keep going" that arrived a second too early threw away what it came for.
+  pendingResume = result.resume
+    ? { ...result.resume, tabId, at: Date.now() }
+    : result.ok
+      ? null
+      : pendingResume;
+
+  const say = result.say || (result.ok ? 'Done.' : 'Sorry — that didn’t work.');
+  await setPill(tabId, { phase: 'answer', text: say, ok: result.ok });
+  await recordAction({
+    source: 'voice',
+    action: 'ASSISTANT',
+    label: `🗣 “${(resume ? resume.goal : command).slice(0, 48)}”${resume ? ' (continued)' : ''}`,
+    ok: !!result.ok,
+    detail: say
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -920,7 +1303,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       dispatchAction(message.action, {
         source: message.source,
         gesture: message.gesture,
-        context: message.context
+        context: message.context,
+        // Only on SLEEP, which the engine has already applied to itself.
+        sleeping: message.sleeping,
+        hint: message.hint
       }).catch((err) => console.error('[jester] dispatch failed', err));
       return false;
 
@@ -934,6 +1320,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case MSG.VOICE:
       relayVoice(message.voice || {}).catch(() => undefined);
+      return false;
+
+    case MSG.VOICE_COMMAND:
+      handleVoiceCommand(message.text).catch((err) =>
+        console.error('[jester] voice command failed', err)
+      );
       return false;
 
     case MSG.CURSOR_CLICK:
@@ -1052,8 +1444,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 chrome.tabs.onActivated.addListener(() => {
-  invalidateTarget();
-  invalidateTopFrame();
+  invalidateActiveTab();
+  retireOverlays();
   updateSuspendState();
   refreshContext();
 });
@@ -1063,8 +1455,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     if (videoFrames.get(key).tabId === tabId) videoFrames.delete(key);
   }
   tabContext.delete(tabId);
-  invalidateTarget();
-  invalidateTopFrame();
+  invalidateActiveTab();
   updateSuspendState();
   refreshContext();
 });
@@ -1077,23 +1468,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // A navigation drops any fullscreen the old page was in, and the new page
   // re-reports as soon as its content script comes up.
   tabContext.delete(tabId);
-  invalidateTarget();
+  // A reload can bring the content script with it, so give the tab another go.
+  invalidateActiveTab();
   updateSuspendState();
   refreshContext();
-  // A reload can bring the content script with it, so give the tab another go.
-  invalidateTopFrame();
 });
 
-chrome.windows.onFocusChanged.addListener(() => {
-  invalidateTarget();
-  invalidateTopFrame();
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  // `WINDOW_ID_NONE` here is the whole point of the front-window rule: the user
+  // has left Chrome for another application, and from now until they come back
+  // there is nothing Jester is allowed to touch.
+  focusedWindowId = windowId;
+  invalidateActiveTab();
+  retireOverlays();
   updateSuspendState();
   refreshContext();
 });
 
 // Catches F11 on a page Jester doesn't run on, which has no content script to
-// report for itself. Chrome commits a state change as a bounds change.
-chrome.windows.onBoundsChanged.addListener(() => refreshContext());
+// report for itself, and a window being minimized out from under us. Chrome
+// commits a state change as a bounds change.
+chrome.windows.onBoundsChanged.addListener(() => {
+  invalidateActiveTab();
+  refreshContext();
+});
 
 chrome.windows.onRemoved.addListener((windowId) => restoreWindowState.delete(windowId));
 

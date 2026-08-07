@@ -11,6 +11,7 @@ import {
   MSG,
   ENGINE,
   GESTURES,
+  SWIPES,
   bindingsFor,
   swipeBindingsFor,
   mergeSettings,
@@ -95,7 +96,20 @@ const POINT_SEPARATION = [0.32, 0.22]; // and how far apart those two readings s
 const POINT_ARM_MS = 220; // hold the shape this long before the pill appears
 const POINT_RELEASE_MS = 400; // shape may drop out this long without ending
 
+/**
+ * How long the room has to stay quiet before an utterance counts as finished in
+ * `always` mode.
+ *
+ * Only used there. With the finger, *dropping it* is the full stop — an
+ * unmistakable one, and worth far more than any silence heuristic, because it
+ * lets you think mid-sentence without the assistant running off with half a
+ * command.
+ */
+const UTTERANCE_SILENCE_MS = 1500;
+
 const GESTURE_LABELS = Object.fromEntries(GESTURES.map((g) => [g.id, g.label]));
+const GESTURE_GLYPHS = Object.fromEntries(GESTURES.map((g) => [g.id, g.glyph]));
+const SWIPE_LABELS = Object.fromEntries(SWIPES.map((s) => [s.id, s.label]));
 
 const videoEl = document.getElementById('camera');
 const previewCanvas = document.getElementById('preview');
@@ -172,6 +186,17 @@ let lastShapeLogAt = 0;
 
 let micStatus = { state: MIC.IDLE, detail: '' };
 
+/**
+ * What Jester was put to sleep with — `{ source, gesture }`, so
+ * `{ source: 'pose', gesture: 'Closed_Fist' }` or
+ * `{ source: 'swipe', gesture: 'left' }` — or null while it is awake.
+ *
+ * Lives here rather than in the service worker because this is the half that
+ * has to keep matching against it, frame by frame, and because a worker that
+ * gets evicted mid-nap must not be able to lose it. @see ACTIONS.SLEEP
+ */
+let sleeper = null;
+
 // ---------------------------------------------------------------------------
 // Status reporting
 // ---------------------------------------------------------------------------
@@ -179,6 +204,25 @@ let micStatus = { state: MIC.IDLE, detail: '' };
 function report(state, detail = '') {
   lastStatus = { state, detail };
   post({ type: MSG.ENGINE_STATUS, state, detail });
+}
+
+/** What the popup and the badge should be showing for a live engine. */
+function liveState() {
+  if (sleeper) return ENGINE.SLEEPING;
+  return suspended ? ENGINE.SUSPENDED : ENGINE.RUNNING;
+}
+
+/** How to describe the way out, for the status line and the on-page toast. */
+function wakeHint() {
+  if (!sleeper) return '';
+  if (sleeper.source === 'swipe') return SWIPE_LABELS[sleeper.gesture] || `swipe ${sleeper.gesture}`;
+  const label = GESTURE_LABELS[sleeper.gesture] || sleeper.gesture;
+  const glyph = GESTURE_GLYPHS[sleeper.gesture];
+  return glyph ? `${glyph} ${label}` : label;
+}
+
+function stateDetail() {
+  return sleeper ? `Asleep — ${wakeHint()} to wake` : `${activeDelegate} delegate`;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +384,7 @@ async function start() {
   // Again now that `running` is true: `always` mode wants the pill up from the
   // moment the engine is, without waiting for a hand to appear.
   syncVoice();
-  report(suspended ? ENGINE.SUSPENDED : ENGINE.RUNNING, `${activeDelegate} delegate`);
+  report(liveState(), stateDetail());
   scheduleTick(0);
 }
 
@@ -354,6 +398,10 @@ function stop(nextState = ENGINE.OFF, detail = '') {
     stream = null;
   }
   videoEl.srcObject = null;
+  // Switching Jester off is a deliberate reset, so it wakes. Restarting to pick
+  // up a new camera or delegate is not, and must not quietly undo a nap the user
+  // put Jester into — they'd have no idea why it started acting again.
+  if (nextState === ENGINE.OFF) sleeper = null;
   resetRecognitionState();
   report(nextState, detail);
 }
@@ -421,9 +469,10 @@ function step(now) {
   }
 
   const hand = readHand(lastResult);
-  const view = processHand(now, hand);
+  const view = maskWhileAsleep(processHand(now, hand));
   emitTelemetry(now, view);
   keepPillAlive(now);
+  checkUtteranceSilence(now);
   logShape(now, hand);
   drawPreview(now, hand, view);
 }
@@ -553,7 +602,81 @@ function detectSwipe(now) {
 
 function fire(action, source, gesture) {
   if (!action || action === 'NONE') return;
+  // Jester's own state, and this is the half that owns it — flip it here rather
+  // than sending it on a round trip the worker would only have to send back.
+  if (action === 'SLEEP') {
+    toggleSleep(source, gesture);
+    return;
+  }
   post({ type: MSG.TRIGGER, action, source, gesture, context: viewContext });
+}
+
+// ---------------------------------------------------------------------------
+// Sleep — everything stops except the one gesture that undoes it
+// ---------------------------------------------------------------------------
+
+function toggleSleep(source, gesture) {
+  const napping = !sleeper;
+  sleeper = napping ? { source, gesture } : null;
+
+  if (napping) {
+    // Let go of everything a sleeping Jester has no business still holding: the
+    // cursor drawn on the page, and the microphone — leaving that open would
+    // keep the OS recording indicator lit for a pill that answers to nothing.
+    endPointer();
+    ptr.poseSince = 0;
+    ptr.lastPoseAt = 0;
+    endIndexPoint();
+  }
+  syncVoice();
+  report(liveState(), stateDetail());
+
+  // Sent even though nothing is going to act on it: the worker owns the toast
+  // and the history entry, and this is the only way it hears that this happened.
+  post({
+    type: MSG.TRIGGER,
+    action: 'SLEEP',
+    source,
+    gesture,
+    context: viewContext,
+    sleeping: napping,
+    hint: wakeHint()
+  });
+}
+
+/**
+ * The binding a pose resolves to.
+ *
+ * Asleep, the answer is `SLEEP` for the one gesture that put Jester under and
+ * nothing at all for everything else — deliberately whatever that pose is
+ * *currently* bound to. Entering or leaving fullscreen swaps the whole binding
+ * set, and a way back that a window change could unbind isn't a way back.
+ */
+function poseBinding(name) {
+  if (!sleeper) return bindingsFor(settings, viewContext)[name] || { action: 'NONE', repeat: false };
+  return sleeper.source === 'pose' && sleeper.gesture === name
+    ? { action: 'SLEEP', repeat: false }
+    : { action: 'NONE', repeat: false };
+}
+
+/** @see poseBinding */
+function swipeAction(direction) {
+  if (!sleeper) return swipeBindingsFor(settings, viewContext)[direction];
+  return sleeper.source === 'swipe' && sleeper.gesture === direction ? 'SLEEP' : 'NONE';
+}
+
+/**
+ * What the HUD and the popup are told about this frame.
+ *
+ * Asleep, everything but the way out is masked off, so a hand that isn't holding
+ * the wake gesture reads as no hand at all. Otherwise the on-page pill would
+ * nod along at every passing gesture that a sleeping Jester is never going to
+ * act on, which is precisely the wrong thing for it to say.
+ */
+function maskWhileAsleep(view) {
+  if (!sleeper) return view;
+  const waking = sleeper.source === 'pose' && view.gesture === sleeper.gesture;
+  return waking ? view : { ...view, gesture: null, progress: 0, handPresent: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -714,8 +837,9 @@ function pinchThresholds() {
 function updatePointer(now, hand) {
   // `features.cursor` is the .env kill switch: off, and the shape is never even
   // measured, so nothing downstream can see a pointer that shouldn't exist.
+  // `sleeper` does the same for the length of a nap.
   const reading =
-    hand && features.cursor && settings.pointerEnabled
+    hand && !sleeper && features.cursor && settings.pointerEnabled
       ? pointerReading(hand.landmarks, settings.pointerTolerance, ptr.active)
       : null;
 
@@ -838,8 +962,8 @@ function endIndexPoint() {
  */
 function updateIndexPoint(now, hand) {
   // `always` keeps the pill up regardless, so there is nothing to detect; `off`
-  // means the shape is never measured at all.
-  const wanted = settings.voicePillMode === 'pointer-finger';
+  // means the shape is never measured at all. Asleep, neither does.
+  const wanted = !sleeper && settings.voicePillMode === 'pointer-finger';
   const reading = wanted && hand ? indexPointReading(hand.landmarks, point.active) : null;
   lastPointReading = reading;
   const posed = !!reading?.posed;
@@ -875,6 +999,54 @@ function updateIndexPoint(now, hand) {
 let voicePillUp = false;
 let lastVoiceAt = 0;
 
+/**
+ * The sentence being built, across however many recognition sessions Chrome
+ * decides to split it into.
+ *
+ * `interim` is not a nicety. Chrome finalises a phrase about a second after you
+ * stop saying it, and the pill comes down the moment your finger does — so the
+ * tail of nearly every command is still interim when we're asked for it. Kept
+ * separately from `finals` because the *next* final supersedes it.
+ */
+const utterance = { finals: [], interim: '', lastAt: 0 };
+
+function resetUtterance() {
+  utterance.finals.length = 0;
+  utterance.interim = '';
+  utterance.lastAt = 0;
+}
+
+/**
+ * Everything heard this session, and it's now the caller's.
+ *
+ * @param finalsOnly leaves a phrase Chrome hasn't finalised yet in the buffer,
+ *        where it belongs to the next sentence. Only right when nobody has said
+ *        they're finished — see `submitUtterance`.
+ */
+function takeUtterance(finalsOnly) {
+  const parts = finalsOnly ? utterance.finals : [...utterance.finals, utterance.interim];
+  const text = parts.join(' ').replace(/\s+/g, ' ').trim();
+  utterance.finals.length = 0;
+  if (!finalsOnly) utterance.interim = '';
+  utterance.lastAt = 0;
+  return text;
+}
+
+/**
+ * Hands a finished sentence to the service worker, which owns the assistant —
+ * and the pill from here on, so it can turn into the spinner without a frame of
+ * nothing in between.
+ *
+ * @returns whether there was anything to send.
+ */
+function submitUtterance(finalsOnly = false) {
+  const text = takeUtterance(finalsOnly);
+  if (!text) return false;
+  console.log(`[jester] voice command: ${text}`);
+  post({ type: MSG.VOICE_COMMAND, text });
+  return true;
+}
+
 const voice = createVoice({
   onLevels: (levels) => {
     lastVoiceAt = performance.now();
@@ -884,8 +1056,14 @@ const voice = createVoice({
     });
   },
   onTranscript: ({ text, final }) => {
-    // Nothing consumes this yet — printing it is the whole feature for now.
     console.log(`[jester] voice${final ? '' : ' (interim)'}: ${text}`);
+    if (final) {
+      utterance.finals.push(text);
+      utterance.interim = '';
+    } else {
+      utterance.interim = text;
+    }
+    utterance.lastAt = performance.now();
     // No `active` field: a transcript says nothing about whether the pill should
     // be up, and it must not disturb the bars on its way to the page console.
     post({ type: MSG.VOICE, voice: { transcript: { text, final } } });
@@ -900,7 +1078,9 @@ const voice = createVoice({
 
 /** Whether the pill should be on screen right now — and the microphone with it. */
 function voiceWanted() {
-  if (!settings || !running || suspended) return false;
+  // Asleep counts the same as suspended here: the microphone goes with the pill,
+  // and a sleeping Jester has nothing to listen for.
+  if (!settings || !running || suspended || sleeper) return false;
   switch (settings.voicePillMode) {
     case 'off':
       return false;
@@ -926,19 +1106,54 @@ function syncVoice() {
   voicePillUp = wanted;
 
   if (wanted) {
+    resetUtterance();
     voice.start();
     // Show it immediately rather than on the first level frame — opening a
     // microphone takes a moment and the pill shouldn't lag your finger.
+    //
+    // `start` marks this as the opening frame of a session, which is the one
+    // thing allowed to take the pill back off the assistant. @see relayVoice.
     post({
       type: MSG.VOICE,
-      voice: { active: true, levels: [0, 0, 0, 0, 0], position: settings.voicePillPosition }
+      voice: {
+        active: true,
+        start: true,
+        levels: [0, 0, 0, 0, 0],
+        position: settings.voicePillPosition
+      }
     });
     lastVoiceAt = performance.now();
     return;
   }
 
   voice.stop();
+  // Dropping your finger is the full stop on the sentence. If there was one,
+  // the worker takes the pill from here — sending `active: false` as well would
+  // blink it off screen on its way into the spinner.
+  //
+  // Only while the engine is still up, though: a pill that came down because
+  // Jester was switched off, or suspended, is not someone finishing a sentence,
+  // and running whatever they had half-said would be a nasty surprise.
+  if (running && !suspended && submitUtterance()) return;
+  resetUtterance();
   post({ type: MSG.VOICE, voice: { active: false } });
+}
+
+/**
+ * The `always`-mode full stop.
+ *
+ * There is no finger to drop, so the sentence ends when the talking does. Runs
+ * off the frame loop rather than a timer of its own — it only has to be roughly
+ * right, and this way it can't outlive a stopped engine.
+ */
+function checkUtteranceSilence(now) {
+  if (!voicePillUp || settings?.voicePillMode !== 'always') return;
+  if (!utterance.lastAt || now - utterance.lastAt < UTTERANCE_SILENCE_MS) return;
+  // Finalised phrases only. A phrase Chrome is still chewing on would be sent
+  // now *and* again as a final a moment later — the same command twice, which
+  // with the finger can't happen because dropping it ends the session outright.
+  if (!utterance.finals.length) return;
+  submitUtterance(true);
 }
 
 function processHand(now, hand) {
@@ -1007,14 +1222,17 @@ function processHand(now, hand) {
   while (rec.trail.length && now - rec.trail[0].t > TRAIL_MS) rec.trail.shift();
 
   // --- swipes win over poses: they're deliberate and short-lived ---
-  if (settings.swipeEnabled && now - rec.lastActionAt >= settings.cooldownMs) {
+  // A nap entered with a swipe keeps swipe detection alive whatever the setting
+  // now says, for the same reason the wake gesture ignores the bindings: turning
+  // swipes off while Jester is under must not be a way to strand it there.
+  if ((settings.swipeEnabled || sleeper?.source === 'swipe') && now - rec.lastActionAt >= settings.cooldownMs) {
     const direction = detectSwipe(now);
     if (direction) {
       rec.trail.length = 0;
       rec.lastActionAt = now;
       rec.candidate = null;
       rec.fired = false;
-      fire(swipeBindingsFor(settings, viewContext)[direction], 'swipe', direction);
+      fire(swipeAction(direction), 'swipe', direction);
       return { gesture: null, score: 0, progress: 0, handPresent: true, swipe: direction };
     }
   }
@@ -1064,7 +1282,7 @@ function processHand(now, hand) {
     return { gesture: name, score: hand.score, progress: 0, handPresent: true };
   }
 
-  const binding = bindingsFor(settings, viewContext)[name] || { action: 'NONE', repeat: false };
+  const binding = poseBinding(name);
   const held = now - rec.candidateSince;
   const progress = clamp(held / Math.max(1, settings.holdMs), 0, 1);
 
@@ -1098,11 +1316,21 @@ function emitTelemetry(now, view) {
   if (!settings.showHud && now > previewWantedUntil) return;
   if (now - lastTelemetryAt < TELEMETRY_INTERVAL_MS) return;
   lastTelemetryAt = now;
+  // Asleep, the only pose that survives the mask is the way out, so the label
+  // says what holding it is going to do rather than naming the shape.
+  const label = view.gesture
+    ? sleeper
+      ? 'Hold to wake Jester'
+      : GESTURE_LABELS[view.gesture] || view.gesture
+    : null;
+
   post({
     type: MSG.TELEMETRY,
     telemetry: {
       gesture: view.gesture,
-      label: view.gesture ? GESTURE_LABELS[view.gesture] || view.gesture : null,
+      label,
+      sleeping: !!sleeper,
+      wake: wakeHint(),
       score: view.score,
       progress: view.progress,
       handPresent: view.handPresent,
@@ -1274,7 +1502,7 @@ chrome.runtime.onMessage.addListener((message) => {
     case MSG.ENGINE_CONFIG:
       if (typeof message.suspend === 'boolean' && message.suspend !== suspended) {
         suspended = message.suspend;
-        if (running) report(suspended ? ENGINE.SUSPENDED : ENGINE.RUNNING, `${activeDelegate} delegate`);
+        if (running) report(liveState(), stateDetail());
         // A suspended engine stops reading frames, so it must also let go of the
         // microphone — leaving it open would keep the OS indicator lit for a
         // pill that has stopped responding to anything.

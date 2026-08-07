@@ -87,9 +87,20 @@ export const ACTIONS = {
   TAB_REOPEN: { label: 'Reopen closed tab', repeatable: false, scope: 'browser', group: 'Tabs & windows' },
   WINDOW_NEXT: { label: 'Next window', repeatable: false, scope: 'browser', group: 'Tabs & windows' },
 
-  // One-way by nature: it stops the camera, so no gesture can undo it. Switching
-  // back on has to come from the popup or the options page.
-  DISABLE: { label: 'Turn Jester off', repeatable: false, scope: 'system', group: 'Jester' }
+  /**
+   * Not an off switch — a full stop that the *same* gesture lifts.
+   *
+   * Asleep, the camera stays open and the frame loop keeps running, because the
+   * only thing that can wake Jester is seeing the pose or swipe that put it
+   * under. Nothing else is looked at: no other binding fires, the pointer never
+   * arms, and the microphone is released. From the page's side that is
+   * indistinguishable from being switched off, with the one difference that
+   * matters — you can get back out of it with your hands.
+   *
+   * The way back deliberately ignores the bindings while it's in force, so a
+   * fullscreen change (which swaps the whole set) can't strand you.
+   */
+  SLEEP: { label: 'Sleep / wake Jester', repeatable: false, scope: 'system', group: 'Jester' }
 };
 
 /**
@@ -174,11 +185,19 @@ export const MSG = {
   // offscreen -> service worker -> content script: the voice pill's visibility,
   // its five band levels (~25/s while up), and any transcript that lands.
   VOICE: 'jester/voice',
+  // offscreen -> service worker: a finished utterance. The pill has come down
+  // (or the talking has stopped in `always` mode) and these are the words the
+  // assistant should act on.
+  VOICE_COMMAND: 'jester/voice-command',
   // service worker -> popup: the pill is up but the page in front can't be
   // reached, so there is nothing to draw it on. Silent otherwise — you'd be left
   // holding a gesture that the popup says is working, at a page that never
   // responds.
   VOICE_BLOCKED: 'jester/voice-blocked',
+  // service worker <-> content script: the assistant's two halves — roughly
+  // where am I, and go and do this. @see src/background/assistant.js
+  PAGE_DIGEST: 'jester/page-digest',
+  RUN_STEPS: 'jester/run-steps',
   // service worker <-> content script
   DO_ACTION: 'jester/do-action',
   PROBE: 'jester/probe',
@@ -239,6 +258,8 @@ export const ENGINE = {
   STARTING: 'starting',
   RUNNING: 'running',
   SUSPENDED: 'suspended',
+  // Watching for exactly one gesture — the one that put it here. @see ACTIONS.SLEEP
+  SLEEPING: 'sleeping',
   NO_PERMISSION: 'no-permission',
   ERROR: 'error'
 };
@@ -388,19 +409,52 @@ export async function loadSettings() {
   return mergeSettings(settings);
 }
 
+/**
+ * Actions that have been renamed, and what they became.
+ *
+ * `DISABLE` stopped the camera outright, which left no gesture able to undo it.
+ * `SLEEP` is the same idea with a way back, so anyone who had bound it keeps the
+ * gesture they picked for "stop reacting to me" rather than finding it silently
+ * unbound after an update.
+ */
+const RENAMED_ACTIONS = { DISABLE: 'SLEEP' };
+
+const renameAction = (action) => RENAMED_ACTIONS[action] || action;
+
 export function mergeSettings(stored) {
   const merged = { ...DEFAULT_SETTINGS, ...(stored || {}) };
-  merged.bindings = { ...DEFAULT_SETTINGS.bindings, ...(stored?.bindings || {}) };
-  merged.swipeBindings = { ...DEFAULT_SETTINGS.swipeBindings, ...(stored?.swipeBindings || {}) };
-  merged.windowedBindings = {
+  merged.bindings = migratePoseBindings({ ...DEFAULT_SETTINGS.bindings, ...(stored?.bindings || {}) });
+  merged.swipeBindings = migrateSwipeBindings({
+    ...DEFAULT_SETTINGS.swipeBindings,
+    ...(stored?.swipeBindings || {})
+  });
+  merged.windowedBindings = migratePoseBindings({
     ...DEFAULT_SETTINGS.windowedBindings,
     ...(stored?.windowedBindings || {})
-  };
-  merged.windowedSwipeBindings = {
+  });
+  merged.windowedSwipeBindings = migrateSwipeBindings({
     ...DEFAULT_SETTINGS.windowedSwipeBindings,
     ...(stored?.windowedSwipeBindings || {})
-  };
+  });
   return merged;
+}
+
+/** @see RENAMED_ACTIONS */
+function migratePoseBindings(bindings) {
+  const out = {};
+  for (const [gesture, binding] of Object.entries(bindings)) {
+    out[gesture] = { ...binding, action: renameAction(binding?.action) };
+  }
+  return out;
+}
+
+/** @see RENAMED_ACTIONS */
+function migrateSwipeBindings(bindings) {
+  const out = {};
+  for (const [direction, action] of Object.entries(bindings)) {
+    out[direction] = renameAction(action);
+  }
+  return out;
 }
 
 export async function saveSettings(patch) {

@@ -61,8 +61,10 @@
       <section class="card">
         <h2>Gestures</h2>
         <p class="small muted">Hold a pose steadily to trigger its action. Moving your hand never fires a pose — that's what swipes are for.</p>
-        <p class="small muted"><strong>Turn Jester off</strong> is one-way: it stops the camera, so no
-          gesture can switch it back on. Use the toolbar popup or the toggle at the top of this page.</p>
+        <p class="small muted"><strong>Sleep / wake Jester</strong> is a full stop, not an off switch.
+          The gesture you bind it to makes Jester ignore everything — poses, swipes, the pointer and
+          the microphone — and that same gesture, and only that one, brings it back. It keeps working
+          even if you change these bindings or go fullscreen in the meantime.</p>
         <table class="bindings" id="gestureTable">
           <thead><tr></tr></thead>
           <tbody></tbody>
@@ -181,21 +183,29 @@
           </div>
         </div>
         <p class="small muted">
-          Speech-to-text uses Chrome's own recognition service, which means the audio
-          <strong>does leave your machine</strong> while the pill is up — unlike hand
-          tracking, which never does. Nothing is done with the text yet: it's printed to
-          the console and that's all.
+          Drop your finger and the sentence goes to the assistant below, which works the
+          page for you. Speech-to-text uses Chrome's own recognition service, which means
+          the audio <strong>does leave your machine</strong> while the pill is up — unlike
+          hand tracking, which never does.
         </p>
       </section>
 
       <section class="card" id="aiSection">
         <h2>AI assistant</h2>
         <p class="small muted">
-          The key is read from <code>AI=</code> in the extension's <code>.env</code> file.
-          Nothing is sent anywhere yet — this only checks that a key is there and looks
-          like one, so a blank or mis-pasted value shows up now rather than later.
+          What understands “search for Suits and play season 2 episode 3” and then goes
+          and does it — clicking, typing and scrolling a few steps at a time, looking at
+          the page again after each. It answers questions about the page too.
+          The key is read from <code>AI=</code> in the extension's <code>.env</code> file;
+          this only checks that a key is there and looks like one, so a blank or
+          mis-pasted value shows up now rather than the first time you talk to a page.
         </p>
         <div class="row"><i class="dot" id="aiDot"></i><span id="aiText">Checking…</span></div>
+        <p class="small muted">
+          When it runs, the sentence and a <em>description</em> of the page — the text on
+          it and the things you could click — go to Groq. Not the page's HTML, and never
+          the contents of a password field.
+        </p>
         <p class="small muted" id="envSource"></p>
       </section>
 

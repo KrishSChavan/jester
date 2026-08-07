@@ -407,7 +407,8 @@ function paintAiKey() {
   }
   dot.className = `dot ${env.aiOk ? 'running' : 'starting'}`;
   text.textContent = env.aiOk
-    ? 'A key is set. It hasn’t been used for anything yet, so it isn’t verified.'
+    ? `A key is set${env.aiModel ? `, and AI_MODEL pins it to ${env.aiModel}` : ''}. Whether Groq accepts it is only ` +
+      'settled by the first thing you say to a page.'
     : env.aiMessage;
 }
 

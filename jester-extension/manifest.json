@@ -29,7 +29,9 @@
     "*://*.crunchyroll.com/*",
     "*://*.twitch.tv/*",
     "*://*.vimeo.com/*",
-    "*://tv.apple.com/*"
+    "*://tv.apple.com/*",
+
+    "https://api.groq.com/*"
   ],
 
   "optional_host_permissions": ["*://*/*"],
