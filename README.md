@@ -85,11 +85,13 @@ at — no other binding fires, the pointer never arms, the microphone is release
 one gesture works regardless of what it happens to be bound to at the time, so
 changing bindings or going fullscreen mid-nap can't strand you.
 
-Jester only ever acts on the window you are actually looking at. If Chrome is
-behind another application, minimized, or the tab is in the background, gestures
-are still recognised but nothing lands — and the cursor and voice pill come off
-the page you left. Sleep is the one exception to that rule, because it acts on
-Jester rather than on a page.
+Out of the box Jester only acts on the window you are actually looking at. If
+Chrome is behind another application, minimized, or the tab is in the background,
+gestures are still recognised but nothing lands — and the cursor and voice pill
+come off the page you left. Sleep is the exception, because it acts on Jester
+rather than on a page. Tick **Let gestures act on the last tab I used, even when
+it's out of view** in the options page and the rest land too; the cursor and the
+pill never do, since both are aimed by eye.
 
 ## Pointer
 

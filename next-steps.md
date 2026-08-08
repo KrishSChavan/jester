@@ -24,6 +24,11 @@ v2:
       with no actions.
 - [x] .env build flags — CURSOR toggles the virtual cursor off and out of the
       UI entirely; AI holds the Groq key, AI_MODEL optionally pins the model.
+- [x] out-of-view tabs — gestures land only on the window in front by default;
+      "Let gestures act on the last tab I used, even when it's out of view"
+      hands them back for the film-on-the-other-monitor case. The cursor and the
+      voice pill stay with the visible tab either way, since both are aimed by
+      eye.
 
 
 v3:

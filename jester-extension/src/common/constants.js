@@ -216,7 +216,9 @@ export const MSG = {
   // content script -> service worker: "this tab is / isn't being shown". Chrome's
   // occlusion tracking is what makes this worth having — a window buried under
   // another one still reports itself focused to the windows API, and this is the
-  // only reading that notices. @see frontTab
+  // only reading that notices. Still worth sending when `actWhenOutOfView` is on
+  // and actions ignore it: the cursor and the pill don't, and the worker's cache
+  // has to be dropped either way. @see frontTab
   VIEW_VISIBILITY: 'jester/view-visibility'
 };
 
@@ -329,6 +331,21 @@ export const DEFAULT_SETTINGS = {
 
   // --- power ---
   pauseWhenNoVideo: false,
+
+  // --- where actions land ---
+
+  /**
+   * Off by default, because an action you can't see is indistinguishable from
+   * one that didn't fire: left off, a gesture aimed at a Chrome that is behind
+   * another application, minimized or covered over does nothing at all, and you
+   * find out by looking at the window rather than by wondering.
+   *
+   * On, that same gesture lands on the last tab you were using — which is the
+   * whole point when a film is playing on the other monitor and you only want to
+   * pause it. Actions follow this setting; the cursor and the voice pill never
+   * do, because both are aimed by eye. @see frontTab
+   */
+  actWhenOutOfView: false,
 
   /**
    * Off by default: one set of bindings everywhere is the behaviour people

@@ -173,10 +173,18 @@ async function setEnabled(enabled) {
 // while the user is away in another application, or has minimized the very
 // window it names. A window Jester can't see is a window Jester doesn't touch,
 // so every caller reads `null` as "there is nothing to act on" and stops there.
+//
+// That rule is the default rather than the law, because the case it gets wrong
+// is a real one: a film playing on the other monitor that you only want to
+// pause. `actWhenOutOfView` hands those gestures back, and the split is drawn
+// between the two readers below — `frontTab()` obeys the setting, `visibleTab()`
+// never does. Anything you aim by eye reads the second one, so a cursor is never
+// steered across a page you can't see and a pinch never clicks it blind.
 // ---------------------------------------------------------------------------
 
 /** Long enough to keep the ~20/s cursor path cheap, short enough to feel instant. */
 const FRONT_CACHE_MS = 300;
+/** The last `{ tab, outOfView }` reading. Only ever read when the stamp is set. */
 let frontTabCache = null;
 let frontTabCacheAt = 0;
 
@@ -192,11 +200,14 @@ let frontTabCacheAt = 0;
  */
 const hiddenTabs = new Set();
 
-/** Whether the front tab last flipped to nothing, so the log stays quiet. */
+/** Whether there was last a visible tab in front, so the log stays quiet. */
 let hadFront = null;
 
+/** One read in flight, shared by everything that asks while it lands. */
+let frontViewPending = null;
+
 /**
- * The active tab of the focused, on-screen window.
+ * The active tab of the last-focused window, and whether the user can see it.
  *
  * Chrome is asked outright every time this refreshes rather than the answer
  * being kept up to date from `chrome.windows.onFocusChanged`. That event is not
@@ -207,48 +218,86 @@ let hadFront = null;
  * reports the live state of the window, so it can only be wrong for as long as
  * the cache above.
  *
- * @returns null whenever Jester should be keeping its hands to itself: Chrome is
- *          behind another application, the focused window is minimized or
- *          covered over, or what's focused is a devtools window with no page.
+ * The reading is kept whole and the *decision* left to the two callers below,
+ * so that flipping `actWhenOutOfView` takes effect on the next gesture rather
+ * than whenever the cache happens to lapse.
  */
-let frontTabPending = null;
-
-async function frontTab() {
+async function frontView() {
   const now = Date.now();
   if (frontTabCacheAt && now - frontTabCacheAt < FRONT_CACHE_MS) return frontTabCache;
 
   // Callers arrive in bursts — the cursor relay, a toast and the HUD can all ask
   // inside the same tick. Share one read, or the first to arrive hands the rest
   // the very answer it is in the middle of replacing.
-  if (!frontTabPending) {
-    frontTabPending = readFrontTab().then((tab) => {
-      frontTabPending = null;
-      frontTabCache = tab;
+  if (!frontViewPending) {
+    frontViewPending = readFrontView().then((view) => {
+      frontViewPending = null;
+      frontTabCache = view;
       frontTabCacheAt = Date.now();
-      const has = !!tab;
+      const has = !!view.tab && !view.outOfView;
       if (has !== hadFront) {
         hadFront = has;
-        console.log(`[jester] in front: ${has ? tab.title?.slice(0, 40) || 'a tab' : 'nothing'}`);
+        console.log(`[jester] in front: ${has ? view.tab.title?.slice(0, 40) || 'a tab' : 'nothing'}`);
       }
-      return tab;
+      return view;
     });
   }
-  return frontTabPending;
+  return frontViewPending;
 }
 
-/** Never rejects: "couldn't tell" and "nothing there" are the same answer here. */
-async function readFrontTab() {
+/**
+ * Never rejects: "couldn't tell" and "nothing there" are the same answer here.
+ *
+ * @returns `{ tab, outOfView }`. A null `tab` is the case no setting can rescue —
+ *          there is no page there to act on at all. `outOfView` is the judgement
+ *          `actWhenOutOfView` overrides: a tab that exists, behind something.
+ */
+async function readFrontView() {
   const win = await chrome.windows.getLastFocused().catch(() => null);
+  if (!win) return { tab: null, outOfView: true };
 
-  // The whole rule, in one flag. `getLastFocused` answers with the window the
-  // user was last in whether or not Chrome has the focus now, and this is the
-  // only part of its answer that says which of the two it is.
-  if (!win?.focused) return null;
-  if (win.state === 'minimized' || win.type === 'devtools') return null;
+  // A devtools window is excluded whatever the setting says — it isn't a page
+  // that happens to be out of view, it's no page at all.
+  if (win.type === 'devtools') return { tab: null, outOfView: true };
 
   const [tab] = await chrome.tabs.query({ active: true, windowId: win.id }).catch(() => []);
-  if (!tab || hiddenTabs.has(tab.id)) return null;
-  return tab;
+  if (!tab) return { tab: null, outOfView: true };
+
+  // The whole rule, in three readings. `getLastFocused` answers with the window
+  // the user was last in whether or not Chrome has the focus now, and `focused`
+  // is the only part of its answer that says which of the two it is; `hiddenTabs`
+  // is the page's own account of itself, and catches the window that is covered
+  // over while still holding the focus on paper.
+  const outOfView = !win.focused || win.state === 'minimized' || hiddenTabs.has(tab.id);
+  return { tab, outOfView };
+}
+
+/**
+ * The tab a gesture should act on.
+ *
+ * @returns null whenever Jester should be keeping its hands to itself: there is
+ *          no page in the last-focused window, or — unless the user has asked
+ *          otherwise — that window is behind another application, minimized or
+ *          covered over.
+ */
+async function frontTab() {
+  const { tab, outOfView } = await frontView();
+  if (!tab) return null;
+  if (!outOfView) return tab;
+  return (await getSettings()).actWhenOutOfView ? tab : null;
+}
+
+/**
+ * The tab the user is actually looking at, whatever the settings say.
+ *
+ * What the cursor and the voice pill draw onto. Both are instruments you aim by
+ * eye rather than actions that land somewhere and announce themselves, so
+ * neither has any business on a page you can't see — a cursor there can't be
+ * steered, and a pinch would click whatever it happened to be resting on.
+ */
+async function visibleTab() {
+  const { tab, outOfView } = await frontView();
+  return outOfView ? null : tab;
 }
 
 function invalidateFront() {
@@ -378,9 +427,12 @@ async function pageTarget() {
 let viewContext = null;
 
 async function computeContext() {
+  // `frontTab()` rather than `visibleTab()`: with `actWhenOutOfView` on, the tab
+  // a pose is about to land on is the one whose binding set the engine must be
+  // reading, whether or not the user can see it.
   const tab = await frontTab();
-  // Nothing in front means nothing is going to fire, so leave the engine reading
-  // the set it already has rather than churning it to a guess and back.
+  // Nothing to act on means nothing is going to fire, so leave the engine
+  // reading the set it already has rather than churning it to a guess and back.
   if (!tab) return viewContext || 'windowed';
   if (tabContext.get(tab.id) === 'fullscreen') return 'fullscreen';
   const win = await chrome.windows.get(tab.windowId).catch(() => null);
@@ -770,10 +822,11 @@ async function dispatchAction(action, meta) {
     return result;
   }
 
-  // Everything below lands on a page, a tab or a window, and Jester only ever
-  // acts on the one the user is actually looking at. Nothing in front, nothing
-  // to do — and deliberately no history entry either: a repeatable pose held at
-  // a backgrounded Chrome would fill the whole list with the same non-event.
+  // Everything below lands on a page, a tab or a window, and by default Jester
+  // only acts on the one the user is actually looking at. Nothing in front,
+  // nothing to do — and deliberately no history entry either: a repeatable pose
+  // held at a backgrounded Chrome would fill the whole list with the same
+  // non-event. `actWhenOutOfView` is what turns that case back into an action.
   if (!(await frontTab())) return { ok: false, detail: 'Nothing in front' };
 
   if (scope === 'window') {
@@ -845,9 +898,21 @@ async function recordAction(entry) {
 // lookup is cached hard and stale frames are dropped rather than queued.
 // ---------------------------------------------------------------------------
 
-/** The tab in front, if Jester can reach it at all. @see frontTab */
+/** The tab a gesture should act on, if Jester can reach it at all. @see frontTab */
 async function activeTabId() {
   const tab = await frontTab();
+  return tab && injectable(tab.url) ? tab.id : null;
+}
+
+/**
+ * The tab the cursor and the pill may draw on. @see visibleTab
+ *
+ * Deliberately not `activeTabId()`: this is the one pair of consumers that must
+ * not follow `actWhenOutOfView`, so they ask a question that setting can't
+ * answer rather than passing a flag down through the relay.
+ */
+async function visibleTabId() {
+  const tab = await visibleTab();
   return tab && injectable(tab.url) ? tab.id : null;
 }
 
@@ -891,9 +956,11 @@ function topFrameChannel(clearMessage) {
     async send(message, droppable) {
       if (inFlight && droppable) return;
 
-      const tabId = await activeTabId();
+      const tabId = await visibleTabId();
       // Includes the case that matters most: a tab id of null, because Chrome
-      // has gone behind something. Whatever we drew goes with the focus.
+      // has gone behind something. Whatever we drew goes with the focus — and
+      // still does when `actWhenOutOfView` is letting actions through, which is
+      // why this asks `visibleTabId()` rather than `activeTabId()`.
       if (tabId !== owner) retire();
 
       // A restricted page — chrome://, the Web Store — has no tab id we can use.
@@ -945,6 +1012,9 @@ function invalidateTopFrame() {
  * still arriving. Losing the focus mid-gesture is exactly when they might not
  * be — the hand drops on the way to the other application — so the two events
  * that mean "you're looking at something else now" clear it outright.
+ *
+ * Unconditional, and stays that way under `actWhenOutOfView`: that setting is
+ * about where an action lands, and these two are not actions. @see visibleTab
  */
 function retireOverlays() {
   cursorChannel.retire();
@@ -1407,7 +1477,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // This is a page going behind or coming back, which is precisely what
         // the cached answer is about — never let it ride out its 300ms.
         invalidateActiveTab();
+        // The overlays come down whichever way `actWhenOutOfView` is set. The
+        // pill and the cursor belong to the tab you can see. @see retireOverlays
         if (!message.visible) retireOverlays();
+        // Every other invalidating listener does this, and leaving it out here
+        // is why an engine suspended under `pauseWhenNoVideo` could stay stuck
+        // that way after the tab came back into view — the one event that says
+        // so is this one.
+        updateSuspendState();
         refreshContext().catch(() => undefined);
       }
       return false;
@@ -1471,10 +1548,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const before = changes.settings.oldValue?.enabled;
   const after = changes.settings.newValue?.enabled;
   if (before !== after) syncEngine();
+  // `actWhenOutOfView` decides what the caches below hold, so a flip has to take
+  // the answers computed under the old rule with it — otherwise ticking the box
+  // and immediately holding a pose gets judged by the setting you just left.
+  invalidateActiveTab();
   // The engine owns the suspend flag and has no way to know the setting behind
   // it just changed. Without this, switching `pauseWhenNoVideo` off leaves an
   // already-suspended engine stuck until the next tab switch.
   updateSuspendState();
+  refreshContext();
 });
 
 chrome.tabs.onActivated.addListener(() => {
@@ -1512,9 +1594,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   refreshContext();
 });
 
-// Only drops the cached answer — `frontTab()` goes and asks Chrome rather than
+// Only drops the cached answer — `frontView()` goes and asks Chrome rather than
 // believing what this reports, because it is missed often enough that trusting
-// it is what let a backgrounded window keep taking gestures.
+// it is what let a backgrounded window keep taking gestures against the user's
+// wishes, back when there was no setting that made that a choice.
 chrome.windows.onFocusChanged.addListener(() => {
   invalidateActiveTab();
   retireOverlays();

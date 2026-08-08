@@ -111,8 +111,17 @@ than firing an action, so they aren't in the bindings table at all.
 Wherever a gesture lands, it lands on the window in front. A Chrome window that
 is unfocused, minimized, or behind another application receives nothing, and
 neither does a background tab — the cursor and the voice pill are taken off it
-as the focus moves away. Sleep is the one exception to that rule, since it acts
-on Jester and not on a page.
+as the focus moves away. Sleep is the exception, since it acts on Jester and not
+on a page.
+
+That is the default rather than the law. Tick **Let gestures act on the last tab
+I used, even when it's out of view** under **Settings → Tabs you're not looking
+at** and those gestures land after all, on whichever tab you were last using —
+worth having when a film is playing on the other monitor and you only want to
+pause it, at the cost of a stray pose doing something you won't see until you
+come back. The cursor and the voice pill are still taken off the page you left
+whichever way it's set: both are aimed by eye, so neither has any business on a
+window you can't see.
 
 Note the collision on ☝️. A raised index finger is measured off the landmarks
 and takes over the hand, so while the voice pill is up the model's
@@ -281,7 +290,7 @@ motion frames are dropped while a send is in flight; clicks and the closing fram
 never are. A tab that can't be reached is remembered and skipped until it
 reloads or you switch away and back.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - The cursor only exists where the content script runs, so tick **"Also run on
   every other site"** if you want it everywhere.
@@ -289,6 +298,12 @@ Two consequences worth knowing:
   the engine suspends on ordinary pages and the pointer goes with it. It ships
   off, so out of the box Jester keeps watching everywhere; untick it again and
   the engine resumes immediately rather than waiting for the next tab switch.
+- **"Let gestures act on the last tab I used, even when it's out of view"** does
+  *not* extend to the cursor, and deliberately. It resolves through
+  `visibleTabId()` rather than `activeTabId()`, so however permissive that
+  setting is, the cursor still comes off a page the moment it goes out of view —
+  a cursor you can't see is one you can't steer, and the pinch would click
+  whatever it was resting on. The voice pill follows the same rule.
 
 ## Voice
 
@@ -676,6 +691,7 @@ half.
 | Popup says "Camera access needed" | Same fix: grant it from the options page. If you previously *blocked* it, use the padlock icon in the address bar of that options tab to re-allow, then Restart. |
 | Preview is black, status "Running" | Another app holds the camera, or you picked a device that's gone. Try **Restart** in the popup. |
 | Gesture recognised but nothing happens | No target video was found. The popup footer says "no video tab" when that's the case. Reload the video tab. |
+| Nothing happens while Chrome is behind another app | Not a video problem, and not a missed gesture. By default a window that is unfocused, minimized or covered over receives nothing at all — and deliberately leaves no history entry either, so there is nothing to find in the popup afterwards, which is the giveaway. Either bring the window to the front, or tick **"Let gestures act on the last tab I used, even when it's out of view"** in the options page. |
 | Nothing works after installing | Tabs opened *before* the extension loaded have no content script. The worker re-injects on demand, but reloading the tab is the reliable fix. |
 | Actions fire twice | Cooldown is too short for your hold time, or two frames both claim a video. Raise **Cooldown**. |
 | Pill never appears, popup says "☝️ Listening" | The gesture is fine — the page is the problem. The pill is drawn by the content script, which only runs on the sites in the manifest, so on an ordinary page there is nothing there to draw it. Tick **"Also run on every other site"** and reload the tab. The popup now says so outright rather than leaving you guessing. |
