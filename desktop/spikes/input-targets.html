@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jester input check</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; margin: 16px; background: #fff; color: #111; }
+      #grid { display: grid; grid-template-columns: repeat(3, 120px); gap: 12px; margin-bottom: 16px; }
+      #grid button { height: 56px; font-size: 18px; }
+      #grid button.hit { background: #2e7d32; color: #fff; }
+      #field { width: 380px; font-size: 16px; padding: 6px; }
+      #scroller { height: 80px; width: 380px; overflow: auto; border: 1px solid #999; margin-top: 12px; }
+      #scroller div { height: 600px; background: linear-gradient(#eee, #9cf); }
+      #status { margin-top: 12px; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+    </style>
+  </head>
+  <body>
+    <div id="grid"></div>
+    <input id="field" placeholder="Jester types here" />
+    <p id="words">Double-click selects <span id="word">jester</span> here.</p>
+    <div id="scroller"><div></div></div>
+    <div id="status">Waiting for the driver…</div>
+    <script>
+      // Only clicks the OS delivers count: those are trusted, a script's aren't.
+      window.hits = [];
+      const grid = document.getElementById('grid');
+      for (let n = 1; n <= 9; n++) {
+        const button = document.createElement('button');
+        button.id = `b${n}`;
+        button.textContent = String(n);
+        button.addEventListener('click', (event) => {
+          if (!event.isTrusted) return;
+          window.hits.push(n);
+          button.classList.add('hit');
+        });
+        grid.append(button);
+      }
+      // What actually arrived, so a failed check can say why.
+      window.keys = [];
+      window.wheels = [];
+      addEventListener('keydown', (event) => {
+        const held = `${event.metaKey ? '⌘' : ''}${event.ctrlKey ? '⌃' : ''}${event.altKey ? '⌥' : ''}${event.shiftKey ? '⇧' : ''}`;
+        window.keys.push(`${held}${event.key}${event.isTrusted ? '' : ' (untrusted)'}`);
+      }, true);
+      addEventListener('wheel', (event) => {
+        window.wheels.push({ dy: Math.round(event.deltaY), mode: event.deltaMode, on: event.target.id || event.target.tagName.toLowerCase() });
+      }, { capture: true, passive: true });
+      window.rectOf = (id) => {
+        const r = document.getElementById(id).getBoundingClientRect();
+        return { x: r.left, y: r.top, w: r.width, h: r.height };
+      };
+    </script>
+  </body>
+</html>

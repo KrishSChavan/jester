@@ -1,0 +1,21 @@
+{
+  "name": "jester-desktop",
+  "productName": "Jester",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Gesture, eye/head cursor and voice control for the whole computer.",
+  "type": "module",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "node scripts/start.mjs",
+    "dev:mac": "node scripts/dev-mac.mjs",
+    "driver": "node scripts/build-driver.mjs",
+    "models": "node scripts/fetch-models.mjs vad parakeet-110m"
+  },
+  "dependencies": {
+    "sherpa-onnx-node": "1.13.8"
+  },
+  "devDependencies": {
+    "electron": "44.7.0"
+  }
+}

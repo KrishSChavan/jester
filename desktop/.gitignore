@@ -1,0 +1,6 @@
+# Speech models are tens of megabytes; scripts/fetch-models.mjs downloads them.
+models/
+# Rust build output.
+native/jester-driver/target/
+# What spikes/input-in-electron.mjs saw on this machine.
+spikes/*-report.json
