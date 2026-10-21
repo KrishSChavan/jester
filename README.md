@@ -5,8 +5,9 @@ with your eyes or head, and give multi-step voice commands such as “Play seaso
 3 episode 1 of Rick and Morty.”
 
 Camera tracking and speech recognition run on-device. Your chosen AI provider
-receives command text and compact semantic page context, never audio, camera
-frames, screenshots or raw HTML.
+receives command text and compact semantic page context, and a screenshot of the
+tab only when a task needs one and Settings allow it; never audio, camera frames
+or raw HTML. See the [privacy policy](PRIVACY.md).
 
 ## Run locally
 
@@ -64,6 +65,11 @@ does not replace the local shortcuts that reduce request usage.
 
 Run `npm test` from this repository root. Tests use mocked browser/model APIs;
 no microphone, account credentials, paid inference, or live streaming account
-is required. Windows packaging is available through `build-zip.ps1`.
+is required.
+
+`npm run zip` checks the extension and writes the Chrome Web Store upload,
+`dist/jester-extension-<version>.zip`, on any platform. On Windows,
+`build-zip.cmd -Flat` builds the same zip. [store/listing.md](store/listing.md)
+has the listing text, the Privacy practices answers and the submission steps.
 
 [Full setup, architecture, token limits and before/after example](jester-extension/README.md).
