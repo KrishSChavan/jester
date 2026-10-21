@@ -9,11 +9,9 @@
 /**
  * The canned gesture labels the MediaPipe GestureRecognizer model emits.
  *
- * The pointer shapes — a half-open hand to steer, a thumb-to-index pinch to
- * click — are deliberately *not* here: the model can't recognise either, so
- * they're measured off the raw landmarks in the offscreen document, and they
- * drive a mode rather than firing an action, so neither is bindable. See
- * `pointerReading()`.
+ * Eyes/head aim the page cursor. An open palm raises it, and closing that
+ * hand into a fist clicks. A bound gesture starts voice command capture; it
+ * stays active after the hand is lowered and finishes when speech stops.
  */
 export const GESTURES = [
   { id: 'Open_Palm', label: 'Open palm', glyph: '✋' },
@@ -100,31 +98,13 @@ export const ACTIONS = {
    * The way back deliberately ignores the bindings while it's in force, so a
    * fullscreen change (which swaps the whole set) can't strand you.
    */
+  VOICE_CAPTURE_TOGGLE: { label: 'Start / stop voice command', repeatable: false, scope: 'system', group: 'Jester' },
+  CALIBRATE_POINTER: { label: 'Calibrate the eye pointer', repeatable: false, scope: 'system', group: 'Jester' },
   SLEEP: { label: 'Sleep / wake Jester', repeatable: false, scope: 'system', group: 'Jester' }
 };
 
-/**
- * When the voice pill is on screen.
- *
- * The pill is also what says the microphone is live, so this doubles as the
- * control over when Jester is listening — `always` really does mean always.
- */
-export const VOICE_PILL_MODES = {
-  'pointer-finger': {
-    label: 'When I raise my index finger (recommended)',
-    hint:
-      'Hold up your index finger with the other fingers curled and the pill slides in, ' +
-      'listening. Drop your hand and it goes, taking the microphone with it.'
-  },
-  always: {
-    label: 'Always, while Jester is on',
-    hint: 'The pill sits on every page and the microphone stays live the whole time Jester is running.'
-  },
-  off: {
-    label: 'Never',
-    hint: 'No pill, and the microphone is never opened.'
-  }
-};
+/** Voice is activated explicitly by a bound gesture or the toolbar control. */
+export const VOICE_PILL_MODES = { gesture: { label: 'Start with a gesture', hint: 'A bound gesture starts a command. Speak, then pause to send it; repeat the gesture to finish.' } };
 
 /** Where the pill sits on the page. */
 export const VOICE_PILL_POSITIONS = {
@@ -189,6 +169,14 @@ export const MSG = {
   // (or the talking has stopped in `always` mode) and these are the words the
   // assistant should act on.
   VOICE_COMMAND: 'jester/voice-command',
+  VOICE_CONTROL: 'jester/voice-control',
+  CALIBRATION_MODE: 'jester/calibration-mode',
+  CALIBRATION_FEED: 'jester/calibration-feed',
+  CALIBRATION_SAVED: 'jester/calibration-saved',
+  CALIBRATION_MODEL: 'jester/calibration-model',
+  GET_CALIBRATION: 'jester/get-calibration',
+  CLEAR_CALIBRATION: 'jester/clear-calibration',
+  OPEN_CALIBRATION: 'jester/open-calibration',
   // service worker -> popup: the pill is up but the page in front can't be
   // reached, so there is nothing to draw it on. Silent otherwise — you'd be left
   // holding a gesture that the popup says is working, at a page that never
@@ -271,7 +259,20 @@ export const ENGINE = {
   ERROR: 'error'
 };
 
+export const POINTER_AIMS = {
+  auto: { label: 'Eyes and head (automatic)', hint: 'Look to place the cursor, then move your head to fine-tune it. Requires calibration; uses head alone at a distance.' },
+  head: { label: 'Head only', hint: 'Turn your head to aim. No calibration needed.' },
+  eyes: { label: 'Eyes only', hint: 'Look to aim. Requires calibration.' }
+};
+export const POINTER_INPUTS = {
+  voice: { label: 'Voice', hint: 'Speak a command to point or click.' },
+  'eyes-head': { label: 'Eyes / head', hint: 'Raise an open palm, aim with eyes or head, and close your hand to click.' },
+  both: { label: 'Both', hint: 'Aim with eyes or head, then click with your voice or a closing hand.' }
+};
+export const SETTINGS_VERSION = 6;
+
 export const DEFAULT_SETTINGS = {
+  settingsVersion: SETTINGS_VERSION,
   enabled: false,
 
   // --- camera ---
@@ -281,7 +282,7 @@ export const DEFAULT_SETTINGS = {
   // --- inference ---
   targetFps: 20,
   delegate: 'GPU', // 'GPU' | 'CPU' — falls back to CPU automatically on failure
-  numHands: 1,
+  numHands: 2,
   minHandDetectionConfidence: 0.5,
   minTrackingConfidence: 0.5,
 
@@ -299,22 +300,33 @@ export const DEFAULT_SETTINGS = {
   swipeMaxDurationMs: 400,
   swipeAxisRatio: 1.8, // dominant axis must beat the other by this factor
 
-  // --- pointer (virtual mouse): a half-open hand steers, a pinch clicks ---
+  // --- page cursor: eyes/head aim, open palm engages, fist clicks ---
   pointerEnabled: true,
-  pointerTolerance: 0.5, // how far from "half open" the hand may stray
-  pointerArmMs: 350, // hand must hold the shape this long before the cursor appears
-  pointerSmoothing: 0.5, // 0 = raw and twitchy, 1 = heavily damped
-  // Fraction of the camera frame mapped onto the full viewport. Deliberately
-  // most of it: a small box turns every twitch into a screen-wide jump. The
-  // last sliver at each edge is left out because a palm centred there has half
-  // the hand out of frame, where the landmarks go unreliable.
-  pointerRangeX: 0.9,
-  pointerRangeY: 0.75,
-  pointerPinchDistance: 0.35, // thumb-to-index gap that counts as touching, in palm widths
+  pointerInput: 'eyes-head',
+  pointerAim: 'auto',
+  pointerArmMs: 500,
+  pointerSmoothing: 0.5,
+  headSpeed: 1,
+  longRange: true,
 
-  // --- voice pill: an index finger raises it, and the microphone with it ---
-  voicePillMode: 'pointer-finger', // see VOICE_PILL_MODES
-  voicePillPosition: 'bottom-center', // see VOICE_PILL_POSITIONS
+  // Voice is command capture only; it never inserts dictated text into fields.
+  voiceEnabled: true,
+  voiceLanguage: 'en-US',
+  agentPermissionBoundary: 'entertainment',
+  /**
+   * Voice tasks click and type with Chrome's own mouse and keyboard through
+   * chrome.debugger, as Claude in Chrome does, so sites see trusted input. Chrome
+   * shows its debugging bar for the length of a task. Off: synthetic page events.
+   */
+  agentRealInput: true,
+  /**
+   * When the page text is not enough, the agent may look at one screenshot with
+   * numbered labels, at most three per task, never with a password or payment
+   * field visible, and only through a saved model that can read images.
+   */
+  agentScreenshots: true,
+  voicePillMode: 'gesture',
+  voicePillPosition: 'bottom-center',
 
   // --- playback ---
   seekSeconds: 10,
@@ -362,7 +374,7 @@ export const DEFAULT_SETTINGS = {
     Victory: { action: 'MUTE_TOGGLE', repeat: false },
     Thumb_Up: { action: 'VOLUME_UP', repeat: true },
     Thumb_Down: { action: 'VOLUME_DOWN', repeat: true },
-    Pointing_Up: { action: 'SKIP_AD', repeat: false },
+    Pointing_Up: { action: 'VOICE_CAPTURE_TOGGLE', repeat: false },
     ILoveYou: { action: 'FULLSCREEN_TOGGLE', repeat: false }
   },
 
@@ -389,7 +401,7 @@ export const DEFAULT_SETTINGS = {
     Victory: { action: 'MUTE_TOGGLE', repeat: false },
     Thumb_Up: { action: 'SCROLL_UP', repeat: true },
     Thumb_Down: { action: 'SCROLL_DOWN', repeat: true },
-    Pointing_Up: { action: 'PAGE_TOP', repeat: false },
+    Pointing_Up: { action: 'VOICE_CAPTURE_TOGGLE', repeat: false },
     ILoveYou: { action: 'FULLSCREEN_TOGGLE', repeat: false }
   },
 
@@ -426,6 +438,14 @@ export function swipeBindingsFor(settings, context) {
  * NOTE: not usable from the offscreen document — `chrome.storage` is undefined
  * there. It asks the service worker via `MSG.SETTINGS_REQUEST` instead.
  */
+export function resumesStandby(settings, kind, id) {
+  if (kind === 'swipe' && !settings.swipeEnabled) return false;
+  return Object.keys(CONTEXTS).some((context) => kind === 'swipe' ? swipeBindingsFor(settings, context)[id] === 'SLEEP' : bindingsFor(settings, context)[id]?.action === 'SLEEP');
+}
+export function resumeGlyphs(settings) {
+  return [...GESTURES.filter((g) => resumesStandby(settings, 'pose', g.id)), ...SWIPES.filter((g) => resumesStandby(settings, 'swipe', g.id))].map((g) => g.glyph).join(' or ');
+}
+
 export async function loadSettings() {
   const { settings } = await chrome.storage.local.get('settings');
   return mergeSettings(settings);
@@ -439,7 +459,7 @@ export async function loadSettings() {
  * gesture they picked for "stop reacting to me" rather than finding it silently
  * unbound after an update.
  */
-const RENAMED_ACTIONS = { DISABLE: 'SLEEP' };
+const RENAMED_ACTIONS = { DISABLE: 'SLEEP', STANDBY_TOGGLE: 'SLEEP' };
 
 const renameAction = (action) => RENAMED_ACTIONS[action] || action;
 
@@ -458,6 +478,28 @@ export function mergeSettings(stored) {
     ...DEFAULT_SETTINGS.windowedSwipeBindings,
     ...(stored?.windowedSwipeBindings || {})
   });
+  // Migrate only the previous shipped defaults; custom gesture choices survive.
+  if (Number(stored?.settingsVersion || 0) < SETTINGS_VERSION) {
+    for (const [key, previous] of [['bindings', 'SKIP_AD'], ['windowedBindings', 'PAGE_TOP']]) {
+      if (merged[key].Pointing_Up?.action === previous) merged[key].Pointing_Up = { action: 'VOICE_CAPTURE_TOGGLE', repeat: false };
+    }
+  }
+  merged.settingsVersion = SETTINGS_VERSION;
+  if (!Object.hasOwn(POINTER_AIMS, merged.pointerAim)) merged.pointerAim = DEFAULT_SETTINGS.pointerAim;
+  if (!Object.hasOwn(POINTER_INPUTS, merged.pointerInput)) merged.pointerInput = DEFAULT_SETTINGS.pointerInput;
+  if (!['ask','entertainment','site'].includes(merged.agentPermissionBoundary)) merged.agentPermissionBoundary = 'entertainment';
+  merged.voicePillMode = 'gesture';
+  merged.voicePillPosition = 'bottom-center';
+  merged.voiceEnabled = merged.voiceEnabled !== false;
+  merged.agentRealInput = merged.agentRealInput !== false;
+  merged.agentScreenshots = merged.agentScreenshots !== false;
+  merged.voiceLanguage = typeof merged.voiceLanguage === 'string' && /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(merged.voiceLanguage) ? merged.voiceLanguage : 'en-US';
+  for (const key of ['pointerTolerance', 'pointerPinchDistance', 'pointerRangeX', 'pointerRangeY']) delete merged[key];
+  for (const [key, [lo, hi]] of Object.entries({ headSpeed: [.4, 2.5], pointerArmMs: [250, 1500], pointerSmoothing: [0, 1], numHands: [1, 2] })) {
+    const value = Number(merged[key]);
+    merged[key] = Number.isFinite(value) ? Math.max(lo, Math.min(hi, value)) : DEFAULT_SETTINGS[key];
+  }
+  merged.numHands = Math.round(merged.numHands);
   return merged;
 }
 
@@ -465,7 +507,8 @@ export function mergeSettings(stored) {
 function migratePoseBindings(bindings) {
   const out = {};
   for (const [gesture, binding] of Object.entries(bindings)) {
-    out[gesture] = { ...binding, action: renameAction(binding?.action) };
+    const action = renameAction(binding?.action);
+    out[gesture] = { action: Object.hasOwn(ACTIONS, action) ? action : 'NONE', repeat: !!binding?.repeat && !!ACTIONS[action]?.repeatable };
   }
   return out;
 }
@@ -479,11 +522,16 @@ function migrateSwipeBindings(bindings) {
   return out;
 }
 
-export async function saveSettings(patch) {
-  const current = await loadSettings();
-  const next = mergeSettings({ ...current, ...patch });
-  await chrome.storage.local.set({ settings: next });
-  return next;
+let saveChain = Promise.resolve();
+export function saveSettings(patch) {
+  const result = saveChain.then(async () => {
+    const current = await loadSettings();
+    const next = mergeSettings({ ...current, ...patch });
+    await chrome.storage.local.set({ settings: next });
+    return next;
+  });
+  saveChain = result.catch(() => undefined);
+  return result;
 }
 
 /** `chrome.runtime.sendMessage` that stays quiet when nobody is listening. */

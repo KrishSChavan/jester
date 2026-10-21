@@ -1,5 +1,5 @@
 import { MSG, ENGINE, ACTIONS, saveSettings } from '../common/constants.js';
-import { loadEnv } from '../common/env.js';
+
 
 const el = (id) => document.getElementById(id);
 
@@ -7,6 +7,8 @@ const ui = {
   enabled: el('enabled'),
   pointerCard: el('pointerCard'),
   pointerEnabled: el('pointerEnabled'),
+  pointerInput: el('pointerInput'),
+  voiceEnabled: el('voiceEnabled'),
   notice: el('notice'),
   statusDot: el('statusDot'),
   statusText: el('statusText'),
@@ -53,8 +55,9 @@ let micProblem = '';
 let voiceBlocked = false;
 
 const VOICE_BLOCKED_NOTE =
-  'Jester can’t draw on this page — it has no content script here. Tick “Also run on ' +
-  'every other site” in Settings and reload the tab, or try it on a supported site.';
+  'Jester can’t draw on this page, so it answers here, on its toolbar badge and in a ' +
+  'notification. Tab commands still work. To control an ordinary site’s page, tick “Also ' +
+  'run on every other site” in Settings and reload the tab; Chrome’s own pages never allow it.';
 
 /**
  * One line, for the most pressing thing wrong. Ordered by how much it stops
@@ -64,13 +67,7 @@ const VOICE_BLOCKED_NOTE =
  * listening to sentences nothing can act on.
  */
 function renderNotice() {
-  const stale = env.mirrored
-    ? 'Flags came from env.txt, not .env — Chrome won’t serve the dotfile here, so re-run ' +
-      'build-zip.ps1 after editing .env or the change won’t reach the extension.'
-    : '';
-  const message = !env.ok
-    ? env.error
-    : (voiceBlocked && VOICE_BLOCKED_NOTE) || micProblem || stale || (env.aiOk ? '' : env.aiMessage);
+  const message = (voiceBlocked && VOICE_BLOCKED_NOTE) || micProblem;
   ui.notice.textContent = message;
   ui.notice.hidden = !message;
 }
@@ -100,6 +97,7 @@ async function refreshCameraPermission() {
 
 function renderEngine(engine = {}) {
   lastEngine = engine;
+  if (engine.mic) { micProblem = ['error','no-permission'].includes(engine.mic.state) ? engine.mic.detail || 'Check Voice setup in Settings.' : ''; renderNotice(); }
   const state = engine.state || ENGINE.OFF;
   const blocked = !cameraGranted;
 
@@ -114,7 +112,7 @@ function renderEngine(engine = {}) {
 }
 
 function renderTelemetry(t) {
-  const mic = t.mic?.detail || (t.mic?.state ? `Microphone: ${t.mic.state}` : '');
+  const mic = ['error','no-permission'].includes(t.mic?.state) ? t.mic.detail || 'Check Voice setup in Settings.' : '';
   if (mic !== micProblem) {
     micProblem = mic;
     renderNotice();
@@ -132,11 +130,11 @@ function renderTelemetry(t) {
       : `😴 Asleep${t.wake ? ` — ${t.wake} to wake` : ''}`;
     ui.gestureScore.textContent = '';
   } else if (env.cursor && t.pointer?.active) {
-    ui.gestureLabel.textContent = t.pointer.down ? '👌 Pinched — click' : '🖐 Pointer — steering';
+    ui.gestureLabel.textContent = t.pointer.down ? '✊ Click' : '👁 Eyes / head pointer';
     ui.gestureScore.textContent = '';
-    bar = t.pointer.pinch || 0;
-  } else if (env.cursor && t.pointer?.arming) {
-    ui.gestureLabel.textContent = '🖐 Pointer — hold it there…';
+    bar = t.pointer.progress || 0;
+  } else if (env.cursor && t.pointer?.state === 'arming') {
+    ui.gestureLabel.textContent = '✋ Hold to show cursor…';
     ui.gestureScore.textContent = '';
   } else if (t.pointing?.active) {
     ui.gestureLabel.textContent = '☝️ Listening';
@@ -210,10 +208,29 @@ ui.pointerEnabled.addEventListener('change', async () => {
   ui.pointerEnabled.disabled = true;
   try {
     await saveSettings({ pointerEnabled: ui.pointerEnabled.checked });
+    ui.pointerCard.hidden = !ui.pointerEnabled.checked;
   } finally {
     ui.pointerEnabled.disabled = false;
   }
 });
+
+ui.voiceEnabled.addEventListener('change', () => saveSettings({voiceEnabled:ui.voiceEnabled.checked}));
+ui.pointerInput.addEventListener('change', () => saveSettings({pointerInput:ui.pointerInput.value}));
+el('listenBtn').addEventListener('click', () => chrome.runtime.sendMessage({type:'jester/voice-control',action:'start'}));
+el('stopBtn').addEventListener('click', () => chrome.runtime.sendMessage({type:'jester/cancel-task'}));
+el('resumeBtn').addEventListener('click', () => chrome.runtime.sendMessage({type:'jester/resume-task'}));
+let approvalId = null;
+function renderApproval(approval) {
+  approvalId = approval?.id || null;
+  el('approvalCard').hidden = !approvalId;
+  el('approvalText').textContent = approval?.label || '';
+}
+for (const [id,approved] of [['approveBtn',true],['denyBtn',false]]) {
+  el(id).addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({type:'jester/agent-approval',id:approvalId,approved});
+    renderApproval(null);
+  });
+}
 
 ui.optionsBtn.addEventListener('click', () => {
   chrome.runtime.openOptionsPage();
@@ -234,8 +251,11 @@ ui.grantBtn.addEventListener('click', () => {
 
 chrome.runtime.onMessage.addListener((message) => {
   switch (message?.type) {
+    case 'jester/approval-state':
+      renderApproval(message.approval);
+      return false;
     case MSG.STATE:
-      renderEngine(message.engine);
+      if (message.engine) renderEngine(message.engine);
       return false;
     case MSG.TELEMETRY:
       renderTelemetry(message.telemetry || {});
@@ -280,14 +300,18 @@ setInterval(() => {
 
   // Before the first paint: on a CURSOR=false build the card must never flash
   // into view on its way to being removed.
-  env = await loadEnv();
-  ui.pointerCard.hidden = !env.cursor;
+  ui.pointerCard.hidden = false;
   renderNotice();
 
   const state = await chrome.runtime.sendMessage({ type: MSG.GET_STATE });
   if (!state) return;
   ui.enabled.checked = !!state.settings.enabled;
   ui.pointerEnabled.checked = !!state.settings.pointerEnabled;
+  ui.voiceEnabled.checked = !!state.settings.voiceEnabled;
+  ui.pointerInput.value = state.settings.pointerInput;
+  ui.pointerCard.hidden = !state.settings.pointerEnabled;
+  renderApproval(state.approval);
+  el('resumeBtn').hidden = !state.resumeAvailable;
   // The pill may already be up and blocked before this popup was even opened.
   voiceBlocked = !!state.voiceBlocked;
   renderNotice();
@@ -301,3 +325,13 @@ setInterval(() => {
     ui.previewPlaceholder.textContent = 'Turn Jester on to start the camera.';
   }
 })();
+
+chrome.storage.onChanged.addListener((changes,area) => {
+  if (area !== 'local' || !changes.settings?.newValue) return;
+  const settings = changes.settings.newValue;
+  ui.enabled.checked = !!settings.enabled;
+  ui.voiceEnabled.checked = !!settings.voiceEnabled;
+  ui.pointerEnabled.checked = !!settings.pointerEnabled;
+  ui.pointerInput.value = settings.pointerInput;
+  ui.pointerCard.hidden = !settings.pointerEnabled;
+});

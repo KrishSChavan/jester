@@ -1,713 +1,525 @@
-# Jester — hand gesture video control
+# Jester: gestures, local voice, and a compact browser agent
 
-A Chrome (Manifest V3) extension that watches your webcam with **MediaPipe's
-Gesture Recognizer** and turns hand poses and swipes into playback commands on
-YouTube, Netflix, Hulu, Disney+, Prime Video and friends.
+Load this folder unpacked in Chrome. Settings opens from the toolbar popup.
+Camera frames and microphone audio stay on-device. AI reasoning uses the
+provider and exact model you configure in Settings.
 
-Hand tracking runs entirely on-device: the WASM runtime and the `.task` model
-are bundled in this folder, and camera frames never leave it.
+## Setup and controls
 
-The one exception is the [voice pill](#voice), which is off unless you raise
-your index finger. Chrome's speech recognition is a network service, so while
-the pill is on screen your audio does go to Google. Nothing else here makes a
-network request.
+Allow camera access and enable Jester. A closed fist pauses video, thumbs change
+volume, swipes seek or adjust volume, and the ILoveYou pose toggles fullscreen.
+All gesture bindings remain editable, with optional separate fullscreen and
+windowed bindings. **Sleep / wake Jester** keeps the camera watching only for
+its resume gesture and stops the microphone and pointer.
 
----
+For voice, allow microphone access and click **Set up on-device speech**.
+Chrome may download a language pack; recognition itself is local. If the local
+API or language is unavailable, Jester reports the problem and keeps the
+microphone closed. It never silently sends audio to a cloud recognizer.
 
-## Build flags — `.env`
+Pointing up defaults to **Start / stop voice commands**, which can be assigned
+to any supported pose or swipe. Hold the gesture until it fires, then lower
+your hand and speak the complete request. The black pill at the bottom center
+shows five frequency-band levels computed locally. The first finalized
+utterance starts one task. Repeat the gesture to request finalization sooner;
+interim recognition text is never executed. Capture has a 30-second deadline.
+The pill’s × and popup’s Cancel button discard capture and stop active work.
 
-Three switches live in `.env`, beside `manifest.json`. It's read at runtime by
-`src/common/env.js`, so there's no build step: edit it and hit **Reload** on
-`chrome://extensions`.
+Example: “Play season 3 episode 1 of Rick and Morty.” The model must locate the
+requested show, choose the requested season, locate the episode, play it, and
+verify the available playback state. It can use recent/Continue Watching cards
+when those are visible, or use the site’s search controls. There are no baked-in
+assumptions that the show or season dropdown already exists on the first page.
 
-| Flag | Effect |
+On YouTube, “Go to MrBeast’s latest video” (or “play the newest video from Mark
+Rober”, “the latest Veritasium video”) searches the name, opens the channel whose
+name or handle matches it, its Videos tab (newest first), plays the first video
+and confirms that video’s own page is playing; an ad first still counts. This
+runs without a model call. If no channel matches the heard name exactly, the
+model continues from the search results. “Next video” and “skip the ad” go
+straight to the player.
+
+**Cursor control** offers Voice, Eyes / head, and Both. The eye/head pointer
+uses an open palm to engage and closing that hand into a fist to click. Choose
+Head only for use without calibration, or calibrate for Eyes only / automatic
+eyes and head. In Both mode, “click” targets the visible eye/head cursor through
+the same permission checks as other voice actions. Cursor coordinates account
+for browser zoom, toolbars, window position and the calibrated display. It is a
+webpage cursor and cannot operate the OS cursor, Chrome’s toolbar, or controls
+inside cross-origin frames. Legacy finger/pinch code is retained unloaded in
+`src/offscreen/legacy-finger-pointer.js`; its old settings are commented out.
+
+## Provider and permissions
+
+Settings supports OpenAI (Responses), Anthropic (Messages), Google Gemini,
+Groq, and custom OpenAI-compatible APIs, including localhost endpoints. Add up
+to 20 saved connections, each with its exact model ID and key. **Add model**
+appends a connection; **Move up/down**, **Edit**, and **Remove** manage the
+fallback order. Editing requires the key again. Existing single-model settings
+migrate automatically. **List models** uses the chosen saved connection and
+is optional. The first model request establishes whether the key/model can
+run inference. The browser requests access only to each configured API origin.
+ChatGPT account subscriptions are separate from provider API keys.
+
+Jester uses the first ready connection in this order. An HTTP 429 stores that
+model's cooldown, moves it to the bottom, and tries the next ready model with
+the same pending request. It continues the current task without replaying any
+page actions. Only saved connections participate; each provider receives only
+its own key. Authentication, malformed responses and other errors pause normally.
+Cooldowns and order persist across worker restarts. Exact duplicate connections
+are not added twice.
+
+If every connection is cooling down, the task pauses and a small top-right
+badge names the model with the earliest retry time and counts down live. It
+hides at expiry. Say **keep going** to resume; expiry never resumes the task or
+polls a provider automatically. The stored task and original goal remain intact
+until one minute after the cooldown ends.
+Provider retry hints are honored. Without a hint, the next attempt is held for
+60 seconds, or 24 hours for an explicitly reported daily quota; these fallback
+times are conservative retry checks, not guaranteed provider reset times.
+
+For a free-tier alternative, choose **Google (Gemini)** and enter
+`gemini-3.5-flash-lite`. Create a key in
+[Google AI Studio](https://aistudio.google.com/apikey), paste it into Settings,
+then Add model. Settings provides this model as a suggestion. Google's
+[pricing page](https://ai.google.dev/gemini-api/docs/pricing) currently lists
+free input/output for this model. Check your project's
+[active quotas](https://aistudio.google.com/rate-limit): Google
+[does not promise one universal free-tier rate limit](https://ai.google.dev/gemini-api/docs/rate-limits).
+Gemini model discovery filters out entries explicitly lacking text generation.
+A smaller model on Groq does not by itself raise your organization's quota;
+check the [Groq limits page](https://console.groq.com/settings/limits).
+
+Keys live outside broadcast settings in this profile’s `chrome.storage.local`.
+The worker returns only masked key summaries. Content scripts cannot read the
+credential store or change a connection. Changing a provider or endpoint
+requires a newly supplied key. Model requests reject redirects so a redirect
+cannot forward the key to another host. No key is written to task checkpoints
+or prompts. Existing local `.env` / `env.txt` Groq keys remain a migration
+fallback when no Settings connection exists; new connections use Settings.
+`CURSOR` in `.env` no longer overrides the user-facing cursor toggle.
+
+The **Permission boundary** dropdown controls actual execution:
+
+| Choice | Behavior |
 | --- | --- |
-| `CURSOR=true` \| `false` | `false` switches the [virtual cursor](#pointer) off end to end and removes it from the UI — no card in the popup, no section in the options page. The code stays in the tree; only whether it runs changes. |
-| `AI=` | Groq API key ([console.groq.com/keys](https://console.groq.com/keys)) — what powers [the assistant](#the-assistant). Blank is fine and everything else still works; Jester checks the key looks like a key and says so in the popup and options page when it doesn't. |
-| `AI_MODEL=` | Optional. A Groq model id to try first. Left blank, Jester falls through a short built-in list. Choose on the [token allowance](#fitting-inside-a-groq-minute), not on speed. |
+| Ask before every action | Approve each mutation: say yes or no, or use the toolbar popup. Reads do not require approval. |
+| Ask before sensitive actions (default) | Allow browsing, search, tabs and playback on any site; ask before locally identified account, sign-in, purchase, payment, sending, posting or destructive targets, typing outside search boxes, and opening a site the task has no reason to know. |
+| Never ask | Allow every supported action on any site, subject to Chrome permissions. |
 
-`.env` is gitignored — `.env.example` is the committed template. If no flag file
-can be read at all, every flag falls back to leaving things as they are
-(`CURSOR=true`, no key) and the popup says why.
+A task starts on the tab you are looking at — Chrome's own pages included — and
+follows the tabs it opens or switches to, on any web page; Chrome's pages, files,
+`data:` and `javascript:` addresses are never opened or followed. When a step
+needs approval the pill asks “Allow …? Say yes or no.” and the microphone opens
+for the answer; anything other than a yes declines it, and the toolbar popup can
+approve too. A permission review is bound to one action and live element
+identity; a stale or replaced element is rejected after approval. Reviews expire
+after 60 seconds. Sensitive-action classification is a local heuristic, so use
+**Ask before every action** if every mutation should be reviewed.
 
-### Why there is also an `env.txt`
+A destination the model proposes (`open`, `navigate`) runs without asking only
+when it is a listed well-known site, a site the request names (“the Anthropic
+docs” → docs.anthropic.com), an open tab, or a link or listing the task has
+already seen. Anything else could be a page's text steering the model, perhaps
+with your data in the address, so it is treated as sensitive. Links on the page
+are followed by clicking them, as before.
 
-It isn't settled whether Chrome will serve a *dotfile* out of an extension
-folder, and it can't be checked from a script any more — Chrome 137 dropped
-`--load-extension`. So `src/common/env.js` tries `.env` first and falls back to
-`env.txt`, a byte-for-byte mirror that `build-zip.ps1` refreshes on every build.
+Jester ships with host access for YouTube, Netflix, Hulu, Disney+, Hotstar,
+Prime Video, Max, Peacock, Paramount+, Crunchyroll, Twitch, Vimeo and Apple TV.
+**Also run on every other site** is what lets voice read and act on any other
+site's page; tab, window, search and playback commands work everywhere without
+it. Site permissions must be granted using Settings; a camera gesture cannot
+display a Chrome grant prompt. The extension also holds `tabGroups`, `history`,
+`bookmarks`, `notifications` and `search` for the browser commands below.
 
-Edit `.env`. The mirror is generated, and gitignored for the same reason.
+## Voice control of the browser
 
-The options page says which file actually answered, under **AI assistant**. If
-it says `env.txt`, Chrome is refusing the dotfile on your machine, and edits to
-`.env` won't reach the extension until you re-run `build-zip.ps1`.
+Say a request on any tab; the gesture, the popup's button, or **Alt+Shift+J**
+(⌥⇧J on a Mac, changeable at `chrome://extensions/shortcuts`) starts listening.
 
-It ships **inside** the zip, because it's fetched at runtime rather than
-compiled in. So a published build carries whatever key is in it, where anyone
-who downloads the extension can read it; `build-zip.ps1 -Flat` warns when that's
-about to happen.
-
----
-
-## Install and test locally
-
-1. Unzip this folder somewhere permanent (Chrome reads the files from disk every
-   time it starts, so don't leave it in a temp directory).
-2. Open `chrome://extensions`.
-3. Turn on **Developer mode** (top right).
-4. Click **Load unpacked** and select the `jester-extension` folder — the one
-   containing `manifest.json`.
-5. The options page opens automatically. Click **Allow camera access** and
-   accept Chrome's prompt. **Don't skip this** — the engine runs in an offscreen
-   document that has no UI, so it can't raise the prompt itself. It has to happen
-   in a real tab.
-6. Flip **Enabled** on (in the options page header, or in the toolbar popup).
-7. Open a YouTube video and hold a closed fist ✊ steady at your camera for about
-   half a second — it should pause. An open palm ✋ starts it again.
-
-Pin the extension to the toolbar to get the popup: it shows a live camera
-preview with the hand skeleton, the gesture being recognised, the hold progress
-bar, the achieved frame rate, and a log of recent actions. That popup is the
-fastest way to tell whether a gesture isn't registering versus registering but
-not firing.
-
-## Default gestures
-
-| Gesture | Action |
-| --- | --- |
-| ✋ Open palm (hold) | Play |
-| ✊ Closed fist (hold) | Pause |
-| 🤟 ILoveYou (hold) | Fullscreen toggle |
-| ✌️ Victory (hold) | Mute / unmute |
-| 👍 Thumb up (hold) | Volume up — repeats while held |
-| 👎 Thumb down (hold) | Volume down — repeats while held |
-| ☝️ Pointing up (hold) | Skip ad / skip intro |
-| ➡️ Swipe right | Skip forward 10s |
-| ⬅️ Swipe left | Skip back 10s |
-| ⬆️ / ⬇️ Swipe up / down | Volume up / down |
-| 🖐 Hand held half open | Move the cursor — see [Pointer](#pointer) |
-| 👌 Thumb and index touching | Click, while the cursor is up |
-| ☝️ Index finger raised | Voice pill + microphone — see [Voice](#voice) |
-
-Play and pause are separate poses rather than one toggle, so a missed hold can
-never leave you fighting the video — repeat the pose and you still get what you
-asked for.
-
-All seven canned poses are bound out of the box; set any of them to **Do
-nothing** to free the slot. Every binding, and every threshold below, is
-editable in the options page.
-
-One action worth knowing about is unbound by default: **Sleep / wake Jester**.
-It is a full stop rather than an off switch — the camera stays open, but poses,
-swipes, the pointer and the microphone all stop, and the only thing that gets
-Jester back is the same gesture that put it under. That gesture is honoured
-whatever it is currently bound to, so a fullscreen change or an edit to the
-bindings table can't leave you with no way back. Switching Jester *off* outright
-stays with the toolbar popup and the options page. The three shapes at the bottom
-of the table are the exception in the other direction: they drive a mode rather
-than firing an action, so they aren't in the bindings table at all.
-
-Wherever a gesture lands, it lands on the window in front. A Chrome window that
-is unfocused, minimized, or behind another application receives nothing, and
-neither does a background tab — the cursor and the voice pill are taken off it
-as the focus moves away. Sleep is the exception, since it acts on Jester and not
-on a page.
-
-That is the default rather than the law. Tick **Let gestures act on the last tab
-I used, even when it's out of view** under **Settings → Tabs you're not looking
-at** and those gestures land after all, on whichever tab you were last using —
-worth having when a film is playing on the other monitor and you only want to
-pause it, at the cost of a stray pose doing something you won't see until you
-come back. The cursor and the voice pill are still taken off the page you left
-whichever way it's set: both are aimed by eye, so neither has any business on a
-window you can't see.
-
-Note the collision on ☝️. A raised index finger is measured off the landmarks
-and takes over the hand, so while the voice pill is up the model's
-`Pointing_Up` pose does **not** fire whatever it's bound to.
-
-That only applies on the default setting, where the finger is what summons the
-pill. Set **Settings → Voice → Show the pill** to **Never** or **Always** and
-the finger stops being a trigger, so ☝️ goes back to skipping ads.
-
-## Fullscreen vs. windowed
-
-The table above is what a gesture does when a video is filling your screen. Turn
-on **Use a different set of bindings when I'm not in fullscreen** in the options
-page and you get a second column: the same poses and swipes, bound to whatever
-you want for the rest of the time.
-
-The starting point for that second set keeps play/pause, mute and fullscreen on
-the same poses — a windowed player is still a player, and a sign that means two
-different things depending on the window is exactly what's worth avoiding. What
-changes is everything that only made sense against a video:
-
-| Gesture | Not in fullscreen |
-| --- | --- |
-| ➡️ / ⬅️ Swipe right / left | Next / previous tab |
-| ⬆️ / ⬇️ Swipe up / down | Scroll up / down |
-| 👍 / 👎 Thumb up / down (hold) | Scroll up / down — repeats while held |
-| ☝️ Pointing up (hold) | Jump to the top of the page |
-
-Alongside the playback actions, the full list now covers scrolling, jumping to
-the top or bottom of a page, back / forward / reload, switching, moving, opening,
-closing and reopening tabs, and cycling browser windows. Tab and window actions
-run in the service worker, so they work on pages Jester itself can't touch —
-including the new tab page.
-
-"Fullscreen" means all three ways a video can fill the screen: cinema mode, the
-site's own fullscreen, and a window you put fullscreen yourself with F11. From
-where you're sitting they're the same thing, so Jester treats them the same.
-
-Switching contexts drops any pose you were part-way through holding, so a hold
-that started under one set can't fire the other set's action.
-
-## How recognition works
-
-Three channels run over the same landmark stream:
-
-**Held poses.** A pose has to stay above the confidence floor *and* stay
-reasonably still for `holdMs` before it fires. Once fired it won't fire again
-until you drop the pose (or, for actions marked *repeat while held*, it re-fires
-every `repeatMs`). The stillness requirement is what keeps you from triggering
-play/pause every time you raise an open hand to swipe.
-
-**Swipes.** The palm centre is tracked over a short rolling window. If it
-crosses `swipeMinDistance` of the frame within `swipeMaxDurationMs`, and the
-dominant axis beats the other by `swipeAxisRatio`, that's a swipe. Swipes win
-over poses and reset the pose state machine. Directions are mirrored, so moving
-your hand to *your* right is "swipe right".
-
-**Pointer.** A half-open hand raises a cursor; a thumb-to-index pinch clicks it.
-It outranks the other two: while you steer, no pose may fire and no swipe may
-register, so sweeping across the screen can't seek the video. Details below.
-
-A global `cooldownMs` sits after every action so one gesture can't machine-gun.
-
-Two of those channels are *modes* rather than actions — the pointer, and the
-raised index finger behind the voice pill. Both own the hand outright while
-they're engaged, and both are measured off the landmarks rather than coming
-from the model. The pointer wins if a frame somehow reads as both.
-
-### Tuning notes
-
-- Gestures firing by accident → raise **Confidence floor** or **Hold time**.
-- Gestures not firing → lower **Confidence floor**, and check the popup's fps
-  readout; below ~8 fps the swipe window gets too few samples.
-- Swipes not registering → lower **Swipe distance** or raise **Swipe window**.
-- Laptop fan spinning up → drop **Inference rate** to 12–15 fps. Gesture
-  recognition doesn't need 30. The pointer is the exception — it's the one
-  feature that visibly benefits from 20+.
-
-## Pointer
-
-Hold your hand half open — fingers relaxed and curled, neither a flat palm nor a
-fist — for `pointerArmMs`, and a cursor appears. Move your hand to steer it.
-Touch your thumb and index fingertip together to click. Flatten or close your
-hand and it fades.
-
-**An extension cannot move the operating system's cursor.** Nothing in the
-Chrome API surface reaches outside the browser, and no permission changes that —
-it's the reason a desktop app is on the roadmap. So the content script draws its
-own cursor in a shadow root and synthesises the events the page would have seen:
-`pointerover` / `mouseover` on entering an element, `pointermove` / `mousemove`
-every frame (which is what makes YouTube's control bar appear), and a full
-`pointerdown → mousedown → focus → pointerup → mouseup → click` sequence on a
-click. Ordinary handlers can't tell the difference, but the events are untrusted,
-so they can't unlock anything gated on real user activation — the site's own
-fullscreen button, clipboard writes, sound-on autoplay.
-
-### Detecting the shapes
-
-MediaPipe's canned set has neither shape, and adding them would mean training a
-classifier, so `pointerReading()` in `src/offscreen/offscreen.js` measures both
-off the raw landmarks.
-
-Each finger is first scored by `reach()`: the tip's distance from the wrist over
-its own knuckle's distance from the wrist. Roughly 1.9 straight out, 0.95 folded
-into the palm; `REACH_FLAT` and `REACH_FIST` scale that onto 0…1. Measuring from
-the *wrist* rather than along the finger's own bones is the point — most of what
-changes between a flat palm and a relaxed hand is flexion at the knuckle, which
-leaves the finger itself straight, and a curl measured within the finger can't
-see it at all. Both distances share an origin, so hand size and in-plane rotation
-cancel.
-
-Two tests on those four scores, each a `[strict, loose]` pair interpolated by the
-**Hand tolerance** slider:
-
-| test | what it measures | what it rejects |
+| Kind | Examples | Handled |
 | --- | --- | --- |
-| `POINTER_BAND` | how far the four-finger average sits from half open | a flat palm, a fist |
-| `POINTER_SPREAD` | the gap between the most and least extended finger | ✌️, ☝️ and 🤟 — they average out to half open while being nothing of the sort |
+| Tabs and windows | “new tab”, “close this tab”, “next/previous tab”, “switch to tab 3”, “reopen the closed tab”, “mute/pin/duplicate this tab”, “new window”, “go back”, “reload”, “bookmark this page”, “scroll down” | On the device, one step |
+| Tabs by name | “switch to Gmail”, “go to my lasagna recipe tab”, “close all the cooking tabs”, “close all other tabs”, “mute the YouTube tab” | On the device when one site or every matching tab is meant; otherwise the model sees the tab list |
+| Sites | “open Gmail”, “go to github dot com”, “open YouTube and play MrBeast’s latest video” | A listed site or spoken domain switches to its open tab, else opens a new one (in place on a blank New Tab page); the rest of “… and …” continues there |
+| Search | “search for lofi beats”, “search Amazon for a USB hub”, “google weather in Tokyo” | The current site's own search box first; a named site's search; else the default search engine |
+| Anything else | “open my latest email”, “group these tabs as Work”, “find that recipe I read yesterday” | The model, with `browser` operations: tabs, open, search, switch, close, groups, history, bookmarks |
 
-They're deliberately separate. A relaxed hand curls unevenly — the pinky more
-than the index — so a per-finger band tight enough to reject ✌️ would also reject
-a perfectly good steering hand. ✌️ in particular lands at almost exactly 0.5
-average and is caught *only* by the spread test.
+Playback commands said with no player in the tab reach the tab that is playing
+(“Paused “Song” in another tab.”); gestures still act only on what is in view.
+Open tabs' titles and addresses, and a few matching history or bookmark entries,
+reach the model only when it asks for them. Where the pill cannot be drawn —
+Chrome's own pages, the Web Store, sites Jester has no access to — the badge
+shows ● while listening, … while working and ✓ or ! with the answer, which also
+arrives as a notification; the popup's list keeps every reply.
 
-Pinching is `dist(thumb tip, index tip) / palmWidth`, against
-`pointerPinchDistance` with `POINTER_PINCH_HYSTERESIS` between the closing and
-releasing points, so a hand hovering on the threshold can't machine-gun clicks.
-The click fires on the closing edge only; holding the pinch does nothing further.
+## Audit of the fetched implementation
 
-Two details that keep clicking from fighting steering:
+The fetched `origin/main` (`11c9b09`) already avoided full DOM/screenshot
+prompts. Its `content.js::pageDigest()` sent the URL, title, scroll information
+and up to 40 names, with the name list capped at 700 characters.
+`assistant.js::turnPrompt()` rebuilt a prompt each turn with a plan and up to
+14 trail entries. It did not persist a growing model conversation or send
+screenshots. `RUN_STEPS` actions used fuzzy text descriptions such as “season
+dropdown”; matching happened locally.
 
-- Pinching curls the index finger, which can push the hand out of the steering
-  shape. So once the cursor is up, a held pinch keeps it up on its own —
-  `POINTER_HOLD_MARGIN` also loosens both tests while engaged, since it should
-  take less to keep the cursor than to raise it.
-- Raising a hand that is *already* pinched doesn't engage, and `startPointer()`
-  adopts the pinch as it stands rather than counting it as a fresh click.
+Consequently, this checkout did not support the pasted diagnosis that raw HTML
+was repeatedly sent. Remaining costs came from repeated instructions, the
+current digest and trail on every call, plus retries after ambiguous targeting.
+It was limited to Groq and a 14-turn loop with provider fallback models. Speech
+recognition used Chrome’s default network service.
 
-### Steering
+The new design keeps the compact approach while replacing fuzzy targeting with
+page-scoped stable IDs, preserving enough show/episode context to distinguish
+similar buttons, validating each action locally, and keeping durable bounded
+task memory. A semantic observation may be larger than the old names-only
+digest. No measured token reduction against that already-small digest is
+claimed; the per-step logs expose the actual tradeoff.
 
-The hot spot is the palm centre — the same landmark average the swipe detector
-uses, chosen because the fingers move when you pinch and the palm doesn't. It's
-mapped through an active area (`pointerRangeX` / `pointerRangeY`, centred on the
-frame) onto the viewport, so a fraction of the frame covers the whole page and
-you don't have to reach. X is mirrored, so moving your hand to *your* right
-moves the cursor right.
+## Claude in Chrome-style control
 
-Position runs through a one-euro filter, which widens its own cutoff with speed:
-still hand, still cursor; fast hand, no lag. **Smoothing** sets both ends of that
-(4 Hz → 0.6 Hz minimum cutoff). The cursor element also carries a 70 ms linear
-`transform` transition, which interpolates between inference frames — at 20 fps
-that's the difference between smooth and visibly stepped.
+Voice tasks follow the same approach as Claude in Chrome: read the page as a
+compact list of controls with stable IDs, act through Chrome's own input, and
+look at a screenshot only when the text is not enough. Each model step is
+rebuilt from the command, a small memory and a fresh page, so a step costs
+about 2,000 input tokens however long the task runs and the context window
+cannot overflow.
 
-Open the popup while steering: it draws the active area and the hot spot on the
-camera preview, which is by far the quickest way to tune the reach sliders. The
-ring around the cursor itself fills as your fingers close and snaps in when the
-pinch lands — tune **Pinch distance** against that.
+- **Real mouse and keyboard.** Clicks, hovers, typing and key presses go
+  through `chrome.debugger` (`Input.dispatchMouseEvent`, `Input.insertText`,
+  `Input.dispatchKeyEvent`), so sites receive trusted input, hover included.
+  The page aims and confirms; the worker only moves and presses. Nothing is
+  pressed until a trusted move proves the approved target is the topmost
+  element under the real pointer, including at page zoom levels where debugger
+  units differ from CSS pixels. Chrome shows “Jester started debugging this
+  browser” for the length of a task. Dismissing that bar, a page Chrome will
+  not attach to, or turning off **Click and type with Chrome’s real mouse and
+  keyboard** falls back to synthetic events. Selects, file inputs, date pickers
+  and video elements stay on the synthetic path.
+- **Rate pacing.** Each saved model keeps a one-minute window of its requests
+  and input tokens in session storage. Before a request, Jester waits for the
+  window (up to 20 seconds, shown on the pill) instead of tripping the limit;
+  longer waits pause with the countdown badge. Exact limits come from Groq,
+  OpenAI and Anthropic headers on every response and from the quota a Gemini
+  429 names. A connection's **Plan** sets the defaults until then: Free tier
+  paces Gemini at 15 requests and 250,000 tokens a minute and Groq at 30
+  requests and 6,000 tokens; Paid uses only what the provider reports. A model
+  with a small token ceiling is sent a smaller page (never under 1,500
+  characters) so a task fits more steps per minute.
+- **Follow-ups.** The last three commands and how they ended stay available
+  for two minutes, so “next episode”, “go back” or “not that one” can be
+  understood. They are context only; the newest command is always the goal.
+- **Screenshots when stuck.** The model may ask to `look` when the text list
+  lacks a control, such as an unlabeled player icon. The page draws a numbered
+  label on every control a person could click, unnamed icons included, and the
+  model answers with an element ID from the legend rather than coordinates. One
+  image goes to the next step only, at most three per task, only to a saved
+  model that can read images (Gemini, Claude, GPT-4o/5, Llama 4), and never
+  while a password or payment field is on screen. Turn it off with **Let a task
+  look at a screenshot when the page text isn’t enough**.
 
-### Routing
+## Implementation and limits
 
-Unlike playback actions, the cursor isn't aimed at a `<video>` — it belongs to
-whatever you're looking at. `relayCursor()` in the service worker resolves its
-own target (the active tab's **top** frame, cached for a second because these
-arrive at the inference rate) rather than going through `resolveTarget()`. Plain
-motion frames are dropped while a send is in flight; clicks and the closing frame
-never are. A tab that can't be reached is remembered and skipped until it
-reloads or you switch away and back.
-
-Three consequences worth knowing:
-
-- The cursor only exists where the content script runs, so tick **"Also run on
-  every other site"** if you want it everywhere.
-- If you turned on **"Pause gesture detection when no video tab is in focus"**,
-  the engine suspends on ordinary pages and the pointer goes with it. It ships
-  off, so out of the box Jester keeps watching everywhere; untick it again and
-  the engine resumes immediately rather than waiting for the next tab switch.
-- **"Let gestures act on the last tab I used, even when it's out of view"** does
-  *not* extend to the cursor, and deliberately. It resolves through
-  `visibleTabId()` rather than `activeTabId()`, so however permissive that
-  setting is, the cursor still comes off a page the moment it goes out of view —
-  a cursor you can't see is one you can't steer, and the pinch would click
-  whatever it was resting on. The voice pill follows the same rule.
-
-## Voice
-
-Raise your index finger, other fingers curled, and a black pill slides in at the
-bottom of the page. Five vertical bars sit as dots in the middle of it and move
-with your voice. While it's up Jester is listening; drop your hand and both the
-pill and the microphone go.
-
-Two things are configurable in **Settings → Voice**: when the pill appears (on
-the finger, always while Jester is on, or never) and where it sits (bottom
-centre, top centre, or either bottom corner).
-
-**It only appears where Jester runs.** The pill is an element drawn into the
-page by the content script, exactly like the cursor, so on a site outside the
-built-in list you need **"Also run on every other site"** ticked — otherwise the
-gesture registers in the popup with nothing to show for it. The popup says so
-when that happens rather than failing silently.
-
-**Grant microphone access from the options page**, the same way as the camera
-and for the same reason — the engine lives in an offscreen document with no UI,
-so Chrome has nowhere to show the prompt and `getUserMedia` simply never
-returns. Jester checks the permission up front and says so rather than hanging.
-
-### Detecting the shape
-
-`indexPointReading()` scores the four fingers with the same `reach()` the
-pointer uses, then applies three tests, each a `[raise, hold]` pair — it takes
-less to keep the pill up than to raise it, because a finger held out for a
-sentence drifts:
-
-| test | what it measures |
+| File / function | Responsibility |
 | --- | --- |
-| `POINT_INDEX_MIN` | the index reaches far enough to count as out |
-| `POINT_OTHERS_MAX` | the other three stay curled |
-| `POINT_SEPARATION` | and those two readings sit far enough apart |
+| `content/agent-page.js::observe` | Compact semantic state, visible/modal focus, bounded registry and local IDs. |
+| `content/agent-page.js::execute`, `classify` | Live element validation, retrieval and browser operations; local permission classification. |
+| `content/content.js` | Trusted worker message bridge, player actions, cursor and voice overlays. |
+| `background/assistant.js::runAssistant` | Local entertainment flow, compact model fallback and groups of up to three live-validated actions. |
+| `background/entertainment.js` | Exact show/season/episode shortcuts with observed season and playback verification; ambiguous pages use AI. |
+| `background/youtube.js` | A creator’s latest YouTube video: search, exact channel, Videos tab, first video in document order, verified playback. |
+| `background/browser-intent.js` | Spoken tab, site and search commands planned on the device; spoken yes/no answers. |
+| `background/browser-tools.js` | Chrome tabs, windows, search, history, bookmarks and tab groups for the agent's `browser` action. |
+| `common/sites.js` | Well-known sites by spoken name, their search addresses, and which open tab already shows one. |
+| `common/agent-actions.js::validateAction` | Strict supported-action fields and parameter bounds; no selectors or executable code. |
+| `common/task-memory.js` | Immutable goal, bounded facts/constraints/milestones and latest five results. |
+| `background/model-client.js::requestModel` | Provider adapters, selected-model enforcement, timeouts, bounded responses and rate-limit backoff. |
+| `background/service-worker.js::executeAgent` | Task tab/origin enforcement, approval, single execution and session checkpoints. |
+| `background/model-pool.js` | Saved-model selection, pacing, 429 rotation, screenshot routing, shared deadline and next retry state. |
+| `background/rate-governor.js` | Per-connection request/token windows, provider-reported limits and free-tier defaults. |
+| `background/real-input.js` | `chrome.debugger` sessions for trusted mouse, keyboard and screenshot capture. |
+| `content/agent-page.js::input`, `marks` | Real-input aim/land/ready steps and numbered screenshot labels. |
+| `common/credentials.js` | Ordered model connections, cooldown persistence and worker-only key storage. |
+| `common/agent-permissions.js` | Permission choices and origin checks. |
+| `offscreen/voice.js::createVoice` | Local recognition, microphone levels and cancellation-safe single utterance capture. |
+| `offscreen/offscreen.js` | Gesture state machines, eye/head tracking and voice capture controls. |
+| `options/`, `popup/` | Model connection, speech setup, input modes, permissions and action review. |
 
-The third is what earns its keep. ✌️ and 🤟 both have the index fully out and
-*some* fingers curled, and only the gap between the index and the most extended
-of the other three separates them cleanly from a real point.
+The extractor supports at most **12,000 serialized characters**, **100 elements**,
+and **300 characters per element text**. Normal agent observations now request
+6,000 characters and 50 elements, with task-relevant actions ranked first. Controls
+in the site’s own navigation, banner or footer rank below the page’s content unless
+the goal names them; search controls keep their rank. (On a wide window YouTube’s
+sidebar otherwise filled the budget ahead of the results.) A control nested in a
+same-named link is listed once, and short words such as “to” or “go” never count as
+goal matches. A planner can ask for each control’s document order. The local registry holds at most 1,000
+live handles. Secret fields, drafts, hidden elements, SVG internals, scripts,
+styles and Jester’s own overlays are excluded. Repeated content is deduplicated;
+long lists/tables are bounded. Card context and image descriptions preserve
+show names beside repeated Play buttons. No raw HTML is used; a screenshot only
+when the model asks to look (see above).
 
-This is deliberately not the model's `Pointing_Up` class: that one insists the
-finger points upward, and this drives a mode rather than firing an action, so it
-has to hold whichever way your hand is turned and be readable every frame.
-`POINT_ARM_MS` debounces the way in and `POINT_RELEASE_MS` the way out, so one
-dropped frame can't cut you off mid-sentence.
+On-demand actions include `find_text`, `find_elements`, `read_element`,
+`read_nearby`, `inspect_section`, `get_form_fields`, and `get_table`, alongside
+click/type/clear/select/hover/scroll/press_key/wait and supported playback
+commands. A route change or a changed/disconnected target invalidates old IDs.
+Browser cookies, tabs, form values, full DOM and session state stay in Chrome.
 
-### Levels and words
+Task state persists in `chrome.storage.session` before and after execution.
+After worker restart a task is paused; **Resume task** or “keep going” obtains
+a fresh observation. A paused task is forgotten one minute after its last step
+(or after the provider cooldown it is waiting on), and a worker restart does
+not reset that clock. A finished task is forgotten at once, and any new command
+replaces a paused one, so a later request never carries an old goal. An action interrupted after dispatch is marked uncertain,
+never blindly replayed. Each invocation allows 100 actions and 15 minutes;
+resuming grants a fresh invocation budget while keeping the same goal and
+bounded memory, so hundreds of actions do not require a growing prompt.
+Repeated failures/no-progress pause the task. Model requests have bounded
+responses, request/body deadlines and cancellable bounded 429 backoff.
 
-Both come off the microphone in the offscreen document (`src/offscreen/voice.js`),
-which is where the stream can live.
+The worker console logs `[jester] assistant step` with `pageChars`,
+`requestChars`, `approximateInputTokens`, selected model and step number.
+The token estimate is characters divided by four; provider-reported usage is
+logged separately when returned. It is an estimate, not a billing measurement.
 
-**Levels** are an `AnalyserNode` sampled on a 40 ms timer — 25 Hz, the same
-order as the inference loop — reduced to five roughly logarithmic bands between
-85 Hz and 4 kHz, stopped there because speech carries almost nothing above it.
-Each band gets a noise floor, a gain, and an asymmetric attack/decay so the bars
-jump to a sound and fall away from it. The bars carry a 70 ms CSS transition,
-which interpolates between frames exactly as the cursor's transform does.
+## Latency improvements
 
-**Words** come from Chrome's `webkitSpeechRecognition`. It's set `continuous`,
-but Chrome ends a session on its own after a pause, so `onend` re-opens it —
-with a flood guard, because a session that dies the instant it starts is failing
-rather than finishing. Interim results are throttled and de-duplicated.
+The “Waiting 10 seconds for the model” message was emitted during API retry
+backoff (429 rate limiting or 502/503 service errors), not ordinary token
+generation. Previously one request could retry twice with up to ten seconds
+between attempts, then the outer agent loop could restart that request budget.
+Separately, every observation waited at least 280 ms and sometimes 2.6 seconds
+for unrelated page mutations to quiet down. One model request per click, field
+fill, and Enter key multiplied both costs.
 
-The transcript is also printed to two consoles: the offscreen document's
-(`chrome://extensions` → Jester → **Inspect views** → `offscreen.html`), which is
-where recognition actually happens, and the page's, which is the one you're
-looking at while you talk.
+The current interactive path:
 
-Dropping your finger is the full stop on the sentence, and what's accumulated
-goes to the assistant below. The pending *interim* result is included, not just
-the finalised phrases: Chrome finalises about a second after you stop speaking,
-so the tail of nearly every command is still interim at the moment you drop your
-hand. In `always` mode there is no finger to drop, so a 1.5 s silence ends the
-sentence instead.
+- Handles explicit named-show/season/episode requests and basic playback
+  commands locally when the available semantic controls are unambiguous. Each
+  action still passes the same permissions, live-target and checkpoint checks.
+  An observed active season is required before selecting its episode; a click
+  dispatch alone never proves the season changed. Actual requested playback
+  must be observed before reporting success.
+  Dictation commas, polite requests such as “Can you please…”, and explicit
+  ordinal forms such as “the first episode of the third season” are accepted
+  without a model call. “Go to Rick and Morty season 3 episode 2” also uses this
+  local flow.
+- Keeps the search-first route local when a title is absent from Home. It
+  recognizes semantic searchboxes and descriptive catalog search labels, and
+  can identify a poster-only link from one unambiguous visible image title.
+  Multiple distinct poster titles never become one inferred control name.
+  Exact show names followed only by recognized year/rating/episode-count
+  metadata are eligible; title suffixes such as “The Anime” are not.
+  If an exact show link is covered, the planner can use the actual covering
+  link only when the browser verifies both links have the identical complete
+  destination and the covering link is freshly observed. This recovery requires
+  that no press was dispatched. It does not click through an overlay.
+  A covering link omitted from the compact page is read directly once before
+  any click is proposed. The original poster can disappear after hover; the
+  covering link must still retain its observed identity and destination.
+  Custom season comboboxes and shorthand episode labels such as `S3 E1` use
+  the same current-page verification as native selectors. Named pickers such
+  as “Select a season” and “Season selector” work on a generic Series page
+  when the exact show heading is present. Season labels can append a known
+  episode count, such as “Season 3 (10 Episodes)”; unrelated suffixes are refused.
+- Falls back to the selected model for ambiguity or unfamiliar layouts, without
+  changing the original task. Search entry and submission can be grouped into
+  one response, as can other already-present controls (maximum three actions).
+  Each target is checked immediately before execution. Navigation, uncertain
+  results, failures and denied permission discard the remaining group.
+- Constrains native Gemini fallback responses with the
+  [documented action JSON Schema](https://ai.google.dev/api/generate-content#v1beta.GenerationConfig)
+  using `responseJsonSchema`. Single actions, existing-control groups and
+  bounded memory have explicit shapes; selectors, scripts and extra fields
+  are excluded. Runtime validation still enforces IDs, string limits, URLs,
+  permissions and live targets. A truncated Gemini response pauses once with
+  its actual reason. The schema adds request tokens only to Gemini fallback
+  calls; actual provider usage logs include them.
+- Waits for a navigation to finish before reading the page it led to. Each
+  observation names the page the agent last saw; if the address has changed, or
+  YouTube’s top progress bar is up, the content script waits for the bar and
+  then a 120 ms window with almost no DOM change, at most four seconds. YouTube
+  changes the address at once but shows search results about 1.2 seconds later,
+  with the page unchanged for ~600 ms in between, so DOM quiet alone is no
+  signal. A `navigate` action also waits for the new document to load.
+- Plays a YouTube creator’s latest video locally (see above). It recognizes the
+  channel only by an exact name or handle match, waits until the Videos tab
+  shows as selected, and picks the first video by document order; if the
+  observation left out any control between the sort chips and that video, the
+  model decides instead. Once the model has acted, the planner never starts a
+  new search over its work.
+- Sends a playback goal back to the model once if it reports success while no
+  video on the page is playing.
+- Replaces the blanket quiet-page delay with a single render opportunity,
+  bounded at 60 ms. A successful known transition can poll for missing state
+  for up to two seconds, with at most four seconds of polling across a task.
+  This also applies when the model supplies the exact-show typing/Enter step,
+  allowing the local planner to take over as results arrive. Failed or
+  uncertain actions never start this wait. Page loading time is real and
+  cannot be removed by the controller. A successful model-assisted season
+  change can also wait for the next pane locally. Uncertain dispatches never
+  commit shortcut progress or count as completed actions.
+- Sends a shorter instruction prompt, smaller current observations, and compact
+  prompt memory without duplicating the original goal. Durable memory stays
+  outside the prompt and retains its previous bounds.
+- Uses a 600-token default output budget and sets Groq GPT-OSS models to
+  `reasoning_effort: "low"` with `include_reasoning: false`, using the
+  [documented Groq GPT-OSS controls](https://console.groq.com/docs/reasoning).
+  `reasoning_format` is not supported for those models and is not sent. The
+  exact saved model ID and key are used for each connection.
+- Saved-model requests switch immediately on a 429 instead of retrying the
+  limited connection. At most one request per eligible connection is attempted
+  in a turn, and all connections share a ten-second deadline including storage,
+  UI callbacks and response bodies. If all are limited, the task pauses with
+  the closest retry countdown. The adapter's bounded short retry remains for
+  legacy direct requests. Retry-After is never truncated to retry early.
+- Caches semantic/layout reads only inside one observation, with fresh reads
+  before actions and subsequent observations. Video clock ticks do not count
+  as meaningful page progress; playback/selection changes still do.
+  Hover and press events also recheck the target before continuing a click.
+  A replacement or new overlay stops the gesture; interruptions after a press
+  are marked uncertain and require observation before any further action.
+  Click points come from actual client rectangles, clipped visible areas and
+  bounded descendant surfaces, with at most 48 tested points. This avoids
+  reporting wrapped links as covered just because their bounding box contains
+  empty space. Every accepted point must still hit the original target or its
+  descendant; a real covering overlay is never bypassed.
+  A real pointer reaches its target by moving there, so an empty layer that
+  paints nothing (no content, a transparent fixed/absolute box, not a control)
+  first gets one mouse move. Hulu's instant search covers its results with such
+  a layer while the keyboard drives the list and removes it on that move. The
+  layer never receives a press, and the target must then pass the hit test
+  again; a layer that stays is reported as covered.
 
-## The assistant
+`[jester] task timing` prints copyable JSON with total time, model-call count,
+local-action count, intent-recognition status, observation/execution time,
+storage checkpoints and readiness polling. A zero local-action count points
+to a command/layout that did not use the local path. `[jester] local intent`
+and `[jester] local fallback` distinguish parser recognition from unavailable
+or ambiguous controls without logging the transcript. Model
+results also include attempts, request time, retry wait and actual token usage
+where the provider supplies it. These logs distinguish site-loading latency,
+model latency and quota waits without printing prompts or keys.
+`[jester] model selected` and `[jester] model cooldown` identify queue changes
+without including credentials. Request timings aggregate attempts across the
+saved models tried for that turn.
+`[jester] action result` now records the operation, opaque target ID, source,
+confirmation/outcome flags and a bounded redacted failure reason.
+Failed clicks also report their error class and whether a press was dispatched.
+Covered failures include up to two redacted blocking controls and `hitTest`
+geometry for the top surfaces, including non-actionable covers. Geometry omits
+page text, selectors, classes, IDs and URLs. This distinguishes a real overlay
+from empty bounding-box space without adding a screenshot or raw DOM dump.
+`[jester] invalid reply` records rejected action kinds and field names, without
+the proposed field values or raw response. Task timing includes an invalid
+reply count and stop reason. A previous local failure does not label every
+later fallback as that same failure.
 
-> Needs a Groq API key in `AI=`. Everything above works without one.
+The isolated Chrome smoke test uses the production controller and semantic
+extractor against a local streaming fixture with an 80 ms delayed season
+transition. It completed the requested Season 3 episode in **226 ms**, with
+**zero model calls**, three actions and six observations. The trace verifies
+that the new season was ready before the episode click. This demonstrates the
+local flow and race checks; it is not a live Netflix or Groq measurement.
+The separate Hulu-style search fixture starts with Rick and Morty absent from
+Home, loads search results after 1,200 ms, and delays the custom season pane by
+80 ms. It completed in **1,505 ms**, with **zero model calls**, seven actions and
+fifteen observations. The command includes polite phrasing and a dictation
+comma; the result title includes year/rating/count metadata. Its trace verifies the exact poster was chosen over an
+Anime decoy, and the requested season pane was ready before `S3 E1` was clicked.
+This is a representative local DOM fixture, not a captured or live Hulu page;
+Hulu network loading, ads and actual playback startup are not measured.
+The covered-card variant uses the exact “go to” command for season 3, episode 2.
+It completed in **1,524 ms** with **zero model calls**, rejecting the covered
+poster before pressing and opening its live Details link instead. The trace
+checks that neither the covered poster nor the Anime decoy receives a click.
+The fragmented-link variant measures actual Chrome layout: all five former
+bounding-box sample points miss the link, while its real line fragments receive
+hits. The exact season 3, episode 2 request completed in **1,496 ms** with
+**zero model calls** and no false covered-target failure.
+The mouse-blocker variant lays a transparent full-page layer over the search
+results, as live Hulu does after typing, and removes it on the next mouse move.
+The same request completed in **1,510 ms** with **zero model calls** and no
+covered-target failure; the trace shows the layer leaving before the exact
+result opened.
+The real-input check drives the same fixture with trusted DevTools-protocol
+events, exactly as the worker does through `chrome.debugger`: a real click
+opens Search, real text reaches the field, and the real move removes the
+blocker before the press on the exact result. The screenshot check captures
+the search results with every clickable control numbered, including the
+image-only Anime poster, and confirms the labels come off afterwards.
+A second entry point starts directly on the generic Series page, with the
+requested show heading and a closed “Select a season” button. It selected
+“Season 3 (10 Episodes)”, waited for the delayed episode pane, and verified
+Episode 1 playback in **225 ms**, with **zero model calls** and three actions.
+Run `node tests/browser-smoke.mjs` to repeat it with a fresh temporary profile
+and fake extension/media APIs. `JESTER_SMOKE_CHROME` can select a Chrome binary.
+The smoke run also replays YouTube’s in-app navigation timing: the observation
+after the address changes waits for the results behind the progress bar.
 
-Say *"search for Suits and play season 2 episode 3"* and Jester does it — clicks
-the search button, types into the field that appears, opens the title, picks the
-season, clicks the episode. Ask *"what's this about?"* and it just answers.
+`node tests/voice-browser-live.mjs` loads the real unpacked extension into a
+temporary headless Chrome over a debugging pipe (branded Chrome ignores
+`--load-extension` since version 137), turns it on, and speaks tab, site, search,
+background-playback and approval commands with no model connected; each must
+complete on the device.
 
-The pill collapses into a spinning ball while it works, opens back out around
-the answer for a few seconds, and goes.
+`node tests/youtube-live.mjs ["go to MrBeast's latest video"]` runs the same
+production assistant against live youtube.com in a signed-out temporary profile,
+with trusted input and the content script’s own settle code, and fails if a
+model is asked. On 2026-10-20 it searched, opened the channel, its Videos tab and
+the newest video, and confirmed playback (behind an ad) in about six seconds, at
+1280 and 1500 px wide (YouTube’s full sidebar shows at the latter). Run it when
+YouTube’s markup changes; the unit fixtures cannot follow it.
 
-### What Groq actually sees
+The target for the example command is under ten seconds. That is a target for
+an available page and responsive service, not a guarantee across site loading,
+account content restrictions, manual approvals or provider quotas. No live
+streaming account or paid provider inference is used by the regression tests.
 
-Not the page. The obvious design — describe everything and let the model pick —
-doesn't survive a real site: a description of a streaming front page is most of
-a free key's whole minute, and a command spends two or three turns inside that
-minute, so the thing that reads the page is also the thing that stops it
-working.
+## Before / after example
 
-So the model gets a **digest** — where it is, and a few dozen names:
+Previously, a names-only digest might contain:
 
-```
+```text
 url: https://www.netflix.com/browse
 title: Netflix
-scroll: 0 of 4210px, so there is more page than this
-you can see: Home · TV Shows · Movies · Search · Suits · Breaking Bad · …
-(212 more further down the page — scroll, or just ask for one by name)
+you can see: Continue Watching · Rick and Morty · Play · Episodes · Season 2
 ```
 
-That's about 150 tokens, against the 2,000–7,000 a page description costs. It
-isn't a description of the page; it's enough to know what to ask for next.
+The model could request `{"type":"click","target":"season dropdown"}`;
+local fuzzy matching chose a candidate, and a batch could contain more actions.
 
-### Asking for things by name
+Now the relevant observation is explicit (illustrative IDs):
 
-The model doesn't address elements, it describes them:
+```text
+Page: Rick and Morty | Netflix
+Page ID: p8e74a221b0
+[8e74a221b0.12] heading "Rick and Morty"
+[8e74a221b0.18] select "Season" options: Season 1=1; Season 2=2; Season 3=3
+[8e74a221b0.24] button "Play" — Season 3, Episode 1: The Rickshank Rickdemption
+[8e74a221b0.30] video "Player" (paused)
+```
 
 ```json
-{"type":"click","target":"the search button"}
+{"action":{"action":"select","elementId":"8e74a221b0.18","value":"3"},"memory":{"subgoal":"Play episode 1 of season 3","facts":["Rick and Morty is open"]}}
 ```
 
-and `findElement()` in the content script goes and gets it. That inverts the
-cost: instead of sending everything on the chance some of it matters, we send
-the request and look for what it names — and looking is free.
+If AI is needed, the next call contains the original goal, bounded memory, a fresh semantic
+observation and only the recent results. It does not contain any earlier DOM
+snapshots or images. This example documents the representation, not a live
+Netflix capture.
 
-Which puts the weight on looking things up well, because a spoken description
-almost never matches a page's own wording. You say *"the search bar"*; Netflix
-calls it `data-uia="search-box-input"` with the placeholder *"Titles, people,
-genres"*. So it's a ladder of increasingly forgiving searches, tried in order,
-and each rung is a different way of asking:
+## Validation and limitations
 
-| | what it tries | scores |
-| --- | --- | --- |
-| 1 | the exact name | 100 |
-| 2 | the name starting with, or starting, what you asked | 82 |
-| 3 | the name containing it, or being contained by it | 74 / 66 |
-| 4 | every meaningful word of it somewhere in the name | 60 |
-| 5 | what that phrase *usually means* — a lexicon of `search`, `play`, `season`, `close`, `mute`… mapped to the selectors sites actually use | 34, +26 for shared words |
-| 6 | the words in its attributes — `class="ytp-mute-button"` answering "mute" | 36 |
+Run `npm test` from the repository root. The suite covers semantic extraction,
+secret exclusion, repeated show-card labels, stale IDs, limits, permission
+checks, multi-step agent execution, long runs, restart uncertainty, provider
+requests, cancellation, local recognition and gaze/cursor math.
 
-Whole words, not substrings, so `"ute"` matches nothing. Noise words (*the*,
-*button*, *click*, *dropdown*) are dropped from both sides, so "the search box"
-and "Search" are the same request. What's on screen scores above what you'd have
-to scroll to; a real `<button>` above a div someone made focusable; a disabled
-control below everything.
-
-**The step type narrows the field before any of that runs.** "The search box" is
-ambiguous across a page and obvious among the things you can *type into* — so a
-`type` step only ever considers those, and `select` only considers real
-`<select>` elements. That one filter does more work than any single rung.
-
-Nothing below a confidence floor is ever clicked. A miss comes back as a miss,
-with the nearest names attached:
-
-```
-2. click "season dropdown" -> FAILED: nothing on this page matches
-   "season dropdown". Nearest on the page: Seasons, Season 1, Episodes.
-```
-
-so the next turn aims at one of those. A wrong click is far more expensive to
-recover from than being told to look again. `find` does the same lookup without
-acting, for when the digest didn't carry enough to aim with, and `index` picks
-the nth match — which is how "the third episode" works.
-
-### The loop
-
-One turn is: look, ask, act. Not a plan up front — the season dropdown doesn't
-exist yet when the sentence arrives, and neither does the search field. Each
-turn the model is told what its last actions did *and which name each one
-matched*, so it learns what this page calls things. A slow page, a different
-layout or an *"are you still watching?"* interstitial is just the next turn
-rather than a plan that has quietly fallen apart.
-
-Six turns, up to eight steps each. `src/background/assistant.js` holds the loop
-and knows nothing about Chrome; `src/background/service-worker.js` supplies the
-half that does.
-
-Steps are `click`, `type`, `press`, `select`, `scroll`, `find` and `wait`, plus
-`command`, which runs one of Jester's own actions (`PAUSE`, `SEEK_FORWARD`,
-`FULLSCREEN_TOGGLE`, `TAB_NEXT`…). That last one exists because some things a
-click can't reach: the player may be in an iframe the content script can't see
-into, and fullscreen needs the worker's window-level route since a synthesised
-click carries no user activation.
-
-Only the newest digest goes in the conversation, and only the last exchange —
-older turns describe a page that no longer exists.
-
-### Fitting inside a Groq minute
-
-The limit that bites on a free key is **tokens per minute**, not requests:
-
-| model | tokens/min (free) | turns per minute |
-| --- | --- | --- |
-| `llama-3.3-70b-versatile` | 12,000 | ~13 |
-| `llama-3.1-8b-instant` | 6,000 | ~6 |
-
-A turn is around 900 tokens, nearly all of it the system prompt — which is why
-the digest is the shape it is. Sending the page instead put a turn at 3,000–8,000
-tokens, and a single Netflix-sized description could exceed a whole minute's
-allowance on the first request.
-
-Groq returns the real allowance for your key in `x-ratelimit-limit-tokens` on
-every response; the worker logs it next to the size of each look at the page, so
-`/offscreen` isn't the only place to find out what's going on.
-
-A 429 is waited out, not surfaced: Groq says how long in `retry-after` and it's
-usually a couple of seconds. A *daily* cap is surfaced immediately, because
-waiting two seconds won't help.
-
-`AI_MODEL` pins a model. Left blank, Jester falls through a short list, so a
-model being retired shows up as a slower first turn rather than a dead feature.
-
-## Supported sites
-
-Enabled out of the box: YouTube, Netflix, Hulu, Disney+ / Hotstar, Prime Video,
-Max, Peacock, Paramount+, Crunchyroll, Twitch, Vimeo, Apple TV.
-
-For anything else, tick **"Also run on every other site with a video"** in the
-options page. That asks for a broad host permission at the moment you click it,
-and registers the content script dynamically — reload open tabs afterwards.
-
-Play/pause, seeking, volume, speed and mute go straight to the `<video>` element
-on most sites. Netflix is the exception: its player snaps `currentTime` back, so
-seeking and play/pause route through `src/content/page-bridge.js`, which runs in
-the page's main world and drives Netflix's own player API.
-
-## Fullscreen
-
-`Element.requestFullscreen()` is gated on *transient user activation*, and a
-gesture recognised in the offscreen document has none. No extension permission
-lifts that — so `FULLSCREEN_TOGGLE` routes through the service worker
-(`toggleFullscreen()`), which tries three things in order:
-
-1. **Native.** If the user happens to have clicked in the page in the last few
-   seconds, `navigator.userActivation.isActive` is still true and the content
-   script can just call `requestFullscreen()`. Free, and the best result.
-2. **True fullscreen** (opt-in, **Settings → Fullscreen**). Attaches
-   `chrome.debugger` and runs `Runtime.evaluate` with `userGesture: true`, which
-   forges real activation, so the site's own fullscreen engages. Costs the
-   optional `debugger` permission and a brief "being debugged" bar, and cannot
-   attach while DevTools is open on that tab.
-3. **Cinema mode** (default). `chrome.windows.update(id, {state:'fullscreen'})`
-   needs no activation at all, so the *window* goes fullscreen; the content
-   script then pins the player to the viewport with a stylesheet. Visually the
-   same as the real thing, with no extra permission.
-
-Cinema mode ends on Escape (the content script forwards it, since nothing is
-natively fullscreen for Chrome to handle) or when the user leaves window
-fullscreen themselves, watched via `(display-mode: fullscreen)`.
-
-The overlay neutralises `transform` / `filter` / `contain` on every ancestor of
-the player, because any of those would trap a `position: fixed` element.
-
-## Known limitations
-
-- **Cinema mode is CSS over a site's own layout.** It works on the built-in
-  sites; a player with an unusual structure may need its selector added to
-  `fullscreenTarget()` in `src/content/content.js`.
-- **Skip ad / next episode rely on site-specific selectors** (in
-  `src/content/content.js`). Streaming sites reshuffle their DOM regularly; if
-  one stops working, that selector list is the place to fix it.
-- **One camera at a time.** If Zoom or Teams has the camera, the engine reports
-  "camera is already in use".
-- **Seven poses only.** These are MediaPipe's canned gestures. Adding your own
-  (e.g. a flat "L" for chapters) means training a custom classifier and pointing
-  `MODEL_PATH` at it — or, if the pose is geometrically distinctive, measuring it
-  off the landmarks the way `pointerPose()` does.
-- **The pointer is a page cursor.** It can't leave the tab or reach Chrome's own
-  UI, and it can't click *into* a cross-origin iframe: `elementFromPoint` returns
-  the `<iframe>` element and the event lands there, not on what's inside it. Its
-  events are untrusted, so anything gated on real user activation stays locked.
-- The camera runs in an offscreen document. If the frame rate shown in the popup
-  is far below your **Inference rate** setting, that's Chrome throttling the
-  background page — lower the target rate rather than fighting it.
-
-## Layout
-
-```
-manifest.json
-.env                                  build flags — see above. Read at runtime.
-env.txt                               generated mirror of it; build-zip.ps1 owns this
-.env.example                          committed template for both
-models/gesture_recognizer.task        MediaPipe canned-gesture model (8 MB)
-vendor/tasks-vision/                  MediaPipe Tasks Vision 1.0.0 + WASM runtime
-src/
-  common/constants.js                 settings schema, action list, message types
-  common/env.js                       .env reader, flag + API-key validation
-  background/service-worker.js        offscreen lifecycle, target tab resolution,
-                                      action dispatch, HUD / cursor / voice relays,
-                                      and the Chrome half of the assistant
-  background/assistant.js             the Groq loop: page in, steps out. No chrome.*
-  offscreen/offscreen.js              camera + inference + gesture state machine,
-                                      pointer shapes + cursor smoothing,
-                                      the index-finger shape behind the pill,
-                                      and the utterance the pill hands over
-  offscreen/voice.js                  microphone: band levels + speech recognition
-  content/content.js                  video discovery, action execution, on-page HUD,
-                                      the virtual cursor and its synthetic events,
-                                      the voice pill and its three faces,
-                                      the element finder and the step runner
-  content/page-bridge.js              Netflix player API bridge (main world)
-  popup/                              toolbar popup: preview, status, history
-  options/                            all settings, gesture bindings, camera setup
-  ui/ui.css                           shared styles
-```
-
-Repack from the parent folder with:
-
-```
-..\build-zip.cmd            # nested layout, for "unzip, then Load unpacked"
-..\build-zip.cmd -Flat      # manifest.json at the root, for the Web Store
-..\build-zip.cmd -Versioned # names it after the manifest version
-```
-
-It validates the manifest, the HTML references, the runtime assets, `.env` and
-every first-party `.js` before writing anything, and refreshes `env.txt` from
-`.env` on the way through. Nothing is written if a check fails.
-
-**Use the `.cmd`, not the `.ps1` directly.** Windows ships PowerShell as
-`Restricted`, so `.\build-zip.ps1` fails with *"running scripts is disabled on
-this system"* unless you've changed that. The wrapper passes
-`-ExecutionPolicy Bypass` for its own process only, which leaves your machine's
-setting alone, and works from cmd, PowerShell and Git Bash alike. Run it from a
-terminal — it deliberately doesn't `pause`, so a double-click closes the window
-before you can read the output.
-
-The `.ps1` is still the thing doing the work; call it directly if your policy
-already allows scripts.
-
-The division of labour worth knowing: **all gesture logic lives in the offscreen
-document**, not the service worker. A service worker gets evicted while idle,
-which would wreck any per-frame state machine; the offscreen document is a
-long-lived page, so it owns the camera, the inference loop, the hold timers and
-the swipe buffer. The worker only decides *which tab* should receive an
-already-made decision.
-
-## Privacy
-
-Camera frames stay inside the offscreen document. Nothing is recorded, stored or
-uploaded. The only data that leaves that document is the name of a recognised
-gesture and a downscaled preview image — and the preview is only produced while
-the popup is actually open. There is no remote code; MV3 forbids it and nothing
-here needs it.
-
-**Audio is the exception, and it's worth being clear about.** While the voice
-pill is on screen, Jester runs Chrome's `webkitSpeechRecognition`, which is a
-*network* service — the audio goes to Google's servers to be transcribed, the
-same as dictation in any Chrome text field. Band levels for the bars are
-computed locally and never leave, but the speech itself does.
-
-The microphone is only ever open while the pill is up, so with the default
-setting it tracks your index finger exactly: finger up, OS microphone indicator
-on; hand down, released. Set **Settings → Voice → Show the pill** to **Never**
-and the microphone is never opened at all. Choosing **Always** means it stays
-live for as long as Jester is running.
-
-**The assistant is the second exception**, and only if you've set a key. When a
-sentence finishes, it goes to Groq along with [the digest](#what-groq-actually-sees)
-— the address, the title, and a few dozen names of things on the page. Not the
-HTML, and not the page's text: matching a description to an element happens on
-your machine, so what leaves it is a list of labels. The value of a password
-field is never read at all, and neither is anything marked as a one-time code or
-a card number. Nothing is sent between sentences — there is no background
-chatter, and with `AI=` blank nothing is sent at all.
-
-## Updating the bundled MediaPipe assets
-
-```bash
-npm install @mediapipe/tasks-vision@latest
-cp node_modules/@mediapipe/tasks-vision/vision_bundle.mjs vendor/tasks-vision/
-cp node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.* vendor/tasks-vision/wasm/
-```
-
-Only the SIMD build is bundled (every Chrome that supports MV3 supports WASM
-SIMD). If you ever need the fallback, also copy `vision_wasm_nosimd_internal.*`
-— `FilesetResolver` picks it automatically when SIMD is missing.
-
-The model came from:
-`https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/latest/gesture_recognizer.task`
-
-## Troubleshooting
-
-**Debugging tool you'll want first:** open `chrome://extensions`, find Jester, and
-under **Inspect views** click `offscreen.html`. That's the engine's console —
-camera and model errors show up there. `service worker` next to it is the other
-half.
-
-| Symptom | Cause |
-| --- | --- |
-| Stuck on "Starting…", no preview | Camera access was never granted. The engine runs in an offscreen document, which has no UI, so Chrome has nowhere to show the prompt — `getUserMedia` just never returns. Grant access from the **options page** (a real tab), then hit **Restart** in the popup. The engine now checks the permission up front and says so instead of hanging. |
-| Popup says "Camera access needed" | Same fix: grant it from the options page. If you previously *blocked* it, use the padlock icon in the address bar of that options tab to re-allow, then Restart. |
-| Preview is black, status "Running" | Another app holds the camera, or you picked a device that's gone. Try **Restart** in the popup. |
-| Gesture recognised but nothing happens | No target video was found. The popup footer says "no video tab" when that's the case. Reload the video tab. |
-| Nothing happens while Chrome is behind another app | Not a video problem, and not a missed gesture. By default a window that is unfocused, minimized or covered over receives nothing at all — and deliberately leaves no history entry either, so there is nothing to find in the popup afterwards, which is the giveaway. Either bring the window to the front, or tick **"Let gestures act on the last tab I used, even when it's out of view"** in the options page. |
-| Nothing works after installing | Tabs opened *before* the extension loaded have no content script. The worker re-injects on demand, but reloading the tab is the reliable fix. |
-| Actions fire twice | Cooldown is too short for your hold time, or two frames both claim a video. Raise **Cooldown**. |
-| Pill never appears, popup says "☝️ Listening" | The gesture is fine — the page is the problem. The pill is drawn by the content script, which only runs on the sites in the manifest, so on an ordinary page there is nothing there to draw it. Tick **"Also run on every other site"** and reload the tab. The popup now says so outright rather than leaving you guessing. |
-| Pill never appears, popup says something else | The shape isn't reading. Open the popup (which switches on the shape log) and read the offscreen document's console: it prints which of the three tests is failing and by how much. Usually it's the other three fingers not being curled far enough in. |
-| Pill appears, bars never move | The popup shows the microphone problem under the status line. Most often access was never granted: **Settings → Voice → Allow microphone access**, then **Restart** in the popup. |
-| No transcript in the console | Two consoles carry it — the page's, and the offscreen document's under **Inspect views**. If neither shows anything, check the popup for a microphone error; recognition is a network service, so it also needs a working connection. |
-| Pill says Groq is rate-limiting the key | The per-minute *token* budget, not a request count. A turn is ~900 tokens, so a free key should manage six of them a minute — if this is constant, something else is spending the allowance, or `AI_MODEL` is on `llama-3.1-8b-instant`, which has half the budget of `llama-3.3-70b-versatile`. The worker console logs what's left after every turn. |
-| It says a control isn't on the page, and it is | The description didn't match. The worker console shows what it looked for and the nearest names it found — say it the way the page says it, or ask it to `find` first. Genuinely unnamed controls are matched on their markup, which is a last resort and does miss. |
-| ☝️ stopped skipping ads | Expected: a raised index finger now takes over the hand for the voice pill. Set **Settings → Voice → Show the pill** to **Never** to get the pose back. |
-| No Pointer section in Settings | `CURSOR=false` in `.env`. That's the flag doing its job — set it to `true` and reload the extension. |
-| Editing `.env` changes nothing | Check the line under **Settings → AI assistant**. If it says the flags came from `env.txt`, Chrome won't serve the dotfile here, so re-run `build-zip.ps1` to refresh the mirror before reloading. |
-| Cursor never appears | Watch the popup while making the shape — it says "Pointer" the moment it registers. If it never does, raise **Hand tolerance**, and check you're neither flattening your hand nor closing it far enough to read as a fist. If the popup *does* say it, the tab can't be reached: Jester has no content script there, so tick **"Also run on every other site"** and reload. |
-| Cursor appears when you didn't mean it | Lower **Hand tolerance**, or raise **Time to engage**. A resting hand often sits close to half open. |
-| Pinch doesn't click | Raise **Pinch distance** — the threshold is measured against your palm width, so a large hand on a distant camera needs more slack. The popup's bar fills as your fingers close; if it never reaches full, the threshold is too tight. |
-| One pinch clicks twice | Shouldn't happen — release and click use separate thresholds. If it does, raise **Pinch distance** so the release point clears your resting finger gap. |
-| Cursor vanishes when you pinch | Raise **Hand tolerance**. A held pinch is supposed to keep the cursor alive on its own, so this means the hand left the shape before the pinch registered. |
-| Cursor can't reach the screen edges | Lower **Horizontal / Vertical reach** — you're running out of camera frame before you run out of page. The popup preview draws the active area. |
-| Cursor jitters, or lags behind | **Smoothing** trades one for the other. Below ~15 fps in the popup readout, raise **Inference rate** instead. |
-| Clicks land on the wrong thing | The halo shows what will be clicked. If it's highlighting a big wrapper rather than the button, the site nests its click handler oddly — the click still goes to the deepest element under the cursor, so it usually works anyway. |
+Live camera/microphone recognition, language-pack setup, provider authentication
+and actual streaming-site playback require a manual Chrome check. Synthetic
+events cannot bypass user-activation requirements, protected media, CAPTCHAs,
+logins, or cross-origin frames. The agent reports blocked content rather than
+solving those restrictions. DOM layouts and content availability vary by site,
+account and region; the generic semantic agent is not a guarantee that every
+streaming flow will complete without user intervention.

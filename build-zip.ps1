@@ -9,11 +9,9 @@
     - manifest.json parses, and every path it names exists
     - every local src=/href= in the HTML pages resolves
     - the runtime assets the offscreen document fetches by URL exist
-    - .env parses, and CURSOR is a boolean
     - every first-party .js parses (needs node on PATH; skipped if absent)
 
-  .env ships inside the zip — it's read at runtime, not compiled in — so a
-  published build carries whatever AI key is in it. The script says so.
+  Legacy .env files are excluded from the zip; model keys are configured in Settings.
 
   Then writes the zip with forward-slash entry names. Windows' own zip tools
   write backslashes, which the Chrome Web Store rejects.
@@ -172,6 +170,7 @@ function Test-RuntimeAssets {
   Test-Asset 'vendor/tasks-vision/wasm/vision_wasm_internal.js' 'MediaPipe WASM loader'
   Test-Asset 'vendor/tasks-vision/wasm/vision_wasm_internal.wasm' 'MediaPipe WASM binary'
   Test-Asset 'models/gesture_recognizer.task' 'Gesture model'
+  Test-Asset 'models/face_landmarker.task' 'Face model'
 }
 
 # .env is read at runtime by src/common/env.js. A missing file isn't fatal —
@@ -256,7 +255,7 @@ if ($SkipChecks) {
   foreach ($entry in Get-ManifestPaths) { Test-Asset $entry.Path "manifest $($entry.Why)" }
   Test-HtmlReferences
   Test-RuntimeAssets
-  Test-EnvFile
+  $notes.Add('Model connections and cursor controls are configured in Settings; local env files are excluded') | Out-Null
   Test-JavaScript
 
   if ($problems.Count -gt 0) {
@@ -278,7 +277,7 @@ if ($SkipChecks) {
 $excluded = New-Object System.Collections.Generic.List[object]
 $include = New-Object System.Collections.Generic.List[object]
 
-$skipPatterns = $JunkPatterns
+$skipPatterns = $JunkPatterns + @('.env', 'env.txt')
 if (-not $IncludeDevFiles) { $skipPatterns = $skipPatterns + $DevPatterns }
 
 foreach ($file in Get-ChildItem -Path $Src -Recurse -File -Force) {
@@ -366,26 +365,4 @@ if (-not $Flat) {
   Write-Host "      Build with -Flat when you are ready to publish." -ForegroundColor DarkGray
 }
 
-# The key ships inside the zip either way — .env is fetched at runtime, so it has
-# to be in there. Warned about on every build rather than only on -Flat, because
-# publishing is not the only way this gets out: .gitignore covers .env itself,
-# and a zip built around it is the hole that leaves.
-if ((Test-Path (Join-Path $Src '.env')) -and
-    (Select-String -Path (Join-Path $Src '.env') -Pattern '^\s*AI\s*=\s*[^#\s]' -Quiet)) {
-  Write-Host ""
-  Write-Host "Warning: this zip contains .env, and .env contains an AI key." -ForegroundColor Yellow
-  Write-Host "         Anyone who reads the zip can read the key. Do not commit or publish" -ForegroundColor Yellow
-  Write-Host "         it as it stands - blank AI= first, or move the key behind a server" -ForegroundColor Yellow
-  Write-Host "         you control." -ForegroundColor Yellow
-
-  Push-Location $PSScriptRoot
-  $tracked = (& git ls-files --error-unmatch $Output 2>$null)
-  $isTracked = ($LASTEXITCODE -eq 0 -and $tracked)
-  Pop-Location
-  if ($isTracked) {
-    Write-Host ""
-    Write-Host "         git is tracking this zip, so committing would publish that key." -ForegroundColor Red
-    Write-Host "         .gitignore cannot help - it does not apply to tracked files. Run:" -ForegroundColor Red
-    Write-Host "           git rm --cached `"$(Split-Path -Leaf $Output)`"" -ForegroundColor Red
-  }
-}
+# API credentials are saved by each user in Settings and are never packaged.

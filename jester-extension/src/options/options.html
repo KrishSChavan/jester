@@ -122,6 +122,7 @@
         Hidden until .env is read, and stays hidden on a CURSOR=false build —
         default-hidden so it can never flash into view on a build without it.
       -->
+      <!-- Retained legacy finger steering settings; superseded by eyes/head and voice.
       <section class="card" id="pointerSection" hidden>
         <h2>Pointer ✊✋</h2>
         <p class="small muted">
@@ -175,63 +176,73 @@
         </p>
       </section>
 
+      -->
+      <section class="card" id="pointerSection">
+        <h2>Cursor control</h2>
+        <label class="row check"><input type="checkbox" data-setting="pointerEnabled" />
+          <span>Enable cursor control</span></label>
+        <div id="cursorControls">
+          <div class="field"><label for="pointerInput">Control with</label>
+            <select id="pointerInput" data-setting="pointerInput">
+              <option value="voice">Voice</option><option value="eyes-head">Eyes / head</option><option value="both">Both</option>
+            </select></div>
+          <p class="small muted">In Both mode, your eyes or head aim and spoken commands click, scroll, or perform a task.</p>
+          <div id="eyeControls">
+            <div class="field"><label for="pointerAim">Aim with</label><select id="pointerAim" data-setting="pointerAim"></select>
+              <p class="small muted" id="pointerAimNote"></p></div>
+            <p class="small muted">Hold an open palm to show the cursor; close that hand into a fist to click. Head only needs no calibration.</p>
+            <button id="calibrateBtn">Calibrate eyes</button><button id="clearCalBtn">Clear calibration</button>
+            <p class="small muted" id="calText" role="status"></p>
+            <div class="field"><label>Head speed <output data-output="headSpeed"></output></label>
+              <input type="range" min="0.4" max="2.5" step="0.1" data-setting="headSpeed" data-format="times" /></div>
+            <div class="field"><label>Time to engage <output data-output="pointerArmMs"></output></label>
+              <input type="range" min="250" max="1500" step="50" data-setting="pointerArmMs" data-format="ms" /></div>
+            <div class="field"><label>Smoothing <output data-output="pointerSmoothing"></output></label>
+              <input type="range" min="0" max="1" step="0.05" data-setting="pointerSmoothing" data-format="percent" /></div>
+          </div>
+        </div>
+        <p class="small muted">The cursor works inside webpages where Jester has site access.</p>
+      </section>
+
       <section class="card" id="voiceSection">
-        <h2>Voice ☝️</h2>
-        <p class="small muted">
-          Raise your index finger — the other fingers curled — and a black pill slides in
-          at the edge of the page. Its five bars sit as dots and move with your voice.
-          While it's up Jester is listening; drop your hand and it stops.
-        </p>
-        <p class="small muted">
-          Raising your finger takes over the hand, so <strong>☝️ Pointing up</strong> won't
-          fire whatever it's bound to while the pill is on screen.
-        </p>
-        <p class="small muted">
-          The pill is drawn into the page, so it only appears where Jester runs — see
-          <strong>Where it runs</strong> below. On an ordinary site like a search page you'll
-          need <em>“Also run on every other site”</em> ticked, or the gesture will register in
-          the popup with nothing to show for it.
-        </p>
-        <div class="row between camera-status">
-          <div class="row"><i class="dot" id="micDot"></i><span id="micText">Checking…</span></div>
-          <button class="primary" id="micGrantBtn">Allow microphone access</button>
-        </div>
-        <div class="grid">
-          <div class="field">
-            <label for="voicePillMode">Show the pill</label>
-            <select id="voicePillMode" data-setting="voicePillMode"></select>
-            <p class="small muted" id="voicePillNote"></p>
-          </div>
-          <div class="field">
-            <label for="voicePillPosition">Where it sits</label>
-            <select id="voicePillPosition" data-setting="voicePillPosition"></select>
-          </div>
-        </div>
-        <p class="small muted">
-          Drop your finger and the sentence goes to the assistant below, which works the
-          page for you. Speech-to-text uses Chrome's own recognition service, which means
-          the audio <strong>does leave your machine</strong> while the pill is up — unlike
-          hand tracking, which never does.
-        </p>
+        <h2>Voice commands</h2>
+        <label class="row check"><input type="checkbox" data-setting="voiceEnabled" /><span>Enable voice commands</span></label>
+        <p class="small muted">Bind any gesture to <strong>Start / stop voice commands</strong> in Gestures above. Pointing up is the default. Hold the gesture once, lower your hand, and speak your full request. A black pill with voice bars appears at the bottom of the page. Pause after speaking to run the command, or repeat the gesture to finish.</p>
+        <p class="small muted">Or press <strong>Alt+Shift+J</strong> (<strong>⌥⇧J</strong> on a Mac) on any page, Chrome’s own included; change it at <code>chrome://extensions/shortcuts</code>. Beyond video, say things like “open Gmail”, “switch to the recipe tab”, “close all the cooking tabs”, “search Amazon for a USB hub”, “reopen the closed tab” or “open YouTube and play MrBeast’s latest video”.</p>
+        <div class="row between camera-status"><div class="row"><i class="dot" id="micDot"></i><span id="micText" role="status">Checking…</span></div>
+          <button class="primary" id="micGrantBtn">Allow microphone access</button></div>
+        <div class="field"><label for="voiceLanguage">Speech language</label>
+          <select id="voiceLanguage" data-setting="voiceLanguage"><option value="en-US">English (US)</option><option value="en-GB">English (UK)</option><option value="es-ES">Spanish</option><option value="fr-FR">French</option><option value="de-DE">German</option><option value="hi-IN">Hindi</option><option value="ja-JP">Japanese</option></select></div>
+        <button id="installSpeechBtn">Set up on-device speech</button>
+        <p class="small muted" id="speechStatus" role="status"></p>
+        <p class="small muted">Audio stays on your device. Chrome may need to download a speech language pack once. Voice is unavailable if this browser cannot recognize the selected language locally.</p>
       </section>
 
       <section class="card" id="aiSection">
         <h2>AI assistant</h2>
-        <p class="small muted">
-          What understands “search for Suits and play season 2 episode 3” and then goes
-          and does it — clicking, typing and scrolling a few steps at a time, looking at
-          the page again after each. It answers questions about the page too.
-          The key is read from <code>AI=</code> in the extension's <code>.env</code> file;
-          this only checks that a key is there and looks like one, so a blank or
-          mis-pasted value shows up now rather than the first time you talk to a page.
-        </p>
-        <div class="row"><i class="dot" id="aiDot"></i><span id="aiText">Checking…</span></div>
-        <p class="small muted">
-          When it runs, the sentence and a <em>description</em> of the page — the text on
-          it and the things you could click — go to Groq. Not the page's HTML, and never
-          the contents of a password field.
-        </p>
-        <p class="small muted" id="envSource"></p>
+        <p class="small muted">Say a task such as “Play season 3 episode 1 of Rick and Morty.” Jester follows the page through show selection, seasons, episodes and playback.</p>
+        <p class="small muted">Jester uses the first ready model below. When a model is rate limited, it moves to the end and the next ready model continues the task. If all models are limited, a countdown appears on the page until the closest model is ready.</p>
+        <p class="small muted" id="modelQueueStatus">Loading saved models…</p>
+        <ol class="model-connections" id="modelConnections" aria-label="Model fallback order"></ol>
+        <h3 class="model-form-title" id="modelFormTitle">Add a model</h3>
+        <div class="field"><label for="provider">Provider</label><select id="provider"></select></div>
+        <div class="field" id="baseUrlField" hidden><label for="baseUrl">API base URL</label><input id="baseUrl" type="url" placeholder="https://provider.example/v1" autocomplete="off" /></div>
+        <div class="field"><label for="modelId">Model ID</label><input id="modelId" type="text" list="modelList" placeholder="Enter your provider’s model ID" autocomplete="off" /><datalist id="modelList"></datalist></div>
+        <p class="small muted" id="googleProviderHelp" hidden>Free-tier option: <code>gemini-3.5-flash-lite</code>. Create a <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio API key</a>, enter this model ID, paste the key below, then Add model. Check your <a href="https://aistudio.google.com/rate-limit" target="_blank" rel="noopener noreferrer">active rate limits</a> and <a href="https://ai.google.dev/gemini-api/docs/pricing" target="_blank" rel="noopener noreferrer">free-tier availability</a>; quotas vary by project and can change.</p>
+        <div class="field"><label for="apiKey">API key</label><input id="apiKey" type="password" autocomplete="off" placeholder="Paste your provider API key" /></div>
+        <div class="field" id="modelPlanField"><label for="modelPlan">Plan</label><select id="modelPlan"><option value="free">Free tier — pace requests to its per-minute limits</option><option value="paid">Paid — only the provider’s reported limits</option></select></div>
+        <p class="small muted" id="modelEditNote" hidden>Enter the API key again to save changes. Saved keys are never shown here.</p>
+        <div class="row model-form-actions"><button class="primary" id="connectModelBtn">Add model</button><button id="cancelModelEditBtn" hidden>Cancel edit</button><button id="loadModelsBtn">List models</button></div>
+        <p class="small muted" id="modelStatus" role="status"></p>
+        <p class="small muted">Your keys stay in this browser profile and are only sent to their configured providers. Each model used for a task receives your command, your last few commands from the past two minutes, compact relevant page context, task memory and the last few actions — and, only when a request needs them, your open tabs’ titles and addresses or a few matching history and bookmark entries. Simple tab commands (“next tab”, “open Gmail”, “switch to YouTube”) are handled on this device. No raw HTML is sent, and a screenshot only when the setting below allows it. Model API usage may cost money.</p>
+        <div class="field"><label for="agentPermissionBoundary">Permission boundary</label><select id="agentPermissionBoundary" data-setting="agentPermissionBoundary"></select><p class="small muted" id="permissionNote"></p></div>
+        <p class="small muted">Tasks can open, switch and close tabs and move between sites. When a step needs your OK, the pill asks: say “yes” or “no”, or approve it in the toolbar popup. On Chrome’s own pages, where the pill can’t appear, the question and the answer arrive as notifications and on the toolbar badge.</p>
+        <label class="row check"><input type="checkbox" data-setting="agentRealInput" />
+          <span>Click and type with Chrome’s real mouse and keyboard during voice tasks</span></label>
+        <p class="small muted">Sites treat it exactly like your own input, so hover menus and controls that ignore scripted clicks work. Chrome shows “Jester started debugging this browser” while a task runs; dismissing that bar switches the rest of the task back to scripted events.</p>
+        <label class="row check"><input type="checkbox" data-setting="agentScreenshots" />
+          <span>Let a task look at a screenshot when the page text isn’t enough</span></label>
+        <p class="small muted">One picture of the tab with every clickable control numbered, sent to a saved model that can read images, at most three times per task. Never taken while a password or payment field is on screen, and never kept after that step.</p>
       </section>
 
       <section class="card">
@@ -344,13 +355,14 @@
         <h2>Where it runs</h2>
         <p class="small muted">Jester ships with YouTube, Netflix, Hulu, Disney+, Prime Video, Max, Peacock, Paramount+, Crunchyroll, Twitch, Vimeo and Apple TV enabled.</p>
         <p class="small muted">
-          Anything Jester <em>draws on the page</em> only exists where it runs — the voice
-          pill and the cursor both. Tab, window and playback actions work everywhere
-          regardless, because those run in the extension itself. So if the pill won't appear
-          on an ordinary site, this is why.
+          Anything Jester <em>draws on or reads from the page</em> only exists where it runs —
+          the voice pill, the cursor, and voice control of the page itself (clicking, typing,
+          searching a site). Tab, window and playback commands work everywhere regardless,
+          because those run in the extension itself. So if the pill won't appear, or a spoken
+          request can't act on an ordinary site, this is why.
         </p>
         <label class="row check"><input type="checkbox" id="allSites" />
-          <span>Also run on every other site — needed for the voice pill and the cursor off the list above</span></label>
+          <span>Also run on every other site — needed for voice control of pages, the voice pill and the cursor off the list above</span></label>
         <p class="small muted" id="allSitesNote"></p>
       </section>
 

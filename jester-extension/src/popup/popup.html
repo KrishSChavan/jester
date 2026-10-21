@@ -41,18 +41,18 @@
       <div class="meter"><i id="gestureBar"></i></div>
     </div>
 
-    <!--
-      Hidden until .env is read, and stays hidden on a CURSOR=false build.
-      Default-hidden rather than default-shown so the card can never flash into
-      view on a build where the feature doesn't exist.
-    -->
-    <label class="card row between pointer-setting" id="pointerCard" hidden>
-      <span>
-        <strong>Cursor control</strong>
-        <span class="small muted">Move and click with your hand</span>
-      </span>
-      <input type="checkbox" id="pointerEnabled" />
-    </label>
+    <div class="card" id="inputCard">
+      <label class="row between"><span>Voice commands</span><input type="checkbox" id="voiceEnabled" /></label>
+      <p class="small muted">Start with your bound gesture (☝️ by default).</p>
+      <label class="row between"><span>Cursor control</span><input type="checkbox" id="pointerEnabled" /></label>
+      <div id="pointerCard"><label for="pointerInput">Control with</label>
+        <select id="pointerInput"><option value="voice">Voice</option><option value="eyes-head">Eyes / head</option><option value="both">Both</option></select></div>
+      <div class="row"><button id="listenBtn">Start voice</button><button id="stopBtn">Cancel</button><button id="resumeBtn" hidden>Resume task</button></div>
+    </div>
+    <div class="card" id="approvalCard" hidden>
+      <strong>Review action</strong><p id="approvalText" class="small"></p>
+      <div class="row"><button class="primary" id="approveBtn">Allow once</button><button id="denyBtn">Cancel task</button></div>
+    </div>
 
     <div class="card">
       <div class="row between">

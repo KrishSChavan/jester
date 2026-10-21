@@ -85,7 +85,10 @@ code {
   margin: 4px 0 0;
 }
 
-.field select {
+.field select,
+.field input[type='text'],
+.field input[type='password'],
+.field input[type='url'] {
   width: 100%;
 }
 
@@ -145,4 +148,88 @@ table.bindings select {
 
 footer {
   padding-top: 4px;
+}
+
+.model-connections {
+  margin: 0 0 18px;
+  padding-left: 24px;
+}
+
+.model-connections:empty {
+  display: none;
+}
+
+.model-connection {
+  position: relative;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+
+.model-connection + .model-connection {
+  margin-top: 8px;
+}
+
+.model-connection::marker {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-connection.editing {
+  border-color: var(--accent);
+}
+
+.model-connection-details {
+  padding-right: 130px;
+  overflow-wrap: anywhere;
+}
+
+.model-connection-meta {
+  margin-top: 3px;
+}
+
+.model-ready {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.model-ready.cooling {
+  color: var(--warn);
+}
+
+.model-connection-actions,
+.model-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-connection-actions {
+  margin-top: 10px;
+}
+
+.model-connection-actions button {
+  font-size: 12px;
+  padding: 4px 9px;
+}
+
+.model-form-title {
+  margin-top: 16px;
+  font-size: 13px;
+}
+
+@media (max-width: 520px) {
+  .model-connection-details {
+    padding-right: 0;
+  }
+
+  .model-ready {
+    position: static;
+    display: inline-block;
+    margin-top: 5px;
+  }
 }

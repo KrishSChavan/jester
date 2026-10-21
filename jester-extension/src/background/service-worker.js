@@ -9,7 +9,18 @@
 
 import { ACTIONS, MSG, ENGINE, loadSettings, mergeSettings, post } from '../common/constants.js';
 import { loadEnv } from '../common/env.js';
-import { runAssistant, rateLimits, spentModels } from './assistant.js';
+import { runAssistant } from './assistant.js';
+import { loadConnection, loadConnections, connectionSummary, saveConnection, clearConnection, listConnectionModels, reorderConnections } from '../common/credentials.js';
+import { createPooledModelClient, nextModelCooldown } from './model-pool.js';
+import { createRealInput } from './real-input.js';
+import { abortableDelay, supportsImages } from './model-client.js';
+import { webPage, requiresConfirmation } from '../common/agent-permissions.js';
+import { BROWSER_READS } from '../common/agent-actions.js';
+import { createBrowserTools, publicAddress } from './browser-tools.js';
+import { approvalAnswer } from './browser-intent.js';
+import { siteOf } from '../common/sites.js';
+import { loadCalibration, clearCalibration } from '../common/gaze-store.js';
+import { fromJester, fromEngine, fromPage } from '../common/senders.js';
 
 const OFFSCREEN_URL = 'src/offscreen/offscreen.html';
 const TARGET_CACHE_MS = 1500;
@@ -20,8 +31,12 @@ const videoFrames = new Map();
 
 /** tabId -> the context its top frame last reported. */
 const tabContext = new Map();
+const tabScreen = new Map();
+let calibratingUntil = 0;
 
 let engineStatus = { state: ENGINE.OFF, detail: '' };
+/** A voice reply shown on the toolbar badge, where the pill can't be drawn; null when the badge shows engine state. */
+let badgeHeld = null;
 let cachedTarget = null;
 let cachedTargetAt = 0;
 let lastHudSignature = '';
@@ -98,6 +113,7 @@ function syncEngine() {
 async function runSync() {
   const settings = await getSettings();
   if (!settings.enabled) {
+    cancelAssistant();
     await closeOffscreen();
     return;
   }
@@ -143,8 +159,11 @@ const BADGE = {
 function setStatus(status) {
   engineStatus = { ...engineStatus, ...status };
   const badge = BADGE[engineStatus.state] || BADGE[ENGINE.OFF];
-  chrome.action.setBadgeText({ text: badge.text });
-  chrome.action.setBadgeBackgroundColor({ color: badge.color });
+  // A voice reply shown on the badge (where the pill can't be) keeps it until released.
+  if (!badgeHeld) {
+    chrome.action.setBadgeText({ text: badge.text });
+    chrome.action.setBadgeBackgroundColor({ color: badge.color });
+  }
   post({ type: MSG.STATE, engine: engineStatus });
 }
 
@@ -471,7 +490,7 @@ async function sendToFrame(target, message) {
     try {
       await chrome.scripting.executeScript({
         target: { tabId: target.tabId, frameIds: [target.frameId] },
-        files: ['src/content/content.js']
+        files: ['src/content/agent-page.js', 'src/content/content.js']
       });
       return await chrome.tabs.sendMessage(target.tabId, message, { frameId: target.frameId });
     } catch (retryErr) {
@@ -613,9 +632,9 @@ async function toggleWindowFullscreen(action) {
   return { ok: true, detail: 'Fullscreen' };
 }
 
-async function toggleFullscreen(action) {
+async function toggleFullscreen(action, forcedTarget = null) {
   const settings = await getSettings();
-  const target = await resolveTarget();
+  const target = forcedTarget || await resolveTarget();
   if (!target) return toggleWindowFullscreen(action);
 
   let tab;
@@ -809,6 +828,20 @@ async function dispatchAction(action, meta) {
   const scope = ACTIONS[action]?.scope || 'video';
 
   if (scope === 'system') {
+    if (action === 'VOICE_CAPTURE_TOGGLE') {
+      // Any page you're looking at, Chrome's own included: tab commands work everywhere.
+      if (!(await visibleTab())) return {ok:false,detail:'Bring a Chrome window to the front to use voice.'};
+      const settings = await getSettings();
+      if (!settings.enabled || !settings.voiceEnabled) {
+        notify('Voice commands are off. Turn Jester and voice on from its toolbar button.');
+        return {ok:false,detail:'Voice commands are off'};
+      }
+      post({type:MSG.VOICE_CONTROL,action:'toggle'});
+      return {ok:true,detail:'Voice capture toggled'};
+    }
+    if (action === 'CALIBRATE_POINTER') return openCalibration();
+    if (action === 'DISABLE') return setEnabled(false);
+    if (action === 'SLEEP' || action === 'STANDBY_TOGGLE') cancelAssistant();
     // Sleep is about Jester, not about a window, so it is the one thing that
     // still works with Chrome in the background — and the engine has already
     // flipped by the time this arrives. All that's left here is to say so.
@@ -979,7 +1012,7 @@ function topFrameChannel(clearMessage) {
         try {
           await chrome.scripting.executeScript({
             target: { tabId, frameIds: [0] },
-            files: ['src/content/content.js']
+            files: ['src/content/agent-page.js', 'src/content/content.js']
           });
           await chrome.tabs.sendMessage(tabId, message, { frameId: 0 });
           delivered = true;
@@ -1024,10 +1057,12 @@ function retireOverlays() {
 async function relayCursor(cursor) {
   // The .env kill switch. The engine already refuses to produce these, so this
   // is belt and braces against a stale offscreen document surviving a reload.
-  if (!(await loadEnv()).cursor) return;
+  if (cursor.active && !(await getSettings()).pointerEnabled) return;
   // A click, or the cursor going away, must never be dropped. Plain motion can:
   // the next frame supersedes it anyway.
-  return cursorChannel.send({ type: MSG.CURSOR, cursor }, cursor.active && !cursor.click);
+  const tabId = await visibleTabId();
+  const zoom = tabId === null ? 1 : await chrome.tabs.getZoom(tabId).catch(() => 1);
+  return cursorChannel.send({ type: MSG.CURSOR, cursor:{...cursor,zoom} }, cursor.active && !cursor.click);
 }
 
 /**
@@ -1057,7 +1092,7 @@ async function pauseForListening() {
   // started, not because anybody asked for it, and pausing the film someone had
   // running would be Jester acting entirely on its own.
   const settings = await getSettings();
-  if (settings.voicePillMode !== 'pointer-finger') return;
+  if (!settings.voiceEnabled) return;
 
   const target = await resolveTarget();
   if (!target) return;
@@ -1074,6 +1109,9 @@ async function pauseForListening() {
 }
 
 async function relayVoice(voice) {
+  // While a step waits for "yes" or "no", the microphone is open for that answer:
+  // the pill keeps the question, and nothing is paused or cancelled.
+  if (approval) return;
   // The opening frame of a session is the index finger going up. @see offscreen.
   if (voice.start) pauseForListening().catch(() => undefined);
 
@@ -1095,6 +1133,9 @@ async function relayVoice(voice) {
   if (blocked === voiceBlocked) return;
   voiceBlocked = blocked;
   post({ type: MSG.VOICE_BLOCKED, blocked });
+  // Listening on a page the pill can't reach: the badge says so instead.
+  if (blocked) holdBadge('●', '#3b82f6');
+  else if (!assistantRun) releaseBadge();
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,11 +1177,57 @@ let pillHeldUntil = 0;
  * half that knows nothing about Chrome.
  */
 let pendingResume = null;
-/** A plan older than this is about a page that has since moved on. */
-const RESUME_TTL_MS = 300000;
+/**
+ * A paused task is forgotten this long after its last step. "Keep going" is for
+ * carrying on straight away; by a minute later the user has moved on, and an
+ * old goal left lying around is one a later command can be confused with.
+ */
+const RESUME_TTL_MS = 60000;
+let resumeExpiry = null;
 
 /** Said to carry on, rather than to ask for something new. */
 const CONTINUE = /^(keep (going|at it)|carry on|continu\w*|go on|finish (it|that|up)|resume|and then)\b[\s.!?]*$/i;
+
+/**
+ * The last few voice commands and how they ended, so a follow-up such as "next
+ * episode" or "not that one" can be understood. Context only: the newest command
+ * is always the goal. Kept in session storage, because the worker often sleeps
+ * between two sentences.
+ */
+const FOLLOW_UP_KEY = 'recentCommands';
+const FOLLOW_UP_TTL_MS = 120000;
+const FOLLOW_UP_LIMIT = 3;
+
+async function recentCommands() {
+  const saved = (await chrome.storage.session.get(FOLLOW_UP_KEY).catch(() => ({})))?.[FOLLOW_UP_KEY];
+  return (Array.isArray(saved) ? saved : []).filter(entry => Date.now() - entry?.at < FOLLOW_UP_TTL_MS).slice(-FOLLOW_UP_LIMIT);
+}
+
+async function rememberCommand(said, result) {
+  const entry = {said:String(said).slice(0,200),result:String(result.say || (result.ok ? 'Done.' : 'Stopped.')).slice(0,160),at:Date.now()};
+  await chrome.storage.session.set({[FOLLOW_UP_KEY]:[...await recentCommands(),entry].slice(-FOLLOW_UP_LIMIT)}).catch(() => undefined);
+}
+
+/** Forgets the paused task, in session storage too, or a worker restart would bring it back. */
+function dropTask() {
+  pendingResume = null;
+  clearTimeout(resumeExpiry);
+  return chrome.storage.session.remove(TASK_KEY).catch(() => undefined);
+}
+
+/** The paused task while it is fresh; one that has gone stale is dropped as it is found. */
+function pausedTask() {
+  if (pendingResume && !(Date.now() < pendingResume.expiresAt)) dropTask();
+  return pendingResume;
+}
+
+/** Drops the paused task when it goes stale, if the worker is still awake then; `pausedTask` covers it if not. */
+function expireTaskLater() {
+  clearTimeout(resumeExpiry);
+  if (!pendingResume) return;
+  // A "keep going" run in progress owns the task; its end stores or drops it afresh.
+  resumeExpiry = setTimeout(() => { if (!assistantRun) pausedTask(); }, pendingResume.expiresAt - Date.now() + 100);
+}
 
 /**
  * @returns the state to resume from, or null if this is a new request.
@@ -1148,10 +1235,10 @@ const CONTINUE = /^(keep (going|at it)|carry on|continu\w*|go on|finish (it|that
  *          the stored plan has no bearing on.
  */
 function continuation(command, tabId) {
-  if (!pendingResume) return null;
+  if (!pausedTask()) return null;
   if (!CONTINUE.test(command)) return null;
-  if (pendingResume.tabId !== tabId || Date.now() - pendingResume.at > RESUME_TTL_MS) {
-    pendingResume = null;
+  if (pendingResume.tabId !== tabId) {
+    dropTask();
     return null;
   }
   return pendingResume;
@@ -1174,152 +1261,559 @@ function setPill(tabId, voice) {
   return sendToFrame({ tabId, frameId: 0 }, { type: MSG.VOICE, voice });
 }
 
+async function showModelCooldown(tabId, cooldown) {
+  if (tabId === null || tabId === undefined) return;
+  try {
+    await chrome.tabs.sendMessage(tabId,{type:'jester/model-cooldown',cooldown},{frameId:0});
+  } catch { /* A tab without Jester cannot show a badge. */ }
+}
+async function refreshModelCooldown(tabId) {
+  const connections = await loadConnections();
+  await showModelCooldown(tabId,nextModelCooldown(connections));
+}
+
 function cancelAssistant() {
   pillHeldUntil = 0;
+  releaseBadge();
   if (!assistantRun) return;
   const run = assistantRun;
   assistantRun = null;
   run.abort();
+  clearApproval(false);
+  realInput.release(run.tabId);
 }
 
 /**
- * Deliberately *not* through `sendToFrame`: its inject-and-retry is exactly
- * wrong here. A click that navigates tears down the content script with the
- * reply still in it, and retrying would run the whole batch a second time
- * against the page that replaced it. A lost reply means the page turned, which
- * is the step having worked — the next look at the page says what it did.
+ * A task acts on one tab at a time and follows the tabs it opens or switches to
+ * ("open YouTube and …"), on any web page. Chrome's own pages can't be read, but
+ * a task there still takes browser actions.
  */
-async function assistantAct(tabId, steps) {
-  try {
-    const result = await chrome.tabs.sendMessage(tabId, { type: MSG.RUN_STEPS, steps }, { frameId: 0 });
-    if (result?.results) return result;
-    return { results: [{ step: 'run', ok: false, detail: 'the page did not answer' }] };
-  } catch {
-    return { results: [], navigated: true };
-  }
+const TASK_KEY = 'agentTask';
+let approval = null;
+const taskReady = chrome.storage.session.get(TASK_KEY).then(saved => {
+  const task = saved[TASK_KEY];
+  if (!task?.snapshot) return;
+  // The task keeps its own clock: waking the worker must not make an old goal new again.
+  pendingResume = {...task.snapshot,tabId:task.tabId,expiresAt:Number(task.expiresAt) || 0};
+  if (pausedTask()) expireTaskLater();
+}).catch(() => undefined);
+async function guardAgentTab(tabId) {
+  const settings = await getSettings();
+  if (!settings.enabled) throw new Error('Jester is off.');
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) throw new Error('The task’s tab was closed.');
+  return tab;
 }
 
-/**
- * Roughly where the assistant is — a few dozen names, not the page. The finding
- * happens in the content script, where the elements are.
- */
-async function assistantDigest(tabId) {
-  const digest = await sendToFrame({ tabId, frameId: 0 }, { type: MSG.PAGE_DIGEST });
-  if (digest?.ok) {
-    const { tokens, remaining } = rateLimits();
-    const out = spentModels();
-    console.log(
-      `[jester] where: ${digest.count} things to aim at, ${digest.text.length} chars sent` +
-        (tokens ? ` · ${remaining}/${tokens} tokens left this minute` : '') +
-        (out.length ? ` · out for the day: ${out.join(', ')}` : '')
-    );
-    return digest;
-  }
-  return {
-    ok: false,
-    detail:
-      'Jester can’t read this page. It runs on the streaming sites listed in its manifest — ' +
-      'tick “Also run on every other site” in Settings to use it anywhere.'
-  };
+/** Why Jester can't read or act on a tab's page, or '' when it can. */
+async function pageAccess(tab) {
+  const url = tab.url || tab.pendingUrl || '';
+  if (!webPage(url)) return 'it is one of Chrome’s own pages';
+  if (/^https:\/\/(?:chromewebstore\.google\.com|chrome\.google\.com\/webstore)\//.test(url)) return 'Chrome protects the Web Store';
+  const allowed = await chrome.permissions.contains({origins:[`${new URL(url).origin}/*`]}).catch(() => false);
+  return allowed ? '' : 'Jester has no access to this site (turn on “Also run on every other site” in Settings)';
 }
 
-async function handleVoiceCommand(text) {
-  const command = String(text || '').trim();
-  if (!command) return;
+/** A page described rather than read, so the model still knows where it is and what still works there. */
+function unreadablePage(tab, reason) {
+  const url = publicAddress(tab.url || tab.pendingUrl || '');
+  const title = String(tab.title || '').slice(0, 160);
+  let hash = 0;
+  for (const char of url) hash = (hash * 31 + char.codePointAt(0)) >>> 0;
+  return {ok:true,restricted:true,pageId:`tab${tab.id}-${hash.toString(36)}`,revision:0,url,title,elements:[],count:0,truncated:false,
+    text:`Page: ${title}\nURL: ${url}\nJester cannot read or control this page: ${reason}. Browser actions still work here.`};
+}
 
-  // A second sentence supersedes the first: whatever the last one was doing,
-  // the user has moved on and is talking about something else.
-  cancelAssistant();
+function publishApproval() {
+  post({type:'jester/approval-state',approval:approval ? {id:approval.id,label:approval.label} : null});
+}
+function clearApproval(approved = false) {
+  if (!approval) return;
+  const current = approval; approval = null;
+  clearTimeout(current.timer); current.resolve(approved); publishApproval();
+}
 
-  const tabId = await activeTabId();
-
-  // "keep going" is the previous sentence continued, not a new one. Anything
-  // else is a new one, and retires whatever was left over.
-  const resume = continuation(command, tabId);
-
-  // Asked to carry on with nothing to carry on with. Worth its own answer: run
-  // as a request it would send Jester hunting the page for a button called
-  // "keep going", which is a strange thing to watch happen.
-  if (!resume && CONTINUE.test(command)) {
-    const say = 'There’s nothing to carry on with — say what you’d like.';
-    await setPill(tabId, { phase: 'answer', text: say, ok: false });
-    await recordAction({ source: 'voice', action: 'ASSISTANT', label: `🗣 “${command.slice(0, 48)}”`, ok: false, detail: say });
-    return;
-  }
-
-  if (!resume) pendingResume = null;
-
-  const controller = new AbortController();
-  const run = { abort: () => controller.abort() };
-  assistantRun = run;
-
-  await setPill(tabId, { phase: 'thinking' });
-
-  let result;
-  try {
-    const env = await loadEnv();
-    if (!env.aiOk) {
-      result = { ok: false, say: env.aiMessage };
-    } else if (tabId === null) {
-      result = { ok: false, say: 'Jester can’t reach the page in front — try a normal web page.' };
-    } else {
-      result = await runAssistant({
-        text: command,
-        resume,
-        env,
-        signal: controller.signal,
-        host: {
-          digest: () => assistantDigest(tabId),
-          act: (steps) => assistantAct(tabId, steps),
-          // Both of these reach out and change something the user can see, and
-          // an abort does not unpark the await a cancelled run is sitting in —
-          // `assistantAct` is a plain sendMessage that runs to completion, and a
-          // batch carrying a `wait` step can hold a dead run for seconds. By the
-          // time it comes back the pill belongs to the sentence that replaced
-          // it, so the seam is where ownership has to be checked: `signal` says
-          // the run was cancelled, `assistantRun` says who the pill is for now.
-          command: (action) =>
-            assistantRun === run
-              ? dispatchAction(action, { source: 'voice' })
-              : Promise.resolve({ ok: false, detail: 'cancelled' }),
-          thinking: (step) => {
-            if (assistantRun !== run) return Promise.resolve();
-            return setPill(tabId, { phase: 'thinking', step: step || '' });
-          }
-        }
-      });
-    }
-  } catch (err) {
-    console.error('[jester] assistant failed', err);
-    result = { ok: false, say: String(err?.message || err) };
-  }
-
-  // Cancelled, or overtaken by a newer sentence — either way the pill is
-  // somebody else's now and this run has nothing left to say on it.
-  if (assistantRun !== run) return;
-  assistantRun = null;
-
-  // Stopped with work left in it: keep the plan and the trail where "keep going"
-  // can find them. Only a run that *finished* clears the slot — a failure that
-  // produced no handle of its own (the page wasn't readable, the key was
-  // rejected) has said nothing about the plan, and clearing on it would mean a
-  // "keep going" that arrived a second too early threw away what it came for.
-  pendingResume = result.resume
-    ? { ...result.resume, tabId, at: Date.now() }
-    : result.ok
-      ? null
-      : pendingResume;
-
-  const say = result.say || (result.ok ? 'Done.' : 'Sorry — that didn’t work.');
-  await setPill(tabId, { phase: 'answer', text: say, ok: result.ok });
-  await recordAction({
-    source: 'voice',
-    action: 'ASSISTANT',
-    label: `🗣 “${(resume ? resume.goal : command).slice(0, 48)}”${resume ? ' (continued)' : ''}`,
-    ok: !!result.ok,
-    detail: say
+async function requestApproval(run, label) {
+  if (run.signal.aborted) return false;
+  const action = String(label).replace(/\s+/g, ' ').trim().slice(0, 80);
+  await showPill(run,{phase:'thinking',step:`Allow “${action}”? Say yes or no.`},{notify:true});
+  if (run.signal.aborted || assistantRun !== run) return false;
+  return new Promise(resolve => {
+    const id = crypto.randomUUID();
+    approval = {id,label:String(label).slice(0,400),resolve,timer:setTimeout(() => clearApproval(false),60000)};
+    run.signal.addEventListener('abort',() => clearApproval(false),{once:true});
+    publishApproval();
+    // The microphone opens for the answer; the toolbar popup can still approve.
+    post({type:MSG.VOICE_CONTROL,action:'start'});
   });
 }
+
+async function observeAgent(run, options = {}) {
+  const tab = await guardAgentTab(run.tabId);
+  const {tabs,...pageOptions} = options;
+  const reason = await pageAccess(tab);
+  let page = reason ? unreadablePage(tab,reason)
+    : await sendToFrame({tabId:tab.id,frameId:0},{type:'jester/agent-observe',options:pageOptions});
+  // A page just opened can still be loading its content script.
+  if (!page?.ok && !reason) {
+    await abortableDelay(400,run.signal);
+    page = await sendToFrame({tabId:tab.id,frameId:0},{type:'jester/agent-observe',options:pageOptions});
+  }
+  // Tab titles and addresses for the local planner only; the model's page never carries them.
+  if (page?.ok && tabs) page.tabs = await browserTools.listTabs(tab.id);
+  if (page?.ok) noteHosts(run,[page.url,...(page.elements || []).map(entry => entry?.url),...(page.tabs || []).map(entry => entry?.url)]);
+  return page;
+}
+
+const hostOf = (address) => { try { return new URL(address).hostname.replace(/^www\./, ''); } catch { return ''; } };
+/** Sites the task has seen linked or listed: following them needs no extra say-so. */
+function noteHosts(run, addresses) {
+  run.seenHosts ||= new Set();
+  for (const address of addresses) {
+    const host = typeof address === 'string' && /^https?:/.test(address) && hostOf(address);
+    if (host && run.seenHosts.size < 500) run.seenHosts.add(host);
+  }
+}
+/**
+ * A destination the task may open without asking: a listed site, a site the
+ * request names ("the Anthropic docs" → docs.anthropic.com), or one the task has
+ * seen linked, open or listed. Anything else a model came up with could be a
+ * page's text steering it, possibly with data in the address: that is sensitive.
+ */
+function knownDestination(run, address) {
+  const host = hostOf(address);
+  if (!host || siteOf(address) || run.seenHosts?.has(host)) return !!host;
+  const said = new Set(String(run.goal || '').toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+  return host.split('.').slice(0, -1).some(label => label.length > 2 && said.has(label));
+}
+
+/** The task moves to another tab: its pill and the debugging session go with it. */
+async function retarget(run, tabId) {
+  const previous = run.tabId;
+  if (tabId === previous) return;
+  run.tabId = tabId;
+  await chrome.tabs.sendMessage(previous,{type:MSG.VOICE,voice:{active:false}},{frameId:0}).catch(() => undefined);
+  await realInput.release(previous);
+}
+
+/**
+ * The player a spoken playback command means: this tab's, else the one playing
+ * in another tab ("pause" while reading Gmail). Gestures never reach a tab out of
+ * view; a spoken command names what it wants, and its answer says where it acted.
+ */
+async function playerFor(tabId) {
+  await probeTab(tabId);
+  const own = bestFrameInTab(tabId);
+  if (own) return {target:own};
+  const elsewhere = (frames) => frames.filter(frame => frame.tabId !== tabId).sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
+  let target = elsewhere([...videoFrames.values()].filter(frame => frame.playing));
+  if (!target) {
+    for (const tab of await chrome.tabs.query({audible:true}).catch(() => [])) {
+      if (tab.id === tabId) continue;
+      await probeTab(tab.id);
+      target = bestFrameInTab(tab.id);
+      if (target) break;
+    }
+  }
+  target ||= elsewhere([...videoFrames.values()]);
+  const tab = target && await chrome.tabs.get(target.tabId).catch(() => null);
+  return tab ? {target,tab} : {target:null};
+}
+
+const AGENT_COMMANDS = new Set(['PLAY','PAUSE','PLAY_PAUSE','SEEK_FORWARD','SEEK_BACK','VOLUME_UP','VOLUME_DOWN','MUTE_TOGGLE','SPEED_UP','SPEED_DOWN','SKIP_AD','NEXT_VIDEO','FULLSCREEN_TOGGLE','EXIT_FULLSCREEN']);
+async function executeAgent(run, action) {
+  if (run.signal.aborted || assistantRun !== run) return {ok:false,detail:'cancelled'};
+  const tab = await guardAgentTab(run.tabId);
+  const settings = await getSettings();
+  const name = action.action;
+  let classification;
+  if (name === 'command') {
+    if (!AGENT_COMMANDS.has(action.actionId)) return {ok:false,detail:'This browser command is not available to the agent.'};
+    classification = {ok:true,category:'browse',label:ACTIONS[action.actionId].label};
+  } else if (name === 'browser') {
+    const destinations = [action.url,...(action.urls || [])].filter(Boolean);
+    classification = {ok:true,label:browserApprovalLabel(action),category:BROWSER_READS.has(action.op) ? 'read'
+      : destinations.every(url => knownDestination(run,url)) ? 'browse' : 'sensitive'};
+  } else if (['navigate','go_back','go_forward'].includes(name)) {
+    if (name !== 'navigate') return {ok:false,detail:'Use a visible page control for navigation so the destination can be checked.'};
+    if (!webPage(action.url)) return {ok:false,detail:'Only web pages can be opened.'};
+    classification = {ok:true,category:knownDestination(run,action.url) ? 'browse' : 'sensitive',label:`Open ${hostOf(action.url)}`};
+  } else {
+    const reason = await pageAccess(tab);
+    if (reason) return {ok:false,detail:`Jester cannot act on this page: ${reason}. Browser actions still work.`};
+    classification = await sendToFrame({tabId:run.tabId,frameId:0},{type:'jester/agent-classify',action});
+    if (!classification?.ok) return classification || {ok:false,detail:'Could not inspect the target.'};
+    if (name === 'press_key' && !action.elementId) {
+      if (!classification.elementId || !classification.pageId) return {ok:false,detail:'Choose an explicit target before pressing a key.'};
+      action = {...action,elementId:classification.elementId,pageId:classification.pageId};
+    }
+    if (classification.url && !webPage(classification.url)) return {ok:false,detail:'This link does not lead to a web page.'};
+  }
+  let approved = false;
+  if (requiresConfirmation(settings.agentPermissionBoundary,classification.category)) {
+    approved = await requestApproval(run,classification.label);
+    if (!approved) { run.abort(); return {ok:false,detail:'Action was not approved.'}; }
+  }
+  if (run.signal.aborted || assistantRun !== run) return {ok:false,detail:'cancelled'};
+  await guardAgentTab(run.tabId);
+  if (name === 'browser') {
+    if (action.op === 'close') run.closing = new Set(action.tabIds || [action.tabId ?? run.tabId]);
+    try {
+      const result = await browserTools.run(action,{tabId:run.tabId,signal:run.signal});
+      noteHosts(run,[...(result?.tabs || []),...(result?.items || [])].flatMap(entry => [entry?.url,...(entry?.urls || [])]));
+      if (result?.ok && Number.isInteger(result.tabId)) await retarget(run,result.tabId);
+      return result;
+    } finally { run.closing = null; }
+  }
+  if (name === 'command') {
+    if (ACTIONS[action.actionId].scope === 'window') {
+      // Fullscreen is for the window in front: the task's tab must be what you're looking at.
+      if ((await visibleTab())?.id !== run.tabId) return {ok:false,detail:'Bring the task’s tab to the front for fullscreen.'};
+      await probeTab(run.tabId);
+      const target = bestFrameInTab(run.tabId);
+      return target ? toggleFullscreen(action.actionId,target) : {ok:false,detail:'No player is available in this tab.'};
+    }
+    const {target,tab:playerTab} = await playerFor(run.tabId);
+    if (!target) return {ok:false,detail:'No video is playing in any tab.'};
+    try {
+      const result = await chrome.tabs.sendMessage(target.tabId,{type:MSG.DO_ACTION,action:action.actionId,params:{seekSeconds:settings.seekSeconds,volumeStep:settings.volumeStep,speedStep:settings.speedStep,showToasts:false}},{frameId:target.frameId});
+      return target.tabId !== run.tabId && result?.ok
+        ? {...result,detail:`${PLAYED_ELSEWHERE[action.actionId] || ACTIONS[action.actionId].label} ${playerTitle(playerTab)} in another tab.`} : result;
+    } catch { return {ok:false,uncertain:true,detail:'The player changed before replying. Inspect playback before repeating.'}; }
+  }
+  if (name === 'navigate') {
+    // Until the new document loads, the old one still answers the next look.
+    const loads = browserTools.watchLoads(run.signal);
+    try {
+      await chrome.tabs.update(run.tabId,{url:action.url});
+      return {ok:true,detail:(await loads.until(run.tabId)) ? 'Opened the page.' : 'Navigation started; inspect the new page.'};
+    } finally { loads.stop(); }
+  }
+  const options = {boundary:settings.agentPermissionBoundary,approved};
+  if (settings.agentRealInput !== false && !run.syntheticOnly && REAL_INPUT.has(name) && realInput.supported()) {
+    const outcome = await executeReal(run,action,options);
+    if (outcome) return outcome;
+  }
+  try {
+    // Never retry a mutation: navigation can destroy its reply after the click landed.
+    return await chrome.tabs.sendMessage(run.tabId,{type:'jester/agent-execute',action,options},{frameId:0});
+  } catch { return {ok:false,uncertain:true,detail:'The document changed before replying. Inspect the current page before deciding what remains.'}; }
+}
+
+/** What a playback command did, said of a player in another tab. */
+const PLAYED_ELSEWHERE = {PLAY:'Playing',PAUSE:'Paused',PLAY_PAUSE:'Toggled playback of',VOLUME_UP:'Turned up',
+  VOLUME_DOWN:'Turned down',MUTE_TOGGLE:'Toggled the sound of',SEEK_FORWARD:'Skipped ahead in',SEEK_BACK:'Skipped back in',
+  SPEED_UP:'Sped up',SPEED_DOWN:'Slowed down',SKIP_AD:'Skipped the ad in',NEXT_VIDEO:'Moved to the next video in'};
+function playerTitle(tab) {
+  const title = String(tab?.title || '').replace(/\s+-\s+YouTube$/i, '').replace(/\s+/g, ' ').trim();
+  return title ? `“${title.length > 50 ? `${title.slice(0, 49)}…` : title}”` : 'the video';
+}
+
+/** What an approval asks about a browser action, in words. */
+function browserApprovalLabel(action) {
+  const site = (url) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return 'a page'; } };
+  switch (action.op) {
+    case 'open': return action.urls ? `Open ${action.urls.length} tabs` : `Open ${site(action.url)}`;
+    case 'search': return `Search the web for “${String(action.query).slice(0, 60)}”`;
+    case 'close': return action.tabIds?.length > 1 ? `Close ${action.tabIds.length} tabs` : 'Close the tab';
+    case 'bookmark': return 'Bookmark this page';
+    default: return `${action.op[0].toUpperCase()}${action.op.slice(1)} tab`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Real input — Chrome's own mouse and keyboard, as Claude in Chrome uses them
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Screenshots when stuck — one labelled picture for the next model step
+// ---------------------------------------------------------------------------
+
+/** Wide enough for the numbered labels to stay legible; a Retina capture is often twice this. */
+const SHOT_MAX_WIDTH = 1280;
+
+async function visionAvailable(env) {
+  const connections = await loadConnections().catch(() => []);
+  return connections.length ? connections.some(supportsImages) : supportsImages(env || {});
+}
+
+/** Scales a JPEG capture down to `maxWidth` pixels; unchanged where the worker cannot draw. */
+async function shrinkJpeg(base64, maxWidth) {
+  const image = {mimeType:'image/jpeg',data:base64};
+  if (typeof OffscreenCanvas !== 'function' || typeof createImageBitmap !== 'function') return image;
+  const bitmap = await createImageBitmap(new Blob([Uint8Array.from(atob(base64),char => char.charCodeAt(0))],{type:'image/jpeg'}));
+  try {
+    if (bitmap.width <= maxWidth) return image;
+    const canvas = new OffscreenCanvas(maxWidth,Math.round(bitmap.height*maxWidth/bitmap.width));
+    canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);
+    const bytes = new Uint8Array(await (await canvas.convertToBlob({type:'image/jpeg',quality:0.75})).arrayBuffer());
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i,i+0x8000));
+    return {mimeType:'image/jpeg',data:btoa(binary)};
+  } finally { bitmap.close?.(); }
+}
+
+/**
+ * One screenshot of the task tab with every clickable control numbered, for the
+ * model's next step. Never while a password or payment field is visible, and only
+ * when a saved model can read images.
+ */
+async function lookAgent(run,env) {
+  const settings = await getSettings();
+  if (settings.agentScreenshots === false) return {ok:false,detail:'Screenshots are off in Settings.'};
+  if (!(await visionAvailable(env))) return {ok:false,detail:'None of your saved models can read screenshots. Add one that can, such as Gemini, in Settings.'};
+  if (run.signal.aborted || assistantRun !== run) return {ok:false,detail:'cancelled'};
+  await guardAgentTab(run.tabId);
+  // Attach first: Chrome's debugging bar must not shift the page after the labels are drawn.
+  const viaDebugger = settings.agentRealInput !== false && !run.syntheticOnly && realInput.supported() && await realInput.attach(run.tabId);
+  const tab = viaDebugger ? null : await chrome.tabs.get(run.tabId);
+  if (tab && !tab.active) return {ok:false,detail:'Bring the task tab to the front so Jester can take a screenshot.'};
+  const frame = {tabId:run.tabId,frameId:0};
+  const marked = await sendToFrame(frame,{type:'jester/agent-marks',step:'show'});
+  if (!marked?.ok) return marked || {ok:false,detail:'The page could not be labelled.'};
+  try {
+    const base64 = viaDebugger ? await realInput.screenshot(run.tabId)
+      : (await chrome.tabs.captureVisibleTab(tab.windowId,{format:'jpeg',quality:70})).split(',')[1];
+    return {ok:true,image:await shrinkJpeg(base64,SHOT_MAX_WIDTH),legend:marked.legend};
+  } catch (error) {
+    return {ok:false,detail:`The screenshot could not be taken: ${String(error?.message || error).slice(0,120)}`};
+  } finally {
+    await sendToFrame(frame,{type:'jester/agent-marks',step:'hide'}).catch(() => undefined);
+  }
+}
+
+/** Actions that go through the debugger mouse and keyboard when they can. */
+const REAL_INPUT = new Set(['click','hover','type','press_key']);
+/** Long enough for hover reveals and mouse-move-dismissed layers to react. */
+const REAL_MOVE_SETTLE_MS = 100;
+const browserTools = createBrowserTools();
+const realInput = createRealInput({
+  // Dismissing Chrome's debugging bar means "stop debugging": the run carries on with synthetic events.
+  onUserCancel:tabId => { if (assistantRun?.tabId === tabId) assistantRun.syntheticOnly = true; }
+});
+
+/**
+ * One action through real input. The page aims and confirms; the worker only
+ * moves and presses. Returns null to fall back to synthetic events — before
+ * anything was pressed — whenever real input cannot be used safely.
+ */
+async function executeReal(run,action,options) {
+  const {tabId} = run;
+  const page = step => sendToFrame({tabId,frameId:0},{type:'jester/agent-input',step,action,options});
+  const live = () => !run.signal.aborted && assistantRun === run && !run.syntheticOnly;
+  const done = () => page('done').catch(() => undefined);
+  const fallBack = async () => { await done(); return null; };
+  const succeeded = (policy) => {
+    const {x,y,...result} = policy;
+    return {...result,ok:true,detail:`${action.action}: ${policy.label || action.action}`};
+  };
+  try {
+    if (action.action === 'type' || action.action === 'press_key') {
+      const ready = await page('ready');
+      if (!ready?.ok) return ready?.native === false ? fallBack() : ready;
+      if (!(await realInput.attach(tabId)) || !live()) return fallBack();
+      try {
+        if (action.action === 'type') await realInput.insertText(tabId,action.text);
+        else await realInput.key(tabId,action.key);
+      } catch { return {ok:false,uncertain:true,detail:'Typing was interrupted. Inspect the field before repeating.'}; }
+      await done();
+      return succeeded(ready);
+    }
+    let aimed = await page('aim');
+    if (!aimed?.ok) return aimed?.native === false ? fallBack() : aimed;
+    if (!realInput.attached(tabId)) {
+      if (!(await realInput.attach(tabId))) return fallBack();
+      // Chrome's debugging bar can resize the page as it appears: aim again on the settled layout.
+      await abortableDelay(150,run.signal);
+      aimed = await page('aim');
+      if (!aimed?.ok) return aimed?.native === false ? fallBack() : aimed;
+    }
+    let target = {x:aimed.x,y:aimed.y};
+    let landed = null;
+    for (let attempt = 0; attempt < 3 && live(); attempt++) {
+      await realInput.move(tabId,target.x,target.y);
+      await abortableDelay(REAL_MOVE_SETTLE_MS,run.signal);
+      landed = await page('land');
+      if (landed?.move) { target = landed.move; continue; }
+      // Zoom can make debugger units differ from CSS pixels; correct once from where the pointer was seen.
+      if (landed?.misaligned && attempt === 0 && realInput.calibrate(tabId,target,landed.seen)) continue;
+      break;
+    }
+    if (!live()) return run.signal.aborted || assistantRun !== run ? {ok:false,detail:'cancelled'} : fallBack();
+    // Unproven pointer position, or Jester's own overlay on top: nothing is pressed through the debugger.
+    if (landed?.unseen || landed?.misaligned || landed?.move || landed?.native === false) return fallBack();
+    if (!landed?.ok) return landed || {ok:false,notDispatched:true,detail:'The page changed before the press.'};
+    if (action.action === 'click') {
+      try { await realInput.press(tabId,landed.x,landed.y); }
+      catch { return {ok:false,uncertain:true,detail:'The click was interrupted. Inspect the page before repeating.'}; }
+    }
+    await done();
+    return succeeded(aimed);
+  } catch (error) {
+    if (run.signal.aborted || assistantRun !== run) return {ok:false,detail:'cancelled'};
+    // Nothing reached the page through the debugger: the synthetic path may still try.
+    console.info('[jester] real input unavailable',String(error?.message || error).slice(0,120));
+    return fallBack();
+  }
+}
+async function handleVoiceCommand(text, explicitResume = false) {
+  const command = String(text || '').trim().slice(0,2000);
+  if (!command && !explicitResume) return;
+  // The answer to "Allow …? Say yes or no." Anything else is a new request, and not a yes.
+  if (approval && !explicitResume) {
+    const answer = approvalAnswer(command);
+    if (assistantRun && answer !== 'yes') assistantRun.declined = true;
+    clearApproval(answer === 'yes');
+    if (answer) return;
+  }
+  await taskReady;
+  const settings = await getSettings();
+  if (!settings.enabled || !settings.voiceEnabled) return;
+  cancelAssistant();
+  // Whatever tab you're looking at, Chrome's own pages included: browser commands work there.
+  const tab = await visibleTab();
+  const tabId = tab?.id ?? null;
+  const resume = explicitResume ? pausedTask() : continuation(command,tabId);
+  if ((explicitResume || CONTINUE.test(command)) && (!resume || resume.tabId !== tabId)) {
+    await reply(tabId,{phase:'answer',text:'There is no task to resume on this tab.',ok:false}); return;
+  }
+  // A new request replaces whatever was paused; its goal is the only one now.
+  if (!resume) await dropTask();
+  if (!tab) return;
+  const controller = new AbortController();
+  // `tabId` changes as the task opens and switches tabs.
+  const run = {tabId,goal:resume?.goal || command,signal:controller.signal,abort:() => controller.abort()};
+  assistantRun = run;
+  // `resumableAt` is when the task can next make progress; its minute starts then.
+  const persist = async (snapshot, resumableAt = 0) => {
+    if (assistantRun !== run) return;
+    if (!snapshot) return dropTask();
+    const expiresAt = Math.max(Date.now(), resumableAt) + RESUME_TTL_MS;
+    pendingResume = {...snapshot,tabId:run.tabId,expiresAt};
+    await chrome.storage.session.set({[TASK_KEY]:{snapshot,tabId:run.tabId,expiresAt}});
+  };
+  await showPill(run,{phase:'thinking'});
+  let result;
+  try {
+    // "click" in combined mode is deterministic and uses the current gaze target.
+    if (/^(click|click (here|that)|select that)[.!]?$/i.test(command) && settings.pointerEnabled && settings.pointerInput === 'both') {
+      const target = await sendToFrame({tabId,frameId:0},{type:'jester/cursor-target'});
+      if (!target?.ok) result = {ok:false,say:target?.detail || 'Show the eye/head cursor first.'};
+      else {
+        const action = {action:'click',elementId:target.elementId,pageId:target.pageId};
+        const outcome = await executeAgent(run,action);
+        result = {ok:outcome?.ok,say:outcome?.detail || 'Clicked.'};
+      }
+    } else {
+      const config = await loadConnection();
+      // Preserve existing .env Groq connections during migration, without broadcasting secrets.
+      const migrated = (await chrome.storage.local.get('modelConnectionConfigured')).modelConnectionConfigured;
+      const legacy = config || migrated ? null : await loadEnv();
+      const env = config || (legacy?.aiOk ? {provider:'groq',protocol:'openai-compatible',baseUrl:'https://api.groq.com/openai/v1',model:legacy.aiModel || 'llama-3.3-70b-versatile',key:legacy.aiKey} : null);
+      const pooledModel = config ? createPooledModelClient({
+        // The pill keeps saying what the task is doing; which model answers is only logged.
+        onSelected:async (selected,requestSignal) => {
+          if (assistantRun !== run || run.signal.aborted || requestSignal.aborted) return;
+          await showModelCooldown(run.tabId,null);
+          console.info('[jester] model selected',JSON.stringify(selected));
+        },
+        onLimited:limited => console.info('[jester] model cooldown',JSON.stringify(limited)),
+        // Waiting a few seconds for a per-minute window is cheaper than tripping the provider's limit.
+        onPacing:async ({provider,waitMs}) => {
+          if (assistantRun !== run || run.signal.aborted) return;
+          console.info('[jester] model pacing',JSON.stringify({provider,waitMs}));
+          await showPill(run,{phase:'thinking',step:`Waiting ${Math.ceil(waitMs/1000)}s for ${provider}'s per-minute limit`});
+        },
+        onUnavailable:cooldown => assistantRun === run && !run.signal.aborted ? showModelCooldown(run.tabId,cooldown) : undefined
+      }) : undefined;
+      // A continuation's goal is the paused one, so it carries no follow-up context.
+      const previous = resume ? [] : await recentCommands();
+      result = await runAssistant({text:command,resume,previous,env:env||{},signal:controller.signal,
+        ...(pooledModel ? {modelClient:pooledModel} : {}),host:{
+        observe:options => observeAgent(run,options), execute:action => executeAgent(run,action), checkpoint:persist,
+        look:() => lookAgent(run,env),
+        thinking:step => assistantRun === run ? showPill(run,{phase:'thinking',step:typeof step === 'string' ? step : step?.status || ''}) : Promise.resolve()
+      }});
+    }
+  } catch (err) { result = {ok:false,say:String(err?.message || err).slice(0,350)}; }
+  if (assistantRun !== run) return;
+  // The debugging bar is only for the length of a task.
+  await realInput.release(run.tabId);
+  await rememberCommand(resume?.goal || command,result);
+  // Waiting out a provider cooldown is not inactivity: "keep going" cannot work until it ends.
+  if (result.resume) {
+    await persist(result.resume,Math.max(result.retryAt || 0,
+      nextModelCooldown(await loadConnections().catch(() => []))?.readyAt || 0));
+    expireTaskLater();
+  } else if (result.ok) await persist(null);
+  assistantRun = null;
+  clearApproval(false);
+  const said = result.say || (run.declined ? 'Okay, I didn’t do that.' : result.ok ? 'Done.' : 'The task stopped.');
+  await reply(run.tabId,{phase:'answer',text:said,ok:!!result.ok});
+  await recordAction({source:'voice',action:'ASSISTANT',label:`Voice: ${(resume?.goal || command).slice(0,70)}`,ok:!!result.ok,detail:said});
+}
+
+// ---------------------------------------------------------------------------
+// Replies where the pill can't be drawn — Chrome's own pages, the Web Store,
+// sites Jester has no access to: the toolbar badge, and a notification for
+// questions and answers. The popup's list keeps the full reply either way.
+// ---------------------------------------------------------------------------
+
+/** Shows the pill on the task's tab, or says it another way where it can't be drawn. */
+async function showPill(run, voice, {notify: ask = false} = {}) {
+  const delivered = await setPill(run.tabId,voice);
+  if (delivered?.ok !== false) return true;
+  holdBadge('…','#64748b');
+  if (ask && voice.step) notify(voice.step,run.tabId);
+  return false;
+}
+
+/** The final answer: on the pill, else as a badge and a notification. */
+async function reply(tabId, voice) {
+  const delivered = await setPill(tabId,voice);
+  if (delivered?.ok !== false) { releaseBadge(); return; }
+  flashBadge(voice.ok === false ? '!' : '✓',voice.ok === false ? '#ef4444' : '#22c55e');
+  notify(voice.text,tabId);
+}
+
+/** Shows a badge until released, over the engine's own state badge. */
+function holdBadge(text, color) {
+  clearTimeout(badgeHeld?.timer);
+  badgeHeld = {timer:null};
+  chrome.action.setBadgeText({text});
+  chrome.action.setBadgeBackgroundColor({color});
+}
+function flashBadge(text, color, ms = 6000) {
+  holdBadge(text,color);
+  badgeHeld.timer = setTimeout(releaseBadge,ms);
+}
+function releaseBadge() {
+  if (!badgeHeld) return;
+  clearTimeout(badgeHeld.timer);
+  badgeHeld = null;
+  setStatus({});
+}
+
+const NOTIFICATION_TABS = new Map();
+function notify(message, tabId = null) {
+  const text = String(message || '').trim().slice(0,300);
+  if (!text || !chrome.notifications?.create) return;
+  const id = `jester-${Date.now()}`;
+  if (tabId !== null) NOTIFICATION_TABS.set(id,tabId);
+  Promise.resolve(chrome.notifications.create(id,{type:'basic',iconUrl:chrome.runtime.getURL('icons/icon128.png'),
+    title:'Jester',message:text,priority:0,silent:true})).catch(() => undefined);
+}
+// Clicking a reply goes back to the tab it is about.
+chrome.notifications?.onClicked?.addListener(id => {
+  const tabId = NOTIFICATION_TABS.get(id);
+  NOTIFICATION_TABS.delete(id);
+  chrome.notifications.clear(id);
+  if (tabId !== undefined) chrome.tabs.get(tabId).then(tab => {
+    chrome.tabs.update(tab.id,{active:true});
+    chrome.windows.update(tab.windowId,{focused:true});
+  }).catch(() => undefined);
+});
+chrome.notifications?.onClosed?.addListener(id => NOTIFICATION_TABS.delete(id));
 
 // ---------------------------------------------------------------------------
 // HUD relay — forward only meaningful changes, not every inference frame
@@ -1373,7 +1867,7 @@ async function relayHud(telemetry) {
  */
 async function shouldSuspend() {
   const settings = await getSettings();
-  if (!settings.enabled || !settings.pauseWhenNoVideo) return false;
+  if (!settings.enabled || !settings.pauseWhenNoVideo || Date.now() < calibratingUntil) return false;
   return !(await resolveTarget({ allowProbe: false }));
 }
 
@@ -1385,19 +1879,83 @@ async function updateSuspendState() {
   }
 }
 
+// Calibration and message access remain local to extension-owned pages.
+async function openCalibration() {
+  const url = chrome.runtime.getURL('src/calibration/calibration.html');
+  const [existing] = await chrome.tabs.query({url});
+  const tab = existing || await chrome.tabs.create({url});
+  if (existing) await chrome.tabs.update(existing.id,{active:true});
+  await chrome.windows.update(tab.windowId,{focused:true}).catch(() => undefined);
+  await chrome.tabs.setZoomSettings(tab.id,{mode:'automatic',scope:'per-tab'}).catch(() => undefined);
+  await chrome.tabs.setZoom(tab.id,1).catch(() => undefined);
+  return {ok:true,detail:'Calibration opened'};
+}
+async function currentScreen() {
+  const tab = await visibleTab();
+  return tab ? tabScreen.get(tab.id) || null : null;
+}
+function respond(sendResponse, callback) {
+  Promise.resolve().then(callback).then(sendResponse).catch(err => sendResponse({ok:false,detail:String(err?.message || err).slice(0,400)}));
+  return true;
+}
+const ENGINE_MESSAGES = new Set([MSG.TRIGGER,MSG.TELEMETRY,MSG.CURSOR,MSG.VOICE,MSG.VOICE_COMMAND,MSG.ENGINE_STATUS,MSG.SETTINGS_REQUEST]);
+const PAGE_MESSAGES = new Set([MSG.VIDEO_STATE,MSG.VIEW_CONTEXT,MSG.VIEW_VISIBILITY,MSG.FULLSCREEN_EXIT,MSG.FULLSCREEN_DETACHED]);
+function allowed(type,sender) {
+  if (ENGINE_MESSAGES.has(type)) return fromEngine(sender);
+  if (PAGE_MESSAGES.has(type)) return fromPage(sender);
+  if (type === MSG.CURSOR_CLICK || type === 'jester/cancel-task') return fromPage(sender) || fromEngine(sender) || fromJester(sender);
+  return fromJester(sender);
+}
+
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!allowed(message?.type,sender)) return false;
   switch (message?.type) {
+    case 'jester/model-get':
+      return respond(sendResponse,async () => ({ok:true,connection:await connectionSummary()}));
+    case 'jester/model-save':
+      return respond(sendResponse,async () => { cancelAssistant(); return {ok:true,connection:await saveConnection(message.connection)}; });
+    case 'jester/model-clear':
+      return respond(sendResponse,async () => { cancelAssistant(); return {ok:true,connection:await clearConnection(message.id)}; });
+    case 'jester/model-reorder':
+      return respond(sendResponse,async () => { cancelAssistant(); return {ok:true,connection:await reorderConnections(message.ids)}; });
+    case 'jester/model-list':
+      return respond(sendResponse,async () => ({ok:true,models:await listConnectionModels(message.id)}));
+    case 'jester/agent-approval':
+      if (approval?.id === message.id) clearApproval(message.approved === true);
+      sendResponse({ok:true}); return false;
+    case 'jester/cancel-task':
+      cancelAssistant();
+      post({type:MSG.VOICE_CONTROL,action:'cancel'});
+      voiceChannel.retire();
+      sendResponse({ok:true}); return false;
+    case 'jester/resume-task':
+      handleVoiceCommand('keep going',true).catch(err => console.warn('[jester] resume failed',err));
+      sendResponse({ok:true}); return false;
+    case MSG.VOICE_CONTROL:
+      // Offscreen receives extension messages directly; never relay twice.
+      sendResponse({ok:true}); return false;
+    case MSG.OPEN_CALIBRATION:
+      return respond(sendResponse,openCalibration);
+    case MSG.GET_CALIBRATION:
+      return respond(sendResponse,async () => ({calibration:await loadCalibration()}));
+    case MSG.CLEAR_CALIBRATION:
+      return respond(sendResponse,async () => { await clearCalibration(); post({type:MSG.CALIBRATION_MODEL,calibration:null}); return {ok:true}; });
+    case MSG.CALIBRATION_SAVED:
+      loadCalibration().then(calibration => post({type:MSG.CALIBRATION_MODEL,calibration})); return false;
+    case MSG.CALIBRATION_MODE:
+      calibratingUntil = message.on ? Date.now()+2500 : 0;
+      updateSuspendState(); return false;
     case MSG.TRIGGER:
       dispatchAction(message.action, {
         source: message.source,
         gesture: message.gesture,
         context: message.context,
         // Only on SLEEP, which the engine has already applied to itself.
-        sleeping: message.sleeping,
+        sleeping: message.sleeping ?? message.standby,
         hint: message.hint
       }).catch((err) => console.error('[jester] dispatch failed', err));
       return false;
@@ -1421,25 +1979,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
 
     case MSG.CURSOR_CLICK:
-      // No cursor, no clicks to log — a stale frame must not put an entry in the
-      // history for a feature the build says doesn't exist.
-      loadEnv()
-        .then((env) => {
-          if (!env.cursor) return;
-          return recordAction({
-            source: 'pointer',
-            action: 'POINTER_CLICK',
-            label: 'Click',
-            ok: !!message.ok,
-            detail: message.detail || ''
-          });
-        })
-        .catch(() => undefined);
+      if ((message.surface === 'video' || message.surface === 'frame-video') && sender.tab) {
+        const frame = message.surface === 'frame-video' ? bestFrameInTab(sender.tab.id) : {tabId:sender.tab.id,frameId:sender.frameId || 0};
+        if (frame) sendToFrame(frame,{type:MSG.DO_ACTION,action:'PLAY_PAUSE',params:{showToasts:false}}).catch(() => undefined);
+      } else recordAction({source:'pointer',action:'POINTER_CLICK',label:'Click',ok:!!message.ok,detail:String(message.detail || '').slice(0,200)});
       return false;
 
     case MSG.ENGINE_STATUS:
       clearTimeout(watchdog);
-      setStatus({ state: message.state, detail: message.detail || '' });
+      setStatus({ state: message.state, detail: message.detail || '',cameraId:message.cameraId || null,mic:message.mic });
       return false;
 
     case MSG.VIDEO_STATE:
@@ -1465,13 +2013,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case MSG.VIEW_CONTEXT:
       if (sender.tab) {
+        if ((sender.frameId ?? 0) === 0) refreshModelCooldown(sender.tab.id).catch(() => undefined);
         tabContext.set(sender.tab.id, message.context);
+        if (message.screen?.w > 0 && message.screen?.h > 0) tabScreen.set(sender.tab.id,{w:message.screen.w,h:message.screen.h});
+        currentScreen().then(screen => post({type:MSG.ENGINE_CONFIG,screen}));
         refreshContext().catch(() => undefined);
       }
       return false;
 
     case MSG.VIEW_VISIBILITY:
       if (sender.tab) {
+        if (message.visible && (sender.frameId ?? 0) === 0) refreshModelCooldown(sender.tab.id).catch(() => undefined);
         if (message.visible) hiddenTabs.delete(sender.tab.id);
         else hiddenTabs.add(sender.tab.id);
         // This is a page going behind or coming back, which is precisely what
@@ -1491,6 +2043,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case MSG.GET_STATE:
       (async () => {
+        await taskReady;
         const settings = await getSettings();
         const { history = [] } = await chrome.storage.session.get('history');
         const target = await resolveTarget();
@@ -1503,6 +2056,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           history,
           hasTarget: !!target,
           voiceBlocked,
+          approval:approval ? {id:approval.id,label:approval.label} : null,
+          resumeAvailable:!assistantRun && !!pausedTask(),
           context: await refreshContext()
         });
       })();
@@ -1516,7 +2071,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           settings: await getSettings(),
           suspend: await shouldSuspend(),
-          context: await refreshContext()
+          context: await refreshContext(),
+          screen: await currentScreen(),
+          calibration: await loadCalibration()
         }))();
       return true;
 
@@ -1540,8 +2097,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local' || !changes.settings) return;
+  if (area !== 'local') return;
+  if (changes.modelConnections) {
+    const cooldown = nextModelCooldown(changes.modelConnections.newValue || []);
+    chrome.tabs.query({}).then(tabs => Promise.allSettled(tabs.map(tab => showModelCooldown(tab.id,cooldown)))).catch(() => undefined);
+  }
+  if (changes.gazeCalibration) loadCalibration().then(calibration => post({type:MSG.CALIBRATION_MODEL,calibration}));
+  if (!changes.settings) return;
   settingsCache = mergeSettings(changes.settings.newValue);
+  if (changes.settings.oldValue?.agentPermissionBoundary !== settingsCache.agentPermissionBoundary || !settingsCache.voiceEnabled) cancelAssistant();
   // The offscreen document has no storage listener of its own — push to it.
   // If it isn't up yet, syncEngine() below starts it and it asks us directly.
   post({ type: MSG.ENGINE_SETTINGS, settings: settingsCache });
@@ -1561,16 +2125,20 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 chrome.tabs.onActivated.addListener(() => {
   invalidateActiveTab();
+  currentScreen().then(screen => post({type:MSG.ENGINE_CONFIG,screen}));
   retireOverlays();
   updateSuspendState();
   refreshContext();
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  // Closing the task's tab ends the task, unless the task is the one closing it.
+  if (assistantRun?.tabId === tabId && !assistantRun.closing?.has(tabId)) cancelAssistant();
   for (const key of [...videoFrames.keys()]) {
     if (videoFrames.get(key).tabId === tabId) videoFrames.delete(key);
   }
   tabContext.delete(tabId);
+  tabScreen.delete(tabId);
   hiddenTabs.delete(tabId);
   invalidateActiveTab();
   updateSuspendState();
@@ -1617,12 +2185,22 @@ chrome.windows.onRemoved.addListener((windowId) => restoreWindowState.delete(win
 
 chrome.runtime.onStartup.addListener(() => syncEngine());
 
+// The keyboard shortcut (Alt+Shift+J by default; chrome://extensions/shortcuts changes it).
+chrome.commands?.onCommand?.addListener((command) => {
+  if (command !== 'toggle-voice') return;
+  dispatchAction('VOICE_CAPTURE_TOGGLE', { source: 'keyboard' }).catch((err) => console.error('[jester] shortcut failed', err));
+});
+
 chrome.runtime.onInstalled.addListener(async (details) => {
   await syncEngine();
   if (details.reason === 'install') {
     chrome.tabs.create({ url: chrome.runtime.getURL('src/options/options.html#welcome') });
   }
 });
+
+// Keep keys out of content-script storage access where Chrome supports it.
+chrome.storage.local.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'}).catch(() => undefined);
+chrome.storage.session.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'}).catch(() => undefined);
 
 // A cold worker start (e.g. after idle eviction) should re-assert the engine.
 syncEngine();

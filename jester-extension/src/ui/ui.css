@@ -114,7 +114,9 @@ button:disabled {
 
 select,
 input[type='number'],
-input[type='text'] {
+input[type='text'],
+input[type='password'],
+input[type='url'] {
   font: inherit;
   color: var(--text);
   background: var(--panel-2);

@@ -1,18 +1,22 @@
 {
   "manifest_version": 3,
-  "name": "Jester — Hand Gesture Video Control",
+  "name": "Jester \u2014 Hand Gesture Video Control",
   "version": "0.1.0",
   "description": "Control video playback with hand gestures on YouTube, Netflix, Disney+, Hulu and more. All hand tracking runs on-device via MediaPipe.",
   "minimum_chrome_version": "116",
-
   "permissions": [
     "offscreen",
     "storage",
     "tabs",
     "scripting",
-    "sessions"
+    "sessions",
+    "debugger",
+    "tabGroups",
+    "history",
+    "bookmarks",
+    "notifications",
+    "search"
   ],
-
   "host_permissions": [
     "*://*.youtube.com/*",
     "*://*.youtube-nocookie.com/*",
@@ -30,20 +34,18 @@
     "*://*.twitch.tv/*",
     "*://*.vimeo.com/*",
     "*://tv.apple.com/*",
-
     "https://api.groq.com/*"
   ],
-
-  "optional_host_permissions": ["*://*/*"],
-
+  "optional_host_permissions": [
+    "*://*/*"
+  ],
   "background": {
     "service_worker": "src/background/service-worker.js",
     "type": "module"
   },
-
   "action": {
     "default_popup": "src/popup/popup.html",
-    "default_title": "Jester — hand gesture video control",
+    "default_title": "Jester \u2014 hand gesture video control",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -51,19 +53,25 @@
       "128": "icons/icon128.png"
     }
   },
-
   "options_ui": {
     "page": "src/options/options.html",
     "open_in_tab": true
   },
-
+  "commands": {
+    "toggle-voice": {
+      "suggested_key": {
+        "default": "Alt+Shift+J",
+        "mac": "Alt+Shift+J"
+      },
+      "description": "Start or stop a voice command"
+    }
+  },
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-
   "content_scripts": [
     {
       "matches": [
@@ -84,20 +92,26 @@
         "*://*.vimeo.com/*",
         "*://tv.apple.com/*"
       ],
-      "js": ["src/content/content.js"],
+      "js": [
+        "src/content/agent-page.js",
+        "src/content/content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     },
     {
-      "matches": ["*://*.netflix.com/*"],
-      "js": ["src/content/page-bridge.js"],
+      "matches": [
+        "*://*.netflix.com/*"
+      ],
+      "js": [
+        "src/content/page-bridge.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     }
   ],
-
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*"
   }
 }

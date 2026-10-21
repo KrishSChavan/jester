@@ -544,10 +544,26 @@
     // One answer per tab: an iframe is never fullscreen on its own terms.
     if (window.top !== window) return;
     const context = viewContext();
-    if (context === lastContext) return;
-    lastContext = context;
-    chrome.runtime.sendMessage({ type: MSG.VIEW_CONTEXT, context }).catch(() => undefined);
+    const size = { w: screen.width, h: screen.height };
+    const signature = `${context}|${size.w}x${size.h}`;
+    if (signature === lastContext) return;
+    lastContext = signature;
+    chrome.runtime.sendMessage({ type: MSG.VIEW_CONTEXT, context, screen: size }).catch(() => undefined);
   }
+
+  let screenToldAt = 0;
+  function reassertScreen() {
+    const now = Date.now();
+    if (now - screenToldAt < 2000) return;
+    screenToldAt = now;
+    lastContext = null;
+    reportContext();
+  }
+
+  window.addEventListener('resize', reportContext);
+  if (typeof screen.addEventListener === 'function') screen.addEventListener('change', reportContext);
+  // Moving a window to another display may not produce a resize event.
+  setInterval(reportContext, 5000);
 
   for (const evt of ['fullscreenchange', 'webkitfullscreenchange']) {
     document.addEventListener(evt, reportContext, true);
@@ -701,15 +717,78 @@
   // An extension can't move the operating system's cursor — nothing in the
   // Chrome API surface reaches outside the browser — so Jester draws its own
   // and synthesises the pointer/mouse events the page would otherwise have
-  // seen. Those events are untrusted, which ordinary click and hover handlers
-  // don't care about, but it does mean a hand click can't unlock anything gated
-  // on real user activation (fullscreen, clipboard, sound-on autoplay).
+  // seen. Your eyes, your head or both aim it, and a hand closing into a fist
+  // clicks it. Those events are untrusted, which ordinary click and hover
+  // handlers don't care about, but it does mean a click can't unlock anything
+  // gated on real user activation (fullscreen, clipboard, sound-on autoplay).
   //
   // Rendered in the top frame only: the worker addresses frameId 0, and hit
   // testing runs against the top document.
   // -------------------------------------------------------------------------
 
+  function pointerSend(message) {
+    try { chrome.runtime.sendMessage(message).catch(() => undefined); } catch { /* extension reloaded */ }
+  }
+
+  function composedParent(node) {
+    if (node.parentElement) return node.parentElement;
+    const parent = node.parentNode;
+    return parent instanceof ShadowRoot ? parent.host : null;
+  }
+
+  function holds(outer, inner) {
+    for (let node = inner; node; node = composedParent(node)) if (node === outer) return true;
+    return false;
+  }
+
+  function closestAcross(el, selector) {
+    try {
+      for (let node = el; node;) {
+        const found = node.closest?.(selector);
+        if (found) return found;
+        const root = node.getRootNode?.();
+        node = root instanceof ShadowRoot ? root.host : null;
+      }
+    } catch { /* detached element */ }
+    return null;
+  }
+
+  function elementAt(x, y) {
+    let element = document.elementFromPoint(x, y);
+    for (let depth = 0; element?.shadowRoot && depth < 8; depth++) {
+      const inner = element.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === element) break;
+      element = inner;
+    }
+    return element;
+  }
+
+  // Cross-origin frame contents remain outside this page's cursor hit testing.
+  function holdsVideo(frame) {
+    try { return !!frame.contentDocument?.querySelector('video'); } catch { return false; }
+  }
+
+  function pointerMountOverlay(host, raise = false) {
+    if (!host) return;
+    if (host.parentNode !== document.documentElement) document.documentElement.appendChild(host);
+    if (typeof host.showPopover !== 'function') return;
+    try {
+      const open = host.matches(':popover-open');
+      if (open && !raise) return;
+      if (open) host.hidePopover();
+      host.showPopover();
+    } catch { /* a removed host will be mounted on the next update */ }
+  }
+
+  // Kept for the existing fullscreen listeners outside the pointer section.
+  function mountCursor() { pointerMountOverlay(cursorHost, true); }
+
+  document.addEventListener('toggle', (event) => {
+    if (event.newState === 'open' && event.target !== cursorHost && cursorVisible) mountCursor();
+  }, true);
+
   const POINTER_IDLE_MS = 1200; // no update for this long and the cursor goes
+  const CLOSING_FROM = 0.25; // how far closed the hand is before the aim holds still
   const RING_CIRCUMFERENCE = 2 * Math.PI * 20;
 
   /** What counts as "clickable" for the halo. Missing one costs only the halo. */
@@ -732,13 +811,26 @@
     '[tabindex]:not([tabindex="-1"])'
   ].join(',');
 
+  // A ring rather than a dot: where your eyes are is only known to within a
+  // hundred pixels or so, and a precise-looking dot invites you to look at it —
+  // which moves it, and you chase it across the page. The halo on the thing
+  // that will be clicked is what to watch.
+  //
+  // Steered by the head alone, the cursor is somewhere else: exactly where it
+  // was steered to, and looking at it doesn't move it. So it gets a centre dot
+  // to steer by, and its own accent, so that which of the two you're driving
+  // shows at a glance.
   const CURSOR_CSS = `
     :host { all: initial; }
-    .layer { position: fixed; inset: 0; pointer-events: none; z-index: 2147483647; }
+    .layer {
+      position: fixed; inset: 0; pointer-events: none; z-index: 2147483647;
+      --accent: 125, 211, 252;
+    }
+    .layer.head { --accent: 196, 181, 253; }
     .halo {
       position: absolute; left: 0; top: 0; width: 0; height: 0;
-      border: 2px solid rgba(125, 211, 252, .95); border-radius: 8px;
-      box-shadow: 0 0 0 4px rgba(125, 211, 252, .15);
+      border: 2px solid rgba(var(--accent), .95); border-radius: 8px;
+      box-shadow: 0 0 0 4px rgba(var(--accent), .15);
       opacity: 0; transition: opacity .12s ease;
     }
     .halo.show { opacity: 1; }
@@ -746,36 +838,34 @@
       position: absolute; left: 0; top: 0; width: 48px; height: 48px;
       margin: -24px 0 0 -24px;
       opacity: 0; transform: translate3d(-300px, -300px, 0);
-      /* Frames arrive at the inference rate; the transition fills the gaps. */
+      /* Readings arrive at the inference rate; the transition fills the gaps. */
       transition: opacity .16s ease, transform .07s linear;
       will-change: transform;
     }
     .cursor.show { opacity: 1; }
+    /* Looking off the page: the cursor stays where you'd find it, faded, and
+       clicks nothing. */
+    .cursor.show.away { opacity: .3; }
     .cursor svg {
       position: absolute; inset: 0; width: 100%; height: 100%;
       transform: rotate(-90deg) scale(1);
       transition: transform .08s ease;
     }
-    /* The pinch has landed: the ring snaps in, the way a button depresses. */
+    /* The fist has closed: the ring snaps in, the way a button depresses. */
     .cursor.down svg { transform: rotate(-90deg) scale(.78); }
-    .track { fill: rgba(15, 18, 24, .32); stroke: rgba(255, 255, 255, .6); stroke-width: 2.5; }
-    .cursor.over .track { stroke: #7dd3fc; }
-    .cursor.down .track { fill: rgba(125, 211, 252, .3); }
+    .track { fill: rgba(15, 18, 24, .18); stroke: rgba(255, 255, 255, .7); stroke-width: 2.5; }
+    .cursor.over .track { stroke: rgb(var(--accent)); }
+    .cursor.down .track { fill: rgba(var(--accent), .3); }
     .ring {
-      fill: none; stroke: #7dd3fc; stroke-width: 4; stroke-linecap: round;
+      fill: none; stroke: rgb(var(--accent)); stroke-width: 4; stroke-linecap: round;
       stroke-dasharray: ${RING_CIRCUMFERENCE};
       stroke-dashoffset: ${RING_CIRCUMFERENCE};
     }
-    .dot {
-      position: absolute; left: 50%; top: 50%; width: 8px; height: 8px;
-      margin: -4px 0 0 -4px; border-radius: 50%;
-      background: #fff; box-shadow: 0 0 6px rgba(0, 0, 0, .55);
-      transition: transform .08s ease;
-    }
-    .cursor.down .dot { transform: scale(1.5); background: #7dd3fc; }
+    .pip { fill: rgb(var(--accent)); stroke: rgba(15, 18, 24, .55); stroke-width: 1; opacity: 0; }
+    .layer.head .pip { opacity: 1; }
     .ripple {
       position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px;
-      border-radius: 50%; border: 2px solid #7dd3fc;
+      border-radius: 50%; border: 2px solid rgb(var(--accent));
       animation: ripple .45s ease-out forwards;
     }
     @keyframes ripple { to { transform: scale(3); opacity: 0; } }
@@ -789,17 +879,35 @@
   let cursorIdleTimer = null;
   let cursorVisible = false;
   let haloTarget = null;
+  /** The element under the cursor, and it and its ancestors, innermost first, as they were when it got there. */
   let hoverEl = null;
+  let hoverChain = [];
   let lastPointerX = 0;
   let lastPointerY = 0;
+  /** What the cursor would click, and the one it is about to switch to. */
+  let aimed = null;
+  let contender = null;
+  let contenderFrames = 0;
+  /** The last full look around the cursor: where, when, how wide, and what it found. */
+  let probed = null;
+  /** A problem already said once for this cursor, so it isn't toasted every frame. */
+  let saidProblem = '';
+
+  // `hideCursor` also releases whatever element is holding a synthetic hover.
+  window.addEventListener('pagehide', () => {
+    hideCursor();
+    cursorHost?.remove();
+    cursorHost = null;
+  });
 
   function ensureCursor() {
     if (cursorHost && cursorHost.isConnected) return;
     cursorHost = document.createElement('div');
     cursorHost.id = 'jester-cursor-host';
+    cursorHost.setAttribute('popover', 'manual');
     // `all: initial` resets pointer-events to auto, so re-clear it after.
     cursorHost.style.cssText = 'all: initial; pointer-events: none;';
-    const root = cursorHost.attachShadow({ mode: 'open' });
+    const root = cursorHost.attachShadow({ mode: 'closed' });
 
     const style = document.createElement('style');
     style.textContent = CURSOR_CSS;
@@ -812,33 +920,48 @@
         <svg viewBox="0 0 48 48" aria-hidden="true">
           <circle class="track" cx="24" cy="24" r="20"></circle>
           <circle class="ring" cx="24" cy="24" r="20"></circle>
+          <circle class="pip" cx="24" cy="24" r="2.5"></circle>
         </svg>
-        <i class="dot"></i>
       </div>`;
 
     root.append(style, cursorLayer);
     cursorEl = cursorLayer.querySelector('.cursor');
     cursorHalo = cursorLayer.querySelector('.halo');
     cursorRing = cursorLayer.querySelector('.ring');
-    mountCursor();
-  }
-
-  /** Fixed-position elements are invisible while another element is fullscreen. */
-  function mountCursor() {
-    if (!cursorHost) return;
-    const parent = document.fullscreenElement || document.documentElement;
-    if (cursorHost.parentNode !== parent) parent.appendChild(cursorHost);
+    // A new cursor, if the page threw the last one away: nothing on it is
+    // showing yet, whatever the old one was doing.
+    cursorVisible = false;
+    haloTarget = null;
+    pointerMountOverlay(cursorHost);
   }
 
   function interactiveTarget(el) {
+    return closestAcross(el, INTERACTIVE);
+  }
+
+  /** A control the page has switched off: nothing to aim at, though a click may still land on it. */
+  function disabled(el) {
     try {
-      return el?.closest?.(INTERACTIVE) || null;
+      return el.matches(':disabled, [aria-disabled="true"]');
     } catch {
-      return null; // element in a shadow tree without closest(), or detached
+      return false;
     }
   }
 
+  /**
+   * Where on the screen a point on this page is, as a real pointer event
+   * would say — from the page's own corner, so neither the toolbar above it
+   * nor page zoom puts the event's screenX/screenY somewhere else.
+   */
+  function screenPoint(px, py) {
+    const origin = pageOrigin(false);
+    return origin
+      ? { x: origin.x + px * pageZoom, y: origin.y + py * pageZoom }
+      : { x: px + (window.screenX || 0), y: py + (window.screenY || 0) };
+  }
+
   function mouseInit(px, py, extra) {
+    const at = screenPoint(px, py);
     return {
       bubbles: true,
       cancelable: true,
@@ -846,8 +969,8 @@
       view: window,
       clientX: px,
       clientY: py,
-      screenX: px + (window.screenX || 0),
-      screenY: py + (window.screenY || 0),
+      screenX: at.x,
+      screenY: at.y,
       button: 0,
       buttons: 0,
       detail: 0,
@@ -855,29 +978,91 @@
     };
   }
 
-  function dispatchPointer(el, types, px, py, extra) {
-    if (!el?.isConnected) return;
+  /** Dispatches one pointer or mouse event: false if a listener cancelled it, nothing if `el` has gone. */
+  function fire(el, type, px, py, extra) {
+    if (!el?.isConnected) return undefined;
     const init = mouseInit(px, py, extra);
-    const pointerInit = { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1 };
-    for (const type of types) {
-      const usePointer = type.startsWith('pointer');
-      el.dispatchEvent(
-        usePointer ? new PointerEvent(type, pointerInit) : new MouseEvent(type, init)
-      );
+    return el.dispatchEvent(
+      type.startsWith('pointer')
+        ? new PointerEvent(type, {
+            ...init,
+            pointerId: 1,
+            pointerType: 'mouse',
+            isPrimary: true,
+            width: 1,
+            height: 1,
+            pressure: init.buttons ? 0.5 : 0
+          })
+        : new MouseEvent(type, init)
+    );
+  }
+
+  /**
+   * It and its ancestors, innermost first, out of shadow roots too: every
+   * element whose "is the pointer inside me" a move can change.
+   */
+  function lineage(el) {
+    const chain = [];
+    for (let node = el; node; node = composedParent(node)) chain.push(node);
+    return chain;
+  }
+
+  /**
+   * Moves the synthetic hover to `next` the way a real pointer moves: out of
+   * the old element and over the new, each naming the other as
+   * `relatedTarget`, with a leave for every element the pointer is no longer
+   * inside and an enter for every one it now is — the old one's ancestors
+   * that don't hold the new one, the new one's that didn't hold the old. Hover
+   * menus, and React's onMouseEnter and onMouseLeave, are built on exactly
+   * these: without them a card can close as the eyes cross from its picture to
+   * its button.
+   */
+  function moveHover(next, px, py) {
+    // What was hovered may have been taken out of the page since; the pointer
+    // is still inside whatever of its ancestors is left.
+    const before = hoverChain.filter((node) => node.isConnected);
+    const prev = before[0] || null;
+    const after = next ? lineage(next) : [];
+    hoverEl = next;
+    hoverChain = after;
+    if (next === prev) return;
+
+    const inside = new Set(before);
+    const stays = new Set(after.filter((node) => inside.has(node)));
+    const left = before.filter((node) => !stays.has(node));
+    const entered = after.filter((node) => !stays.has(node)).reverse();
+    const boundary = { bubbles: false, cancelable: false, composed: false };
+    // All the pointer events first, then the mouse events they stand for.
+    for (const kind of ['pointer', 'mouse']) {
+      if (prev) fire(prev, `${kind}out`, px, py, { relatedTarget: next });
+      for (const node of left) fire(node, `${kind}leave`, px, py, { ...boundary, relatedTarget: next });
+      if (next) fire(next, `${kind}over`, px, py, { relatedTarget: prev });
+      for (const node of entered) fire(node, `${kind}enter`, px, py, { ...boundary, relatedTarget: prev });
     }
+  }
+
+  /** The pointer at (px, py) over `el`: the hover moved there, and a move to say so. */
+  function pointerTo(el, px, py) {
+    moveHover(el, px, py);
+    // Players reveal their controls on mousemove, not on hover state alone.
+    fire(el, 'pointermove', px, py);
+    fire(el, 'mousemove', px, py);
+  }
+
+  /** A page-sized wrapper that happens to be focusable: outlining or aiming at it is noise. */
+  function uselessRect(rect) {
+    return (
+      !rect ||
+      rect.width < 4 ||
+      rect.height < 4 ||
+      (rect.width > window.innerWidth * 0.9 && rect.height > window.innerHeight * 0.9)
+    );
   }
 
   function setHalo(target) {
     if (!cursorHalo) return;
     const rect = target?.getBoundingClientRect?.();
-    const useless =
-      !rect ||
-      rect.width < 4 ||
-      rect.height < 4 ||
-      // A page-sized wrapper that happens to be focusable — outlining it is noise.
-      (rect.width > window.innerWidth * 0.9 && rect.height > window.innerHeight * 0.9);
-
-    if (useless) {
+    if (uselessRect(rect)) {
       if (!haloTarget) return;
       haloTarget = null;
       cursorHalo.classList.remove('show');
@@ -894,22 +1079,197 @@
     cursorEl.classList.add('over');
   }
 
-  function syncHover(px, py) {
-    const el = document.elementFromPoint(px, py);
-    if (el !== hoverEl) {
-      if (hoverEl) dispatchPointer(hoverEl, ['pointerout', 'mouseout'], px, py);
-      hoverEl = el;
-      if (el) dispatchPointer(el, ['pointerover', 'mouseover'], px, py);
+  /** `under`: what is at (px, py), if the caller has just hit-tested it. */
+  function syncHover(px, py, under) {
+    const el = under?.isConnected ? under : elementAt(px, py);
+    if (el) pointerTo(el, px, py);
+    else moveHover(null, px, py);
+  }
+
+  function releaseHover() {
+    // Out of the page altogether, as a real pointer leaving the window is.
+    moveHover(null, lastPointerX, lastPointerY);
+    setHalo(null);
+    aimed = null;
+    contender = null;
+    contenderFrames = 0;
+    probed = null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Aiming, with an eye's accuracy
+  //
+  // The eyes are read to within a hundred pixels or so, and a player button is
+  // forty. Clicking the exact point would mostly miss, so the cursor looks
+  // around itself — as far as the engine says (`errorPx`: the calibration's
+  // typical miss for the eyes, less once the head steers) — and aims at the
+  // nearest clickable thing. The halo shows which; it holds still while the
+  // hand closes; and the click lands on it.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Controls whose meaning is *where* on them you click — a seek bar, a volume
+   * slider. Snapping to one and clicking would pick a spot the eyes never
+   * chose (YouTube's seek bar spans the player: its middle is "jump to 50%").
+   * Never targets; looking at them over a video is looking at the video.
+   */
+  const POSITIONAL = '[role="slider"], [role="scrollbar"], [role="progressbar"], input[type="range"]';
+
+  function positional(el) {
+    return !!closestAcross(el, POSITIONAL);
+  }
+
+  /**
+   * Around the gaze point, the clickable thing nearest to it within `radius`
+   * (`best`); every clickable thing a probe landed on (`seen`); and what is
+   * right under the point (`under`), which the hover wants too.
+   */
+  function nearestTarget(px, py, radius) {
+    const probes = [[px, py]];
+    for (const [ring, twist] of [[radius / 2, 0], [radius, Math.PI / 8]]) {
+      for (let i = 0; i < 8; i += 1) {
+        const angle = (i / 8) * Math.PI * 2 + twist;
+        probes.push([px + ring * Math.cos(angle), py + ring * Math.sin(angle)]);
+      }
     }
-    // Players reveal their controls on mousemove, not on hover state alone.
-    if (hoverEl) dispatchPointer(hoverEl, ['pointermove', 'mousemove'], px, py);
-    setHalo(interactiveTarget(hoverEl));
+    let best = null;
+    let under = null;
+    const seen = new Set();
+    for (const [i, [x, y]] of probes.entries()) {
+      if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+      const hit = elementAt(x, y);
+      if (i === 0) under = hit;
+      const target = interactiveTarget(hit);
+      if (!target || seen.has(target)) continue;
+      seen.add(target);
+      if (positional(target) || disabled(target)) continue;
+      const rect = target.getBoundingClientRect();
+      if (uselessRect(rect)) continue;
+      const dx = Math.max(rect.left - px, 0, px - rect.right);
+      const dy = Math.max(rect.top - py, 0, py - rect.bottom);
+      const distance = Math.hypot(dx, dy);
+      if (distance <= radius && (!best || distance < best.distance)) best = { el: target, distance };
+    }
+    return { best, seen, under };
+  }
+
+  /** A cursor that has moved less than this since the last look around it... */
+  const PROBE_MOVE_PX = 3;
+  /** ...and looked this recently, has nothing new to find. */
+  const PROBE_REST_MS = 250;
+
+  /**
+   * Seventeen hit tests are a look around the cursor. A cursor at rest — the
+   * head held still, a gaze settled — would repeat the same look twenty times
+   * a second, so it looks again only once it has moved or a moment has passed.
+   * `fresh` says whether this one is new.
+   */
+  function lookAround(px, py, radius) {
+    const now = performance.now();
+    const last = probed;
+    if (
+      last &&
+      last.radius === radius &&
+      now - last.at < PROBE_REST_MS &&
+      Math.hypot(px - last.x, py - last.y) < PROBE_MOVE_PX
+    ) {
+      return { ...last.found, fresh: false };
+    }
+    const found = nearestTarget(px, py, radius);
+    probed = { x: px, y: py, radius, at: now, found };
+    return { ...found, fresh: true };
+  }
+
+  /**
+   * Whether the aim has to let go of `el`: it's switched off now, or covered
+   * — a menu or a tooltip opened over it — so no probe found it, and neither
+   * the point of it nearest the cursor nor its centre is it any more. A click
+   * would go straight through whatever covers it.
+   */
+  function lostAim(el, look, px, py) {
+    if (disabled(el)) return true;
+    return !look.seen.has(el) && !pointOn(el, px, py).hit;
+  }
+
+  /**
+   * Re-aim, but not jumpily: a new target has to be clearly nearer, two
+   * frames running, to take over — gaze noise would otherwise flick the halo
+   * between neighbours. And never while the hand is closing (`look` is null
+   * then): the thing that is about to be clicked must not change under the
+   * click.
+   */
+  function reaim(px, py, radius, look) {
+    // Frozen while the hand closes — including on the click itself, and
+    // including an aim at nothing: the eyes flicking to the closing hand must
+    // not move the click onto something else, or off the video onto a button.
+    if (!look) {
+      if (aimed && !aimed.el.isConnected) aimed = null;
+      return;
+    }
+    if (aimed && (!aimed.el.isConnected || (look.fresh && lostAim(aimed.el, look, px, py)))) {
+      aimed = null;
+      contender = null;
+      contenderFrames = 0;
+    }
+    const found = look.best;
+    if (!found) {
+      aimed = null;
+      contender = null;
+      contenderFrames = 0;
+      return;
+    }
+    if (!aimed || !aimed.el.isConnected || found.el === aimed.el) {
+      aimed = found;
+      contender = null;
+      contenderFrames = 0;
+      return;
+    }
+    const current = aimed.el.getBoundingClientRect();
+    const currentDistance = Math.hypot(
+      Math.max(current.left - px, 0, px - current.right),
+      Math.max(current.top - py, 0, py - current.bottom)
+    );
+    if (found.distance < currentDistance - radius * 0.25) {
+      contenderFrames = contender === found.el ? contenderFrames + 1 : 1;
+      contender = found.el;
+      if (contenderFrames >= 2) {
+        aimed = found;
+        contender = null;
+        contenderFrames = 0;
+      }
+    } else {
+      contender = null;
+      contenderFrames = 0;
+    }
+  }
+
+  /** Text that is someone's own writing, or isn't text at all. */
+  const UNTOLD = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA']);
+
+  /**
+   * The first `max` or so letters of an element's text — never from inside an
+   * editor, where the text is what was typed, and without reading the rest:
+   * a click on blank space lands on a container whose text is the whole page.
+   */
+  function leadingText(el, max) {
+    if (el.isContentEditable || UNTOLD.has(el.tagName)) return '';
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let text = '';
+    let letters = 0;
+    for (let node = walker.nextNode(); node && letters < max; node = walker.nextNode()) {
+      const parent = node.parentElement;
+      if (!parent || parent.isContentEditable || UNTOLD.has(parent.tagName)) continue;
+      const piece = node.data.slice(0, max);
+      text += piece;
+      letters += piece.trim().length;
+    }
+    return text;
   }
 
   /**
    * Names the clicked element for the popup's history list. Deliberately never
-   * reads `value` — that would put whatever is typed in a field, password
-   * included, into stored history.
+   * reads `value`, nor text inside an editor — either would put what was
+   * typed, a password or a draft, into stored history.
    */
   function describeTarget(el) {
     const name = el.tagName ? el.tagName.toLowerCase() : 'element';
@@ -917,7 +1277,7 @@
       el.getAttribute?.('aria-label') ||
         el.title ||
         el.getAttribute?.('placeholder') ||
-        el.textContent ||
+        leadingText(el, 80) ||
         ''
     )
       .replace(/\s+/g, ' ')
@@ -935,53 +1295,356 @@
     setTimeout(() => dot.remove(), 500);
   }
 
+  /**
+   * Whether a point is on the video, with nothing clickable nearer.
+   *
+   * Looking at a film and closing your hand means play or pause it — the job ✋
+   * used to do before it started raising the cursor. A synthetic click there
+   * would mean whatever the site's player makes of one (play on some, "show
+   * controls" on others, and Netflix ignores it outright), so instead the
+   * worker runs Play / pause through the same path the gestures use.
+   *
+   * On the video means inside its box — or the player's, black bars and all,
+   * unless "the player" is as big as the page, as one site's is — and with
+   * the video, or the player's own overlays, what's actually there: not a
+   * dialog or a sidebar laid over it. A player as big as the page holds every
+   * dialog the app opens, so there the overlays that count are the ones in
+   * the wrappers still about the video's size.
+   */
+  function onVideo(video, px, py) {
+    if (!video) return false;
+    const inside = (rect) => px >= rect.left && px <= rect.right && py >= rect.top && py <= rect.bottom;
+    const player = fullscreenTarget(video);
+    const playerRect = player.getBoundingClientRect();
+    const pageSized = playerRect.width > window.innerWidth * 0.9 && playerRect.height > window.innerHeight * 0.9;
+    if (!inside(video.getBoundingClientRect()) && (pageSized || !inside(playerRect))) return false;
+    const hit = elementAt(px, py);
+    const box = pageSized ? videoWrapper(video) : player;
+    return !!hit && (holds(box, hit) || holds(hit, video));
+  }
+
+  /**
+   * The outermost wrapper around a video still no bigger than twice it — the
+   * rule playerScope() goes by for a player it doesn't know — or the video
+   * itself. Out of a shadow root too, as holds() goes.
+   */
+  function videoWrapper(video) {
+    const size = Math.max(videoArea(video), 1);
+    let box = video;
+    for (let node = composedParent(video); node && node !== document.body; node = composedParent(node)) {
+      const rect = node.getBoundingClientRect();
+      if (rect.width * rect.height > size * 2) break;
+      box = node;
+    }
+    return box;
+  }
+
+  /**
+   * Where on the aimed element to click, and the element there. The point of
+   * it nearest the gaze, a little inside its edge — not its centre, which for
+   * anything wide is somewhere the eyes weren't — as long as that point really
+   * is the element: a round button's corner belongs to whatever is behind it.
+   * Failing that its centre; failing that too (something laid over it), the
+   * element itself, which is what the halo said would be clicked — and `hit`
+   * says it was neither.
+   */
+  function pointOn(target, px, py) {
+    const rect = target.getBoundingClientRect();
+    const insetX = Math.min(4, rect.width / 4);
+    const insetY = Math.min(4, rect.height / 4);
+    const centre = [(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2];
+    const near = [clamp(px, rect.left + insetX, rect.right - insetX), clamp(py, rect.top + insetY, rect.bottom - insetY)];
+    for (const [cx, cy] of [near, centre]) {
+      const x = clamp(cx, 0, window.innerWidth - 1);
+      const y = clamp(cy, 0, window.innerHeight - 1);
+      const el = elementAt(x, y);
+      if (el && holds(target, el)) return { el, x, y, hit: true };
+    }
+    return {
+      el: target,
+      x: clamp(centre[0], 0, window.innerWidth - 1),
+      y: clamp(centre[1], 0, window.innerHeight - 1),
+      hit: false
+    };
+  }
+
+  /** Another page in a frame of its own. */
+  const FRAMES = new Set(['IFRAME', 'FRAME', 'OBJECT', 'EMBED']);
+
   function clickAt(px, py) {
-    const el = document.elementFromPoint(px, py);
+    const target = aimed?.el?.isConnected ? aimed.el : null;
+    const video = findVideo();
+    // Aimed at the player itself (some wrap it in a focusable element), or at
+    // nothing but the video: that's play / pause.
+    if ((!target && onVideo(video, px, py)) || (target && video && holds(target, video))) {
+      ripple(px, py);
+      return { ok: true, surface: 'video', detail: 'Video' };
+    }
+
+    const { el, x, y } = target ? pointOn(target, px, py) : { el: elementAt(px, py), x: px, y: py };
     if (!el) return { ok: false, detail: 'Nothing under the cursor' };
-    const target = interactiveTarget(el) || el;
+    // Events sent to an <iframe> stay in this document and never reach the
+    // page inside it, so a click there would only look like one.
+    if (FRAMES.has(el.tagName)) {
+      // A player in a frame: the click can't get in, but play and pause don't
+      // need it to — the worker plays or pauses it the way a gesture would.
+      if (holdsVideo(el)) {
+        ripple(x, y);
+        return { ok: true, surface: 'frame-video', detail: 'Video' };
+      }
+      return { ok: false, surface: 'frame', detail: "Inside an embedded frame — out of the cursor's reach" };
+    }
+    const focusable = interactiveTarget(el) || el;
+    // Named now: pressing it may re-render it.
+    const detail = describeTarget(focusable);
 
-    // Dispatch on the deepest element so the event path matches a real click;
-    // it bubbles to whatever handler actually cares.
-    dispatchPointer(el, ['pointerdown', 'mousedown'], px, py, { buttons: 1, detail: 1 });
-    if (typeof target.focus === 'function') target.focus({ preventScroll: true });
-    dispatchPointer(el, ['pointerup', 'mouseup', 'click'], px, py, { detail: 1 });
+    // The pointer goes there first, as a real one would have, then presses.
+    // Dispatched on the deepest element, so the event path matches a real
+    // click; it bubbles to whatever handler actually cares.
+    pointerTo(el, x, y);
+    const down = { buttons: 1, detail: 1 };
+    // A page that cancels pointerdown is asking for no mouse events for this
+    // press (a click still comes)...
+    const mouseToo = fire(el, 'pointerdown', x, y, down) !== false;
+    // ...and one that cancels mousedown, for focus to stay where it is: how an
+    // autocomplete keeps its input focused while an option is clicked.
+    const focusToo = !mouseToo || fire(el, 'mousedown', x, y, down) !== false;
+    if (focusToo && focusable.isConnected && typeof focusable.focus === 'function') {
+      focusable.focus({ preventScroll: true });
+    }
+    // A press can re-render what was pressed. A real release then lands on
+    // what is left of it — and if all of it went, there's nothing to click.
+    const released = el.isConnected ? el : focusable.isConnected ? focusable : null;
+    if (!released) return { ok: false, detail: `${detail} — gone when pressed` };
+    fire(released, 'pointerup', x, y, { detail: 1 });
+    if (mouseToo) fire(released, 'mouseup', x, y, { detail: 1 });
+    fire(released, 'click', x, y, { detail: 1 });
 
-    ripple(px, py);
-    return { ok: true, detail: describeTarget(target) };
+    ripple(x, y);
+    return { ok: true, detail };
+  }
+
+  // -------------------------------------------------------------------------
+  // From the screen to this page
+  //
+  // The eyes aim at the screen, and calibration runs fullscreen, so the cursor
+  // arrives as fractions of the whole display. In an ordinary window the page
+  // starts some way in from the display's corner — the window's position, the
+  // tab strip and toolbar above the page, a side panel beside it — and on a
+  // zoomed page its pixels aren't the screen's either. Getting any of that
+  // wrong puts the cursor a toolbar's height from where you're looking, so
+  // when it can't be worked out the cursor stays down and says why.
+  //
+  // A cursor steered by the head is the exception. It is wherever it has been
+  // steered to, and the user steers it by watching it, so a page corner that
+  // is off by a side panel's width only moves where it starts; for it, a good
+  // guess beats no cursor.
+  //
+  // src/common/gaze.js has the simple version the calibration page uses.
+  // -------------------------------------------------------------------------
+
+  /** Page zoom, from the worker: a page can't tell zoom from a dense screen by itself. */
+  let pageZoom = 1;
+  const isMac = /Mac/i.test(navigator.userAgentData?.platform || navigator.platform || '');
+
+  /**
+   * The last real mouse movement over the page. A trusted event carries both
+   * its screen and its page position, which pins down exactly where the page
+   * sits on the screen — side panels, odd toolbars and all — for as long as
+   * the window doesn't move, resize or zoom.
+   */
+  let trustedMouse = null;
+  const noteMouse = (event) => {
+    if (!event.isTrusted) return;
+    trustedMouse = {
+      screenX: event.screenX,
+      screenY: event.screenY,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      windowX: window.screenX,
+      windowY: window.screenY,
+      width: window.innerWidth,
+      height: window.innerHeight
+    };
+  };
+  document.addEventListener('mousemove', noteMouse, { capture: true, passive: true });
+
+  /**
+   * Where this page's top-left corner is, in desktop pixels. `strict`: null
+   * rather than a guess when the window's shape leaves it in doubt.
+   */
+  function pageOrigin(strict) {
+    const m = trustedMouse;
+    if (m && m.width === window.innerWidth && m.height === window.innerHeight) {
+      return {
+        x: m.screenX - m.clientX * pageZoom + (window.screenX - m.windowX),
+        y: m.screenY - m.clientY * pageZoom + (window.screenY - m.windowY)
+      };
+    }
+    const width = window.innerWidth * pageZoom;
+    const height = window.innerHeight * pageZoom;
+    // innerWidth and innerHeight are whole CSS pixels, and on a zoomed page as
+    // often rounded up as down: the page can measure a fraction of a pixel
+    // wider than a borderless window, narrower than a bordered one, or taller
+    // than the room under a hidden toolbar. Less than a CSS pixel out is that
+    // rounding, not a panel.
+    let border = (window.outerWidth - width) / 2;
+    if (border < 0 && border > -pageZoom) border = 0;
+    if (border > 8 && border < 8 + pageZoom) border = 8;
+    // Wider than a window border is a side panel, docked DevTools or a second
+    // tab split beside this one — on either side, and nothing here says which.
+    // Guessed wrong, an eye-aimed cursor lands a panel's width from where you
+    // look, which is worse than none.
+    if (!(border >= 0 && border <= 8)) {
+      if (strict) return null;
+      border = isMac ? 0 : 8;
+    }
+    let top = window.outerHeight - height - border;
+    if (top < 0 && top > -pageZoom) top = 0;
+    if (!(top >= 0 && top <= 200)) {
+      if (strict) return null;
+      top = clamp(top, 0, 200) || 0;
+    }
+    return { x: window.screenX + border, y: window.screenY + top };
+  }
+
+  /**
+   * Where the display this page is on starts, in desktop pixels. Chrome only
+   * says where its *usable* area starts (below a menu bar, beside a dock), so
+   * the calibration recorded how far that was from the display's real corner.
+   */
+  function displayOrigin(display) {
+    if (!screen.isExtended) return { x: 0, y: 0 };
+    if (Number.isFinite(display?.insetX) && Number.isFinite(display?.insetY)) {
+      return { x: screen.availLeft - display.insetX, y: screen.availTop - display.insetY };
+    }
+    return screen.availLeft === 0 && screen.availTop <= 40
+      ? { x: 0, y: 0 }
+      : { x: screen.availLeft, y: screen.availTop };
+  }
+
+  /**
+   * A point given as fractions of the screen it was placed on, in this page's
+   * pixels — or null. `strict` as for pageOrigin().
+   */
+  function screenToPage(cursor, strict) {
+    const gx = cursor.x * screen.width;
+    const gy = cursor.y * screen.height;
+    if (document.fullscreenElement) {
+      // An element in fullscreen is the screen, less anything the system keeps
+      // at the top of it.
+      const top = Math.max(0, screen.height - window.innerHeight * pageZoom);
+      return { x: gx / pageZoom, y: (gy - top) / pageZoom };
+    }
+    const page = pageOrigin(strict);
+    if (!page) return null;
+    const display = displayOrigin(cursor.display);
+    return { x: (gx - (page.x - display.x)) / pageZoom, y: (gy - (page.y - display.y)) / pageZoom };
+  }
+
+  /** Whether the pointer may put its own notices on the page (Settings → toasts). */
+  let pointerNotices = true;
+
+  function notice(detail) {
+    if (pointerNotices) showToast('POINTER', { ok: false, detail });
+  }
+
+  /** Once per cursor: a toast saying why this cursor can't do what it's asked. */
+  function sayOnce(problem) {
+    if (saidProblem === problem) return;
+    saidProblem = problem;
+    notice(problem);
+  }
+
+  /**
+   * The cursor can't be put anywhere on this page. It stays down, the reason is
+   * said once — and a click is refused every time, out loud and in the popup's
+   * history, rather than silently vanishing.
+   */
+  function cannotPlace(cursor, problem) {
+    hideCursor();
+    sayOnce(problem);
+    if (cursor.click) {
+      pointerSend({ type: MSG.CURSOR_CLICK, ok: false, detail: problem });
+      notice(`Not clicked — ${problem.charAt(0).toLowerCase()}${problem.slice(1)}`);
+    }
   }
 
   function hideCursor() {
     clearTimeout(cursorIdleTimer);
     if (!cursorHost) return;
     cursorVisible = false;
-    cursorEl.classList.remove('show', 'down');
-    setHalo(null);
-    if (hoverEl) {
-      dispatchPointer(hoverEl, ['pointerout', 'mouseout'], lastPointerX, lastPointerY);
-      hoverEl = null;
-    }
+    cursorEl.classList.remove('show', 'down', 'away');
+    releaseHover();
   }
 
   function applyCursor(cursor) {
     if (!cursor.active) {
       hideCursor();
+      saidProblem = '';
+      return;
+    }
+    if (Number.isFinite(cursor.zoom) && cursor.zoom > 0) pageZoom = cursor.zoom;
+    if (typeof cursor.notices === 'boolean') pointerNotices = cursor.notices;
+
+    // A fist held after its click: done with the cursor for now.
+    if (cursor.hidden) {
+      hideCursor();
+      return;
+    }
+    // A refused click is an event, not a state: said every time it happens.
+    if (cursor.refused) notice(cursor.refused);
+
+    // Steered by the head alone (see "From the screen to this page").
+    const headSteered = cursor.mode === 'head';
+
+    const display = cursor.display;
+    if (display && (display.w !== screen.width || display.h !== screen.height)) {
+      // The engine has this page on a screen of another size, so whatever it
+      // last heard from here is out of date.
+      reassertScreen();
+      // Aimed by the eyes, the fractions describe where someone looked on a
+      // different display, and no arithmetic here can make them mean this
+      // one. Steered by the head, they're how far across the screen it has
+      // been steered — which means the same on this one.
+      if (!headSteered) {
+        cannotPlace(cursor, 'Calibrated on a different screen — recalibrate on this one');
+        return;
+      }
+    }
+    const point = screenToPage(cursor, !headSteered);
+    if (!point) {
+      cannotPlace(cursor, 'Move the mouse over the page once, or go fullscreen, so the cursor can find it');
       return;
     }
 
     ensureCursor();
-    mountCursor();
+    // The transition that smooths motion between frames would otherwise fly the
+    // cursor in from wherever it was parked, so the first frame jumps instead.
+    const appearing = !cursorVisible;
+    // Coming up is also the moment to get back on top of anything the page
+    // has put in the top layer since — a fullscreen element, a modal dialog.
+    pointerMountOverlay(cursorHost, appearing);
     // If the engine dies mid-gesture nothing sends the closing frame, so the
     // cursor times itself out rather than hanging on screen forever.
     clearTimeout(cursorIdleTimer);
     cursorIdleTimer = setTimeout(hideCursor, POINTER_IDLE_MS);
 
-    // Stay a pixel inside the viewport: elementFromPoint returns null on the edge.
-    lastPointerX = clamp((cursor.x ?? 0.5) * window.innerWidth, 0, window.innerWidth - 1);
-    lastPointerY = clamp((cursor.y ?? 0.5) * window.innerHeight, 0, window.innerHeight - 1);
+    // Looking well past the page — at the tab strip, the keyboard, the camera
+    // — is looking away. The cursor waits, faded, at the edge; nothing is
+    // hovered and nothing clicks. (Steered past it by the head, the same.)
+    const margin = 40;
+    const away =
+      !!cursor.offscreen ||
+      point.x < -margin ||
+      point.y < -margin ||
+      point.x > window.innerWidth + margin ||
+      point.y > window.innerHeight + margin;
+    // Stay a pixel inside the page: elementFromPoint returns null on the edge.
+    lastPointerX = clamp(point.x, 0, window.innerWidth - 1);
+    lastPointerY = clamp(point.y, 0, window.innerHeight - 1);
 
-    // The transition that smooths motion between frames would otherwise fly the
-    // cursor in from wherever it was parked, so the first frame jumps instead.
-    const appearing = !cursorVisible;
+    cursorLayer.classList.toggle('head', headSteered);
     if (appearing) cursorEl.style.transition = 'none';
     cursorEl.style.transform = `translate3d(${lastPointerX}px, ${lastPointerY}px, 0)`;
     if (appearing) {
@@ -990,18 +1653,45 @@
       cursorVisible = true;
       cursorEl.classList.add('show');
     }
+    cursorEl.classList.toggle('away', away);
+    // Fills as the open hand closes; full is the click.
     cursorRing.style.strokeDashoffset = String(
-      RING_CIRCUMFERENCE * (1 - clamp(cursor.pinch || 0, 0, 1))
+      RING_CIRCUMFERENCE * (1 - clamp(cursor.progress || 0, 0, 1))
     );
     cursorEl.classList.toggle('down', !!cursor.down);
 
-    syncHover(lastPointerX, lastPointerY);
+    // A hand resting a little under fully open isn't closing; one a quarter of
+    // the way to a fist is, and a real close gets there in a frame or two.
+    const closing = !!cursor.click || !!cursor.down || (cursor.progress || 0) >= CLOSING_FROM;
+
+    if (away) {
+      // Nothing is hovered while you look away — except that a hand already
+      // closing keeps its aim: the aim holds still while the hand closes, and
+      // a moment's reading past the edge mustn't move the click off it (onto
+      // the video underneath, say, which would play or pause instead).
+      if (!closing) releaseHover();
+      if (cursor.click) {
+        const why = headSteered ? 'The cursor was off the page' : 'You were looking away from the page';
+        pointerSend({ type: MSG.CURSOR_CLICK, ok: false, detail: why });
+        notice(`Not clicked — ${why.charAt(0).toLowerCase()}${why.slice(1)}`);
+      }
+      return;
+    }
+
+    const radius = clamp(cursor.errorPx || 100, 32, 160) / pageZoom;
+    // Hit tests first, while the page's layout is still clean from the last
+    // frame drawn: the page's own handlers for the synthetic moves below
+    // dirty it, and every hit test after that would lay the page out again.
+    const look = closing ? null : lookAround(lastPointerX, lastPointerY, radius);
+    reaim(lastPointerX, lastPointerY, radius, look);
+    setHalo(aimed?.el || null);
+    // The hover holds still with the aim while the hand closes: following the
+    // eyes down to the closing hand could shut the very menu the click is for.
+    if (!closing) syncHover(lastPointerX, lastPointerY, look.under);
 
     if (cursor.click) {
       const result = clickAt(lastPointerX, lastPointerY);
-      chrome.runtime
-        .sendMessage({ type: MSG.CURSOR_CLICK, ok: result.ok, detail: result.detail })
-        .catch(() => undefined);
+      pointerSend({ type: MSG.CURSOR_CLICK, ok: result.ok, detail: result.detail, surface: result.surface || null });
     }
   }
 
@@ -1206,7 +1896,15 @@
     voiceSay = document.createElement('div');
     voiceSay.className = 'say';
 
-    voicePill.append(bars, spin, voiceStep, voiceSay);
+    const cancel = document.createElement('button');
+    cancel.textContent = '×';
+    cancel.setAttribute('aria-label','Cancel voice command or task');
+    cancel.style.cssText = 'pointer-events:auto;border:0;background:transparent;color:#fff;font-size:22px;cursor:pointer;padding:0 4px;margin-left:8px;';
+    cancel.addEventListener('click',() => {
+      chrome.runtime.sendMessage({type:'jester/cancel-task'}).catch(() => undefined);
+      hideVoicePill();
+    });
+    voicePill.append(bars, spin, voiceStep, voiceSay,cancel);
     voiceAnchor.append(voicePill);
     layer.append(voiceAnchor);
     root.append(style, layer);
@@ -1320,6 +2018,10 @@
   }
 
   function applyVoice(voice) {
+    if (voice.mic?.detail && ['error','no-permission'].includes(voice.mic.state)) {
+      showVoicePhase('answer',{text:voice.mic.detail,ok:false});
+      return;
+    }
     if (voice.transcript?.text) {
       const { text, final } = voice.transcript;
       // Also logged in the offscreen document's own console; this copy is here
@@ -1348,6 +2050,91 @@
       const level = clamp(Number(voice.levels[i]) || 0, 0, 1);
       voiceBars[i].style.height = `${VOICE_BAR_MIN + level * (VOICE_BAR_MAX - VOICE_BAR_MIN)}px`;
     }
+  }
+
+  // Model cooldowns are independent of the voice pill, so the remaining wait
+  // stays visible after a spoken task's status fades away.
+  let cooldownHost = null;
+  let cooldownBadge = null;
+  let cooldownSummary = null;
+  let cooldownClock = null;
+  let cooldownTimer = null;
+  let cooldownDeadline = 0;
+
+  function mountModelCooldown() {
+    if (!cooldownHost || !cooldownDeadline) return;
+    const parent = document.fullscreenElement || document.documentElement;
+    if (cooldownHost.parentNode !== parent) parent.appendChild(cooldownHost);
+  }
+
+  function clearModelCooldown() {
+    clearTimeout(cooldownTimer);
+    cooldownTimer = null;
+    cooldownDeadline = 0;
+    if (cooldownBadge) cooldownBadge.hidden = true;
+  }
+
+  function applyModelCooldown(cooldown) {
+    clearModelCooldown();
+    const deadline = cooldown?.readyAt;
+    if (cooldown?.allLimited !== true || !Number.isFinite(deadline) || deadline <= Date.now() || deadline > 8.64e15) return;
+    const provider = typeof cooldown.provider === 'string' ? cooldown.provider.replace(/\s+/g, ' ').trim().slice(0, 80) : '';
+    const model = typeof cooldown.model === 'string' ? cooldown.model.replace(/\s+/g, ' ').trim().slice(0, 120) : '';
+    if (!provider || !model) return;
+    if (!cooldownHost) {
+      cooldownHost = document.createElement('div');
+      cooldownHost.id = 'jester-model-cooldown-host';
+      cooldownHost.setAttribute('data-jester', '');
+      cooldownHost.style.cssText = 'all: initial; pointer-events: none;';
+      const root = cooldownHost.attachShadow({ mode: 'open' });
+      const style = document.createElement('style');
+      style.textContent = `
+        :host { all: initial; pointer-events: none; }
+        .badge { position: fixed; top: 16px; right: 16px; z-index: 2147483647;
+          box-sizing: border-box; max-width: min(440px, calc(100vw - 32px));
+          padding: 9px 12px; border: 1px solid rgba(255,255,255,.16);
+          border-radius: 12px; background: rgba(18,18,20,.94); color: #f5f5f5;
+          font: 12px/1.45 system-ui, sans-serif; overflow-wrap: anywhere;
+          box-shadow: 0 4px 18px rgba(0,0,0,.25); pointer-events: none; }
+        .badge[hidden] { display: none !important; }
+        .clock { color: #d1d1d6; white-space: nowrap; font-variant-numeric: tabular-nums; }
+      `;
+      cooldownBadge = document.createElement('div');
+      cooldownBadge.className = 'badge';
+      cooldownBadge.hidden = true;
+      cooldownSummary = document.createElement('span');
+      cooldownSummary.className = 'summary';
+      cooldownSummary.setAttribute('role', 'status');
+      cooldownSummary.setAttribute('aria-live', 'polite');
+      cooldownSummary.setAttribute('aria-atomic', 'true');
+      cooldownClock = document.createElement('span');
+      cooldownClock.className = 'clock';
+      // Announce the status once, rather than interrupting a screen reader on
+      // every tick of the visual countdown.
+      cooldownClock.setAttribute('aria-hidden', 'true');
+      cooldownBadge.append(cooldownSummary, cooldownClock);
+      root.append(style, cooldownBadge);
+    }
+    cooldownDeadline = deadline;
+    mountModelCooldown();
+    cooldownSummary.textContent = `All models rate-limited · ${provider} ${model}`;
+    cooldownBadge.hidden = false;
+    const tick = () => {
+      const remaining = cooldownDeadline - Date.now();
+      if (remaining <= 0 || !cooldownHost?.isConnected) {
+        clearModelCooldown();
+        return;
+      }
+      const seconds = Math.ceil(remaining / 1000);
+      const label = ` · next retry in ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+      if (cooldownClock.textContent !== label) cooldownClock.textContent = label;
+      cooldownTimer = setTimeout(tick, Math.min(remaining, 1000));
+    };
+    tick();
+  }
+
+  for (const event of ['fullscreenchange', 'webkitfullscreenchange']) {
+    document.addEventListener(event, mountModelCooldown);
   }
 
   // -------------------------------------------------------------------------
@@ -1392,7 +2179,7 @@
   ]);
 
   /** Jester's own overlays. Offering the assistant its own pill would be absurd. */
-  const JESTER_HOSTS = new Set(['jester-hud-host', 'jester-cursor-host', 'jester-voice-host']);
+  const JESTER_HOSTS = new Set(['jester-hud-host', 'jester-cursor-host', 'jester-voice-host', 'jester-model-cooldown-host']);
 
   /**
    * What the assistant is allowed to aim at. Wider than INTERACTIVE above,
@@ -2279,8 +3066,106 @@
   // Messaging
   // -------------------------------------------------------------------------
 
+  /**
+   * An in-app navigation still loading: the site's own progress bar is up.
+   * YouTube swaps the address at once and the page about a second later
+   * (measured: search results 1.2 s after Enter), with its bar up in between.
+   */
+  function navigationPending() {
+    if (document.readyState === 'loading') return true;
+    const bar = document.querySelector('yt-page-navigation-progress');
+    return !!bar && !bar.hidden && !(Number(bar.getAttribute('aria-valuenow')) >= 100);
+  }
+
+  const NAVIGATION_SETTLE_MS = 4000;
+  const NAVIGATION_QUIET_MS = 120;
+  const NAVIGATION_QUIET_CHANGES = 20;
+
+  /**
+   * Waits out a navigation: the progress bar, then the render that follows it.
+   * DOM quiet alone is no signal — YouTube's page sits unchanged for ~600 ms
+   * while it fetches results — so the bar comes first and quiet only after.
+   */
+  async function settleNavigation(maxMs = NAVIGATION_SETTLE_MS) {
+    const deadline = performance.now() + maxMs;
+    const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+    let changes = 0;
+    const observer = new MutationObserver((records) => { changes += records.length; });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    try {
+      while (performance.now() < deadline) {
+        if (navigationPending()) { await sleep(50); continue; }
+        changes = 0;
+        await sleep(NAVIGATION_QUIET_MS);
+        if (changes <= NAVIGATION_QUIET_CHANGES && !navigationPending()) return;
+      }
+    } finally { observer.disconnect(); }
+  }
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (_sender?.id !== chrome.runtime.id || !String(_sender.url || '').startsWith(chrome.runtime.getURL(''))) return false;
     switch (message?.type) {
+      case 'jester/agent-observe':
+        (async () => {
+          const startedAt = performance.now();
+          // `since` is the page the agent last saw. A different one now means the
+          // last step navigated, and the new page's content may still be on its way.
+          const since = message.options?.since;
+          const moved = typeof since === 'string' && since !== globalThis.__jesterAgentPage?.route?.();
+          const visible = document.visibilityState === 'visible';
+          // A background tab's timers are throttled to a second or, after five
+          // minutes, a minute: no waiting there, as with the frame below.
+          if (visible && (moved || navigationPending())) {
+            await settleNavigation();
+          } else if (message.options?.settle === 'frame' && visible) {
+            // Give React one paint opportunity; unrelated animation must never
+            // impose the legacy 280–2600 ms quiet-period delay on every step.
+            await new Promise(resolve => {
+              let settled = false;
+              let frame;
+              const done = () => { if (settled) return; settled = true; clearTimeout(timeout); if (frame) cancelAnimationFrame(frame); resolve(); };
+              const timeout = setTimeout(done, 60);
+              frame = requestAnimationFrame(done);
+            });
+          }
+          const readyAt = performance.now();
+          const result = globalThis.__jesterAgentPage?.observe(message.options || {}) || {ok:false,detail:'Semantic page tools are unavailable. Reload this tab.'};
+          result.timings = {frameMs:Math.round(readyAt-startedAt),extractMs:Math.round(performance.now()-readyAt)};
+          if(result.limits && JSON.stringify(result).length>result.limits.maxChars)delete result.timings;
+          sendResponse(result);
+        })().catch(err => sendResponse({ok:false,detail:err.message}));
+        return true;
+      case 'jester/agent-classify':
+        sendResponse(globalThis.__jesterAgentPage?.classify(message.action) || {ok:false,detail:'Semantic page tools are unavailable.'});
+        return false;
+      case 'jester/agent-execute':
+        Promise.resolve(globalThis.__jesterAgentPage?.execute(message.action,message.options || {}))
+          .then(result => { scheduleReport(100); sendResponse(result || {ok:false,detail:'Semantic page tools are unavailable.'}); })
+          .catch(err => sendResponse({ok:false,detail:err.message}));
+        return true;
+      case 'jester/agent-marks': {
+        // Labels must be painted before the worker captures the screenshot.
+        const result = globalThis.__jesterAgentPage?.marks?.(message.step) || {ok:false,detail:'Screenshots are unavailable on this page.'};
+        if (message.step !== 'show' || !result.ok) { sendResponse(result); return false; }
+        const painted = new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+        Promise.race([painted,new Promise(done => setTimeout(done,150))]).then(() => sendResponse(result));
+        return true;
+      }
+      case 'jester/agent-input': {
+        // A real-input gesture step; the worker moves and presses the debugger mouse in between.
+        const result = globalThis.__jesterAgentPage?.input?.(message.step,message.action,message.options || {});
+        if (message.step === 'done') scheduleReport(100);
+        sendResponse(result || {ok:false,native:false,detail:'Real input is unavailable on this page.'});
+        return false;
+      }
+      case 'jester/cursor-target': {
+        if (!cursorVisible) { sendResponse({ok:false,detail:'Raise your palm to show the eye/head cursor first.'}); return false; }
+        const rect = aimed?.el?.getBoundingClientRect();
+        const x = rect ? Math.max(rect.left,Math.min(lastPointerX,rect.right-1)) : lastPointerX;
+        const y = rect ? Math.max(rect.top,Math.min(lastPointerY,rect.bottom-1)) : lastPointerY;
+        sendResponse(globalThis.__jesterAgentPage?.targetAtPoint(x,y) || {ok:false,detail:'No target under the cursor.'});
+        return false;
+      }
       case MSG.DO_ACTION:
         perform(message.action, message.params).then((result) => {
           if (message.params?.showToasts !== false) showToast(message.action, result);
@@ -2326,6 +3211,10 @@
 
       case MSG.VOICE:
         if (window.top === window) applyVoice(message.voice || {});
+        return false;
+
+      case 'jester/model-cooldown':
+        if (window.top === window) applyModelCooldown(message.cooldown);
         return false;
 
       default:

@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jester — pointer calibration</title>
+    <link rel="stylesheet" href="../ui/ui.css" />
+    <link rel="stylesheet" href="calibration.css" />
+  </head>
+  <body>
+    <!-- Intro. Also the click that buys us requestFullscreen's user activation. -->
+    <section class="stage card" id="intro">
+      <h1>Calibrate the eye pointer</h1>
+      <p>
+        Thirteen dots, three rounds — the same dots in the same order each time.
+        <strong>Look at each dot</strong>, then <strong>show the camera your open palm and
+        close it into a fist</strong> — the same open-then-closed hand that clicks. About
+        two minutes, with a short breather between rounds.
+      </p>
+      <ul class="tips">
+        <li>Keep your head still and move only your eyes. Keep looking at the dot until
+          your hand has closed — don't glance down at it.</li>
+        <li>Raise your hand out beside your shoulder, not in front of your face — the
+          camera has to see your eyes the whole time.</li>
+        <li>Open fully first, then close. Open arms it, the fist takes the dot.</li>
+        <li>Sit the way you use your computer, about arm's length from the camera, in your
+          usual light. You're teaching Jester how <em>your</em> eyes and head look from there.
+          From across the room the pointer aims with your head instead, and that needs no
+          calibration.</li>
+        <li>A dot that didn't read cleanly is offered again with the reason — twice in a
+          round, then the round moves on and it comes round again. You can hand the last dot
+          back yourself with <kbd>Backspace</kbd>.</li>
+        <li><kbd>Esc</kbd> stops the whole calibration. Nothing is saved until the end, and
+          your current calibration stays.</li>
+      </ul>
+      <p class="small muted">
+        Eye tracking runs entirely on this computer, from the positions of your irises, lids
+        and head that MediaPipe's face tracker measures. It keeps no pictures of you — only
+        the finished calibration's numbers.
+      </p>
+
+      <!-- Pre-flight. Shows the camera working *before* committing to a run, so
+           a stopped engine or an unseen face is caught here rather than
+           discovered by staring at a dot that never takes. -->
+      <div class="preflight">
+        <div class="preview-box">
+          <img id="introPreview" alt="" />
+          <div class="placeholder" id="introPlaceholder">Waiting for the camera…</div>
+        </div>
+        <div class="checks">
+          <p class="check" id="checkEngine"><i></i><span>Camera</span></p>
+          <p class="check" id="checkTracker"><i></i><span>Eye tracker</span></p>
+          <p class="check" id="checkFace"><i></i><span>Face</span></p>
+          <p class="check" id="checkEyes"><i></i><span>Eyes</span></p>
+          <p class="check" id="checkClear"><i></i><span>Hand clear of your eyes</span></p>
+          <p class="check" id="checkPalm"><i></i><span>Open palm ✋</span></p>
+          <p class="check" id="checkFist"><i></i><span>Closed into a fist ✊</span></p>
+          <p class="small muted" id="preflightHint">Sit where the camera can see your face.</p>
+          <p class="readout" id="readout">—</p>
+        </div>
+      </div>
+
+      <div class="row">
+        <button class="primary" id="startBtn">Start calibration</button>
+        <!-- Shown only when there is a calibration to adjust: one dot instead of
+             thirty-nine, for when you have moved since. -->
+        <button id="recentreBtn" hidden>Re-centre only</button>
+        <button id="cancelBtn">Cancel</button>
+      </div>
+    </section>
+
+    <!-- The calibration field itself. -->
+    <section class="field-stage" id="field" hidden>
+      <div class="target" id="target">
+        <svg viewBox="0 0 100 100" width="100" height="100" aria-hidden="true">
+          <circle class="ring-track" cx="50" cy="50" r="42" />
+          <circle class="ring-fill" id="ringFill" cx="50" cy="50" r="42" />
+        </svg>
+        <i class="bullseye"></i>
+      </div>
+      <!-- Parked in whichever corner is farthest from the lit dot, so it is
+           always visible and never underneath the thing being looked at. -->
+      <aside class="monitor" id="monitor">
+        <div class="preview-box small">
+          <img id="livePreview" alt="" />
+          <div class="placeholder" id="livePlaceholder">No camera</div>
+        </div>
+        <div class="chips">
+          <span class="chip" id="chipFace">Face</span>
+          <span class="chip" id="chipEyes">Eyes</span>
+          <span class="chip" id="chipHand">Hand</span>
+        </div>
+      </aside>
+
+      <p class="hint" id="hint"></p>
+      <p class="progress" id="progress"></p>
+      <p class="escape small muted">Esc to cancel · Backspace to redo the last dot</p>
+
+      <!-- Between rounds: centred, where the next round's first dot (the centre)
+           will light. -->
+      <div class="break-card" id="breakCard" hidden>
+        <p class="break-title" id="breakTitle"></p>
+        <p id="breakText"></p>
+        <p class="break-count" id="breakCount"></p>
+      </div>
+    </section>
+
+    <!-- Outcome. -->
+    <section class="stage card" id="result" hidden>
+      <h1 id="resultTitle">Calibrated</h1>
+      <p class="grade" id="resultGrade"></p>
+      <p class="small muted" id="resultHint"></p>
+      <p class="small muted" id="resultDetail"></p>
+      <!-- Named dots that never read cleanly in any round. Redoing two dots is
+           ten seconds; redoing all thirty-nine to get at them is why people
+           don't. -->
+      <p class="small warn" id="resultPoints"></p>
+      <p class="small muted" id="tryNote" hidden>
+        The blue dot follows your eyes using the calibration you just made, and each line
+        runs from a dot to where the other two rounds read you looking at it. Look around —
+        if it's far off, calibrate again.
+      </p>
+      <p class="small muted" id="tryNotePlain" hidden>
+        The blue dot follows your eyes using the calibration as it now stands. Look around —
+        if it's far off, calibrate again.
+      </p>
+      <div class="row">
+        <button class="primary" id="doneBtn">Done</button>
+        <button id="redoPointsBtn" hidden>Redo those points</button>
+        <button id="redoBtn">Calibrate again</button>
+      </div>
+    </section>
+
+    <!-- The grade, made visible: a line from each dot to where the other two
+         rounds read it. -->
+    <svg class="misses" id="misses" aria-hidden="true"></svg>
+
+    <!-- Where the new calibration thinks you are looking, on the result screen. -->
+    <i class="gaze-dot" id="gazeDot" hidden></i>
+
+    <script type="module" src="calibration.js"></script>
+  </body>
+</html>
