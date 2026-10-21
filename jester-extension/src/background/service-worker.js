@@ -826,6 +826,8 @@ async function announce(action, result) {
 async function dispatchAction(action, meta) {
   if (!action || action === 'NONE') return { ok: false, detail: 'No action' };
   const scope = ACTIONS[action]?.scope || 'video';
+  // Jester Desktop's actions; the options page never offers them here.
+  if (scope === 'os') return { ok: false, detail: 'Only Jester Desktop can do that' };
 
   if (scope === 'system') {
     if (action === 'VOICE_CAPTURE_TOGGLE') {

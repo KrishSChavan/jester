@@ -198,6 +198,70 @@ input[type='checkbox'] {
   flex-shrink: 0;
 }
 
+/* Beats `.row > span:first-child`, which stacks a row's text column. */
+.row.binding > .gesture {
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+}
+
+.binding select {
+  width: 230px;
+}
+
+.binding .glyph {
+  width: 22px;
+  text-align: center;
+  font-size: 16px;
+}
+
+.binding .controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.binding .repeat {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.binding .repeat.unavailable {
+  visibility: hidden;
+}
+
+.split {
+  margin-top: 10px;
+}
+
+.shortcut input[type='text'] {
+  font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  width: 170px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.shortcut input[aria-invalid='true'] {
+  border-color: var(--bad);
+}
+
+.shortcut .shown {
+  min-width: 64px;
+  color: var(--muted);
+  text-align: right;
+}
+
+code {
+  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 footer {
   margin-top: 20px;
   color: var(--muted);

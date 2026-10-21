@@ -4,10 +4,19 @@ The Electron app that takes Jester beyond Chrome: the real cursor, the
 keyboard, media keys and other apps, driven by the same gestures, eye/head
 pointing and voice. The extension stays, and links to the app.
 
-**Status: phase 1 (the app shell).** Jester runs from the menu bar with a
-Settings window that walks through the OS permissions; the engine runs and
-reads gestures, but they don't act on the OS yet (phase 2). Phase 0's answers
-are below.
+**Status: phase 2 (gestures act on the computer).** Jester runs from the menu
+bar; Settings walks through the OS permissions and lets you bind each pose and
+swipe to an action. Actions become the OS's own keys — media keys, ⌘Tab,
+desktops, screenshots, your own shortcuts — and an overlay over every display
+shows what a gesture did. The cursor (phase 3) and voice (phase 4) are next.
+Phase 0's answers are below.
+
+What an action means outside a browser is in `src/main/os-actions.js`: one
+play/pause key for Play, Pause and Play/pause; arrows for seeking; each OS's
+shortcuts for apps, desktops, tabs and history. Actions only Chrome can do
+(speed, skip ad, moving tabs) say so instead. As in the extension, a second
+set of bindings can apply outside full screen; here "full screen" means the
+front window fills its display.
 
 ## Layout
 
@@ -17,6 +26,8 @@ are below.
 | `src/main/tray.js`, `tray-menu.js` | The menu-bar menu (`tray-menu.js` decides what it says). |
 | `src/main/permissions.js`, `permission-list.js` | Reading and asking for Camera, Accessibility, Microphone, Screen Recording. |
 | `src/main/windows.js`, `src/settings/` | The engine's hidden window and the Settings window. |
+| `src/main/os-actions.js`, `dispatch.js` | What each action does on each OS, and doing it through the driver. |
+| `src/main/overlay.js`, `src/overlay/` | Click-through windows over every display: hold progress and toasts. |
 | `src/preload/chrome-shim.cjs`, `src/main/chrome-bridge.js` | The slice of `chrome.runtime` / `chrome.storage` the extension's pages use, over IPC. |
 | `src/main/engine-host.js` | The service worker's half of the engine: settings, gestures, cursor, voice. |
 | `src/main/protocol.js`, `files.js` | `jester://ext/…` serves the extension folder, `jester://app/…` this app's pages. |
@@ -53,9 +64,11 @@ no prompt ever comes from the hidden window.
 For tests and development (see the top of `src/main/main.js`):
 `JESTER_FAKE_MEDIA=1` (synthetic camera and mic), `JESTER_DATA_DIR`,
 `JESTER_SPIKE_SECONDS`, `JESTER_OPEN_SETTINGS`, `JESTER_THEME=light|dark`,
-and `JESTER_SELFTEST=1` (opens Settings unfocused, checks it shows the engine
-and that its switch stops and restarts it; `JESTER_CAPTURE=file.png` adds a
-picture of the page).
+`JESTER_DRIVER_DRY=1` (the driver describes input instead of sending it), and
+`JESTER_SELFTEST=1` (opens Settings unfocused, checks it shows the engine and
+that its switch stops and restarts it; with `JESTER_DRIVER_DRY=1` it also
+dispatches a few actions; `JESTER_CAPTURE=file.png` adds pictures of the page
+and the overlay's toast).
 
 ## Phase 0 results (MacBook Pro, Apple silicon, macOS 26)
 

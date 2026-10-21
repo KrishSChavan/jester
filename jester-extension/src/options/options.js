@@ -95,6 +95,8 @@ function actionSelect(value) {
   const groups = new Map();
 
   for (const [id, meta] of Object.entries(ACTIONS)) {
+    // Jester Desktop's actions: nothing in the browser can perform them.
+    if (meta.scope === 'os') continue;
     const option = document.createElement('option');
     option.value = id;
     option.textContent = meta.label;
@@ -114,7 +116,7 @@ function actionSelect(value) {
     group.append(option);
   }
 
-  select.value = value in ACTIONS ? value : 'NONE';
+  select.value = value in ACTIONS && ACTIONS[value].scope !== 'os' ? value : 'NONE';
   return select;
 }
 

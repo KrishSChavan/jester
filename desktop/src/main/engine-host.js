@@ -86,6 +86,10 @@ export function startEngineHost(hooks) {
     setScreen(screen) {
       post({ type: MSG.ENGINE_CONFIG, screen });
     },
+    /** Which binding set is live: 'fullscreen' while the front window fills its display. */
+    setContext(context) {
+      post({ type: MSG.ENGINE_CONFIG, context });
+    },
     suspend(suspend) {
       post({ type: MSG.ENGINE_CONFIG, suspend: !!suspend });
     },

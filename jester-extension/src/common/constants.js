@@ -44,6 +44,9 @@ export const SWIPES = [
  *   browser — chrome.tabs / chrome.windows, so the service worker itself.
  *   window  — fullscreen, which the worker drives step by step across both.
  *   system  — Jester's own state.
+ *   os      — the computer itself: keys and media keys that only Jester
+ *             Desktop can send. The extension never offers or runs these;
+ *             they live here so both share one list of bindable actions.
  */
 export const ACTIONS = {
   NONE: { label: 'Do nothing', repeatable: false, scope: 'none' },
@@ -84,6 +87,23 @@ export const ACTIONS = {
   TAB_CLOSE: { label: 'Close this tab', repeatable: false, scope: 'browser', group: 'Tabs & windows' },
   TAB_REOPEN: { label: 'Reopen closed tab', repeatable: false, scope: 'browser', group: 'Tabs & windows' },
   WINDOW_NEXT: { label: 'Next window', repeatable: false, scope: 'browser', group: 'Tabs & windows' },
+
+  // --- the computer (Jester Desktop only) ---
+  MEDIA_NEXT: { label: 'Next track', repeatable: false, scope: 'os', group: 'Computer' },
+  MEDIA_PREV: { label: 'Previous track', repeatable: false, scope: 'os', group: 'Computer' },
+  APP_NEXT: { label: 'Next app', repeatable: false, scope: 'os', group: 'Computer' },
+  APP_PREV: { label: 'Previous app', repeatable: false, scope: 'os', group: 'Computer' },
+  SHOW_ALL_WINDOWS: { label: 'Show all windows', repeatable: false, scope: 'os', group: 'Computer' },
+  DESKTOP_LEFT: { label: 'Desktop to the left', repeatable: false, scope: 'os', group: 'Computer' },
+  DESKTOP_RIGHT: { label: 'Desktop to the right', repeatable: false, scope: 'os', group: 'Computer' },
+  SHOW_DESKTOP: { label: 'Show the desktop', repeatable: false, scope: 'os', group: 'Computer' },
+  SCREENSHOT: { label: 'Take a screenshot', repeatable: false, scope: 'os', group: 'Computer' },
+  LOCK_SCREEN: { label: 'Lock the screen', repeatable: false, scope: 'os', group: 'Computer' },
+  BRIGHTNESS_UP: { label: 'Brightness up', repeatable: true, scope: 'os', group: 'Computer' },
+  BRIGHTNESS_DOWN: { label: 'Brightness down', repeatable: true, scope: 'os', group: 'Computer' },
+  SHORTCUT_1: { label: 'Your shortcut 1', repeatable: false, scope: 'os', group: 'Computer' },
+  SHORTCUT_2: { label: 'Your shortcut 2', repeatable: false, scope: 'os', group: 'Computer' },
+  SHORTCUT_3: { label: 'Your shortcut 3', repeatable: false, scope: 'os', group: 'Computer' },
 
   /**
    * Not an off switch — a full stop that the *same* gesture lifts.

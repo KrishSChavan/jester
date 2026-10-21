@@ -47,6 +47,26 @@
       </div>
     </section>
 
+    <section aria-labelledby="gestures-heading">
+      <h2 id="gestures-heading">Gestures</h2>
+      <p class="intro" id="gestures-intro">What each pose and swipe does. Hold a pose until its bar fills.</p>
+      <div class="cards" id="bindings-main"></div>
+      <label class="row split cards">
+        <span><strong>Different gestures outside full screen</strong><small>One set while a window fills the screen (a film, a slideshow), another for everything else.</small></span>
+        <input type="checkbox" id="windowedBindingsEnabled" />
+      </label>
+      <div id="windowed-block" hidden>
+        <p class="intro">Outside full screen:</p>
+        <div class="cards" id="bindings-windowed"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="shortcuts-heading">
+      <h2 id="shortcuts-heading">Your shortcuts</h2>
+      <p class="intro">Any keyboard shortcut, for a gesture to press: bind “Your shortcut 1–3” above. Write it like <code>cmd+shift+4</code> or <code>ctrl+alt+t</code>.</p>
+      <div class="cards" id="shortcuts"></div>
+    </section>
+
     <section aria-labelledby="activity-heading">
       <h2 id="activity-heading">Activity</h2>
       <div class="cards">

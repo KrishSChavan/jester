@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jester overlay</title>
+    <link rel="stylesheet" href="overlay.css" />
+  </head>
+  <body>
+    <div class="dock">
+      <div id="hud" class="pill hud" hidden>
+        <span id="hud-glyph" class="glyph"></span>
+        <span id="hud-label"></span>
+        <span class="bar"><span id="hud-fill" class="fill"></span></span>
+      </div>
+      <div id="toast" class="pill toast" role="status" aria-live="polite" hidden>
+        <span id="toast-text"></span>
+        <span id="toast-detail" class="detail"></span>
+      </div>
+    </div>
+    <script type="module" src="overlay.js"></script>
+  </body>
+</html>

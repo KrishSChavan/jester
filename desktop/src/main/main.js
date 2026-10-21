@@ -17,12 +17,16 @@
  *   JESTER_THEME=light|dark   override the system's appearance
  */
 
-import { app, nativeTheme, screen, session } from 'electron';
+import { app, globalShortcut, nativeTheme, screen, session } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { saveSettings } from '../../../jester-extension/src/common/constants.js';
 import { installBridge, onMessage, onStorageChanged, post, storage } from './chrome-bridge.js';
+import { createDispatcher } from './dispatch.js';
+import { startDriver } from './driver.js';
 import { desktopSettings, loadSettings, startEngineHost } from './engine-host.js';
+import { fillsDisplay } from './os-actions.js';
+import { createOverlays } from './overlay.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
@@ -35,6 +39,10 @@ const env = process.env;
 const VOICE_READY = false;
 /** Permissions change in System Settings, behind the app's back. */
 const PERMISSION_POLL_MS = 2000;
+/** How often the front window is checked: it decides which binding set is live. */
+const FRONT_POLL_MS = 500;
+/** The extension's voice shortcut, kept for the desktop. */
+const VOICE_SHORTCUT = 'Alt+Shift+J';
 
 registerScheme();
 if (env.JESTER_DATA_DIR) app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
@@ -46,9 +54,17 @@ if (env.JESTER_FAKE_MEDIA) {
 const log = env.JESTER_LOG ? (...parts) => console.log('[jester]', ...parts) : () => undefined;
 
 let engineWindow = null;
+let engineHost = null;
 let tray = null;
+let overlays = null;
+let driver = null;
+let dispatch = null;
+let quitting = false;
 let engine = { state: 'off', detail: '' };
 let permissions = [];
+let settings = null;
+/** 'fullscreen' while the front window fills its display, as in the extension. */
+let context = 'windowed';
 
 function primaryScreen() {
   const { width, height } = screen.getPrimaryDisplay().size;
@@ -105,9 +121,70 @@ function desktopState() {
 }
 
 async function refresh() {
-  const settings = await loadSettings();
+  settings = await loadSettings();
   tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voiceReady: VOICE_READY }));
   post(desktopState());
+}
+
+/** jester-driver, restarted if it dies. JESTER_DRIVER_DRY=1: it describes input instead of sending it. */
+function startInput() {
+  try {
+    driver = startDriver({
+      dryRun: !!env.JESTER_DRIVER_DRY,
+      onExit: (code, signal) => {
+        driver = null;
+        if (quitting) return;
+        log('jester-driver exited', signal || code, '— restarting');
+        setTimeout(startInput, 1000);
+      }
+    });
+  } catch (err) {
+    driver = null;
+    log(err.message);
+  }
+}
+
+/** macOS drops synthetic input silently until Accessibility is allowed. */
+function canPost() {
+  if (env.JESTER_DRIVER_DRY || process.platform !== 'darwin') return true;
+  return !!permissions.find((item) => item.id === 'accessibility')?.granted;
+}
+
+function onJester(op) {
+  if (op === 'voice') overlays?.toast('Voice commands', { tone: 'warn', detail: 'Coming in a later update' });
+  else if (op === 'calibrate') overlays?.toast('Calibration', { tone: 'warn', detail: 'Arrives with cursor control' });
+}
+
+/**
+ * Twice a second: which display has the pointer (where feedback goes), and
+ * whether the front window fills its display (which binding set is live).
+ */
+function watchFront() {
+  let busy = false;
+  setInterval(async () => {
+    overlays?.track(settings?.showHud !== false);
+    if (busy || !driver) return;
+    busy = true;
+    try {
+      const front = await driver.call('frontmost');
+      let bounds = front.window?.bounds;
+      // The driver speaks physical pixels on Windows; displays are in DIPs.
+      if (bounds && process.platform === 'win32') {
+        const dip = screen.screenToDipRect(null, { x: bounds.x, y: bounds.y, width: bounds.w, height: bounds.h });
+        bounds = { x: dip.x, y: dip.y, w: dip.width, h: dip.height };
+      }
+      const next = fillsDisplay(bounds, screen.getAllDisplays().map((display) => display.bounds)) ? 'fullscreen' : 'windowed';
+      if (next !== context) {
+        context = next;
+        log('context', context, `(${front.app?.name || 'unknown app'})`);
+        engineHost?.setContext(context);
+      }
+    } catch {
+      /* no ordinary window in front: keep the last context */
+    } finally {
+      busy = false;
+    }
+  }, FRONT_POLL_MS);
 }
 
 function checkPermissions() {
@@ -166,21 +243,50 @@ function selfTest(capture) {
   const page = (code) => win.webContents.executeJavaScript(code);
   const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const shows = () => page(`['status-text', 'camera-stats', 'last-gesture'].map((id) => document.getElementById(id).textContent).join(' | ')`);
+  /** Waits for the engine to reach a state, and for the page's camera line to catch up. */
+  const reach = async (state, ms = 8000) => {
+    for (const until = Date.now() + ms; Date.now() < until; await pause(100)) {
+      if (engine.state === state && (state !== 'running' || /fps/.test(await shows()))) return true;
+    }
+    return false;
+  };
   win.webContents.once('did-finish-load', async () => {
-    await pause(1500);
     if (capture) {
+      await pause(1500);
       win.setContentSize(win.getContentSize()[0], await page('document.documentElement.scrollHeight'));
       await pause(400);
       fs.writeFileSync(capture, (await win.webContents.capturePage()).toPNG());
       log('selftest: captured', capture);
+      // The page outgrows the screen: each later section scrolled into view too.
+      for (const section of ['gestures', 'shortcuts']) {
+        await page(`document.getElementById('${section}-heading').scrollIntoView()`);
+        await pause(300);
+        const file = capture.replace(/\.png$/, `-${section}.png`);
+        fs.writeFileSync(file, (await win.webContents.capturePage()).toPNG());
+        log('selftest: captured', file);
+      }
     }
+    await reach('running');
     log('selftest: settings shows', await shows());
     await page(`document.getElementById('enabled').click()`);
-    await pause(1500);
-    log('selftest: after switching off —', engine.state, '|', await shows());
+    log('selftest: switched off —', (await reach('off')) ? 'engine off' : `engine still ${engine.state}`, '|', await shows());
     await page(`document.getElementById('enabled').click()`);
-    await pause(2500);
-    log('selftest: after switching on —', engine.state, '|', await shows());
+    log('selftest: switched on —', (await reach('running')) ? 'engine running' : `engine still ${engine.state}`, '|', await shows());
+
+    // Gestures' actions, as far as the driver — and only a dry-run driver,
+    // which describes input instead of sending it: never press real keys here.
+    if (!env.JESTER_DRIVER_DRY) return log('selftest: skipping actions (set JESTER_DRIVER_DRY=1)');
+    for (const [action, gesture] of [['VOLUME_UP', 'Thumb_Up'], ['APP_NEXT', 'Victory'], ['SPEED_UP', 'ILoveYou']]) {
+      log('selftest: dispatch', action, '→', JSON.stringify(await dispatch(action, { source: 'pose', gesture })));
+    }
+    const overlay = overlays.activeWindow();
+    if (capture && overlay) {
+      await dispatch('VOLUME_UP', { source: 'pose', gesture: 'Thumb_Up' });
+      await pause(400);
+      const file = capture.replace(/\.png$/, '-overlay.png');
+      fs.writeFileSync(file, (await overlay.webContents.capturePage()).toPNG());
+      log('selftest: captured', file);
+    }
   });
 }
 
@@ -193,16 +299,24 @@ async function start() {
   installMediaPermissions();
   permissions = readPermissions();
 
+  overlays = createOverlays();
+  startInput();
+  dispatch = createDispatcher({ driver: { call: (...args) => (driver ? driver.call(...args) : Promise.reject(new Error('jester-driver is not running'))) }, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
+
   let lastTelemetryLog = 0;
   let cursorFrames = 0;
-  startEngineHost({
+  engineHost = startEngineHost({
     screen: primaryScreen,
+    context: () => context,
     onStatus: (status) => {
       engine = { state: status.state, detail: status.detail || '' };
       log('status', status.state, status.detail || '');
       refresh();
     },
-    onTrigger: (message) => log('trigger', message.action, `(${message.source} ${message.gesture})`),
+    onTrigger: (message) => {
+      log('trigger', message.action, `(${message.source} ${message.gesture})`);
+      dispatch(message.action, { source: message.source, gesture: message.gesture });
+    },
     onCursor: (cursor) => {
       cursorFrames += 1;
       if (cursor?.click) log('cursor click at', cursor.x?.toFixed(3), cursor.y?.toFixed(3));
@@ -225,6 +339,8 @@ async function start() {
   tray = createTray(onTrayAction);
   await refresh();
   setInterval(checkPermissions, PERMISSION_POLL_MS);
+  watchFront();
+  if (!globalShortcut.register(VOICE_SHORTCUT, () => onJester('voice'))) log(`${VOICE_SHORTCUT} is taken by another app`);
 
   if (env.JESTER_SELFTEST) selfTest(env.JESTER_CAPTURE && path.resolve(env.JESTER_CAPTURE));
   else if (env.JESTER_OPEN_SETTINGS || missingNeeded(permissions).length) showSettings();
@@ -242,4 +358,9 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(start);
   // Closing Settings leaves Jester running in the menu bar.
   app.on('window-all-closed', () => undefined);
+  app.on('will-quit', () => {
+    quitting = true;
+    globalShortcut.unregisterAll();
+    driver?.close();
+  });
 }

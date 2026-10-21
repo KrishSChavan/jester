@@ -8,8 +8,10 @@
  */
 
 import { ACTIONS, ENGINE, GESTURES, POINTER_INPUTS, SWIPES, mergeSettings } from '../ext/src/common/constants.js';
+import { DESKTOP_LABELS, bindable, describePlan, parseShortcut } from '../main/os-actions.js';
 
 const $ = (id) => document.getElementById(id);
+const SHORTCUTS = ['SHORTCUT_1', 'SHORTCUT_2', 'SHORTCUT_3'];
 
 const STATUS = {
   [ENGINE.OFF]: ['Off', 'idle'],
@@ -40,9 +42,17 @@ async function readSettings() {
 }
 
 async function save(patch) {
+  const before = settings;
   settings = mergeSettings({ ...(await readSettings()), ...patch });
   await chrome.storage.local.set({ settings });
+  settingsChanged(before);
+}
+
+/** The menus name your shortcuts, so a new shortcut means new menus. */
+function settingsChanged(before) {
+  if (JSON.stringify(before?.desktopShortcuts || {}) !== JSON.stringify(settings.desktopShortcuts || {})) buildBindings();
   renderControls();
+  renderBindings();
 }
 
 function renderStatus() {
@@ -134,10 +144,171 @@ function renderControls() {
   renderStatus();
 }
 
+// ---------------------------------------------------------------------------
+// Gestures and shortcuts
+// ---------------------------------------------------------------------------
+
+const platform = () => desktop?.platform || 'darwin';
+
+function actionLabel(id) {
+  if (SHORTCUTS.includes(id)) {
+    const plan = parseShortcut(settings?.desktopShortcuts?.[id]);
+    return `${ACTIONS[id].label} — ${plan ? describePlan(plan, platform()) : 'not set yet'}`;
+  }
+  return DESKTOP_LABELS[id] || ACTIONS[id]?.label || id;
+}
+
+/** Only what can happen on this computer, grouped as in the extension. */
+function actionSelect() {
+  const select = document.createElement('select');
+  select.append(new Option(ACTIONS.NONE.label, 'NONE'));
+  const groups = new Map();
+  for (const [id, meta] of Object.entries(ACTIONS)) {
+    if (!meta.group || !bindable(id, platform())) continue;
+    let group = groups.get(meta.group);
+    if (!group) {
+      group = document.createElement('optgroup');
+      group.label = meta.group;
+      groups.set(meta.group, group);
+      select.append(group);
+    }
+    group.append(new Option(actionLabel(id), id));
+  }
+  return select;
+}
+
+/** One pose or swipe: what it does, and for poses whether holding it repeats. */
+function bindingRow(gesture, set, type) {
+  const key = type === 'pose' ? (set === 'main' ? 'bindings' : 'windowedBindings') : set === 'main' ? 'swipeBindings' : 'windowedSwipeBindings';
+  const row = document.createElement('div');
+  row.className = 'row binding';
+  const name = document.createElement('span');
+  name.className = 'gesture';
+  const glyph = document.createElement('span');
+  glyph.className = 'glyph';
+  glyph.textContent = gesture.glyph;
+  const label = document.createElement('span');
+  label.style.display = 'flex';
+  label.style.flexDirection = 'column';
+  const title = document.createElement('strong');
+  title.textContent = gesture.label;
+  const hint = document.createElement('small');
+  label.append(title, hint);
+  name.append(glyph, label);
+
+  const controls = document.createElement('span');
+  controls.className = 'controls';
+  const select = actionSelect();
+  select.setAttribute('aria-label', `${gesture.label} does`);
+  controls.append(select);
+  // Swipes get the same box, never shown, so every menu lines up.
+  const wrap = document.createElement('label');
+  wrap.className = type === 'pose' ? 'repeat' : 'repeat unavailable';
+  const repeatBox = document.createElement('input');
+  repeatBox.type = 'checkbox';
+  wrap.append(repeatBox, document.createTextNode('Repeat'));
+  wrap.title = 'Keep doing it while you hold the pose';
+  controls.append(wrap);
+  const repeat = type === 'pose' ? repeatBox : null;
+  if (!repeat) repeatBox.tabIndex = -1;
+  row.append(name, controls);
+
+  const current = () => (type === 'pose' ? settings[key][gesture.id] : { action: settings[key][gesture.id] });
+  select.addEventListener('change', () => {
+    const action = select.value;
+    const value = type === 'pose' ? { action, repeat: !!repeat?.checked && !!ACTIONS[action]?.repeatable } : action;
+    save({ [key]: { ...settings[key], [gesture.id]: value } });
+  });
+  repeat?.addEventListener('change', () => save({ [key]: { ...settings[key], [gesture.id]: { action: current().action, repeat: repeat.checked } } }));
+
+  return {
+    element: row,
+    update() {
+      const { action = 'NONE', repeat: repeating = false } = current() || {};
+      // Bound to something this computer can't do (set in the extension, say): show it, greyed.
+      if (![...select.options].some((option) => option.value === action)) {
+        const option = new Option(`${actionLabel(action)} (not on this computer)`, action);
+        option.disabled = true;
+        select.append(option);
+      }
+      select.value = action;
+      if (repeat) {
+        const repeatable = !!ACTIONS[action]?.repeatable;
+        repeat.checked = repeatable && repeating;
+        repeat.parentElement.classList.toggle('unavailable', !repeatable);
+      }
+      hint.textContent = gesture.id === 'Open_Palm' && settings.pointerEnabled ? 'Raises the cursor while cursor control is on' : '';
+    }
+  };
+}
+
+let bindingRows = [];
+
+function buildBindings() {
+  bindingRows = [];
+  for (const set of ['main', 'windowed']) {
+    const rows = [...GESTURES.map((pose) => bindingRow(pose, set, 'pose')), ...SWIPES.map((swipe) => bindingRow(swipe, set, 'swipe'))];
+    $(set === 'main' ? 'bindings-main' : 'bindings-windowed').replaceChildren(...rows.map((row) => row.element));
+    bindingRows.push(...rows);
+  }
+}
+
+function renderBindings() {
+  if (!settings || !bindingRows.length) return;
+  for (const row of bindingRows) row.update();
+  const split = !!settings.windowedBindingsEnabled;
+  $('windowedBindingsEnabled').checked = split;
+  $('windowed-block').hidden = !split;
+  $('gestures-intro').textContent = split
+    ? 'While a window fills the screen. Hold a pose until its bar fills.'
+    : 'What each pose and swipe does. Hold a pose until its bar fills.';
+}
+
+function buildShortcuts() {
+  $('shortcuts').replaceChildren(
+    ...SHORTCUTS.map((id, i) => {
+      const row = document.createElement('label');
+      row.className = 'row shortcut';
+      const name = document.createElement('strong');
+      name.textContent = `Shortcut ${i + 1}`;
+      const controls = document.createElement('span');
+      controls.className = 'controls';
+      const shown = document.createElement('span');
+      shown.className = 'shown';
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.placeholder = platform() === 'darwin' ? 'cmd+shift+4' : 'ctrl+alt+t';
+      input.spellcheck = false;
+      input.value = settings.desktopShortcuts?.[id] || '';
+      const check = () => {
+        const text = input.value.trim();
+        const plan = parseShortcut(text);
+        input.setAttribute('aria-invalid', String(!!text && !plan));
+        shown.textContent = text ? (plan ? describePlan(plan, platform()) : 'Not a shortcut') : '';
+        return { text, plan };
+      };
+      input.addEventListener('input', check);
+      input.addEventListener('change', () => {
+        const { text, plan } = check();
+        if (text && !plan) return;
+        const next = { ...(settings.desktopShortcuts || {}) };
+        if (text) next[id] = text;
+        else delete next[id];
+        save({ desktopShortcuts: next });
+      });
+      check();
+      controls.append(shown, input);
+      row.append(name, controls);
+      return row;
+    })
+  );
+}
+
 function render() {
   renderStatus();
   renderPermissions();
   renderControls();
+  renderBindings();
   $('dev-note').hidden = !desktop?.fakeMedia;
 }
 
@@ -169,19 +340,24 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+// Changes from elsewhere: the menu-bar switches, or another Settings window.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.settings) return;
+  const before = settings;
   settings = mergeSettings(changes.settings.newValue);
-  renderControls();
+  settingsChanged(before);
 });
 
 $('enabled').addEventListener('change', (event) => save({ enabled: event.target.checked }));
 $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled: event.target.checked }));
 $('pointerInput').addEventListener('change', (event) => save({ pointerInput: event.target.value }));
 $('cameraDeviceId').addEventListener('change', (event) => save({ cameraDeviceId: event.target.value }));
+$('windowedBindingsEnabled').addEventListener('change', (event) => save({ windowedBindingsEnabled: event.target.checked }));
 
 settings = await readSettings();
 desktop = await chrome.runtime.sendMessage({ type: 'jester/desktop-state' });
+buildBindings();
+buildShortcuts();
 render();
 await renderCameras();
 navigator.mediaDevices?.addEventListener?.('devicechange', renderCameras);
