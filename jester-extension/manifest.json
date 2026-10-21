@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Jester \u2014 Hand Gesture Video Control",
   "version": "0.1.0",
-  "description": "Control video playback with hand gestures on YouTube, Netflix, Disney+, Hulu and more. All hand tracking runs on-device via MediaPipe.",
+  "description": "Control YouTube, Netflix and more with hand gestures, an eye/head cursor and your voice. Camera and audio stay on your device.",
   "minimum_chrome_version": "116",
   "permissions": [
     "offscreen",
@@ -112,6 +112,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:* http://[::1]:*"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*"
   }
 }
