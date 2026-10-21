@@ -72,6 +72,18 @@ test('browser module graphs link without missing imports or named exports', () =
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
+test('the engine page refuses MediaPipe usage logging and still loads its own files', async () => {
+  const source = await readFile(resolve(extension, 'src/offscreen/boot.js'), 'utf8');
+  const fetched = [];
+  const window = { addEventListener() {}, fetch: (input) => { fetched.push(String(input)); return Promise.resolve('loaded'); } };
+  vm.runInContext(source, vm.createContext({ window, URL, location: { href: 'chrome-extension://jester/src/offscreen/offscreen.html' } }));
+  await assert.rejects(window.fetch('https://odml.pa.googleapis.com/v1/log', { method: 'POST' }), /MediaPipe usage logs/);
+  await assert.rejects(window.fetch(new URL('https://odml.pa.googleapis.com/v1/log')), /MediaPipe usage logs/);
+  assert.equal(await window.fetch('chrome-extension://jester/models/gesture_recognizer.task'), 'loaded');
+  assert.equal(await window.fetch('../../vendor/tasks-vision/wasm/vision_wasm_internal.wasm'), 'loaded');
+  assert.deepEqual(fetched, ['chrome-extension://jester/models/gesture_recognizer.task', '../../vendor/tasks-vision/wasm/vision_wasm_internal.wasm']);
+});
+
 test('engine message constants and state names used by its module are exported', async () => {
   const source = await readFile(resolve(extension, 'src/offscreen/offscreen.js'), 'utf8');
   for (const [, name] of source.matchAll(/\bMSG\.([A-Z][A-Z_]+)/g)) assert.ok(Object.hasOwn(MSG, name), `missing MSG.${name}`);
