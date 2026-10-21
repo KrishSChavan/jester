@@ -63,10 +63,11 @@ if (-not (Test-Path $Src)) {
 }
 
 # Dev-only files. Dropping the source map costs nothing at runtime — Chrome only
-# looks for it when DevTools is open on the vendor bundle.
-# .env.example is the committed template; the real .env has to ship, because
-# src/common/env.js fetches it at runtime.
-$DevPatterns = @('*.map', '*.d.ts', '.env.example')
+# looks for it when DevTools is open on the vendor bundle. .env.example is the
+# old flag-file template, README.md is documentation, and the legacy finger
+# pointer stays in the source but nothing loads it. build-zip.mjs leaves out
+# the same files.
+$DevPatterns = @('*.map', '*.d.ts', '.env.example', 'README.md', 'legacy-finger-pointer.js')
 $JunkPatterns = @('.DS_Store', 'Thumbs.db', 'desktop.ini', '*.zip', '*.orig', '*.rej', '*~')
 
 $problems = New-Object System.Collections.Generic.List[string]
@@ -248,10 +249,38 @@ function Test-JavaScript {
   $notes.Add("checked $checked first-party JavaScript file(s)") | Out-Null
 }
 
+# The Web Store's limits on what the manifest says, which an upload otherwise
+# reports only after it fails. build-zip.mjs checks the same.
+function Test-StoreLimits {
+  $field = { param($name) if ($manifest.PSObject.Properties.Name -contains $name) { $manifest.$name } else { $null } }
+
+  if ((& $field 'manifest_version') -ne 3) {
+    Add-Problem "manifest_version is $(& $field 'manifest_version'); the Web Store only accepts 3"
+  }
+  $name = [string](& $field 'name')
+  if (-not $name) {
+    Add-Problem 'manifest name is missing'
+  } elseif ($name.Length -gt 75) {
+    Add-Problem "manifest name is $($name.Length) characters; the Web Store allows 75"
+  }
+  $description = [string](& $field 'description')
+  if (-not $description) {
+    Add-Problem 'manifest description is missing; the Web Store shows it as the listing summary'
+  } elseif ($description.Length -gt 132) {
+    Add-Problem "manifest description is $($description.Length) characters; the Web Store allows 132"
+  }
+  $v = [string](& $field 'version')
+  if ($v -notmatch '^(?:0|[1-9]\d{0,4})(?:\.(?:0|[1-9]\d{0,4})){0,3}$' -or ($v.Split('.') | Where-Object { [int]$_ -gt 65535 })) {
+    Add-Problem "manifest version '$v' must be one to four dot-separated numbers from 0 to 65535, without leading zeros"
+  }
+  $notes.Add("manifest description: $($description.Length)/132 characters") | Out-Null
+}
+
 if ($SkipChecks) {
   Write-Host "  checks: skipped (-SkipChecks)" -ForegroundColor Yellow
 } else {
   Write-Host "  checks: " -NoNewline
+  Test-StoreLimits
   foreach ($entry in Get-ManifestPaths) { Test-Asset $entry.Path "manifest $($entry.Why)" }
   Test-HtmlReferences
   Test-RuntimeAssets

@@ -11,5 +11,7 @@ jester-extension/env.txt
 jester-extension.zip
 jester-extension-*.zip
 *.zip.building
+# Where build-zip.mjs writes the Web Store upload.
+dist/
 
 node_modules/
