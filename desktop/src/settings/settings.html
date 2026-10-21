@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jester</title>
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <header>
+      <img src="../ext/icons/icon48.png" alt="" width="40" height="40" />
+      <div>
+        <h1>Jester</h1>
+        <p id="status" class="status" role="status"><span class="dot"></span><span id="status-text">Starting…</span></p>
+      </div>
+    </header>
+
+    <section aria-labelledby="permissions-heading">
+      <h2 id="permissions-heading">Permissions</h2>
+      <p id="permissions-intro" class="intro"></p>
+      <ul id="permissions" class="cards"></ul>
+    </section>
+
+    <section aria-labelledby="controls-heading">
+      <h2 id="controls-heading">Controls</h2>
+      <div class="cards">
+        <label class="row">
+          <span><strong>Jester on</strong><small>Watch the camera for gestures.</small></span>
+          <input type="checkbox" id="enabled" />
+        </label>
+        <label class="row">
+          <span><strong>Cursor control</strong><small>Raise an open palm to aim with your eyes or head; close it to click.</small></span>
+          <input type="checkbox" id="pointerEnabled" />
+        </label>
+        <label class="row">
+          <span><strong>Aim with</strong><small id="pointerInput-hint"></small></span>
+          <select id="pointerInput"></select>
+        </label>
+        <label class="row">
+          <span><strong>Camera</strong><small id="camera-hint">The camera Jester watches.</small></span>
+          <select id="cameraDeviceId"></select>
+        </label>
+        <label class="row disabled">
+          <span><strong>Voice commands</strong><small>Coming in a later update: speech recognition that runs on this computer.</small></span>
+          <input type="checkbox" id="voiceEnabled" disabled />
+        </label>
+      </div>
+    </section>
+
+    <section aria-labelledby="activity-heading">
+      <h2 id="activity-heading">Activity</h2>
+      <div class="cards">
+        <div class="row"><span><strong>Last gesture</strong></span><span id="last-gesture" class="value">None yet</span></div>
+        <div class="row"><span><strong>Camera</strong></span><span id="camera-stats" class="value">—</span></div>
+      </div>
+      <p id="dev-note" class="intro" hidden>Using Chromium's synthetic camera (JESTER_FAKE_MEDIA): no hands will be seen.</p>
+    </section>
+
+    <footer>Changes save as you make them. Closing this window leaves Jester running in the menu bar.</footer>
+    <script type="module" src="settings.js"></script>
+  </body>
+</html>

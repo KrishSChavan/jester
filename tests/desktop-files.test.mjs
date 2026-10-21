@@ -10,6 +10,15 @@ test('jester:// URLs map into the extension and app folders', () => {
   assert.equal(resolveFile('jester://ext/vendor/tasks-vision/wasm/vision_wasm_internal.wasm?x=1#y'), resolve(ROOTS.ext, 'vendor/tasks-vision/wasm/vision_wasm_internal.wasm'));
 });
 
+test('app pages reach the extension\'s modules through their own origin', () => {
+  assert.equal(resolveFile('jester://app/ext/src/common/constants.js'), resolve(ROOTS.ext, 'src/common/constants.js'));
+  assert.equal(resolveFile('jester://app/settings/settings.js'), resolve(ROOTS.app, 'settings/settings.js'));
+  // Only a whole "ext" segment switches roots.
+  assert.equal(resolveFile('jester://app/extras/x.js'), resolve(ROOTS.app, 'extras/x.js'));
+  assert.equal(resolveFile('jester://app/ext/..%2F..%2Fdesktop/package.json'), null);
+  assert.equal(resolveFile('jester://app/ext/../main/main.js'), resolve(ROOTS.app, 'main/main.js'));
+});
+
 test('nothing outside those folders can be named, however it is spelled', () => {
   for (const url of [
     'jester://ext/../desktop/package.json',

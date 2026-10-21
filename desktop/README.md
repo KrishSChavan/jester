@@ -4,14 +4,19 @@ The Electron app that takes Jester beyond Chrome: the real cursor, the
 keyboard, media keys and other apps, driven by the same gestures, eye/head
 pointing and voice. The extension stays, and links to the app.
 
-**Status: phase 0 (spikes).** The four unknowns are answered below; nothing is
-wired to the OS yet beyond the test harnesses.
+**Status: phase 1 (the app shell).** Jester runs from the menu bar with a
+Settings window that walks through the OS permissions; the engine runs and
+reads gestures, but they don't act on the OS yet (phase 2). Phase 0's answers
+are below.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `src/main/main.js` | App entry. Runs the extension's engine page unchanged in a hidden window. |
+| `src/main/main.js` | App entry: one instance, menu-bar only, engine in a hidden window, permissions polled. |
+| `src/main/tray.js`, `tray-menu.js` | The menu-bar menu (`tray-menu.js` decides what it says). |
+| `src/main/permissions.js`, `permission-list.js` | Reading and asking for Camera, Accessibility, Microphone, Screen Recording. |
+| `src/main/windows.js`, `src/settings/` | The engine's hidden window and the Settings window. |
 | `src/preload/chrome-shim.cjs`, `src/main/chrome-bridge.js` | The slice of `chrome.runtime` / `chrome.storage` the extension's pages use, over IPC. |
 | `src/main/engine-host.js` | The service worker's half of the engine: settings, gestures, cursor, voice. |
 | `src/main/protocol.js`, `files.js` | `jester://ext/…` serves the extension folder, `jester://app/…` this app's pages. |
@@ -39,7 +44,18 @@ npm run models                           # speech models, ~135 MB, into models/
 - `npm run dev:mac` — the same, launched through `open` so macOS asks for the
   camera and Accessibility on behalf of "Electron" rather than the terminal or
   VS Code. Output: `~/Library/Logs/Jester/dev.log`, echoed to the terminal.
-- `JESTER_FAKE_MEDIA=1` — Chromium's synthetic camera and mic; no prompts.
+
+The app lives in the menu bar. Settings opens by itself while Camera or
+Accessibility is missing, and from the menu otherwise; closing it leaves
+Jester running. The engine only gets the camera once macOS has granted it, so
+no prompt ever comes from the hidden window.
+
+For tests and development (see the top of `src/main/main.js`):
+`JESTER_FAKE_MEDIA=1` (synthetic camera and mic), `JESTER_DATA_DIR`,
+`JESTER_SPIKE_SECONDS`, `JESTER_OPEN_SETTINGS`, `JESTER_THEME=light|dark`,
+and `JESTER_SELFTEST=1` (opens Settings unfocused, checks it shows the engine
+and that its switch stops and restarts it; `JESTER_CAPTURE=file.png` adds a
+picture of the page).
 
 ## Phase 0 results (MacBook Pro, Apple silicon, macOS 26)
 
@@ -61,8 +77,9 @@ in under 35 ms.
    "Electron" under Privacy & Security › Accessibility when asked; the check
    clicks only inside its own window and stops if anything else comes to the
    front. Results: the window, the terminal, `spikes/input-report.json`.
-2. **Camera**: `npm run dev:mac`, allow the camera, then raise an open palm,
-   make a fist, and try a few bound gestures; triggers appear in the log.
+2. **Camera**: `npm run dev:mac`. Settings opens asking for the camera; click
+   Allow…, and the engine starts. Raise an open palm, make a fist, try a few
+   bound gestures: each shows under Activity › Last gesture and in the log.
 
 ## Things learned the hard way
 

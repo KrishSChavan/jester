@@ -1,6 +1,11 @@
 /**
  * Where `jester://` URLs point on disk. Kept apart from protocol.js, which
  * needs Electron, so the path rules can be tested in plain Node.
+ *
+ *   jester://ext/…      the extension folder, as it ships
+ *   jester://app/…      the desktop app's own pages (desktop/src)
+ *   jester://app/ext/…  the extension folder again, so an app page can
+ *                       import the extension's modules from its own origin
  */
 
 import path from 'node:path';
@@ -21,8 +26,13 @@ export function resolveFile(url, roots = ROOTS) {
   } catch {
     return null;
   }
-  const root = roots[parsed.hostname];
   if (parsed.protocol !== 'jester:' || !Object.hasOwn(roots, parsed.hostname)) return null;
-  const file = path.resolve(root, `.${decodeURIComponent(parsed.pathname)}`);
+  let root = roots[parsed.hostname];
+  let pathname = decodeURIComponent(parsed.pathname);
+  if (parsed.hostname === 'app' && (pathname === '/ext' || pathname.startsWith('/ext/'))) {
+    root = roots.ext;
+    pathname = pathname.slice('/ext'.length);
+  }
+  const file = path.resolve(root, `.${pathname}`);
   return file === root || file.startsWith(root + path.sep) ? file : null;
 }
