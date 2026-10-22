@@ -48,9 +48,13 @@
           <span><strong>Camera</strong><small id="camera-hint">The camera Jester watches.</small></span>
           <select id="cameraDeviceId"></select>
         </label>
-        <label class="row disabled">
-          <span><strong>Voice commands</strong><small>Coming in a later update: speech recognition that runs on this computer.</small></span>
-          <input type="checkbox" id="voiceEnabled" disabled />
+        <label class="row" id="voice-row">
+          <span><strong>Voice commands</strong><small id="voice-hint"></small></span>
+          <input type="checkbox" id="voiceEnabled" />
+        </label>
+        <label class="row" id="speech-model-row">
+          <span><strong>Speech model</strong><small id="speech-model-hint"></small></span>
+          <select id="speechModel"></select>
         </label>
       </div>
     </section>

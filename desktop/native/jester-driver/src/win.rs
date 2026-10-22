@@ -12,8 +12,8 @@ use crate::{Poster, Result};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::mem::size_of;
-use windows::core::{Interface, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, POINT, RECT};
+use windows::core::{Interface, BOOL, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
 use windows::Win32::System::Threading::{
@@ -23,8 +23,10 @@ use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    EnumWindows, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SetForegroundWindow, ShowWindow, SwitchToThisWindow,
+    GWL_EXSTYLE, GW_OWNER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
+    WS_EX_TOOLWINDOW,
 };
 
 /// One wheel notch.
@@ -419,6 +421,78 @@ pub fn element_at(x: f64, y: f64, _wait: bool, _debug: bool) -> Result<Value> {
 /// nothing to do ahead of time yet.
 pub fn wake(_pid: i32) -> Result<Value> {
     Ok(json!({ "woken": false }))
+}
+
+/// The windows Alt-Tab offers, with their process ids: visible, titled,
+/// unowned, and not tool windows.
+fn app_windows() -> Vec<(HWND, u32)> {
+    unsafe extern "system" fn each(window: HWND, list: LPARAM) -> BOOL {
+        let list = unsafe { &mut *(list.0 as *mut Vec<(HWND, u32)>) };
+        let owned = unsafe { GetWindow(window, GW_OWNER) }.is_ok_and(|owner| !owner.is_invalid());
+        let tool = unsafe { GetWindowLongW(window, GWL_EXSTYLE) } as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        if unsafe { IsWindowVisible(window) }.as_bool() && !owned && !tool && unsafe { GetWindowTextLengthW(window) } > 0 {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+            list.push((window, pid));
+        }
+        BOOL(1)
+    }
+    let mut list: Vec<(HWND, u32)> = Vec::new();
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut list as *mut _ as isize)) };
+    list
+}
+
+fn windows_of(pid: i32) -> Result<Vec<HWND>> {
+    let windows: Vec<HWND> = app_windows().into_iter().filter(|(_, owner)| *owner as i32 == pid).map(|(window, _)| window).collect();
+    if windows.is_empty() {
+        Err(format!("process {pid} has no windows"))
+    } else {
+        Ok(windows)
+    }
+}
+
+/// The apps with a window on the taskbar, named after their program files.
+pub fn apps() -> Result<Value> {
+    let mut front = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut front)) };
+    let mut apps: Vec<Value> = Vec::new();
+    for (window, pid) in app_windows() {
+        if apps.iter().any(|app| app["pid"] == pid) {
+            continue;
+        }
+        let (exe, _) = exe_name(pid);
+        let name = exe.as_deref().and_then(|path| path.rsplit('\\').next()).map(|file| file.trim_end_matches(".exe").to_string());
+        apps.push(json!({ "pid": pid, "name": name, "path": exe, "active": pid == front, "hidden": unsafe { IsIconic(window) }.as_bool() }));
+    }
+    Ok(Value::Array(apps))
+}
+
+/// Closes each of the app's windows, as their close buttons would.
+pub fn quit_app(pid: i32) -> Result<()> {
+    for window in windows_of(pid)? {
+        unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) }.map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn hide_app(pid: i32) -> Result<()> {
+    for window in windows_of(pid)? {
+        let _ = unsafe { ShowWindow(window, SW_MINIMIZE) };
+    }
+    Ok(())
+}
+
+pub fn activate_app(pid: i32) -> Result<()> {
+    let window = windows_of(pid)?[0];
+    if unsafe { IsIconic(window) }.as_bool() {
+        let _ = unsafe { ShowWindow(window, SW_RESTORE) };
+    }
+    // Windows lets only the app in front hand over the front; when it won't,
+    // switch as Alt-Tab does.
+    if !unsafe { SetForegroundWindow(window) }.as_bool() {
+        unsafe { SwitchToThisWindow(window, true) };
+    }
+    Ok(())
 }
 
 pub fn frontmost() -> Result<Value> {

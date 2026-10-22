@@ -127,7 +127,10 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
         }
         Command::Text { text } => input.text(poster, &text).map(|_| Map::new()),
         Command::Media { key } => input.media(poster, key).map(|_| Map::new()),
-        Command::ElementAt { .. } | Command::Frontmost | Command::Wake { .. } | Command::Quit => unreachable!(),
+        Command::QuitApp { pid } => app_op(poster, "quitApp", pid, platform::quit_app),
+        Command::HideApp { pid } => app_op(poster, "hideApp", pid, platform::hide_app),
+        Command::ActivateApp { pid } => app_op(poster, "activateApp", pid, platform::activate_app),
+        Command::ElementAt { .. } | Command::Frontmost | Command::Wake { .. } | Command::Apps | Command::Quit => unreachable!(),
     };
     result.map(|mut body| {
         if poster.dry_run && !poster.log.is_empty() {
@@ -137,11 +140,21 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
     })
 }
 
+/// Something done to a whole app, which a dry run describes instead.
+fn app_op(poster: &mut Poster, name: &str, pid: i32, op: fn(i32) -> Result<()>) -> Result<Map<String, Value>> {
+    poster.record(json!({ "event": name, "pid": pid }));
+    if !poster.dry_run {
+        op(pid)?;
+    }
+    Ok(Map::new())
+}
+
 fn run_query(command: Command) -> Result<Map<String, Value>> {
     match command {
         Command::ElementAt { x, y, wait, debug } => platform::element_at(x, y, wait, debug).map(object),
         Command::Frontmost => platform::frontmost().map(object),
         Command::Wake { pid } => platform::wake(pid).map(object),
+        Command::Apps => platform::apps().map(|apps| object(json!({ "apps": apps }))),
         _ => unreachable!(),
     }
 }

@@ -99,6 +99,11 @@ h2 {
   border-top: 1px solid var(--line);
 }
 
+/* `hidden` wins over the display rules below. */
+[hidden] {
+  display: none !important;
+}
+
 .row,
 .permission {
   display: flex;

@@ -19,6 +19,13 @@ test('app pages reach the extension\'s modules through their own origin', () => 
   assert.equal(resolveFile('jester://app/ext/../main/main.js'), resolve(ROOTS.app, 'main/main.js'));
 });
 
+test('the engine page loads the app\'s audio worklets as its own, and nothing else of the app', () => {
+  assert.equal(resolveFile('jester://ext/_desktop/worklets/speech-capture.js'), resolve(ROOTS.app, 'worklets/speech-capture.js'));
+  assert.equal(resolveFile('jester://ext/_desktop/main/main.js'), resolve(ROOTS.ext, '_desktop/main/main.js'), 'only worklets are mapped');
+  assert.equal(resolveFile('jester://ext/_desktop/worklets/..%2F..%2Fmain%2Fmain.js'), null);
+  assert.equal(resolveFile('jester://ext/_desktop/worklets/..%2Fmain%2Fmain.js'), null);
+});
+
 test('nothing outside those folders can be named, however it is spelled', () => {
   for (const url of [
     'jester://ext/../desktop/package.json',

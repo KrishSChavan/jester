@@ -136,7 +136,7 @@ function renderControls() {
   $('enabled').checked = !!settings.enabled;
   $('pointerEnabled').checked = !!settings.pointerEnabled;
   $('pointerEnabled').disabled = !settings.enabled;
-  $('voiceEnabled').checked = !!settings.voiceEnabled && !!desktop?.voiceReady;
+  renderVoice();
   const cursorOff = !settings.enabled || !settings.pointerEnabled;
   const aim = $('pointerAim');
   if (!aim.options.length) aim.replaceChildren(...Object.entries(POINTER_AIMS).map(([value, meta]) => new Option(meta.label, value)));
@@ -147,6 +147,44 @@ function renderControls() {
   $('headSpeed').disabled = cursorOff || settings.pointerAim === 'eyes';
   $('calibrate').disabled = cursorOff;
   renderStatus();
+}
+
+/** How to start a command: the gesture bound to voice, if any, and the shortcut. */
+function voiceStarters() {
+  const shortcut = platform() === 'darwin' ? '⌥⇧J' : 'Alt+Shift+J';
+  const [pose] = Object.entries(settings.bindings || {}).find(([, binding]) => binding?.action === 'VOICE_CAPTURE_TOGGLE') || [];
+  const gesture = GESTURES.find((item) => item.id === pose);
+  return gesture ? `${gesture.glyph} ${gesture.label} or ${shortcut}` : shortcut;
+}
+
+/** The voice switch, and what voice needs or does: the speech model's state comes from the main process. */
+function renderVoice() {
+  const voice = desktop?.voice || 'missing';
+  const missing = voice === 'missing';
+  $('voiceEnabled').checked = !!settings.voiceEnabled && !missing;
+  $('voiceEnabled').disabled = !settings.enabled || missing;
+  $('voice-row').classList.toggle('disabled', missing);
+  $('voice-hint').textContent = missing
+    ? 'Needs its speech model, which isn’t installed. In desktop/, run: npm run models'
+    : `${voiceStarters()} starts a command: say “open Spotify”, “volume 30”, “type hello”. Speech is recognized on this computer.`;
+  renderSpeechModel(missing);
+}
+
+/** Which recognizer hears commands; one not downloaded yet is listed, and says how to get it. */
+function renderSpeechModel(missing) {
+  const choices = desktop?.speechChoices || [];
+  $('speech-model-row').hidden = missing || !choices.length;
+  const select = $('speechModel');
+  select.replaceChildren(...choices.map((choice) => {
+    const option = new Option(choice.installed ? choice.label : `${choice.label} (not downloaded)`, choice.id);
+    option.disabled = !choice.installed;
+    return option;
+  }));
+  select.value = desktop?.speechModel || '';
+  select.disabled = !settings.enabled || !settings.voiceEnabled;
+  const chosen = choices.find((choice) => choice.id === desktop?.speechModel);
+  const absent = choices.find((choice) => !choice.installed);
+  $('speech-model-hint').textContent = [chosen?.hint, absent && `To add ${absent.label}, in desktop/ run: npm run models -- ${absent.id}`].filter(Boolean).join(' ');
 }
 
 /** Whether the eyes are calibrated, and how well, from the extension's own grading. */
@@ -371,6 +409,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 $('enabled').addEventListener('change', (event) => save({ enabled: event.target.checked }));
 $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled: event.target.checked }));
+$('voiceEnabled').addEventListener('change', (event) => save({ voiceEnabled: event.target.checked }));
+$('speechModel').addEventListener('change', (event) => save({ speechModel: event.target.value }));
 $('pointerAim').addEventListener('change', (event) => save({ pointerAim: event.target.value }));
 $('headSpeed').addEventListener('change', (event) => save({ headSpeed: Number(event.target.value) }));
 $('calibrate').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-calibrate' }));

@@ -20,7 +20,8 @@ export const MODELS = {
   vad: { file: 'silero_vad.onnx' },
   'moonshine-tiny': { archive: 'sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2' },
   kroko: { archive: 'sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2' },
-  'parakeet-110m': { archive: 'sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2' }
+  'parakeet-110m': { archive: 'sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2' },
+  'parakeet-0.6b': { archive: 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2' }
 };
 const DEFAULT_SET = ['vad', 'moonshine-tiny'];
 

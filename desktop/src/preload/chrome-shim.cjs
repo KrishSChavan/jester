@@ -82,3 +82,148 @@ contextBridge.executeInMainWorld({
   },
   args: [api, () => ipcRenderer.send('jester:close-window')]
 });
+
+// ---------------------------------------------------------------------------
+// Speech, for the engine page only
+// ---------------------------------------------------------------------------
+//
+// voice.js uses the Web Speech API's on-device recognizer, which Electron
+// doesn't have. This is a SpeechRecognition of the same shape — available(),
+// processLocally, start/stop/abort, onstart/onresult/onerror/onend — whose
+// audio goes to the app's own offline recognizer (src/main/speech.js).
+
+const ENGINE_PAGE = 'jester://ext/src/offscreen/offscreen.html';
+
+if (location.href.startsWith(ENGINE_PAGE)) {
+  let listener = null;
+  ipcRenderer.on('jester:speech-event', (_event, message) => listener?.(message));
+  const speech = {
+    available: () => ipcRenderer.invoke('jester:speech-available'),
+    // `payload`: the samples, for 'audio'; what the mic is doing, for 'begin'.
+    send: (op, session, payload) => ipcRenderer.send('jester:speech', op, session, payload),
+    // Once: a function crossing the bridge twice needn't arrive as the same one.
+    listen: (fn) => void (listener = fn)
+  };
+
+  contextBridge.executeInMainWorld({
+    func: (speech) => {
+      /** Silence before anything is said: Chrome's recognizer gives up about as soon. */
+      const NO_SPEECH_MS = 8000;
+      /** Same-origin for this page; see src/main/files.js. */
+      const WORKLET = new URL('/_desktop/worklets/speech-capture.js', location.href).href;
+      /**
+       * The raw mic. Each command opens a fresh stream, and noise suppression
+       * and auto-gain spend their first moments adapting — just when the first
+       * word arrives.
+       */
+      const MIC = { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+      let sessions = 0;
+      /** The recognizer listening for each session. */
+      const live = new Map();
+      speech.listen((message) => live.get(message.session)?.heard(message));
+
+      const resultList = (text, isFinal) => {
+        const alternative = { transcript: text, confidence: 1 };
+        const result = Object.assign([alternative], { isFinal, item: (i) => (i === 0 ? alternative : null) });
+        return Object.assign([result], { item: (i) => (i === 0 ? result : null) });
+      };
+
+      class LocalSpeechRecognition {
+        static async available() {
+          return speech.available();
+        }
+        static async install() {
+          return false;
+        }
+        constructor() {
+          this.processLocally = false;
+          this.lang = 'en-US';
+          this.continuous = false;
+          this.interimResults = false;
+          this.maxAlternatives = 1;
+          this.onstart = this.onresult = this.onerror = this.onend = null;
+          this.session = 0;
+          this.over = false;
+        }
+        start() {
+          this.run().catch(() => this.fail('audio-capture'));
+        }
+        /** Finish: whatever has been heard so far becomes the result. */
+        stop() {
+          if (this.session && !this.over) speech.send('end', this.session);
+        }
+        abort() {
+          if (this.over) return;
+          this.over = true;
+          if (this.session) speech.send('abort', this.session);
+          this.teardown();
+        }
+        async run() {
+          const session = ++sessions;
+          this.session = session;
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: MIC, video: false }).catch((error) => {
+            this.fail(error?.name === 'NotAllowedError' ? 'not-allowed' : 'audio-capture');
+            return null;
+          });
+          if (!stream) return;
+          this.stream = stream;
+          if (this.over) return this.teardown();
+          // The recognizer wants 16 kHz mono; the audio context resamples to it.
+          this.context = new AudioContext({ sampleRate: 16000 });
+          await this.context.audioWorklet.addModule(WORKLET);
+          if (this.over) return this.teardown();
+          live.set(session, this);
+          const { echoCancellation, noiseSuppression, autoGainControl, sampleRate } = stream.getAudioTracks()[0]?.getSettings() || {};
+          speech.send('begin', session, { echoCancellation, noiseSuppression, autoGainControl, sampleRate });
+          const source = this.context.createMediaStreamSource(stream);
+          const tap = new AudioWorkletNode(this.context, 'jester-speech-capture');
+          tap.port.onmessage = ({ data }) => {
+            if (!this.over) speech.send('audio', session, data);
+          };
+          source.connect(tap);
+          // Connected through, so the graph keeps pulling it; it outputs silence.
+          tap.connect(this.context.destination);
+          this.context.resume().catch(() => undefined);
+          this.silence = setTimeout(() => this.fail('no-speech'), NO_SPEECH_MS);
+          this.onstart?.();
+        }
+        heard(message) {
+          if (message.session !== this.session || this.over) return;
+          if (message.type === 'speech') clearTimeout(this.silence);
+          else if (message.type === 'partial' && this.interimResults && message.text) this.onresult?.({ resultIndex: 0, results: resultList(message.text, false) });
+          else if (message.type === 'final') {
+            if (message.text) this.onresult?.({ resultIndex: 0, results: resultList(message.text, true) });
+            this.finish();
+          } else if (message.type === 'error') this.fail(message.detail === 'not-ready' ? 'service-not-allowed' : 'aborted');
+        }
+        fail(error) {
+          if (this.over) return;
+          this.over = true;
+          if (this.session) speech.send('abort', this.session);
+          this.teardown();
+          this.onerror?.({ error });
+          this.onend?.();
+        }
+        finish() {
+          if (this.over) return;
+          this.over = true;
+          this.teardown();
+          this.onend?.();
+        }
+        teardown() {
+          clearTimeout(this.silence);
+          live.delete(this.session);
+          this.stream?.getTracks().forEach((track) => track.stop());
+          this.stream = null;
+          Promise.resolve(this.context?.close()).catch(() => undefined);
+          this.context = null;
+        }
+      }
+
+      for (const name of ['SpeechRecognition', 'webkitSpeechRecognition']) {
+        Object.defineProperty(globalThis, name, { value: LocalSpeechRecognition, configurable: true, writable: true });
+      }
+    },
+    args: [speech]
+  });
+}

@@ -18,16 +18,102 @@ body {
   user-select: none;
 }
 
-/* The hold bar and the toast take turns in the same spot. */
+/* The hold bar and the toast take turns in the same spot, above the voice
+   pill while it's up. --inset-bottom is how much of the window's bottom is
+   off screen or under the Dock (overlay.js). */
 .dock {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 72px;
+  bottom: calc(var(--inset-bottom, 0px) + 24px);
   display: grid;
   justify-items: center;
   align-items: end;
   pointer-events: none;
+  transition: bottom 180ms ease;
+}
+
+.voice-up .dock {
+  bottom: calc(var(--inset-bottom, 0px) + 84px);
+}
+
+/* The voice pill, as in the extension: bars while it listens (and what it has
+   heard so far), then what the command did. */
+.voice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--inset-bottom, 0px) + 24px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  min-width: 132px;
+  max-width: min(520px, 80vw);
+  min-height: 46px;
+  padding: 0 22px;
+  border-radius: 999px;
+  background: #0a0c11;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+  color: #e8ecf2;
+  transform: translateX(-50%);
+  transition: opacity 180ms ease, translate 180ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+.voice[hidden] {
+  display: flex;
+  opacity: 0;
+  translate: 0 10px;
+}
+
+.voice .bars {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  margin: 0 auto;
+}
+
+.voice .bars i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #e8ecf2;
+  /* Frames arrive at ~25/s; the transition fills the gaps. */
+  transition: height 70ms linear;
+}
+
+.voice .heard {
+  color: rgba(232, 236, 242, 0.72);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.voice .heard:empty,
+.voice .say {
+  display: none;
+}
+
+.voice.answer .bars,
+.voice.answer .heard {
+  display: none;
+}
+
+.voice.answer .say {
+  display: block;
+  padding: 12px 0;
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: center;
+  margin: 0 auto;
+}
+
+.voice.answer.bad {
+  border-color: rgba(252, 165, 165, 0.92);
+}
+
+.voice.answer.bad .say {
+  color: #fca5a5;
 }
 
 .pill {
@@ -179,7 +265,9 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .pill,
-  .cursor {
+  .cursor,
+  .dock,
+  .voice {
     transition: none;
   }
 

@@ -23,3 +23,13 @@ test('spacing differences are not errors when comparing commands', () => {
   assert.equal(sameWords("show me MrBeast's latest video", 'Show me Mr. Beasts latest video'), true);
   assert.equal(sameWords('lock the screen', 'the screen'), false);
 });
+
+test('the speech model: the one chosen if downloaded, else the most accurate that is', async () => {
+  const { pickModel } = await import('../desktop/src/main/speech/models.js');
+  const only = (...ids) => (id) => ids.includes(id);
+  assert.equal(pickModel(undefined, only('parakeet-110m', 'parakeet-0.6b')), 'parakeet-0.6b');
+  assert.equal(pickModel('parakeet-110m', only('parakeet-110m', 'parakeet-0.6b')), 'parakeet-110m');
+  assert.equal(pickModel('parakeet-0.6b', only('parakeet-110m')), 'parakeet-110m', 'a choice that isn\'t downloaded falls back');
+  assert.equal(pickModel('kroko', only('parakeet-110m')), 'parakeet-110m', 'only the offered models');
+  assert.equal(pickModel(undefined, only()), null);
+});

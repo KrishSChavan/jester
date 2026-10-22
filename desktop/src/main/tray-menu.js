@@ -21,21 +21,24 @@ export const STATUS_TEXT = {
  * @param {{state:string, detail?:string}} state.engine
  * @param {object} state.settings  merged settings
  * @param {{id:string,label:string}[]} state.missing  needed permissions not yet granted
- * @param {boolean} state.voiceReady  false until voice capture works in the app
+ * @param {string} [state.voice]  the speech model: 'ready' | 'off' | 'missing' (speech.js)
  */
-export function trayModel({ engine, settings, missing = [], voiceReady = false }) {
+export function trayModel({ engine, settings, missing = [], voice = 'missing' }) {
   const status = STATUS_TEXT[engine?.state] || engine?.state || STATUS_TEXT[ENGINE.OFF];
   const on = !!settings?.enabled;
   const items = [
     { id: 'status', label: on ? status : 'Jester is off', enabled: false },
     { type: 'separator' },
     { id: 'enabled', label: 'Jester on', type: 'checkbox', checked: on },
-    { id: 'pointer', label: 'Cursor control', type: 'checkbox', checked: !!settings?.pointerEnabled, enabled: on },
-    voiceReady
-      ? { id: 'voice', label: 'Voice commands', type: 'checkbox', checked: !!settings?.voiceEnabled, enabled: on }
-      : { id: 'voice', label: 'Voice commands — coming soon', enabled: false },
-    { type: 'separator' }
+    { id: 'pointer', label: 'Cursor control', type: 'checkbox', checked: !!settings?.pointerEnabled, enabled: on }
   ];
+  if (voice === 'missing') items.push({ id: 'voice', label: 'Voice commands — speech model not installed', enabled: false });
+  else {
+    items.push({ id: 'voice', label: 'Voice commands', type: 'checkbox', checked: !!settings?.voiceEnabled, enabled: on });
+    // The shortcut is the global one; the menu only shows it.
+    if (on && settings?.voiceEnabled) items.push({ id: 'listen', label: 'Speak a command', accelerator: 'Alt+Shift+J', registerAccelerator: false });
+  }
+  items.push({ type: 'separator' });
   if (missing.length) items.push({ id: 'permissions', label: `Allow ${missing.map((item) => item.label).join(' and ')}…` });
   items.push({ id: 'settings', label: 'Settings…' }, { type: 'separator' }, { id: 'quit', label: 'Quit Jester' });
   const tooltip = missing.length ? `Jester — needs ${missing.map((item) => item.label).join(' and ')}` : `Jester — ${on ? status : 'off'}`;

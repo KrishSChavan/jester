@@ -35,9 +35,18 @@ test('missing permissions get their own item and show in the tooltip', () => {
   assert.equal(model.tooltip, 'Jester — needs Camera and Accessibility');
 });
 
-test('voice stays a promise until the app can hear', () => {
-  assert.deepEqual(byId(trayModel({ engine: { state: 'running' }, settings: on })).voice, { id: 'voice', label: 'Voice commands — coming soon', enabled: false });
-  const ready = byId(trayModel({ engine: { state: 'running' }, settings: on, voiceReady: true })).voice;
-  assert.equal(ready.type, 'checkbox');
-  assert.equal(ready.checked, true);
+test('voice needs its speech model, and offers to listen once it has loaded', () => {
+  const missing = byId(trayModel({ engine: { state: 'running' }, settings: on }));
+  assert.deepEqual(missing.voice, { id: 'voice', label: 'Voice commands — speech model not installed', enabled: false });
+  assert.equal(missing.listen, undefined);
+
+  const ready = byId(trayModel({ engine: { state: 'running' }, settings: on, voice: 'ready' }));
+  assert.equal(ready.voice.type, 'checkbox');
+  assert.equal(ready.voice.checked, true);
+  assert.equal(ready.listen.label, 'Speak a command');
+  assert.equal(ready.listen.accelerator, 'Alt+Shift+J');
+
+  const off = byId(trayModel({ engine: { state: 'running' }, settings: { ...on, voiceEnabled: false }, voice: 'off' }));
+  assert.equal(off.voice.checked, false);
+  assert.equal(off.listen, undefined);
 });

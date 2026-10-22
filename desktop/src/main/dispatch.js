@@ -28,37 +28,35 @@ export function gestureName(source, gesture) {
  * @param {string} [deps.platform]
  */
 export function createDispatcher({ driver, getSettings, canPost, onJester, toast, log = () => undefined, platform = process.platform }) {
-  return async function dispatch(action, { source = 'pose', gesture = '' } = {}) {
+  /**
+   * `quiet`: no toast — the caller (a voice command) says how it went.
+   * @returns {Promise<{plan:object, ok:boolean, label:string, detail:string}>}
+   */
+  return async function dispatch(action, { source = 'pose', gesture = '', quiet = false } = {}) {
     const plan = osPlan(action, platform, await getSettings());
     const label = actionLabel(action);
     const said = gesture ? `${gestureName(source, gesture)} → ${label}` : label;
-    if (plan.kind === 'none') return plan;
-    if (plan.kind === 'unsupported') {
-      toast(said, { tone: 'warn', detail: plan.why });
-      return plan;
-    }
+    const done = (ok, detail = '', speak = true) => {
+      if (speak && !quiet) toast(said, ok ? { detail } : { tone: 'warn', detail });
+      return { plan, ok, label, detail };
+    };
+    if (plan.kind === 'none') return done(true, '', false);
+    if (plan.kind === 'unsupported') return done(false, plan.why);
     if (plan.kind === 'jester') {
       onJester(plan.op);
-      return plan;
+      return done(true, '', false);
     }
-    if (!driver) {
-      toast(said, { tone: 'warn', detail: 'Jester’s input helper isn’t built (npm run driver)' });
-      return plan;
-    }
-    if (!canPost()) {
-      toast(said, { tone: 'warn', detail: 'Allow Accessibility in Jester’s Settings first' });
-      return plan;
-    }
+    if (!driver) return done(false, 'Jester’s input helper isn’t built (npm run driver)');
+    if (!canPost()) return done(false, 'Allow Accessibility in Jester’s Settings first');
     try {
       if (plan.kind === 'key') await driver.call('key', { key: plan.key, modifiers: plan.modifiers });
       else if (plan.kind === 'media') await driver.call('media', { key: plan.key });
       else if (plan.kind === 'scroll') await driver.call('scroll', { dy: plan.dy, unit: 'pixel' });
       else if (plan.kind === 'system' && plan.op === 'lock' && platform === 'win32') execFile('rundll32.exe', ['user32.dll,LockWorkStation']);
-      toast(said, { detail: describePlan(plan, platform) });
+      return done(true, describePlan(plan, platform));
     } catch (err) {
       log('action failed:', action, err.message);
-      toast(said, { tone: 'warn', detail: `Didn’t go through: ${err.message}` });
+      return done(false, `Didn’t go through: ${err.message}`);
     }
-    return plan;
   };
 }

@@ -6,6 +6,10 @@
  *   jester://app/…      the desktop app's own pages (desktop/src)
  *   jester://app/ext/…  the extension folder again, so an app page can
  *                       import the extension's modules from its own origin
+ *   jester://ext/_desktop/worklets/…  desktop/src/worklets, so the engine page
+ *                       can load the app's audio worklets as its own. Chrome
+ *                       reserves names starting with "_" in extensions, so
+ *                       this never hides an extension file.
  */
 
 import path from 'node:path';
@@ -32,6 +36,9 @@ export function resolveFile(url, roots = ROOTS) {
   if (parsed.hostname === 'app' && (pathname === '/ext' || pathname.startsWith('/ext/'))) {
     root = roots.ext;
     pathname = pathname.slice('/ext'.length);
+  } else if (parsed.hostname === 'ext' && pathname.startsWith('/_desktop/worklets/')) {
+    root = path.join(roots.app, 'worklets');
+    pathname = pathname.slice('/_desktop/worklets'.length);
   }
   const file = path.resolve(root, `.${pathname}`);
   return file === root || file.startsWith(root + path.sep) ? file : null;

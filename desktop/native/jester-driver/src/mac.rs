@@ -7,7 +7,8 @@
 
 use crate::protocol::{Button, MediaKey, Modifier, ScrollUnit};
 use crate::{Poster, Result};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSRunningApplication};
+use objc2::rc::Retained;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSEventType, NSRunningApplication};
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize};
 use objc2_core_graphics::{
@@ -643,6 +644,69 @@ pub fn frontmost() -> Result<Value> {
     }
     let bounds = window.bounds.map(|(x, y, w, h)| json!({ "x": x, "y": y, "w": w, "h": h }));
     Ok(json!({ "app": app, "window": { "title": window.title, "bounds": bounds } }))
+}
+
+// ---------------------------------------------------------------------------
+// Apps
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    /// libproc: every process id into `buffer`; returns how many.
+    fn proc_listallpids(buffer: *mut std::ffi::c_void, buffer_size: std::ffi::c_int) -> std::ffi::c_int;
+}
+
+fn running(pid: i32) -> Result<Retained<NSRunningApplication>> {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid).ok_or_else(|| format!("no app is running as process {pid}"))
+}
+
+/// The apps in the Dock, looked up one process at a time: AppKit's own list
+/// only updates while a main run loop turns, and this process doesn't run one.
+pub fn apps() -> Result<Value> {
+    let mut pids = vec![0i32; 8192];
+    let size = (pids.len() * std::mem::size_of::<i32>()) as std::ffi::c_int;
+    let count = unsafe { proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    if count <= 0 {
+        return Err("could not list processes".into());
+    }
+    pids.truncate(count as usize);
+    let mut apps = Vec::new();
+    for pid in pids {
+        let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else { continue };
+        if app.activationPolicy() != NSApplicationActivationPolicy::Regular || app.isTerminated() {
+            continue;
+        }
+        apps.push(json!({
+            "pid": pid,
+            "name": app.localizedName().map(|name| name.to_string()),
+            "bundleId": app.bundleIdentifier().map(|id| id.to_string()),
+            "path": app.bundleURL().and_then(|url| url.path()).map(|path| path.to_string()),
+            "active": app.isActive(),
+            "hidden": app.isHidden(),
+        }));
+    }
+    Ok(Value::Array(apps))
+}
+
+pub fn quit_app(pid: i32) -> Result<()> {
+    if running(pid)?.terminate() {
+        Ok(())
+    } else {
+        Err("the app didn't take the request to quit".into())
+    }
+}
+
+pub fn hide_app(pid: i32) -> Result<()> {
+    if running(pid)?.hide() {
+        Ok(())
+    } else {
+        Err("the app can't be hidden".into())
+    }
+}
+
+/// Since macOS 14 an app can't simply take the front for another; the app
+/// asks LaunchServices instead (`open -a`), which always may.
+pub fn activate_app(_pid: i32) -> Result<()> {
+    Err("on macOS, apps are brought forward with open -a".into())
 }
 
 /// Whether an element's frame holds the point: an answer that doesn't is about

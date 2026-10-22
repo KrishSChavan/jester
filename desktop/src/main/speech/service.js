@@ -6,11 +6,16 @@
  * Float32 chunks; a voice-activity detector decides where the utterance ends,
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
- * Messages in:  start {model} · begin · audio {samples} · end · transcribe {samples}
+ * Messages in:  start {model} · begin · audio {samples} · end · abort · transcribe {samples}
  * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · error {detail}
+ *
+ * JESTER_SAVE_SPEECH=folder keeps each utterance as a WAV with what was
+ * heard beside it, for comparing models on a real voice. Off unless set.
  */
 
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import { modelDir, SPEECH_MODELS, VAD_MODEL } from './models.js';
 
 const require = createRequire(import.meta.url);
@@ -30,6 +35,7 @@ const PARTIAL_EVERY_MS = 500;
 const PREROLL_S = 1;
 /** voice.js gives up on a capture after 30 s; so does this. */
 const MAX_CAPTURE_S = 30;
+const SAVE_DIR = process.env.JESTER_SAVE_SPEECH || '';
 
 const port = process.parentPort;
 const send = (message) => port.postMessage(message);
@@ -90,7 +96,19 @@ async function finish(samples) {
   if (state.done) return;
   state.done = true;
   const { text, decodeMs } = samples.length ? await decode(samples) : { text: '', decodeMs: 0 };
+  if (SAVE_DIR && samples.length) save(samples, text);
   send({ type: 'final', text, decodeMs });
+}
+
+function save(samples, text) {
+  try {
+    const name = path.join(SAVE_DIR, new Date().toISOString().replace(/[:.]/g, '-'));
+    fs.mkdirSync(SAVE_DIR, { recursive: true });
+    sherpa.writeWave(`${name}.wav`, { samples, sampleRate: SAMPLE_RATE });
+    fs.writeFileSync(`${name}.txt`, `${text}\n`);
+  } catch (err) {
+    console.error('could not save the utterance:', err.message);
+  }
 }
 
 async function partial() {
@@ -145,6 +163,11 @@ port.on('message', async ({ data }) => {
       case 'begin':
         vad?.reset();
         state = freshState();
+        break;
+      // A capture called off: forget it, say nothing.
+      case 'abort':
+        vad?.reset();
+        state = { ...freshState(), done: true };
         break;
       case 'audio':
         await audio(data.samples instanceof Float32Array ? data.samples : new Float32Array(data.samples));

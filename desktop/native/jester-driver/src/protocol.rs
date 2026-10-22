@@ -90,6 +90,22 @@ pub enum Command {
     Wake {
         pid: i32,
     },
+    /// The running apps the Dock (or the taskbar) shows.
+    Apps,
+    /// Ask an app to quit, as its own Quit command would: unsaved work gets
+    /// its usual prompt.
+    QuitApp {
+        pid: i32,
+    },
+    /// Hide an app (macOS) or minimize its windows (Windows).
+    HideApp {
+        pid: i32,
+    },
+    /// Bring a running app's window to the front (Windows; macOS opens apps
+    /// with `open`, which LaunchServices always lets through).
+    ActivateApp {
+        pid: i32,
+    },
     Quit,
 }
 
@@ -97,7 +113,7 @@ impl Command {
     /// Accessibility queries can block on an app that has stopped responding,
     /// so they run on their own thread and never hold up the cursor.
     pub fn is_query(&self) -> bool {
-        matches!(self, Command::ElementAt { .. } | Command::Frontmost | Command::Wake { .. })
+        matches!(self, Command::ElementAt { .. } | Command::Frontmost | Command::Wake { .. } | Command::Apps)
     }
 }
 

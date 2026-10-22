@@ -8,12 +8,15 @@
  *
  * Environment, for development and tests:
  *   JESTER_FAKE_MEDIA=1       Chromium's synthetic camera and mic, treated as allowed
+ *   JESTER_FAKE_AUDIO=a.wav   with FAKE_MEDIA: the mic plays this file, once
+ *   JESTER_SAVE_SPEECH=dir    keep each spoken command as a WAV + what was heard
  *   JESTER_DATA_DIR=path      keep settings somewhere other than the user's
  *   JESTER_SPIKE_SECONDS=n    quit after n seconds
  *   JESTER_LOG=1              log engine status, gestures, telemetry and CPU
  *   JESTER_OPEN_SETTINGS=1    open Settings at launch
  *   JESTER_SELFTEST=1         check Settings ⇄ engine, logging what it sees
  *   JESTER_SELFTEST_CALIBRATE=1  also press Start on calibration (takes the screen)
+ *   JESTER_SELFTEST_VOICE=1   also speak one command (FAKE_AUDIO) and log what it did
  *   JESTER_CAPTURE=file.png   with SELFTEST: save a picture of the whole page
  *   JESTER_THEME=light|dark   override the system's appearance
  */
@@ -21,7 +24,7 @@
 import { app, BrowserWindow, globalShortcut, nativeTheme, screen, session } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MSG, saveSettings } from '../../../jester-extension/src/common/constants.js';
+import { ENGINE, MSG, saveSettings } from '../../../jester-extension/src/common/constants.js';
 import { installBridge, onMessage, onStorageChanged, post, storage } from './chrome-bridge.js';
 import { createDispatcher } from './dispatch.js';
 import { startDriver } from './driver.js';
@@ -32,13 +35,13 @@ import { createPointer } from './pointer.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
+import { startSpeech } from './speech.js';
 import { createTray } from './tray.js';
 import { trayModel } from './tray-menu.js';
+import { createVoiceRunner, runFile } from './voice-runner.js';
 import { closeSafely, createEngineWindow, showCalibration, showSettings } from './windows.js';
 
 const env = process.env;
-/** Voice capture needs the app's own speech engine; it isn't wired in yet. */
-const VOICE_READY = false;
 /** Permissions change in System Settings, behind the app's back. */
 const PERMISSION_POLL_MS = 2000;
 /** How often the front window is checked: it decides which binding set is live. */
@@ -48,9 +51,16 @@ const VOICE_SHORTCUT = 'Alt+Shift+J';
 
 registerScheme();
 if (env.JESTER_DATA_DIR) app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
+// Read by the speech service, which inherits this environment.
+if (env.JESTER_SAVE_SPEECH) env.JESTER_SAVE_SPEECH = path.resolve(env.JESTER_SAVE_SPEECH);
 if (env.JESTER_FAKE_MEDIA) {
   app.commandLine.appendSwitch('use-fake-device-for-media-stream');
   app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+  if (env.JESTER_FAKE_AUDIO) {
+    app.commandLine.appendSwitch('use-file-for-fake-audio-capture', `${path.resolve(env.JESTER_FAKE_AUDIO)}%noloop`);
+    // Chromium's sandboxed audio process can't read the file; audio in this process can.
+    app.commandLine.appendSwitch('disable-features', 'AudioServiceOutOfProcess');
+  }
 }
 
 const log = env.JESTER_LOG ? (...parts) => console.log('[jester]', ...parts) : () => undefined;
@@ -62,8 +72,12 @@ let overlays = null;
 let pointer = null;
 /** What the pointer asked the driver for, during a self-test. */
 const pointerCalls = [];
+/** The self-test's ear: called with the next voice command and how it went. */
+let voiceHeard = null;
 let driver = null;
 let dispatch = null;
+let speech = null;
+let voiceRunner = null;
 let quitting = false;
 let engine = { state: 'off', detail: '' };
 let permissions = [];
@@ -88,8 +102,9 @@ function cpuReport() {
   const engineMetric = metrics.find((m) => m.pid === enginePid);
   const gpu = metrics.find((m) => m.type === 'GPU');
   const main = metrics.find((m) => m.type === 'Browser');
+  const speechMetric = metrics.find((m) => m.serviceName === 'Jester speech' || m.name === 'Jester speech');
   const total = metrics.reduce((sum, m) => sum + mb(m), 0);
-  return `cpu engine ${pct(engineMetric)}% gpu ${pct(gpu)}% all ${metrics.reduce((sum, m) => sum + pct(m), 0)}% · MB engine ${mb(engineMetric)} gpu ${mb(gpu)} main ${mb(main)} total ${total}`;
+  return `cpu engine ${pct(engineMetric)}% gpu ${pct(gpu)}% all ${metrics.reduce((sum, m) => sum + pct(m), 0)}% · MB engine ${mb(engineMetric)} gpu ${mb(gpu)} main ${mb(main)} speech ${mb(speechMetric)} total ${total}`;
 }
 
 /** Only media macOS (or Windows) has actually granted, so no prompt ever comes from the hidden window. */
@@ -128,14 +143,21 @@ function desktopState() {
     engine,
     permissions,
     missing: missingNeeded(permissions).map((item) => item.id),
-    voiceReady: VOICE_READY,
+    voice: voiceState(),
+    speechModel: speech?.model || null,
+    speechChoices: speech?.choices || [],
     fakeMedia: !!env.JESTER_FAKE_MEDIA
   };
 }
 
+/** The speech model: 'ready', 'off' or 'missing' (see speech.js). */
+const voiceState = () => speech?.state || 'missing';
+
 async function refresh() {
   settings = await loadSettings();
-  tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voiceReady: VOICE_READY }));
+  speech?.setModel(settings.speechModel);
+  speech?.setEnabled(settings.enabled && settings.voiceEnabled);
+  tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState() }));
   post(desktopState());
 }
 
@@ -164,8 +186,46 @@ function canPost() {
 }
 
 function onJester(op) {
-  if (op === 'voice') overlays?.toast('Voice commands', { tone: 'warn', detail: 'Coming in a later update' });
+  if (op === 'voice') toggleVoice();
   else if (op === 'calibrate') showCalibration(pointerDisplay());
+  else if (op === 'settings') showSettings();
+}
+
+/** Why the mic can't open for a command right now, or '' if it can. `mic: false` leaves the permission out. */
+function voiceProblem({ mic = true } = {}) {
+  if (!settings?.enabled) return 'Jester is off';
+  if (!settings.voiceEnabled) return 'Voice commands are off in Jester’s Settings';
+  if (engine.state === ENGINE.SLEEPING) return 'Jester is asleep: make your wake gesture first';
+  if (voiceState() === 'missing') return 'The speech model isn’t installed (in desktop/: npm run models)';
+  if (mic && !mediaAllowed('audio')) return 'Allow the Microphone in Jester’s Settings first';
+  return '';
+}
+
+/** The voice shortcut, gesture or menu item: start listening, or finish. */
+function toggleVoice() {
+  const problem = voiceProblem({ mic: false });
+  if (problem) return overlays?.toast('Voice commands', { tone: 'warn', detail: problem });
+  if (!mediaAllowed('audio')) {
+    // Not asked yet: the first command asks macOS, and goes ahead if allowed.
+    if (process.platform === 'darwin' && readStatuses().microphone === 'not-determined') {
+      requestPermission('microphone').then((granted) => {
+        checkPermissions();
+        if (granted) toggleVoice();
+      });
+      return;
+    }
+    return overlays?.toast('Voice commands', { tone: 'warn', detail: voiceProblem() });
+  }
+  voiceRunner.prepare();
+  engineHost.voice('toggle');
+}
+
+/** A finished utterance, done; the pill says how it went. */
+async function onVoiceCommand(text) {
+  const { outcome } = await voiceRunner.run(text);
+  post({ type: MSG.VOICE, voice: outcome ? { phase: 'answer', text: outcome.text, ok: outcome.ok } : { active: false } });
+  voiceHeard?.({ text, outcome });
+  voiceHeard = null;
 }
 
 /**
@@ -224,6 +284,8 @@ async function onTrayAction(id, checked) {
       return saveSettings({ pointerEnabled: checked });
     case 'voice':
       return saveSettings({ voiceEnabled: checked });
+    case 'listen':
+      return toggleVoice();
     case 'permissions':
     case 'settings':
       return showSettings();
@@ -292,6 +354,8 @@ function selfTest(capture) {
     }
     await reach('running');
     log('selftest: settings shows', await shows());
+    log('selftest: voice row —', await page(`(() => { const box = document.getElementById('voiceEnabled'); return (box.checked ? '☑ ' : '☐ ') + (box.disabled ? '(disabled) ' : '') + document.getElementById('voice-hint').textContent; })()`));
+    log('selftest: speech model row —', await page(`(() => { const select = document.getElementById('speechModel'); return [...select.options].map((o) => (o.selected ? '▸' : '') + o.text + (o.disabled ? ' [off]' : '')).join(' | ') + ' — ' + document.getElementById('speech-model-hint').textContent; })()`));
     await page(`document.getElementById('enabled').click()`);
     log('selftest: switched off —', (await reach('off')) ? 'engine off' : `engine still ${engine.state}`, '|', await shows());
     await page(`document.getElementById('enabled').click()`);
@@ -340,6 +404,37 @@ function selfTest(capture) {
     const clicked = pointerCalls.filter(([cmd]) => cmd === 'click').at(-1)?.[1];
     log('selftest: clicked at', JSON.stringify(clicked), `after ${pointerCalls.filter(([cmd]) => cmd === 'elementAt').length} aim-assist lookups`);
     pointer.frame({ active: false });
+
+    // Voice: the fake mic plays JESTER_FAKE_AUDIO once, and the command in
+    // it is heard, matched and done — by the dry-run driver.
+    if (env.JESTER_SELFTEST_VOICE) {
+      for (const until = Date.now() + 20000; voiceState() !== 'ready' && Date.now() < until; ) await pause(200);
+      log('selftest: voice', voiceState(), '·', voiceProblem() || 'can listen');
+      const heard = new Promise((resolve) => (voiceHeard = resolve));
+      const started = Date.now();
+      toggleVoice();
+      if (capture && overlay) {
+        await pause(1600);
+        const file = capture.replace(/\.png$/, '-voice.png');
+        fs.writeFileSync(file, (await overlay.webContents.capturePage()).toPNG());
+        log('selftest: captured', file);
+      }
+      const result = await Promise.race([heard, pause(20000).then(() => null)]);
+      log('selftest: voice heard', JSON.stringify(result?.text ?? null), '→', JSON.stringify(result?.outcome ?? null), `after ${Date.now() - started} ms`);
+      if (capture && overlay && result) {
+        await pause(300);
+        const file = capture.replace(/\.png$/, '-voice-answer.png');
+        fs.writeFileSync(file, (await overlay.webContents.capturePage()).toPNG());
+        log('selftest: captured', file);
+      }
+      // Where the pill is on the screen itself, against the area apps may use.
+      if (overlay && result) {
+        const fit = await overlay.webContents.executeJavaScript(
+          `(() => { const pill = document.getElementById('voice').getBoundingClientRect(); return { pillBottom: Math.round(window.screenY + pill.bottom), usableBottom: screen.availTop + screen.availHeight, screenBottom: screen.height, windowTop: window.screenY }; })()`
+        );
+        log('selftest: voice pill', JSON.stringify(fit));
+      }
+    }
 
     // The extension's calibration screen, unchanged: its checklist is fed by
     // the engine, so it shows whether the two are talking.
@@ -401,15 +496,30 @@ async function start() {
     log,
     dryRun: !!env.JESTER_DRIVER_DRY
   });
-  dispatch = createDispatcher({ driver: { call: (...args) => (driver ? driver.call(...args) : Promise.reject(new Error('jester-driver is not running'))) }, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
+  const input = { call: (...args) => (driver ? driver.call(...args) : Promise.reject(new Error('jester-driver is not running'))) };
+  dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
+  // Switched on by refresh(), from the settings.
+  speech = startSpeech({ log });
+  voiceRunner = createVoiceRunner({
+    driver: input,
+    dispatch,
+    canPost,
+    onJester,
+    // A dry run describes `open`, `osascript` and `shortcuts` too, rather than running them.
+    run: env.JESTER_DRIVER_DRY ? async (file, args) => (log('dry run: would run', file, JSON.stringify(args)), '') : runFile,
+    log
+  });
 
   let lastTelemetryLog = 0;
   let cursorFrames = 0;
+  let micState = '';
   engineHost = startEngineHost({
     screen: primaryScreen,
     context: () => context,
     onStatus: (status) => {
       engine = { state: status.state, detail: status.detail || '' };
+      const mic = status.mic ? `${status.mic.state}${status.mic.detail ? `: ${status.mic.detail}` : ''}` : '';
+      if (mic !== micState) log('mic', (micState = mic));
       log('status', status.state, status.detail || '');
       refresh();
     },
@@ -422,7 +532,10 @@ async function start() {
       if (cursor?.click) log('cursor click at', cursor.x?.toFixed(3), cursor.y?.toFixed(3));
       pointer.frame(cursor);
     },
-    onVoiceCommand: (text) => log('voice command:', text),
+    onVoiceCommand: (text) => {
+      log('voice command:', text);
+      onVoiceCommand(text);
+    },
     onTelemetry: (telemetry) => {
       const now = Date.now();
       if (now - lastTelemetryLog < 5000) return;
