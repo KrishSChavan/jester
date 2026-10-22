@@ -33,8 +33,16 @@
           <input type="checkbox" id="pointerEnabled" />
         </label>
         <label class="row">
-          <span><strong>Aim with</strong><small id="pointerInput-hint"></small></span>
-          <select id="pointerInput"></select>
+          <span><strong>Aim with</strong><small id="pointerAim-hint"></small></span>
+          <select id="pointerAim"></select>
+        </label>
+        <div class="row">
+          <span><strong>Eye calibration</strong><small id="calibration-state">Not calibrated yet.</small></span>
+          <button id="calibrate" type="button">Calibrate…</button>
+        </div>
+        <label class="row">
+          <span><strong>Head speed</strong><small>How far a turn of the head moves the cursor.</small></span>
+          <input type="range" id="headSpeed" min="0.4" max="2.5" step="0.1" />
         </label>
         <label class="row">
           <span><strong>Camera</strong><small id="camera-hint">The camera Jester watches.</small></span>

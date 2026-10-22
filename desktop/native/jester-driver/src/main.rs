@@ -139,7 +139,7 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
 
 fn run_query(command: Command) -> Result<Map<String, Value>> {
     match command {
-        Command::ElementAt { x, y } => platform::element_at(x, y).map(object),
+        Command::ElementAt { x, y, wait, debug } => platform::element_at(x, y, wait, debug).map(object),
         Command::Frontmost => platform::frontmost().map(object),
         Command::Wake { pid } => platform::wake(pid).map(object),
         _ => unreachable!(),

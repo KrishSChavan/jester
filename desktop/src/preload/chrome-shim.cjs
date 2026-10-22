@@ -66,14 +66,19 @@ const api = {
 // Electron pages already have a `window.chrome`, so exposeInMainWorld('chrome')
 // refuses. Hang the two namespaces on the existing object instead, from inside
 // the page's own world, before any of its scripts run.
+//
+// `window.close()` goes to the main process too. A page closing itself (the
+// calibration screen's Done) would otherwise close its window on the spot,
+// mid-way through leaving full screen, which macOS loses.
 contextBridge.executeInMainWorld({
-  func: (shim) => {
+  func: (shim, closeWindow) => {
     if (typeof globalThis.chrome !== 'object' || globalThis.chrome === null) {
       Object.defineProperty(globalThis, 'chrome', { value: {}, configurable: true, writable: true });
     }
     for (const name of ['runtime', 'storage']) {
       Object.defineProperty(globalThis.chrome, name, { value: shim[name], configurable: true, writable: true });
     }
+    Object.defineProperty(globalThis, 'close', { value: () => closeWindow(), configurable: true, writable: true });
   },
-  args: [api]
+  args: [api, () => ipcRenderer.send('jester:close-window')]
 });

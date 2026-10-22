@@ -69,8 +69,50 @@ export function createOverlays() {
   build();
 
   const cursorDisplay = () => screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).id;
+  /** The overlay over a point, and the point in that overlay's own coordinates. */
+  function over(point) {
+    const id = screen.getDisplayNearestPoint({ x: Math.round(point.x), y: Math.round(point.y) }).id;
+    const win = windows.get(id);
+    if (!win || win.isDestroyed()) return null;
+    // macOS keeps the window below the menu bar, so it may not start at the display's corner.
+    const bounds = win.getBounds();
+    return { id, win, x: point.x - bounds.x, y: point.y - bounds.y };
+  }
+  let cursorOn = null;
+  const hideCursor = () => {
+    const win = cursorOn === null ? null : windows.get(cursorOn);
+    if (win && !win.isDestroyed()) postTo(win.webContents, { type: 'jester/overlay-cursor', hidden: true });
+    cursorOn = null;
+  };
 
   return {
+    /** The ring around the real cursor: where it is, how closed the hand is. null hides it. */
+    cursor(state) {
+      if (!state) return hideCursor();
+      const target = over(state);
+      if (!target) return;
+      if (cursorOn !== null && cursorOn !== target.id) hideCursor();
+      cursorOn = target.id;
+      postTo(target.win.webContents, { type: 'jester/overlay-cursor', ...state, x: target.x, y: target.y });
+    },
+    /** A click's ripple, where it landed. */
+    ripple(point) {
+      const target = over(point);
+      if (target) postTo(target.win.webContents, { type: 'jester/overlay-ripple', x: target.x, y: target.y });
+    },
+    /**
+     * Runs `task` with every overlay hidden: macOS's accessibility lookups
+     * stop at an Electron window drawn over everything, click-through or not.
+     */
+    async whileHidden(task) {
+      const shown = [...windows.values()].filter((win) => !win.isDestroyed() && win.isVisible());
+      for (const win of shown) win.hide();
+      try {
+        return await task();
+      } finally {
+        for (const win of shown) if (!win.isDestroyed()) win.showInactive();
+      }
+    },
     /** Re-reads which display has the pointer; cheap enough to call often. */
     track(hud = showHud) {
       const id = cursorDisplay();

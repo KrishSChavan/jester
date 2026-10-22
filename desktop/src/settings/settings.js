@@ -7,7 +7,8 @@
  * from the main process as `jester/desktop-state` messages.
  */
 
-import { ACTIONS, ENGINE, GESTURES, POINTER_INPUTS, SWIPES, mergeSettings } from '../ext/src/common/constants.js';
+import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings } from '../ext/src/common/constants.js';
+import { calibrationGrade, loadCalibration, usableModel } from '../ext/src/common/gaze-store.js';
 import { DESKTOP_LABELS, bindable, describePlan, parseShortcut } from '../main/os-actions.js';
 
 const $ = (id) => document.getElementById(id);
@@ -136,12 +137,31 @@ function renderControls() {
   $('pointerEnabled').checked = !!settings.pointerEnabled;
   $('pointerEnabled').disabled = !settings.enabled;
   $('voiceEnabled').checked = !!settings.voiceEnabled && !!desktop?.voiceReady;
-  const input = $('pointerInput');
-  if (!input.options.length) input.replaceChildren(...Object.entries(POINTER_INPUTS).map(([value, meta]) => new Option(meta.label, value)));
-  input.value = settings.pointerInput;
-  input.disabled = !settings.enabled || !settings.pointerEnabled;
-  $('pointerInput-hint').textContent = POINTER_INPUTS[settings.pointerInput]?.hint || '';
+  const cursorOff = !settings.enabled || !settings.pointerEnabled;
+  const aim = $('pointerAim');
+  if (!aim.options.length) aim.replaceChildren(...Object.entries(POINTER_AIMS).map(([value, meta]) => new Option(meta.label, value)));
+  aim.value = settings.pointerAim;
+  aim.disabled = cursorOff;
+  $('pointerAim-hint').textContent = POINTER_AIMS[settings.pointerAim]?.hint || '';
+  $('headSpeed').value = String(settings.headSpeed);
+  $('headSpeed').disabled = cursorOff || settings.pointerAim === 'eyes';
+  $('calibrate').disabled = cursorOff;
   renderStatus();
+}
+
+/** Whether the eyes are calibrated, and how well, from the extension's own grading. */
+async function renderCalibration() {
+  const model = await loadCalibration().catch(() => null);
+  if (!model) {
+    $('calibration-state').textContent = settings?.pointerAim === 'head' ? 'Not needed to aim with the head.' : 'Not calibrated yet. Head aiming works without it.';
+    return;
+  }
+  if (!usableModel(model)) {
+    $('calibration-state').textContent = 'Out of date — calibrate again.';
+    return;
+  }
+  const grade = calibrationGrade(model.error);
+  $('calibration-state').textContent = `Calibrated (${grade.grade})${model.screenW ? ` for a ${model.screenW}×${model.screenH} screen` : ''}. ${grade.hint}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +362,7 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // Changes from elsewhere: the menu-bar switches, or another Settings window.
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.gazeCalibration) renderCalibration();
   if (area !== 'local' || !changes.settings) return;
   const before = settings;
   settings = mergeSettings(changes.settings.newValue);
@@ -350,7 +371,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 $('enabled').addEventListener('change', (event) => save({ enabled: event.target.checked }));
 $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled: event.target.checked }));
-$('pointerInput').addEventListener('change', (event) => save({ pointerInput: event.target.value }));
+$('pointerAim').addEventListener('change', (event) => save({ pointerAim: event.target.value }));
+$('headSpeed').addEventListener('change', (event) => save({ headSpeed: Number(event.target.value) }));
+$('calibrate').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-calibrate' }));
 $('cameraDeviceId').addEventListener('change', (event) => save({ cameraDeviceId: event.target.value }));
 $('windowedBindingsEnabled').addEventListener('change', (event) => save({ windowedBindingsEnabled: event.target.checked }));
 
@@ -359,5 +382,6 @@ desktop = await chrome.runtime.sendMessage({ type: 'jester/desktop-state' });
 buildBindings();
 buildShortcuts();
 render();
+renderCalibration();
 await renderCameras();
 navigator.mediaDevices?.addEventListener?.('devicechange', renderCameras);

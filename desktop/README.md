@@ -4,12 +4,11 @@ The Electron app that takes Jester beyond Chrome: the real cursor, the
 keyboard, media keys and other apps, driven by the same gestures, eye/head
 pointing and voice. The extension stays, and links to the app.
 
-**Status: phase 2 (gestures act on the computer).** Jester runs from the menu
-bar; Settings walks through the OS permissions and lets you bind each pose and
-swipe to an action. Actions become the OS's own keys — media keys, ⌘Tab,
-desktops, screenshots, your own shortcuts — and an overlay over every display
-shows what a gesture did. The cursor (phase 3) and voice (phase 4) are next.
-Phase 0's answers are below.
+**Status: phase 3 (the real cursor).** Jester runs from the menu bar;
+gestures press the OS's own keys, an overlay shows what they did, and with
+Cursor control on, an open palm raises the real cursor: your eyes or head aim
+it, closing the hand clicks. Voice (phase 4) is next. Phase 0's answers are
+below.
 
 What an action means outside a browser is in `src/main/os-actions.js`: one
 play/pause key for Play, Pause and Play/pause; arrows for seeking; each OS's
@@ -27,7 +26,8 @@ front window fills its display.
 | `src/main/permissions.js`, `permission-list.js` | Reading and asking for Camera, Accessibility, Microphone, Screen Recording. |
 | `src/main/windows.js`, `src/settings/` | The engine's hidden window and the Settings window. |
 | `src/main/os-actions.js`, `dispatch.js` | What each action does on each OS, and doing it through the driver. |
-| `src/main/overlay.js`, `src/overlay/` | Click-through windows over every display: hold progress and toasts. |
+| `src/main/overlay.js`, `src/overlay/` | Click-through windows over every display: hold progress, toasts, the cursor ring. |
+| `src/main/pointer.js`, `pointer-math.js` | The real cursor: placing, easing, freezing the aim, clicking with aim assist. |
 | `src/preload/chrome-shim.cjs`, `src/main/chrome-bridge.js` | The slice of `chrome.runtime` / `chrome.storage` the extension's pages use, over IPC. |
 | `src/main/engine-host.js` | The service worker's half of the engine: settings, gestures, cursor, voice. |
 | `src/main/protocol.js`, `files.js` | `jester://ext/…` serves the extension folder, `jester://app/…` this app's pages. |
@@ -70,6 +70,18 @@ that its switch stops and restarts it; with `JESTER_DRIVER_DRY=1` it also
 dispatches a few actions; `JESTER_CAPTURE=file.png` adds pictures of the page
 and the overlay's toast).
 
+## The cursor
+
+The engine's cursor frames are fractions of the screen the cursor aims at (the
+main display, which has the camera on a laptop). `pointer.js` eases the real
+cursor between the engine's 20 frames a second at 60, holds the aim still once
+the hand is a quarter closed, and clicks there. Moving the mouse yourself
+hands it back for 1.5 s. A click looks at the point and up to 16 around it
+(the extension's aim assist) for something pressable through the
+accessibility tree, and clicks that. Eye aiming needs the extension's own
+calibration screen, opened from Settings or a gesture bound to "Calibrate the
+eye pointer"; head aiming doesn't.
+
 ## Phase 0 results (MacBook Pro, Apple silicon, macOS 26)
 
 | Question | Answer |
@@ -110,6 +122,25 @@ in under 35 ms.
   can't write there at all.
 - npm's Electron.app is ad-hoc signed; macOS ties the permissions it grants to
   that exact build, so they reset when Electron is upgraded.
+- macOS's accessibility hit test (`AXUIElementCopyElementAtPosition` on the
+  system-wide element) fails outright under an Electron window drawn over the
+  display, click-through or not — Jester's own overlay. Other apps' overlays
+  (Sapphire's full-screen window at layer 28) don't stop it. Asking an app
+  element at a point returns the app itself, and `AXWindows` returned app
+  elements for every app tried, so there is no way around it from the
+  driver: Jester hides its overlays for the moment a click looks.
+- Windows just shown are listed by the window server at 90% scale for a
+  moment (an appearance animation): compare their bounds with care.
+- Electron treats a page asking for full screen as a permission request:
+  refuse it and the page's request never settles. The calibration screen
+  waits on it, so Start did nothing until Jester's pages were allowed it.
+- A page leaving full screen waits for the window to change size; if it
+  never does (an unfocused window isn't allowed full screen), the page
+  freezes. Electron's "simple" full screen never tells the page it has left
+  at all. So the calibration window opens already in full screen, which
+  makes the page's own requests instant, and a page's `window.close()` goes
+  through the main process, which leaves full screen before closing — a
+  window closed mid-animation is lost.
 - Chromium and Electron apps have no accessibility tree until asked
   (`AXManualAccessibility`, or `AXEnhancedUserInterface` for Chrome-family
   browsers), and the tree takes about two seconds to appear. The app should

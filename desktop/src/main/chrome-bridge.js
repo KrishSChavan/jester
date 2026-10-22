@@ -8,7 +8,7 @@
  * Chrome — the calibration screen hears the engine's feed that way.
  */
 
-import { app, ipcMain, webContents } from 'electron';
+import { BrowserWindow, app, ipcMain, webContents } from 'electron';
 import path from 'node:path';
 import { createStorageArea } from './storage.js';
 
@@ -88,7 +88,7 @@ function installMainChrome() {
   };
 }
 
-export function installBridge({ dataDir = app.getPath('userData') } = {}) {
+export function installBridge({ dataDir = app.getPath('userData'), onClose = null } = {}) {
   areas = {
     local: createStorageArea({ file: path.join(dataDir, 'storage-local.json'), onChanged: (changes) => storageChanged('local', changes) }),
     session: createStorageArea({ onChanged: (changes) => storageChanged('session', changes) })
@@ -105,6 +105,12 @@ export function installBridge({ dataDir = app.getPath('userData') } = {}) {
       if (reply !== undefined) return reply;
     }
     return undefined;
+  });
+
+  // A page's window.close() (see the preload): close its window, safely.
+  ipcMain.on('jester:close-window', (event) => {
+    const url = event.senderFrame?.url || event.sender.getURL();
+    if (OWN_PAGES.test(url)) onClose?.(BrowserWindow.fromWebContents(event.sender));
   });
 
   ipcMain.handle('jester:storage', async (event, area, op, arg) => {

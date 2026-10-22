@@ -390,6 +390,19 @@ fn bool_attribute(element: &AXUIElement, name: &str) -> Option<bool> {
     attribute(element, name)?.downcast::<CFBoolean>().ok().map(|value| value.as_bool())
 }
 
+/// An element's frame as (x, y, w, h), in screen points.
+fn frame_rect(element: &AXUIElement) -> Option<(f64, f64, f64, f64)> {
+    let position = attribute(element, "AXPosition")?.downcast::<AXValue>().ok()?;
+    let size = attribute(element, "AXSize")?.downcast::<AXValue>().ok()?;
+    let mut point = CGPoint { x: 0.0, y: 0.0 };
+    let mut extent = CGSize { width: 0.0, height: 0.0 };
+    let ok = unsafe {
+        position.value(AXValueType::CGPoint, NonNull::from(&mut point).cast())
+            && size.value(AXValueType::CGSize, NonNull::from(&mut extent).cast())
+    };
+    ok.then_some((point.x, point.y, extent.width, extent.height))
+}
+
 fn frame(element: &AXUIElement) -> Option<Value> {
     let position = attribute(element, "AXPosition")?.downcast::<AXValue>().ok()?;
     let size = attribute(element, "AXSize")?.downcast::<AXValue>().ok()?;
@@ -410,6 +423,12 @@ fn actions(element: &AXUIElement) -> Vec<String> {
     }
     let names: CFRetained<CFArray<CFString>> = unsafe { CFRetained::from_raw(NonNull::new_unchecked(names as *mut CFArray<CFString>)) };
     names.iter().map(|name| name.to_string()).collect()
+}
+
+/// The title of the window an element is in.
+fn window_title(element: &AXUIElement) -> Option<String> {
+    let window = attribute(element, "AXWindow")?.downcast::<AXUIElement>().ok()?;
+    string_attribute(&window, "AXTitle")
 }
 
 fn pid(element: &AXUIElement) -> Option<i32> {
@@ -527,22 +546,25 @@ fn hit(system: &AXUIElement, x: f64, y: f64) -> Result<CFRetained<AXUIElement>> 
     Ok(unsafe { CFRetained::from_raw(NonNull::new_unchecked(found as *mut AXUIElement)) })
 }
 
-pub fn element_at(x: f64, y: f64) -> Result<Value> {
+pub fn element_at(x: f64, y: f64, wait: bool, debug: bool) -> Result<Value> {
     if !unsafe { AXIsProcessTrusted() } {
         return Err("Accessibility permission has not been granted".into());
     }
-    let system = unsafe { AXUIElement::new_system_wide() };
-    unsafe { system.set_messaging_timeout(AX_TIMEOUT_S) };
-    let mut element = hit(&system, x, y)?;
+    let mut trace = debug.then(Vec::new);
+    let mut element = match element_under(x, y, &mut trace) {
+        Ok(element) => element,
+        Err(error) if debug => return Err(format!("{error}; trace: {}", Value::Array(trace.unwrap_or_default()))),
+        Err(error) => return Err(error),
+    };
     let mut polls = None;
     if let Some(pid) = pid(&element) {
         // Woken just now, or by `wake` a moment ago: either way, give the
         // tree until WAKE_TIME after the ask to appear.
         let (asked, _) = wake_tree(pid);
         let mut count = 0;
-        while asleep(&element) && asked.elapsed() < WAKE_TIME {
+        while wait && asleep(&element) && asked.elapsed() < WAKE_TIME {
             std::thread::sleep(WAKE_POLL);
-            element = hit(&system, x, y)?;
+            element = element_under(x, y, &mut None)?;
             count += 1;
         }
         polls = (count > 0).then_some(count);
@@ -564,39 +586,108 @@ pub fn element_at(x: f64, y: f64) -> Result<Value> {
         "element": describe(&element),
         "actionable": actionable,
         "app": pid(&element).map(app_info),
+        "window": window_title(&element),
         // Set on an app's first query: how many 100 ms looks its tree took to appear.
         "wakePolls": polls,
+        "trace": trace,
     }))
 }
 
-/// The front window, from the window server: no permission needed for the
-/// owner and bounds (titles need Screen Recording, and are omitted without it).
-pub fn frontmost() -> Result<Value> {
+/// One on-screen window, as the window server lists it.
+struct WindowInfo {
+    pid: i32,
+    layer: i64,
+    bounds: Option<(f64, f64, f64, f64)>,
+    owner: Option<String>,
+    title: Option<String>,
+}
+
+/// Every on-screen window, front to back. No permission needed for owners and
+/// bounds; titles need Screen Recording and are None without it.
+fn on_screen_windows() -> Result<Vec<WindowInfo>> {
     let list = CGWindowListCopyWindowInfo(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements, 0)
         .ok_or("the window server returned no windows")?;
     let list: CFRetained<CFArray<CFDictionary<CFString, CFType>>> = unsafe { CFRetained::cast_unchecked(list) };
     let number = |dict: &CFDictionary<CFString, CFType>, key: &CFString| dict.get(key)?.downcast::<CFNumber>().ok()?.as_f64();
     let text = |dict: &CFDictionary<CFString, CFType>, key: &CFString| dict.get(key)?.downcast::<CFString>().ok().map(|s| s.to_string());
+    let (layer_key, pid_key, owner_key, name_key, bounds_key) = unsafe {
+        use objc2_core_graphics::{kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowOwnerName, kCGWindowOwnerPID};
+        (kCGWindowLayer, kCGWindowOwnerPID, kCGWindowOwnerName, kCGWindowName, kCGWindowBounds)
+    };
+    let mut windows = Vec::new();
     for window in list.iter() {
-        let (layer_key, pid_key, owner_key, name_key, bounds_key) = unsafe {
-            use objc2_core_graphics::{kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowOwnerName, kCGWindowOwnerPID};
-            (kCGWindowLayer, kCGWindowOwnerPID, kCGWindowOwnerName, kCGWindowName, kCGWindowBounds)
-        };
-        // Layer 0 is ordinary app windows; menus, the Dock and overlays sit above it.
-        if number(&window, layer_key) != Some(0.0) {
-            continue;
-        }
         let Some(pid) = number(&window, pid_key) else { continue };
-        let bounds = window.get(bounds_key).and_then(|value| value.downcast::<CFDictionary>().ok()).map(|bounds| {
+        let bounds = window.get(bounds_key).and_then(|value| value.downcast::<CFDictionary>().ok()).and_then(|bounds| {
             let bounds: CFRetained<CFDictionary<CFString, CFType>> = unsafe { CFRetained::cast_unchecked(bounds) };
             let field = |name: &'static str| number(&bounds, &CFString::from_static_str(name));
-            json!({ "x": field("X"), "y": field("Y"), "w": field("Width"), "h": field("Height") })
+            Some((field("X")?, field("Y")?, field("Width")?, field("Height")?))
         });
-        let mut app = app_info(pid as i32);
-        if app["name"].is_null() {
-            app["name"] = json!(text(&window, owner_key));
-        }
-        return Ok(json!({ "app": app, "window": { "title": text(&window, name_key), "bounds": bounds } }));
+        windows.push(WindowInfo {
+            pid: pid as i32,
+            layer: number(&window, layer_key).unwrap_or(0.0) as i64,
+            bounds,
+            owner: text(&window, owner_key),
+            title: text(&window, name_key),
+        });
     }
-    Err("no ordinary window is on screen".into())
+    Ok(windows)
+}
+
+/// The front window: the first ordinary one (layer 0 — menus, the Dock and
+/// overlays sit above it).
+pub fn frontmost() -> Result<Value> {
+    let window = on_screen_windows()?.into_iter().find(|window| window.layer == 0).ok_or("no ordinary window is on screen")?;
+    let mut app = app_info(window.pid);
+    if app["name"].is_null() {
+        app["name"] = json!(window.owner);
+    }
+    let bounds = window.bounds.map(|(x, y, w, h)| json!({ "x": x, "y": y, "w": w, "h": h }));
+    Ok(json!({ "app": app, "window": { "title": window.title, "bounds": bounds } }))
+}
+
+/// Whether an element's frame holds the point: an answer that doesn't is about
+/// something else (an app's menu bar, given for a point it doesn't own).
+fn frame_contains(element: &AXUIElement, x: f64, y: f64) -> bool {
+    frame_rect(element).is_some_and(|(fx, fy, fw, fh)| x >= fx - 2.0 && y >= fy - 2.0 && x <= fx + fw + 2.0 && y <= fy + fh + 2.0)
+}
+
+fn with_timeout(element: CFRetained<AXUIElement>) -> CFRetained<AXUIElement> {
+    unsafe { element.set_messaging_timeout(AX_TIMEOUT_S) };
+    element
+}
+
+/// Jester's overlay page's title (src/overlay/overlay.html): its windows lie
+/// over every display and are never what is meant.
+const JESTER_OVERLAY: &str = "Jester overlay";
+
+/// An answer worth keeping: its frame holds the point, and it isn't Jester's overlay.
+fn real_target(element: &AXUIElement, x: f64, y: f64) -> bool {
+    frame_contains(element, x, y) && window_title(element).as_deref() != Some(JESTER_OVERLAY)
+}
+
+/// One line of `trace`: what an answer was, and why it was or wasn't kept.
+fn trace_entry(source: Value, answer: &std::result::Result<CFRetained<AXUIElement>, String>, kept: bool) -> Value {
+    match answer {
+        Ok(element) => json!({ "asked": source, "role": string_attribute(element, "AXRole"), "window": window_title(element), "frame": frame(element), "kept": kept }),
+        Err(error) => json!({ "asked": source, "error": error }),
+    }
+}
+
+/// What is under a point, as macOS answers it, checked: an answer whose
+/// frame doesn't hold the point (another app's menu bar) or that is Jester's
+/// own overlay is no answer. Jester hides its overlay while it asks, as an
+/// Electron window over everything makes macOS's answer fail outright; other
+/// apps' click-through overlays don't. `trace` records what came back.
+fn element_under(x: f64, y: f64, trace: &mut Option<Vec<Value>>) -> Result<CFRetained<AXUIElement>> {
+    let system = with_timeout(unsafe { AXUIElement::new_system_wide() });
+    let answer = hit(&system, x, y);
+    let kept = answer.as_ref().is_ok_and(|element| real_target(element, x, y));
+    if let Some(trace) = trace {
+        trace.push(trace_entry(json!("system"), &answer, kept));
+    }
+    match answer {
+        Ok(element) if kept => Ok(element),
+        Ok(_) => Err(format!("nothing to aim at under {x},{y}")),
+        Err(error) => Err(error),
+    }
 }

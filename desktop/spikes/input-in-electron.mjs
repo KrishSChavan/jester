@@ -84,7 +84,7 @@ app.whenReady().then(async () => {
     if (front.app.pid !== process.pid) throw new Error(`stopped: ${front.app.name || 'another app'} came to the front`);
   }
   async function readTree() {
-    const element = await driver.call('elementAt', await centre('b5')).catch((err) => ({ error: err.message }));
+    const element = await driver.call('elementAt', { ...(await centre('b5')), debug: true }).catch((err) => ({ error: err.message }));
     const target = element.actionable || element.element;
     check('accessibility tree names the button', target && /button/i.test(target.role || '') && (target.title === '5' || target.description === '5'), `${JSON.stringify(target || element.error)}; wake polls ${element.wakePolls ?? '-'}`);
     const field = await driver.call('elementAt', await centre('field')).catch((err) => ({ error: err.message }));

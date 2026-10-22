@@ -71,10 +71,17 @@ pub enum Command {
     Media {
         key: MediaKey,
     },
-    /// What the accessibility tree has at a point, and the nearest ancestor that can be pressed.
+    /// What the accessibility tree has at a point, and the nearest ancestor that
+    /// can be pressed. `wait: false` never waits for a Chromium app's tree to be
+    /// built (the cursor's aim-assist can't afford to); the default waits.
     ElementAt {
         x: f64,
         y: f64,
+        #[serde(default = "yes")]
+        wait: bool,
+        /// Include how the answer was found (`trace`), for diagnosing aim-assist.
+        #[serde(default)]
+        debug: bool,
     },
     /// The app and window in front.
     Frontmost,
@@ -96,6 +103,10 @@ impl Command {
 
 fn one() -> u32 {
     1
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq, Hash)]

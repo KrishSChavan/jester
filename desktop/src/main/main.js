@@ -13,26 +13,28 @@
  *   JESTER_LOG=1              log engine status, gestures, telemetry and CPU
  *   JESTER_OPEN_SETTINGS=1    open Settings at launch
  *   JESTER_SELFTEST=1         check Settings ⇄ engine, logging what it sees
+ *   JESTER_SELFTEST_CALIBRATE=1  also press Start on calibration (takes the screen)
  *   JESTER_CAPTURE=file.png   with SELFTEST: save a picture of the whole page
  *   JESTER_THEME=light|dark   override the system's appearance
  */
 
-import { app, globalShortcut, nativeTheme, screen, session } from 'electron';
+import { app, BrowserWindow, globalShortcut, nativeTheme, screen, session } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
-import { saveSettings } from '../../../jester-extension/src/common/constants.js';
+import { MSG, saveSettings } from '../../../jester-extension/src/common/constants.js';
 import { installBridge, onMessage, onStorageChanged, post, storage } from './chrome-bridge.js';
 import { createDispatcher } from './dispatch.js';
 import { startDriver } from './driver.js';
 import { desktopSettings, loadSettings, startEngineHost } from './engine-host.js';
 import { fillsDisplay } from './os-actions.js';
 import { createOverlays } from './overlay.js';
+import { createPointer } from './pointer.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
 import { createTray } from './tray.js';
 import { trayModel } from './tray-menu.js';
-import { createEngineWindow, showSettings } from './windows.js';
+import { closeSafely, createEngineWindow, showCalibration, showSettings } from './windows.js';
 
 const env = process.env;
 /** Voice capture needs the app's own speech engine; it isn't wired in yet. */
@@ -57,6 +59,9 @@ let engineWindow = null;
 let engineHost = null;
 let tray = null;
 let overlays = null;
+let pointer = null;
+/** What the pointer asked the driver for, during a self-test. */
+const pointerCalls = [];
 let driver = null;
 let dispatch = null;
 let quitting = false;
@@ -66,8 +71,11 @@ let settings = null;
 /** 'fullscreen' while the front window fills its display, as in the extension. */
 let context = 'windowed';
 
+/** The display the cursor aims at: the main one, which has the camera on a laptop. */
+const pointerDisplay = () => screen.getPrimaryDisplay();
+
 function primaryScreen() {
-  const { width, height } = screen.getPrimaryDisplay().size;
+  const { width, height } = pointerDisplay().size;
   return { w: width, h: height };
 }
 
@@ -95,10 +103,15 @@ function mediaAllowed(type) {
 
 function installMediaPermissions() {
   const own = (url) => /^jester:\/\//.test(url || '');
-  session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) => permission === 'media' && own(origin) && mediaAllowed(details.mediaType));
+  // Full screen too: the calibration screen takes the whole display to know
+  // exactly where each dot is, and waits on being allowed to.
+  session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) =>
+    own(origin) && (permission === 'fullscreen' || (permission === 'media' && mediaAllowed(details.mediaType))));
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback, details) => {
     const types = details.mediaTypes?.length ? details.mediaTypes : ['unknown'];
-    callback(permission === 'media' && own(details.requestingUrl) && types.every(mediaAllowed));
+    const allowed = own(details.requestingUrl) && (permission === 'fullscreen' || (permission === 'media' && types.every(mediaAllowed)));
+    if (!allowed) log('refused permission', permission, 'for', details.requestingUrl);
+    callback(allowed);
   });
 }
 
@@ -152,7 +165,7 @@ function canPost() {
 
 function onJester(op) {
   if (op === 'voice') overlays?.toast('Voice commands', { tone: 'warn', detail: 'Coming in a later update' });
-  else if (op === 'calibrate') overlays?.toast('Calibration', { tone: 'warn', detail: 'Arrives with cursor control' });
+  else if (op === 'calibrate') showCalibration(pointerDisplay());
 }
 
 /**
@@ -161,12 +174,17 @@ function onJester(op) {
  */
 function watchFront() {
   let busy = false;
+  let frontPid = null;
   setInterval(async () => {
     overlays?.track(settings?.showHud !== false);
     if (busy || !driver) return;
     busy = true;
     try {
       const front = await driver.call('frontmost');
+      // Chromium apps take ~2 s to build the tree aim-assist reads: start as
+      // soon as an app comes to the front, while the cursor is in use.
+      if (settings?.pointerEnabled && front.app?.pid && front.app.pid !== frontPid) driver.call('wake', { pid: front.app.pid }).catch(() => undefined);
+      frontPid = front.app?.pid ?? frontPid;
       let bounds = front.window?.bounds;
       // The driver speaks physical pixels on Windows; displays are in DIPs.
       if (bounds && process.platform === 'win32') {
@@ -218,8 +236,14 @@ async function onTrayAction(id, checked) {
 
 function listenToPages() {
   onMessage(async (message, sender) => {
-    if (!String(sender?.url || '').startsWith('jester://app/')) return undefined;
+    const url = String(sender?.url || '');
+    // The calibration screen asks the worker how the engine is, as in Chrome.
+    if (message?.type === MSG.GET_STATE && url.startsWith('jester://ext/src/calibration/')) return { settings: await loadSettings(), engine };
+    if (!url.startsWith('jester://app/')) return undefined;
     switch (message?.type) {
+      case 'jester/desktop-calibrate':
+        showCalibration(pointerDisplay());
+        return { ok: true };
       case 'jester/desktop-state':
         return desktopState();
       case 'jester/desktop-permission':
@@ -276,6 +300,7 @@ function selfTest(capture) {
     // Gestures' actions, as far as the driver — and only a dry-run driver,
     // which describes input instead of sending it: never press real keys here.
     if (!env.JESTER_DRIVER_DRY) return log('selftest: skipping actions (set JESTER_DRIVER_DRY=1)');
+
     for (const [action, gesture] of [['VOLUME_UP', 'Thumb_Up'], ['APP_NEXT', 'Victory'], ['SPEED_UP', 'ILoveYou']]) {
       log('selftest: dispatch', action, '→', JSON.stringify(await dispatch(action, { source: 'pose', gesture })));
     }
@@ -287,20 +312,95 @@ function selfTest(capture) {
       fs.writeFileSync(file, (await overlay.webContents.capturePage()).toPNG());
       log('selftest: captured', file);
     }
+
+    // The cursor: frames as the engine sends them, a dry-run driver taking
+    // the input, every call to it recorded.
+    const bounds = pointerDisplay().bounds;
+    const frame = (x, y, extra = {}) =>
+      pointer.frame({ active: true, x, y, progress: 0, down: false, click: false, mode: 'head', errorPx: 40, display: { w: bounds.width, h: bounds.height }, ...extra });
+    pointerCalls.length = 0;
+    for (let i = 0; i < 12; i++) {
+      frame(0.3, 0.4);
+      await pause(50);
+    }
+    const moves = pointerCalls.filter(([cmd]) => cmd === 'move');
+    log('selftest: cursor', moves.length, 'moves, ending at', JSON.stringify(moves.at(-1)?.[1]), `(aimed at ${Math.round(bounds.x + 0.3 * bounds.width)},${Math.round(bounds.y + 0.4 * bounds.height)})`);
+    if (capture && overlay) {
+      frame(0.3, 0.4, { progress: 0.5 });
+      await pause(200);
+      const file = capture.replace(/\.png$/, '-cursor.png');
+      fs.writeFileSync(file, (await overlay.webContents.capturePage()).toPNG());
+      log('selftest: captured', file);
+    }
+    // Closing the hand freezes the aim; the click lands there, not where the eyes drifted.
+    frame(0.3, 0.4, { progress: 0.6 });
+    await pause(60);
+    frame(0.36, 0.4, { progress: 1, click: true });
+    await pause(1500);
+    const clicked = pointerCalls.filter(([cmd]) => cmd === 'click').at(-1)?.[1];
+    log('selftest: clicked at', JSON.stringify(clicked), `after ${pointerCalls.filter(([cmd]) => cmd === 'elementAt').length} aim-assist lookups`);
+    pointer.frame({ active: false });
+
+    // The extension's calibration screen, unchanged: its checklist is fed by
+    // the engine, so it shows whether the two are talking.
+    const calibrationWindow = showCalibration(pointerDisplay(), { quiet: true });
+    calibrationWindow.webContents.on('console-message', ({ level, message }) => level === 'error' && log('selftest: calibration error:', message));
+    await new Promise((resolve) => calibrationWindow.webContents.once('did-finish-load', resolve));
+    await pause(4000);
+    const checklist = await calibrationWindow.webContents.executeJavaScript(
+      `[...document.querySelectorAll('.check')].map((p) => p.textContent.trim() + (p.className.includes('ok') ? ' ✓' : p.className.includes('bad') ? ' ✗' : ' …')).join(', ') + ' — ' + document.getElementById('readout').textContent`
+    );
+    log('selftest: calibration page —', checklist);
+    // Start, as a real click would (a user gesture), then what the page did.
+    // Opt-in: a run takes over the whole screen for a moment.
+    if (env.JESTER_SELFTEST_CALIBRATE) {
+      await calibrationWindow.webContents.executeJavaScript(`document.getElementById('startBtn').click()`, true);
+      await pause(2500);
+      const after = await calibrationWindow.webContents.executeJavaScript(
+        `JSON.stringify({ fullscreen: !!document.fullscreenElement, intro: !document.getElementById('intro').hidden, field: !document.getElementById('field').hidden, hint: document.getElementById('preflightHint').textContent })`
+      );
+      log('selftest: calibration after Start —', after, `· window full screen ${calibrationWindow.isFullScreen()}, simple ${calibrationWindow.isSimpleFullScreen?.()}`);
+      // The page closing itself, as Done does after leaving full screen: the
+      // request reaches the main process, which closes the window. (Whether
+      // full screen itself goes smoothly needs a focused window: macOS won't
+      // put an inactive one in full screen, so this test can't tell.)
+      const closed = new Promise((resolve) => calibrationWindow.once('closed', () => resolve(true)));
+      await calibrationWindow.webContents.executeJavaScript('window.close()', true).catch(() => undefined);
+      const gone = await Promise.race([closed, pause(4000).then(() => false)]);
+      log('selftest: calibration after Done —', gone ? 'window closed' : `window still open (full screen: ${calibrationWindow.isFullScreen()})`);
+      if (gone) return;
+    }
+    calibrationWindow.close();
   });
 }
 
 async function start() {
-  app.dock?.hide();
+  if (!env.JESTER_KEEP_DOCK) app.dock?.hide();
   if (['light', 'dark'].includes(env.JESTER_THEME)) nativeTheme.themeSource = env.JESTER_THEME;
   serveFiles();
-  installBridge();
+  installBridge({ onClose: closeSafely });
   await seedSettings();
   installMediaPermissions();
   permissions = readPermissions();
 
-  overlays = createOverlays();
+  // JESTER_NO_OVERLAY (tests): no windows over the displays, toasts dropped.
+  overlays = env.JESTER_NO_OVERLAY
+    ? { track() {}, toast() {}, cursor() {}, ripple() {}, whileHidden: (task) => task(), windows: () => [], activeWindow: () => null, destroy() {} }
+    : createOverlays();
   startInput();
+  pointer = createPointer({
+    driver: {
+      call: (...args) => {
+        if (env.JESTER_SELFTEST) pointerCalls.push(args);
+        return driver ? driver.call(...args) : Promise.reject(new Error('jester-driver is not running'));
+      }
+    },
+    overlays,
+    display: pointerDisplay,
+    toast: (text, options) => overlays.toast(text, options),
+    log,
+    dryRun: !!env.JESTER_DRIVER_DRY
+  });
   dispatch = createDispatcher({ driver: { call: (...args) => (driver ? driver.call(...args) : Promise.reject(new Error('jester-driver is not running'))) }, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
 
   let lastTelemetryLog = 0;
@@ -320,6 +420,7 @@ async function start() {
     onCursor: (cursor) => {
       cursorFrames += 1;
       if (cursor?.click) log('cursor click at', cursor.x?.toFixed(3), cursor.y?.toFixed(3));
+      pointer.frame(cursor);
     },
     onVoiceCommand: (text) => log('voice command:', text),
     onTelemetry: (telemetry) => {
@@ -346,7 +447,8 @@ async function start() {
   else if (env.JESTER_OPEN_SETTINGS || missingNeeded(permissions).length) showSettings();
 
   const seconds = Number(env.JESTER_SPIKE_SECONDS);
-  if (seconds > 0) setTimeout(() => app.quit(), seconds * 1000);
+  // Destroy first: a window stuck mid-close must not keep a test run alive.
+  if (seconds > 0) setTimeout(() => (BrowserWindow.getAllWindows().forEach((win) => win.destroy()), app.quit()), seconds * 1000);
 }
 
 // One Jester at a time: launching it again opens Settings instead.

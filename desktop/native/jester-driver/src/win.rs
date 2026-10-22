@@ -391,7 +391,8 @@ fn exe_name(pid: u32) -> (Option<String>, Option<bool>) {
     (path, elevated)
 }
 
-pub fn element_at(x: f64, y: f64) -> Result<Value> {
+/// `wait` is for macOS's Chromium trees; UI Automation has nothing to wait for.
+pub fn element_at(x: f64, y: f64, _wait: bool, _debug: bool) -> Result<Value> {
     let automation = automation()?;
     let element = unsafe { automation.ElementFromPoint(POINT { x: x.round() as i32, y: y.round() as i32 }) }.map_err(|err| err.to_string())?;
     let walker = unsafe { automation.ControlViewWalker() }.map_err(|err| err.to_string())?;

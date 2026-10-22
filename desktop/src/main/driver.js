@@ -32,6 +32,14 @@ export function toOsPoint(screen, point, platform = process.platform) {
   return platform === 'win32' ? screen.dipToScreenPoint(point) : { x: point.x, y: point.y };
 }
 
+/** A frame the driver reported ({x, y, w, h}) in Electron's DIPs. */
+export function toDipFrame(screen, frame, platform = process.platform) {
+  if (!frame) return null;
+  if (platform !== 'win32') return { x: frame.x, y: frame.y, w: frame.w, h: frame.h };
+  const rect = screen.screenToDipRect(null, { x: frame.x, y: frame.y, width: frame.w, height: frame.h });
+  return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+}
+
 /**
  * @param {object} [options]
  * @param {string} [options.binary]
