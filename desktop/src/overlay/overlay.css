@@ -116,9 +116,10 @@ body {
   color: #fca5a5;
 }
 
-/* The assistant at work: a spinner and the step it's on. */
+/* The assistant at work: a spinner, the task in a few words, and under it,
+   smaller, the step it's on. */
 .voice .spin,
-.voice .step {
+.voice .work {
   display: none;
 }
 
@@ -139,14 +140,37 @@ body {
   animation: jester-spin 0.7s linear infinite;
 }
 
-.voice.thinking .step:not(:empty) {
-  display: block;
+.voice.thinking .work:has(> :not(:empty)) {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  /* Both lines fit the pill's 46 px: it keeps its height as steps come and go. */
+  padding: 4px 0;
+}
+
+.voice.thinking .task,
+.voice.thinking .step {
   max-width: 380px;
-  color: #cbd3e1;
-  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.voice.thinking .task {
+  color: #f5f7fa;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.voice.thinking .step {
+  color: rgba(203, 211, 225, 0.78);
+  font-size: 12px;
+}
+
+.voice.thinking .task:empty,
+.voice.thinking .step:empty {
+  display: none;
 }
 
 @keyframes jester-spin {

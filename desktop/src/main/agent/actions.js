@@ -81,13 +81,37 @@ export function validateAction(input) {
 export function validateTurn(value) {
   if (!isRecord(value)) throw new Error('Reply with one JSON object.');
   const keys = Object.keys(value);
-  if (keys.some((key) => !['action', 'actions', 'memory'].includes(key))) throw new Error('Reply with action (or actions) and memory only.');
+  if (keys.some((key) => !['task', 'action', 'actions', 'memory'].includes(key))) throw new Error('Reply with task, action (or actions) and memory only.');
   if ((value.action === undefined) === (value.actions === undefined)) throw new Error('Give exactly one of action or actions.');
-  if (value.action !== undefined) return { actions: [validateAction(value.action)], memory: value.memory };
+  // The caption is only for show: one that isn't text is dropped, not refused.
+  const task = typeof value.task === 'string' && value.task.trim() ? value.task : undefined;
+  if (value.action !== undefined) return { actions: [validateAction(value.action)], memory: value.memory, task };
   if (!Array.isArray(value.actions) || !value.actions.length || value.actions.length > MAX_GROUP) throw new Error(`actions holds 1 to ${MAX_GROUP} actions.`);
   const actions = value.actions.map(validateAction);
   if (actions.some((action) => !GROUPABLE.has(action.action))) throw new Error('Only click, type, press and scroll go in a group.');
-  return { actions, memory: value.memory };
+  return { actions, memory: value.memory, task };
+}
+
+/** The pill's caption for a task is at most this long. */
+export const CAPTION_CHARS = 32;
+
+/**
+ * A task in a few words, for the pill while it runs: the model's caption
+ * ("Texting Trisha hello") or, until there is one, what the user said —
+ * tidied, and cut at a word when it's long.
+ */
+export function taskCaption(text, max = CAPTION_CHARS) {
+  const tidied = String(text ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^["'“‘](.*)["'”’]$/, '$1')
+    .replace(/^(?:(?:can|could|would|will) you |please )+/i, '')
+    .replace(/[\s.!?…]+$/, '');
+  const caption = tidied.charAt(0).toUpperCase() + tidied.slice(1);
+  if (caption.length <= max) return caption;
+  const cut = caption.slice(0, max - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space >= max / 2 ? cut.slice(0, space) : cut).replace(/[\s,;:–—-]+$/, '')}…`;
 }
 
 const quoted = (value) => `“${String(value).replace(/\s+/g, ' ').trim().slice(0, 50)}”`;

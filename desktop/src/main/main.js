@@ -436,8 +436,8 @@ function selfTest(capture) {
       const file = capture.replace(/\.png$/, '-overlay.png');
       fs.writeFileSync(file, (await overlay.webContents.capturePage()).toPNG());
       log('selftest: captured', file);
-      // The assistant's faces on the pill: at work, then asking.
-      for (const [name, voice] of [['assistant', { phase: 'thinking', step: 'Click “Play Gunna”' }], ['approval', { phase: 'approval', text: 'Click “Send”?' }]]) {
+      // The assistant at work on the pill: its caption over the step it's on, then between steps.
+      for (const [name, voice] of [['assistant', { phase: 'thinking', task: 'Playing Gunna on Spotify', step: 'Click “Play Gunna”' }], ['assistant-caption', { phase: 'thinking', task: 'Texting Trisha hello', step: '' }]]) {
         post({ type: MSG.VOICE, voice });
         await pause(400);
         const face = capture.replace(/\.png$/, `-${name}.png`);

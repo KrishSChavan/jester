@@ -167,6 +167,10 @@ no). It never types into, or reads, a password field: the driver refuses too.
 A link to a site the user didn't name counts as sensitive. "Stop", ×, or a new
 command ends a task.
 
+While it works, the pill shows the task in a few words ("Texting Trisha
+hello", the model's caption from its first reply; until then, what you said,
+cut at 32 characters) and, smaller under it, the step it's on.
+
 Reading the screen hides Jester's overlays for the moment it takes (see
 below), so the pill blinks out while the assistant looks.
 

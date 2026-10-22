@@ -5,7 +5,7 @@
  */
 
 import { MEMORY_LIMITS } from '../../../../jester-extension/src/common/task-memory.js';
-import { MAX_GROUP, MEDIA_KEYS } from './actions.js';
+import { CAPTION_CHARS, MAX_GROUP, MEDIA_KEYS } from './actions.js';
 
 /** @param {string} platform  process.platform */
 export function systemPrompt(platform) {
@@ -17,7 +17,8 @@ Never type passwords, card numbers or other secrets. The host asks the user befo
 Open or switch apps with open_app. Keyboard shortcuts are often quickest: ${primary}+n for something new, ${primary}+f to find, ${primary}+l for a browser's address bar. In a search box, type the words with enter:true. In a music or video app, play a result by clicking its Play button, or the result itself.
 After acting, check that the new screen shows it worked. Finish with success:true only when it does; if something is impossible or needs the user (a login, a purchase), finish with success:false and say why.
 Never repeat a step that sends, posts or buys: once it's done, finish — what was sent may not show on screen.
-Return JSON only: {"action":{"action":"click","id":12},"memory":{"subgoal":"short next step","facts":["verified fact"]}}. For controls already on screen you may return {"actions":[...]} with up to ${MAX_GROUP} of click/type/press/scroll instead, e.g. type into a search field then press enter.
+Return JSON only: {"task":"Texting Sam hello","action":{"action":"click","id":12},"memory":{"subgoal":"short next step","facts":["verified fact"]}}. For controls already on screen you may return {"actions":[...]} with up to ${MAX_GROUP} of click/type/press/scroll instead, e.g. type into a search field then press enter.
+task: the whole goal as a caption the user sees while you work, 2 to 4 words and at most ${CAPTION_CHARS - 4} characters, like "Texting Sam hello" or "Playing Gunna on Spotify". Give it in your first reply; later replies may leave it out.
 Actions:
 click: id (press a button, link, tab, checkbox, row or menu item)
 type: text, id? (the field; leave out to type where the cursor is), enter? (true presses Enter after)
@@ -44,8 +45,8 @@ const controls = ['click', 'type', 'press', 'scroll'];
 // schema subset has no keywords for them.
 export const DESKTOP_SCHEMA = {
   anyOf: [
-    object({ action: ref('action'), memory: ref('memory') }, ['action']),
-    object({ actions: { type: 'array', items: ref('control'), minItems: 1, maxItems: MAX_GROUP }, memory: ref('memory') }, ['actions'])
+    object({ task: string, action: ref('action'), memory: ref('memory') }, ['action']),
+    object({ task: string, actions: { type: 'array', items: ref('control'), minItems: 1, maxItems: MAX_GROUP }, memory: ref('memory') }, ['actions'])
   ],
   $defs: {
     action: { anyOf: [...controls, 'openApp', 'openUrl', 'media', 'find', 'wait', 'finish'].map(ref) },

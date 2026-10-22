@@ -129,6 +129,7 @@ function drawVoice(voice) {
   if (voice.phase === 'answer') return answer(voice.text, voice.ok !== false);
   // The assistant at work: what it's doing ("stop" ends it).
   if (voice.phase === 'thinking') {
+    $('voice-task').textContent = voice.task || '';
     $('voice-step').textContent = voice.step || '';
     return showVoice('thinking', VOICE_THINKING_MS);
   }

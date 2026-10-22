@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classify, describeAction, validateTurn } from '../desktop/src/main/agent/actions.js';
+import { CAPTION_CHARS, classify, describeAction, taskCaption, validateTurn } from '../desktop/src/main/agent/actions.js';
 import { createDesktopHost } from '../desktop/src/main/agent/host.js';
 import { runDesktopAgent } from '../desktop/src/main/agent/loop.js';
 import { findElements, screenText } from '../desktop/src/main/agent/screen.js';
@@ -65,6 +65,19 @@ test('replies are checked: one action, or a group of up to three controls', () =
   ]) {
     assert.throws(() => validateTurn(bad), Error, JSON.stringify(bad));
   }
+  // The caption is for show: kept when it's text, dropped (not refused) when it isn't.
+  assert.equal(validateTurn({ task: 'Playing Gunna', action: { action: 'click', id: 2 } }).task, 'Playing Gunna');
+  assert.equal(validateTurn({ task: 7, action: { action: 'click', id: 2 } }).task, undefined);
+});
+
+test('the pill\'s caption is a few words: tidied, and cut at a word when long', () => {
+  assert.equal(taskCaption('Texting Trisha hello.'), 'Texting Trisha hello');
+  assert.equal(taskCaption('"Playing Gunna on Spotify"'), 'Playing Gunna on Spotify');
+  assert.equal(taskCaption('Writing “Hello World”'), 'Writing “Hello World”');
+  assert.equal(taskCaption('  can you open Spotify and play Gunna? '), 'Open Spotify and play Gunna');
+  assert.equal(taskCaption('Go to iMessage and text Trisha Seth hello.'), 'Go to iMessage and text Trisha…');
+  assert.ok(taskCaption('Pause the music in Spotify and open a notepad and write Hello World').length <= CAPTION_CHARS);
+  assert.ok(taskCaption('x'.repeat(80)).length <= CAPTION_CHARS);
 });
 
 test('the user\'s rule: ask before sending, buying, deleting or settings; never a password field', () => {
@@ -129,6 +142,29 @@ test('playing something: the model sees the screen, presses Play, and finishes',
   assert.equal(prompts[1].lastResult.action, 'Click “Play Gunna”');
   assert.equal(prompts[1].memory.subgoal, 'check it plays');
   assert.ok(steps.some((step) => step.phase === 'acting' && step.label === 'Click “Play Gunna”'));
+});
+
+test('the caption is what the user said at once, then the model\'s own, given once', async () => {
+  const steps = [];
+  await runDesktopAgent({
+    goal: 'go to iMessage and text Trisha Seth hello',
+    host: fakeHost(MESSAGES).host,
+    model: scripted(
+      { task: 'Texting Trisha hello.', action: { action: 'wait', ms: 100 } },
+      { task: 'Something else', action: { action: 'finish', say: 'Sent.', success: true } }
+    ).model,
+    confirm: async () => true,
+    onStep: (step) => steps.push(step),
+    platform: 'darwin'
+  });
+  assert.deepEqual(
+    steps.filter((step) => step.phase === 'task'),
+    [
+      { phase: 'task', caption: 'Go to iMessage and text Trisha…', by: 'goal' },
+      { phase: 'task', caption: 'Texting Trisha hello', by: 'model' }
+    ]
+  );
+  assert.equal(steps[0].phase, 'task', 'the caption comes before anything else');
 });
 
 test('a sensitive step waits for the user; "no" means nothing is done', async () => {

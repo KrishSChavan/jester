@@ -44,7 +44,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
   const model = createPooledModelClient({
     onSelected: ({ provider, model: id }) => log('assistant model:', provider, id),
     onLimited: ({ provider, model: id, readyAt }) => log('assistant model limited:', provider, id, 'until', new Date(readyAt).toLocaleTimeString()),
-    onPacing: ({ waitMs }) => show({ phase: 'thinking', step: `Waiting ${Math.ceil(waitMs / 1000)} s for the model’s per-minute limit` })
+    onPacing: ({ waitMs }) => working(`Waiting ${Math.ceil(waitMs / 1000)} s for the model’s per-minute limit`)
   });
   let current = null;
   let approval = null;
@@ -52,6 +52,12 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
 
   function show(voice) {
     post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } });
+  }
+
+  /** The pill at work: the task in a few words, and the step it's on. */
+  function working(step = '') {
+    if (current) current.step = step;
+    show({ phase: 'thinking', task: current?.caption || '', step });
   }
 
   /** Waits for the user's yes or no on one step. */
@@ -63,14 +69,14 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
         approval = null;
         prompt.hide();
         log('assistant approval:', label, yes ? 'allowed' : 'refused');
-        show({ phase: 'thinking', step: yes ? label : '' });
+        working(yes ? label : '');
         resolve(yes);
       };
       approval = { resolve, label, settle, timer: setTimeout(() => settle(false), APPROVAL_MS) };
       signal.addEventListener('abort', () => settle(false), { once: true });
       // The question in its own window (clickable); the pill listens for a spoken yes.
       prompt.show(`${label}?`);
-      show({ phase: 'thinking', step: WAITING });
+      working(WAITING);
       listen();
     });
   }
@@ -85,9 +91,9 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     async run(goal) {
       // A new command replaces one still running.
       current?.controller.abort();
-      const task = { controller: new AbortController() };
+      const task = { controller: new AbortController(), caption: '', step: '' };
       current = task;
-      show({ phase: 'thinking', step: '' });
+      working();
       try {
         const result = await runDesktopAgent({
           goal,
@@ -98,8 +104,14 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
           signal: task.controller.signal,
           confirm: ({ label }) => ask(label, task.controller.signal),
           onStep: (step) => {
-            if (step.phase === 'thinking' || step.phase === 'acting') show({ phase: 'thinking', step: step.phase === 'acting' ? step.label : '' });
-            else if (step.phase === 'seen') log(`assistant sees ${step.app} — ${JSON.stringify(step.window || '')}: ${step.elements} controls${logScreens ? `\n${step.screen}` : ''}`);
+            // A task that's been replaced keeps logging, but leaves the pill to the new one.
+            if (step.phase === 'task') {
+              task.caption = step.caption;
+              if (step.by === 'model') log('assistant task:', JSON.stringify(step.caption));
+              if (current === task) working(task.step);
+            } else if (step.phase === 'thinking' || step.phase === 'acting') {
+              if (current === task) working(step.phase === 'acting' ? step.label : '');
+            } else if (step.phase === 'seen') log(`assistant sees ${step.app} — ${JSON.stringify(step.window || '')}: ${step.elements} controls${logScreens ? `\n${step.screen}` : ''}`);
             else if (step.phase === 'acted') log(`assistant ${step.ok ? 'did' : 'couldn’t'}: ${step.label}${step.detail ? ` (${step.detail})` : ''}`);
             else if (step.phase === 'invalid') log('assistant reply unusable:', step.detail);
             else if (step.phase === 'unseen') log('assistant couldn’t read the screen:', step.detail);
@@ -147,7 +159,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
 
     /** The mic, opened for a spoken yes, stopped with none: the pill goes back to waiting, not to "No command heard". */
     micEnded(voice) {
-      if (approval && (voice?.phase === 'answer' || voice?.active === false)) show({ phase: 'thinking', step: WAITING });
+      if (approval && (voice?.phase === 'answer' || voice?.active === false)) working(WAITING);
     },
 
     /** A gesture, if it answers a question: 👍 yes, 👎 no. */

@@ -11,7 +11,7 @@
 
 import { requiresConfirmation } from '../../../../jester-extension/src/common/agent-permissions.js';
 import { createMemory, MEMORY_LIMITS, updateMemory } from '../../../../jester-extension/src/common/task-memory.js';
-import { classify, describeAction, READ_ACTIONS, validateTurn } from './actions.js';
+import { classify, describeAction, READ_ACTIONS, taskCaption, validateTurn } from './actions.js';
 import { DESKTOP_SCHEMA, systemPrompt } from './prompt.js';
 import { elementById, screenText } from './screen.js';
 
@@ -61,8 +61,9 @@ function modelTrouble(err) {
  * @param {{observe: Function, execute: Function}} options.host
  * @param {(request:object) => Promise<{json:object}>} options.model  model-pool's client, or requestModel
  * @param {(ask:{label:string, reason:string}) => Promise<boolean>} options.confirm  the user's yes
- * @param {(step:{phase:string, label?:string}) => void} [options.onStep]  thinking, asking, acting;
- *   and for the log: seen (what was read), acted (how a step went), invalid (an unusable reply)
+ * @param {(step:{phase:string, label?:string}) => void} [options.onStep]  task (the caption: from the goal,
+ *   then the model's), thinking, asking, acting; and for the log: seen (what was read), acted (how a
+ *   step went), invalid (an unusable reply), unseen (why the screen couldn't be read)
  * @param {AbortSignal} [options.signal]
  * @param {string} [options.platform]
  * @returns {Promise<{ok:boolean, say:string, cancelled?:boolean, declined?:boolean, actions:number}>}
@@ -82,6 +83,9 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
   const doneSensitive = new Set();
   let repeats = 0;
   const end = (ok, say, extra = {}) => ({ ok, say, actions, ...extra });
+  // What the user said stands in for the caption until the model gives a shorter one.
+  onStep({ phase: 'task', caption: taskCaption(goal), by: 'goal' });
+  let captioned = false;
 
   for (;;) {
     if (signal?.aborted) return end(false, '', { cancelled: true });
@@ -116,6 +120,10 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
       turn = validateTurn(reply.json);
       updateMemory(memory, turn.memory ?? {});
       invalid = 0;
+      if (turn.task && !captioned) {
+        captioned = true;
+        onStep({ phase: 'task', caption: taskCaption(turn.task), by: 'model' });
+      }
     } catch (err) {
       invalid += 1;
       onStep({ phase: 'invalid', detail: tidy(err.message, 200) });
