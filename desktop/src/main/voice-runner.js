@@ -22,6 +22,8 @@ const FRONT_POLL_MS = 150;
 const FRONT_TRIES = 33;
 /** Once in front, an app just started needs a moment before it takes keys. */
 const SETTLE_MS = 400;
+/** A search's results take about this long to appear, before the assistant looks. */
+const SEARCH_LOAD_MS = 1500;
 const INPUT = new Set(['type', 'press', 'click']);
 
 /** Where each new thing is made: that app, then its New shortcut. Email is a mailto: link everywhere. */
@@ -64,8 +66,10 @@ export function dictation(text) {
  * @param {string} [deps.platform]
  * @param {(...parts:any[]) => void} [deps.log]
  * @param {(ms:number) => Promise<void>} [deps.wait]
+ * @param {{ready: () => Promise<boolean>, run: (goal:string) => Promise<{ok:boolean, text:string}|null>}} [deps.assistant]
+ *   takes what the matcher can't do (phase 6), when a model is set up
  */
-export function createVoiceRunner({ driver, dispatch, canPost, onJester, run = runFile, installed = installedApps, platform = process.platform, log = () => undefined, wait = pause }) {
+export function createVoiceRunner({ driver, dispatch, canPost, onJester, run = runFile, installed = installedApps, platform = process.platform, log = () => undefined, wait = pause, assistant = null }) {
   const mac = platform === 'darwin';
   const primary = mac ? 'cmd' : 'ctrl';
   /** `front`: the names of an app this step brought forward, for the next step to wait on. */
@@ -234,6 +238,8 @@ export function createVoiceRunner({ driver, dispatch, canPost, onJester, run = r
     return ok(done.join(' · '));
   }
 
+  const assistantReady = async () => !!assistant && (await assistant.ready().catch(() => false));
+
   return {
     /** Read the apps while the user talks, so the command needn't wait for them. */
     prepare() {
@@ -246,14 +252,41 @@ export function createVoiceRunner({ driver, dispatch, canPost, onJester, run = r
       const steps = parseSequence(text, { apps: apps.flatMap((app) => app.names), platform });
       log('voice:', JSON.stringify(text), '→', JSON.stringify(steps));
       if (steps.some((step) => step.kind === 'cancel')) return { steps, outcome: null };
-      // Half a sentence is not done: "open Spotify and do a little dance" does nothing.
+      // What the matcher can't do goes, whole, to the assistant. Without one,
+      // half a sentence is not done: "open Spotify and do a little dance" does nothing.
       const unknown = steps.find((step) => step.kind === 'unknown');
       if (unknown) {
+        if (await assistantReady()) return { steps, outcome: await assistant.run(text) };
+        // The assistant could, given a model: say where to add one.
+        if (assistant) return { steps, outcome: bad(`“${unknown.text.replace(/[.!?]+$/, '')}” needs the assistant: add an AI model in Jester’s Settings › Assistant. Nothing was done.`) };
         const said = steps.length > 1 ? `Jester doesn’t know how to “${unknown.text}” yet, so it did nothing.` : `“${unknown.text}” isn’t a command Jester knows yet.`;
         return { steps, outcome: bad(said) };
       }
       if (steps.some(needsInput) && !canPost()) return { steps, outcome: bad('Allow Accessibility in Jester’s Settings first.') };
-      return { steps, outcome: await performSteps(steps, apps) };
+      const outcome = await performSteps(steps, apps);
+      // A search found the music; pressing Play on the right result is the assistant's.
+      if (outcome.ok && steps.some((step) => step.kind === 'play')) {
+        if (await assistantReady()) {
+          await wait(SEARCH_LOAD_MS);
+          return { steps, outcome: await assistant.run(text) };
+        }
+        if (assistant) return { steps, outcome: ok(`${outcome.text}. To have Jester press Play, add an AI model in Settings › Assistant.`) };
+      }
+      return { steps, outcome };
+    },
+    /** Opens an app (or brings it forward) and waits for it in front: the assistant's open_app. */
+    async openApp(name) {
+      const apps = await readCatalog();
+      const match = matchApp(name, apps.flatMap((app) => app.names));
+      if (!match && mac) return bad(`No app called “${name}” is installed.`);
+      try {
+        const opened = await perform({ kind: 'open', app: match || name, heard: String(name).toLowerCase() }, apps);
+        if (!(await cameToFront(opened.front))) return bad(`${opened.front[0]} didn’t come to the front.`);
+        await wait(SETTLE_MS);
+        return ok(opened.text);
+      } catch (err) {
+        return bad(`Couldn’t open ${name}: ${err.message}`);
+      }
     }
   };
 }

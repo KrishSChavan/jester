@@ -12,7 +12,7 @@ use crate::{Poster, Result};
 use serde_json::{json, Value};
 use std::cell::RefCell;
 use std::mem::size_of;
-use windows::core::{Interface, BOOL, PWSTR};
+use windows::core::{Interface, BOOL, BSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
@@ -514,4 +514,269 @@ pub fn frontmost() -> Result<Value> {
         "app": { "pid": pid, "name": name, "exe": exe, "elevated": elevated },
         "window": { "title": String::from_utf16_lossy(&title[..length.max(0) as usize]), "bounds": bounds },
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots: the front window's controls, read for the assistant and acted on
+// by number (as in mac.rs, through UI Automation)
+// ---------------------------------------------------------------------------
+
+/// How many elements a snapshot looks at, at most.
+const SNAPSHOT_VISITS: usize = 3000;
+
+thread_local! {
+    /// The last snapshot's number, and its elements by their numbers in it.
+    static LISTED: RefCell<(u64, Vec<IUIAutomationElement>)> = const { RefCell::new((0, Vec::new())) };
+}
+
+/// A control type in the words both platforms share; None for what a snapshot leaves out.
+// The constants are Windows' own names.
+#[allow(non_upper_case_globals)]
+fn role_name(kind: UIA_CONTROLTYPE_ID, password: bool) -> Option<&'static str> {
+    Some(match kind {
+        UIA_EditControlTypeId if password => "password",
+        UIA_EditControlTypeId => "textfield",
+        UIA_DocumentControlTypeId => "textarea",
+        UIA_ComboBoxControlTypeId => "combobox",
+        UIA_ButtonControlTypeId | UIA_SplitButtonControlTypeId => "button",
+        UIA_HyperlinkControlTypeId => "link",
+        UIA_CheckBoxControlTypeId => "checkbox",
+        UIA_RadioButtonControlTypeId => "radio",
+        UIA_TabItemControlTypeId => "tab",
+        UIA_MenuItemControlTypeId => "menuitem",
+        UIA_SliderControlTypeId => "slider",
+        UIA_SpinnerControlTypeId => "stepper",
+        UIA_ListItemControlTypeId | UIA_TreeItemControlTypeId | UIA_DataItemControlTypeId => "row",
+        UIA_HeaderItemControlTypeId => "heading",
+        UIA_TextControlTypeId => "text",
+        _ => return None,
+    })
+}
+
+/// Controls named by what's written inside them: that text isn't listed again.
+const NAMED_BY_CONTENT: &[&str] = &["button", "link", "checkbox", "radio", "tab", "menuitem", "heading"];
+const TEXT_INPUTS: &[&str] = &["textfield", "textarea", "combobox"];
+/// Containers whose name tells the controls inside apart: a result's "Play" from the player's.
+const CONTAINERS: &[UIA_CONTROLTYPE_ID] = &[
+    UIA_GroupControlTypeId, UIA_ListControlTypeId, UIA_ListItemControlTypeId, UIA_DataGridControlTypeId, UIA_DataItemControlTypeId,
+    UIA_TableControlTypeId, UIA_TreeItemControlTypeId, UIA_ToolBarControlTypeId, UIA_PaneControlTypeId, UIA_CustomControlTypeId,
+];
+
+/// Notes the section a short-labelled control is in, unless its label says it already.
+fn section(entry: &mut Value, context: &Option<String>) {
+    let Some(context) = context else { return };
+    let label = entry.get("label").and_then(Value::as_str).unwrap_or("").to_lowercase();
+    if label.split_whitespace().count() <= 3 && !label.contains(&context.to_lowercase()) {
+        entry["in"] = json!(clip(context, 60));
+    }
+}
+
+fn pattern<T: Interface>(element: &IUIAutomationElement, id: UIA_PATTERN_ID) -> Option<T> {
+    unsafe { element.GetCurrentPatternAs::<T>(id) }.ok()
+}
+
+fn clip(text: &str, chars: usize) -> String {
+    text.chars().take(chars).collect()
+}
+
+/// One listed element, as the assistant reads it.
+fn entry(id: usize, role: &str, label: Option<String>, element: &IUIAutomationElement, depth: usize) -> Value {
+    let mut entry = json!({ "id": id, "role": role, "depth": depth });
+    if let Some(label) = label {
+        entry["label"] = json!(clip(&label, 120));
+    }
+    // A password field's contents are never read.
+    if role != "password" {
+        if TEXT_INPUTS.contains(&role) {
+            let value = pattern::<IUIAutomationValuePattern>(element, UIA_ValuePatternId)
+                .and_then(|found| unsafe { found.CurrentValue() }.ok())
+                .map(|value| value.to_string())
+                .filter(|value| !value.trim().is_empty());
+            if let Some(value) = value {
+                entry["value"] = json!(clip(&value, 200));
+            }
+        } else if role == "checkbox" {
+            if let Some(state) = pattern::<IUIAutomationTogglePattern>(element, UIA_TogglePatternId).and_then(|found| unsafe { found.CurrentToggleState() }.ok()) {
+                entry["checked"] = json!(state == ToggleState_On);
+            }
+        }
+    }
+    if unsafe { element.CurrentIsEnabled() }.is_ok_and(|enabled| !enabled.as_bool()) {
+        entry["disabled"] = json!(true);
+    }
+    if unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(|focused| focused.as_bool()) {
+        entry["focused"] = json!(true);
+    }
+    let selected = pattern::<IUIAutomationSelectionItemPattern>(element, UIA_SelectionItemPatternId)
+        .and_then(|found| unsafe { found.CurrentIsSelected() }.ok())
+        .is_some_and(|selected| selected.as_bool());
+    if selected {
+        entry["selected"] = json!(true);
+    }
+    if let Ok(rect) = unsafe { element.CurrentBoundingRectangle() } {
+        entry["frame"] = json!({ "x": rect.left, "y": rect.top, "w": rect.right - rect.left, "h": rect.bottom - rect.top });
+    }
+    entry
+}
+
+/// The controls in the front window, numbered for `act`. (`pid` is for macOS,
+/// where an app's windows can be read without it being in front.)
+pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: bool) -> Result<Value> {
+    let started = std::time::Instant::now();
+    let automation = automation()?;
+    let mut window = unsafe { GetForegroundWindow() };
+    if window.is_invalid() {
+        return Err("no window is in front".into());
+    }
+    // Past an excluded app's windows (Jester's own) to the next one down, as Alt-Tab orders them.
+    let mut owner = 0u32;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut owner)) };
+    if exclude.is_some_and(|pid| pid == owner as i32) {
+        window = app_windows().into_iter().find(|(_, pid)| Some(*pid as i32) != exclude).map(|(found, _)| found).ok_or("no other window is on screen")?;
+    }
+    let root = unsafe { automation.ElementFromHandle(window) }.map_err(|err| err.to_string())?;
+    let walker = unsafe { automation.ControlViewWalker() }.map_err(|err| err.to_string())?;
+    let mut elements: Vec<Value> = Vec::new();
+    let mut handles = Vec::new();
+    let mut truncated = false;
+    // (element, depth, the listed control it's inside, the named section it's in)
+    let mut stack = vec![(root, 0usize, None::<usize>, None::<String>)];
+    let mut visits = 0;
+    while let Some((element, depth, inside, context)) = stack.pop() {
+        if visits >= SNAPSHOT_VISITS || elements.len() >= limit {
+            truncated = true;
+            break;
+        }
+        visits += 1;
+        // Scrolled out of view, or on a hidden tab: neither it nor what's in it.
+        if depth > 0 && unsafe { element.CurrentIsOffscreen() }.is_ok_and(|offscreen| offscreen.as_bool()) {
+            continue;
+        }
+        let kind = unsafe { element.CurrentControlType() }.unwrap_or_default();
+        let password = unsafe { element.CurrentIsPassword() }.is_ok_and(|password| password.as_bool());
+        let name = unsafe { element.CurrentName() }
+            .ok()
+            .map(|name| name.to_string().split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|name| !name.is_empty());
+        let mut owner = inside;
+        // A named container names the section for everything inside it.
+        let inner = if CONTAINERS.contains(&kind) && name.is_some() { name.clone() } else { context.clone() };
+        if let Some(role) = role_name(kind, password) {
+            if role == "text" {
+                match (name, inside) {
+                    // Text inside a control is its name, if it has none of its own.
+                    (Some(text), Some(index)) => {
+                        if elements[index].get("label").is_none() {
+                            elements[index]["label"] = json!(clip(&text, 120));
+                        }
+                    }
+                    (Some(text), None) => {
+                        elements.push(entry(elements.len(), role, Some(text), &element, depth));
+                        handles.push(element.clone());
+                    }
+                    (None, _) => {}
+                }
+            } else {
+                if NAMED_BY_CONTENT.contains(&role) {
+                    owner = Some(elements.len());
+                }
+                let mut listed = entry(elements.len(), role, name, &element, depth);
+                // A row is a section itself; anything else may sit in one.
+                if role != "row" {
+                    section(&mut listed, &context);
+                }
+                elements.push(listed);
+                handles.push(element.clone());
+            }
+        }
+        let mut children = Vec::new();
+        let mut child = unsafe { walker.GetFirstChildElement(&element) }.ok();
+        while let Some(current) = child {
+            child = unsafe { walker.GetNextSiblingElement(&current) }.ok();
+            children.push(current);
+        }
+        // Reversed, so the stack hands them back in order.
+        for child in children.into_iter().rev() {
+            stack.push((child, depth + 1, owner, inner.clone()));
+        }
+    }
+    let number = LISTED.with(|listed| {
+        let mut listed = listed.borrow_mut();
+        listed.0 += 1;
+        listed.1 = handles;
+        listed.0
+    });
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+    let (exe, elevated) = exe_name(pid);
+    let name = exe.as_deref().and_then(|path| path.rsplit('\\').next()).map(|file| file.trim_end_matches(".exe").to_string());
+    let mut title = [0u16; 512];
+    let length = unsafe { GetWindowTextW(window, &mut title) };
+    let mut rect = RECT::default();
+    let frame = unsafe { GetWindowRect(window, &mut rect) }
+        .ok()
+        .map(|_| json!({ "x": rect.left, "y": rect.top, "w": rect.right - rect.left, "h": rect.bottom - rect.top }));
+    Ok(json!({
+        "snapshot": number,
+        "app": { "pid": pid, "name": name, "exe": exe, "elevated": elevated },
+        "window": { "title": String::from_utf16_lossy(&title[..length.max(0) as usize]), "frame": frame },
+        "elements": elements,
+        "truncated": truncated,
+        "ms": started.elapsed().as_millis() as u64,
+    }))
+}
+
+/// Does something to an element of the last snapshot.
+pub fn act(snapshot: u64, id: usize, action: &str, value: Option<&str>) -> Result<Value> {
+    let element = LISTED.with(|listed| {
+        let listed = listed.borrow();
+        if listed.0 != snapshot {
+            return Err("the screen has been read again since; use the newest numbers".to_string());
+        }
+        listed.1.get(id).cloned().ok_or_else(|| format!("there is no element {id}"))
+    })?;
+    let password = unsafe { element.CurrentIsPassword() }.is_ok_and(|password| password.as_bool());
+    if password && matches!(action, "focus" | "setValue") {
+        return Err("Jester never types into password fields".into());
+    }
+    let done = |result: windows::core::Result<()>| result.map_err(|err| format!("{action} didn't work on it ({err})"));
+    match action {
+        "press" => {
+            if let Some(found) = pattern::<IUIAutomationInvokePattern>(&element, UIA_InvokePatternId) {
+                done(unsafe { found.Invoke() })?
+            } else if let Some(found) = pattern::<IUIAutomationTogglePattern>(&element, UIA_TogglePatternId) {
+                done(unsafe { found.Toggle() })?
+            } else if let Some(found) = pattern::<IUIAutomationSelectionItemPattern>(&element, UIA_SelectionItemPatternId) {
+                done(unsafe { found.Select() })?
+            } else if let Some(found) = pattern::<IUIAutomationExpandCollapsePattern>(&element, UIA_ExpandCollapsePatternId) {
+                done(unsafe { found.Expand() })?
+            } else {
+                return Err("it can't be pressed this way; click it instead".into());
+            }
+        }
+        "focus" => done(unsafe { element.SetFocus() })?,
+        "setValue" => {
+            let found = pattern::<IUIAutomationValuePattern>(&element, UIA_ValuePatternId).ok_or("it doesn't take text")?;
+            done(unsafe { found.SetValue(&BSTR::from(value.unwrap_or(""))) })?
+        }
+        "showMenu" => {
+            let found = pattern::<IUIAutomationExpandCollapsePattern>(&element, UIA_ExpandCollapsePatternId).ok_or("it has no menu")?;
+            done(unsafe { found.Expand() })?
+        }
+        "scrollTo" => {
+            let found = pattern::<IUIAutomationScrollItemPattern>(&element, UIA_ScrollItemPatternId).ok_or("it can't be scrolled to")?;
+            done(unsafe { found.ScrollIntoView() })?
+        }
+        "increment" | "decrement" => return Err(format!("{action} isn't available on Windows yet")),
+        other => return Err(format!("unknown action \"{other}\"")),
+    }
+    Ok(json!({ "element": describe(&element) }))
+}
+
+/// What has the keyboard focus, and whether it's a password field.
+pub fn focused() -> Result<Value> {
+    let element = unsafe { automation()?.GetFocusedElement() }.map_err(|err| err.to_string())?;
+    let pid = unsafe { element.CurrentProcessId() }.unwrap_or(0) as u32;
+    let (exe, elevated) = exe_name(pid);
+    Ok(json!({ "element": describe(&element), "app": { "pid": pid, "exe": exe, "elevated": elevated } }))
 }

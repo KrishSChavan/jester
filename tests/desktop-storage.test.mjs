@@ -50,3 +50,19 @@ test('the local area survives a restart, and a corrupt file starts empty', async
     console.error = originalError;
   }
 });
+
+test('sealed keys are encrypted on disk and read back whole', async () => {
+  const file = join(await mkdtemp(join(tmpdir(), 'jester-sealed-')), 'storage-local.json');
+  // A stand-in for safeStorage: reversible, and visibly not the plain text.
+  const sealed = { keys: ['modelConnections'], seal: (text) => Buffer.from(text).toString('base64'), unseal: (text) => Buffer.from(text, 'base64').toString() };
+  const area = createStorageArea({ file, sealed });
+  const connections = [{ id: 'a', provider: 'groq', key: 'gsk_secret' }];
+  await area.set({ modelConnections: connections, settings: { enabled: true } });
+  const onDisk = await readFile(file, 'utf8');
+  assert.equal(onDisk.includes('gsk_secret'), false, 'the key never reaches the file in the clear');
+  assert.match(onDisk, /"settings":\{"enabled":true\}/, 'other keys are written as they are');
+  assert.deepEqual((await createStorageArea({ file, sealed }).get('modelConnections')).modelConnections, connections);
+  // Unreadable here (another account's keychain): forgotten, not fatal.
+  const broken = { ...sealed, unseal: () => { throw new Error('no key'); } };
+  assert.deepEqual(await createStorageArea({ file, sealed: broken }).get(['modelConnections', 'settings']), { settings: { enabled: true } });
+});

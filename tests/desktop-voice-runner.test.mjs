@@ -205,3 +205,41 @@ test('half a sentence understood does nothing, and says which half', async () =>
   assert.deepEqual(runs, []);
   assert.deepEqual(input(), []);
 });
+
+test('with the assistant but no model saved, the pill says where to add one', async () => {
+  const runs = [];
+  const runner = createVoiceRunner({
+    driver: { call: async (cmd) => (cmd === 'apps' ? { apps: RUNNING } : cmd === 'frontmost' ? { app: { name: 'Spotify' } } : {}) },
+    dispatch: async () => ({ ok: true, label: '', detail: '' }),
+    canPost: () => true,
+    onJester: () => undefined,
+    run: async (file, args) => (runs.push([file, ...args]), ''),
+    installed: () => [...INSTALLED, { name: 'System Settings', path: '/System/Applications/System Settings.app' }],
+    platform: 'darwin',
+    wait: async () => undefined,
+    assistant: { ready: async () => false, run: async () => assert.fail('no model, no run') }
+  });
+  assert.deepEqual((await runner.run('Open system settings and turn on dark mode.')).outcome, {
+    ok: false,
+    text: '“turn on dark mode” needs the assistant: add an AI model in Jester’s Settings › Assistant. Nothing was done.'
+  });
+  assert.deepEqual((await runner.run('Open Spotify and play Gunna')).outcome, {
+    ok: true,
+    text: 'Switched to Spotify · Searching Spotify for “gunna”: pick one to play. To have Jester press Play, add an AI model in Settings › Assistant.'
+  });
+
+  let asked = null;
+  const ready = createVoiceRunner({
+    driver: { call: async (cmd) => (cmd === 'apps' ? { apps: RUNNING } : cmd === 'frontmost' ? { app: { name: 'Spotify' } } : {}) },
+    dispatch: async () => ({ ok: true, label: '', detail: '' }),
+    canPost: () => true,
+    onJester: () => undefined,
+    run: async () => '',
+    installed: () => INSTALLED,
+    platform: 'darwin',
+    wait: async () => undefined,
+    assistant: { ready: async () => true, run: async (goal) => ((asked = goal), { ok: true, text: 'Playing Gunna.' }) }
+  });
+  assert.deepEqual((await ready.run('Open Spotify and play Gunna')).outcome, { ok: true, text: 'Playing Gunna.' });
+  assert.equal(asked, 'Open Spotify and play Gunna', 'the assistant gets the whole sentence, after the search');
+});

@@ -85,7 +85,10 @@ export function claudeThinksByDefault(model) {
 
 const dataUrl = (image) => `data:${image.mimeType};base64,${image.data}`;
 
-export function buildModelRequest(config, { system, prompt, images = [], maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens }) {
+/** `schema`: the reply's shape for Gemini's structured output — the browser agent's unless
+ * a caller with other actions (Jester Desktop) passes its own. */
+export function buildModelRequest(config, { system, prompt, images = [], maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens,
+  schema = AGENT_RESPONSE_SCHEMA }) {
   if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 8192) {
     throw new Error('Output token limit must be between 1 and 8192.');
   }
@@ -113,7 +116,7 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
       generationConfig: { responseMimeType: 'application/json', maxOutputTokens,
         // Medium keeps numbered labels legible at a fraction of the default image cost.
         ...(pictures.length ? { mediaResolution: 'MEDIA_RESOLUTION_MEDIUM' } : {}),
-        ...(config.provider === 'google' ? { responseJsonSchema: AGENT_RESPONSE_SCHEMA } : {}) } };
+        ...(config.provider === 'google' && schema ? { responseJsonSchema: schema } : {}) } };
   } else if (config.protocol === 'openai-responses') {
     if (config.key) headers.authorization = `Bearer ${config.key}`;
     body = { model: config.model, instructions: system,
@@ -397,9 +400,9 @@ function httpError(config, status, body) {
 export async function requestModel({ env, config = normalizeModelConfig(env), system, prompt, signal,
   fetchImpl = globalThis.fetch, timeoutMs = MODEL_REQUEST_LIMITS.maxElapsedMs,
   maxElapsedMs = MODEL_REQUEST_LIMITS.maxElapsedMs, maxRetryWaitMs = MODEL_REQUEST_LIMITS.maxRetryWaitMs,
-  maxRetries = MODEL_REQUEST_LIMITS.maxRetries, maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens, onRetry, images = [] }) {
+  maxRetries = MODEL_REQUEST_LIMITS.maxRetries, maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens, onRetry, images = [], schema }) {
   checkAbort(signal);
-  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens });
+  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens, schema });
   const bounded = (value, fallback, min, max) => Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
   const elapsedLimit = bounded(maxElapsedMs, MODEL_REQUEST_LIMITS.maxElapsedMs, 1, 60000);
   const attemptLimit = bounded(timeoutMs, elapsedLimit, 1, 60000);

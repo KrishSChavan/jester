@@ -116,6 +116,45 @@ body {
   color: #fca5a5;
 }
 
+/* The assistant at work: a spinner and the step it's on. */
+.voice .spin,
+.voice .step {
+  display: none;
+}
+
+.voice.thinking .bars,
+.voice.thinking .heard {
+  display: none;
+}
+
+.voice.thinking .spin {
+  display: block;
+  flex: none;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.22);
+  border-top-color: #fff;
+  animation: jester-spin 0.7s linear infinite;
+}
+
+.voice.thinking .step:not(:empty) {
+  display: block;
+  max-width: 380px;
+  color: #cbd3e1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes jester-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .pill {
   grid-area: 1 / 1;
   display: flex;

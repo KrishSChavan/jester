@@ -10,6 +10,7 @@
     "start": "node scripts/start.mjs",
     "dev:mac": "node scripts/dev-mac.mjs",
     "driver": "node scripts/build-driver.mjs",
+    "launcher": "node scripts/make-launcher.mjs",
     "models": "node scripts/fetch-models.mjs vad parakeet-110m"
   },
   "dependencies": {

@@ -4,12 +4,13 @@ The Electron app that takes Jester beyond Chrome: the real cursor, the
 keyboard, media keys and other apps, driven by the same gestures, eye/head
 pointing and voice. The extension stays, and links to the app.
 
-**Status: phase 4 (voice).** Jester runs from the menu bar;
-gestures press the OS's own keys, an overlay shows what they did, and with
-Cursor control on, an open palm raises the real cursor: your eyes or head aim
-it, closing the hand clicks. ☝️ (or ⌥⇧J, or the menu) opens the mic for one
-spoken command, recognized on this computer. Linking the extension (phase 5)
-is next. Phase 0's answers are below.
+**Status: phase 6 (the assistant), being tried out.** Jester runs from the
+menu bar; gestures press the OS's own keys, an overlay shows what they did,
+and with Cursor control on, an open palm raises the real cursor: your eyes or
+head aim it, closing the hand clicks. ☝️ (or ⌥⇧J, or the menu) opens the mic
+for one spoken command, recognized on this computer; what the local matcher
+can't do goes to an AI model of the user's, which works the app in front.
+Linking the extension (phase 5) comes next. Phase 0's answers are below.
 
 What an action means outside a browser is in `src/main/os-actions.js`: one
 play/pause key for Play, Pause and Play/pause; arrows for seeking; each OS's
@@ -35,6 +36,7 @@ front window fills its display.
 | `src/main/speech.js`, `src/main/speech/` | Offline speech (sherpa-onnx) in a `utilityProcess`, fed by the engine page's stand-in `SpeechRecognition` (in the preload). |
 | `src/main/voice-commands.js`, `voice-runner.js`, `apps.js` | What a sentence means, and doing it: actions, apps, volume, keys, typing, clicks, Shortcuts. |
 | `src/worklets/` | The mic for speech, captured on the audio thread; served to the engine page as `jester://ext/_desktop/worklets/…`. |
+| `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`) and the hands (`host.js`). |
 | `src/main/driver.js`, `native/jester-driver/` | Rust helper for OS input and the accessibility tree, JSON lines over stdio. Also Chrome's native-messaging relay. |
 | `src/main/link.js` | The app's end of the link to the extension. |
 | `spikes/` | Phase 0 experiments. |
@@ -54,6 +56,13 @@ npm run models                           # speech models, ~135 MB, into models/
 
 ## Running
 
+- `npm run launcher` (macOS, once) — puts a **Jester** app in /Applications
+  (or ~/Applications): double-click it, or open it from Launchpad, Spotlight,
+  the Dock or Login Items. It starts the same Electron as `dev:mac` on this
+  checkout — the current code, and the permissions already given to
+  "Electron" — logging to `~/Library/Logs/Jester/dev.log`; with Jester
+  running, it opens Settings. Its large icon sizes are scaled up from the
+  extension's 128 px one.
 - `npm start` — the app. Add `JESTER_LOG=1` to see gestures, cursor frames and CPU.
 - `npm run dev:mac` — the same, launched through `open` so macOS asks for the
   camera and Accessibility on behalf of "Electron" rather than the terminal or
@@ -125,6 +134,59 @@ each command says what the mic was doing and how much audio arrived:
 To compare models on a real voice, `JESTER_SAVE_SPEECH=~/jester-voice` keeps
 each command as a WAV with what was heard beside it; `node
 scripts/speech-bench.mjs` runs a folder of them through any model.
+
+## The assistant
+
+A command the matcher doesn't know ("reply to Sam on Slack", "play Gunna" —
+where the matcher only gets as far as Spotify's search) goes to an AI model
+from Settings › Assistant: the user's own Gemini, Groq, OpenAI, Anthropic or
+OpenAI-compatible key, saved through the extension's `credentials.js` and paced
+through its model pool, as in Chrome. Keys are sealed on disk with the OS
+keychain (macOS) or DPAPI (Windows) via `safeStorage`, and pages never see them
+(`chrome-bridge.js` keeps `modelConnections` out of their storage).
+
+Each step the model gets the goal, a short memory and the front window, read
+by jester-driver's `snapshot` — its controls in reading order, numbered, with
+their roles, names, values and states, in the same vocabulary on both OSes:
+
+```
+App: Spotify — "Spotify Premium"
+[12] button "Play Gunna"
+[14] searchfield "What do you want to play?" value: "gunna"
+```
+
+It answers with one action (or up to three on controls already on screen):
+click, type (optionally then Enter), press a key or shortcut, scroll, open an
+app, open a link, a media key, find, wait, finish. A click is the control's own
+accessibility action, falling back to a real click where it's drawn.
+
+The user's rules (2026-10-21): it acts by itself, except before anything that
+sends or posts, buys, deletes, or changes system settings, where the pill asks
+— 👍, the pill's Allow, or "yes" (👎, Don't, "no", or a minute's silence is a
+no). It never types into, or reads, a password field: the driver refuses too.
+A link to a site the user didn't name counts as sensitive. "Stop", ×, or a new
+command ends a task.
+
+Reading the screen hides Jester's overlays for the moment it takes (see
+below), so the pill blinks out while the assistant looks.
+
+Keys go to whichever app is in front when they're sent, and that can change
+while a step waits for an OK — on 2026-10-22 a click that fell through the
+overlay brought VS Code forward, and an approved "hello, Enter" meant for
+Messages was typed into its chat box instead. So before any key, typed text,
+scroll or click at a point, the host brings the app the screen was read from
+back to the front and checks it (and, for typing, that the keyboard focus is
+in it); otherwise nothing is typed. Jester's own windows are never read as
+"the screen". A send, purchase or deletion that was approved and done is
+never repeated in the same task: the model couldn't see the sent message and
+asked to send it again, twice. The question has its own small window (Allow /
+Don't), which takes clicks without making Jester the active app.
+
+"The window you're working in" skips anything smaller than 120 × 80: after
+sending, Messages put a 66 × 22 window in front of the conversation, and the
+next read failed looking for it. A read that fails is tried once more after
+0.4 s; if it fails again the pill says so, and what it had already done, and
+the log has why.
 
 ## The cursor
 
@@ -233,6 +295,28 @@ models decode in under 35 ms.
 - Commands a real mic got garbled ("Lake's part of five full screen") came
   out exactly right from synthetic speech ("Make Spotify full screen"), so
   the 44-command synthetic set ranks models but doesn't predict real use.
+- That overlay effect reaches beyond hit tests and beyond one instance: with
+  a running Jester's overlays up, a test copy's own `AXWindows` came back as
+  its app element; with that Jester quit, the same read found its Settings
+  window and 144 controls in 38 ms. So the assistant reads with overlays
+  hidden, and `JESTER_SELFTEST_AGENT` needs no other Jester running.
+- A Chromium window's page isn't in its tree at all until about a second
+  after the app is first asked (not even as an empty web area), so the driver
+  knows Chromium apps by the framework in their bundle (Electron, Chrome,
+  Spotify's CEF) and waits for a web area with content.
+- Apps that embed Chromium without Electron (Spotify's CEF) answer only
+  `AXEnhancedUserInterface`, not Electron's `AXManualAccessibility`: without
+  it, both models saw Spotify's window as next to empty and gave up; with it,
+  a search for Gunna reads as 285 controls, each result's Play among them.
+- Short labels need their place: Spotify's top result and its player bar both
+  have a button named just "Play" (the second resumes whatever played last).
+  The snapshot names the nearest named container for labels of three words or
+  fewer: `[118] button "Play" — in "Gunna"`, `[82] button "Play" — in "Player
+  controls"`. The goal ranks lines by whole words, so "play" no longer pulls
+  in every "Playlist".
+- driver.js sent `{ id, cmd, ...params }`: a command with its own `id` field
+  took over the request's, so its reply never matched. The request's id now
+  goes last, and `act` names its target `element`.
 - sherpa-onnx hotwords (contextual biasing) don't work with this package:
   without the model's `bpe.vocab`, phrases must be written as the model's
   pieces, and sherpa-onnx splits a piece like `▁St` into `▁` + `St`, which

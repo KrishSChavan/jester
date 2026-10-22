@@ -92,6 +92,30 @@ pub enum Command {
     },
     /// The running apps the Dock (or the taskbar) shows.
     Apps,
+    /// The front window's controls (or `pid`'s), numbered for `act`: what the
+    /// assistant sees. At most `limit` are listed.
+    Snapshot {
+        pid: Option<i32>,
+        /// Look past this app's windows (Jester's own: its Settings in front isn't the screen meant).
+        exclude: Option<i32>,
+        #[serde(default = "snapshot_limit")]
+        limit: usize,
+        /// Include every element looked at (`visited`: depth, role, children), for diagnosing.
+        #[serde(default)]
+        debug: bool,
+    },
+    /// Do something to `element` of snapshot `snapshot`: press, focus,
+    /// setValue (with `value`), showMenu, scrollTo, increment, decrement.
+    /// Password fields are never focused or filled. (`element`, not `id`:
+    /// `id` is the request's.)
+    Act {
+        snapshot: u64,
+        element: usize,
+        action: String,
+        value: Option<String>,
+    },
+    /// What has the keyboard focus.
+    Focused,
     /// Ask an app to quit, as its own Quit command would: unsaved work gets
     /// its usual prompt.
     QuitApp {
@@ -113,12 +137,19 @@ impl Command {
     /// Accessibility queries can block on an app that has stopped responding,
     /// so they run on their own thread and never hold up the cursor.
     pub fn is_query(&self) -> bool {
-        matches!(self, Command::ElementAt { .. } | Command::Frontmost | Command::Wake { .. } | Command::Apps)
+        matches!(
+            self,
+            Command::ElementAt { .. } | Command::Frontmost | Command::Wake { .. } | Command::Apps | Command::Snapshot { .. } | Command::Act { .. } | Command::Focused
+        )
     }
 }
 
 fn one() -> u32 {
     1
+}
+
+fn snapshot_limit() -> usize {
+    300
 }
 
 fn yes() -> bool {

@@ -8,6 +8,7 @@
  */
 
 import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings } from '../ext/src/common/constants.js';
+import { PROVIDERS } from '../ext/src/common/credentials.js';
 import { calibrationGrade, loadCalibration, usableModel } from '../ext/src/common/gaze-store.js';
 import { DESKTOP_LABELS, bindable, describePlan, parseShortcut } from '../main/os-actions.js';
 
@@ -116,6 +117,16 @@ function renderPermissions() {
   );
 }
 
+/** Which camera is in use, from the engine: "Default camera" hides which one that is. */
+function renderCameraHint(cameras = null) {
+  if (cameras) renderCameraHint.named = cameras.some((camera) => camera.label);
+  $('camera-hint').textContent = desktop?.engine?.camera
+    ? `Watching: ${desktop.engine.camera}.`
+    : renderCameraHint.named === false
+      ? 'Names appear once the camera is allowed.'
+      : 'The camera Jester watches.';
+}
+
 async function renderCameras() {
   const select = $('cameraDeviceId');
   let cameras = [];
@@ -128,7 +139,7 @@ async function renderCameras() {
   select.replaceChildren(...options.map(([value, label]) => new Option(label, value)));
   select.value = settings?.cameraDeviceId || '';
   // Without camera permission the browser hides camera names.
-  $('camera-hint').textContent = cameras.some((camera) => camera.label) ? 'The camera Jester watches.' : 'Names appear once the camera is allowed.';
+  renderCameraHint(cameras);
 }
 
 function renderControls() {
@@ -200,6 +211,73 @@ async function renderCalibration() {
   }
   const grade = calibrationGrade(model.error);
   $('calibration-state').textContent = `Calibrated (${grade.grade})${model.screenW ? ` for a ${model.screenW}×${model.screenH} screen` : ''}. ${grade.hint}`;
+}
+
+// ---------------------------------------------------------------------------
+// The assistant's models
+// ---------------------------------------------------------------------------
+
+/** Examples for the model field: fast models suit one-step-at-a-time work. */
+const MODEL_EXAMPLES = { google: 'gemini-2.5-flash', groq: 'openai/gpt-oss-120b', openai: 'gpt-5-mini', anthropic: 'claude-haiku-5-5', custom: '' };
+
+/** Asks the main process, which alone holds the keys; the reply lists them masked. */
+async function connections(op, extra = {}) {
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-connections', op, ...extra });
+  renderConnections(reply);
+  return reply;
+}
+
+function renderConnections(reply) {
+  const saved = reply?.connections || [];
+  $('connection-error').textContent = reply?.ok === false ? reply.error : '';
+  if (!saved.length) {
+    const empty = document.createElement('div');
+    empty.className = 'row';
+    empty.innerHTML = '<span><strong>No model yet</strong><small>Add one below to let the assistant take commands Jester doesn’t know.</small></span>';
+    $('connections').replaceChildren(empty);
+    return;
+  }
+  $('connections').replaceChildren(
+    ...saved.map((connection, i) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const text = document.createElement('span');
+      const name = document.createElement('strong');
+      name.textContent = `${PROVIDERS[connection.provider]?.label || connection.provider} · ${connection.model}`;
+      const detail = document.createElement('small');
+      const resting = connection.cooldownUntil > Date.now() ? ` · resting until ${new Date(connection.cooldownUntil).toLocaleTimeString()}` : '';
+      detail.textContent = `${connection.masked} · ${connection.plan === 'free' ? 'Free' : 'Paid'}${saved.length > 1 && i === 0 ? ' · tried first' : ''}${resting}`;
+      text.append(name, detail);
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', () => connections('remove', { id: connection.id }));
+      row.append(text, remove);
+      return row;
+    })
+  );
+}
+
+function buildConnectionForm() {
+  const provider = $('connection-provider');
+  provider.replaceChildren(...Object.entries(PROVIDERS).map(([id, meta]) => new Option(meta.label, id)));
+  const fit = () => {
+    $('connection-model').placeholder = MODEL_EXAMPLES[provider.value] ? `e.g. ${MODEL_EXAMPLES[provider.value]}` : 'The model’s ID';
+    $('connection-url-row').hidden = provider.value !== 'custom';
+    $('connection-plan').value = ['google', 'groq'].includes(provider.value) ? 'free' : 'paid';
+  };
+  provider.addEventListener('change', fit);
+  fit();
+  $('connection-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    $('connection-add').disabled = true;
+    const reply = await connections('save', {
+      input: { provider: provider.value, model: $('connection-model').value, key: $('connection-key').value, plan: $('connection-plan').value, baseUrl: $('connection-url').value }
+    });
+    $('connection-add').disabled = false;
+    // The key isn't kept in the page once it's saved.
+    if (reply?.ok) $('connection-key').value = '';
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +445,7 @@ function render() {
   renderPermissions();
   renderControls();
   renderBindings();
+  renderCameraHint();
   $('dev-note').hidden = !desktop?.fakeMedia;
 }
 
@@ -393,6 +472,10 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'jester/trigger':
       $('last-gesture').textContent = `${gestureName(message)} → ${ACTIONS[message.action]?.label || message.action}`;
       break;
+    case 'jester/preview-frame':
+      $('camera-preview').src = message.dataUrl;
+      $('camera-preview').hidden = false;
+      break;
     default:
       break;
   }
@@ -406,6 +489,13 @@ chrome.storage.onChanged.addListener((changes, area) => {
   settings = mergeSettings(changes.settings.newValue);
   settingsChanged(before);
 });
+
+// The camera view, asked for while Settings is on screen (as the extension's popup does).
+const askForPreview = () => {
+  if (document.visibilityState === 'visible') chrome.runtime.sendMessage({ type: 'jester/desktop-preview' }).catch(() => undefined);
+};
+setInterval(askForPreview, 700);
+askForPreview();
 
 $('enabled').addEventListener('change', (event) => save({ enabled: event.target.checked }));
 $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled: event.target.checked }));
@@ -421,7 +511,9 @@ settings = await readSettings();
 desktop = await chrome.runtime.sendMessage({ type: 'jester/desktop-state' });
 buildBindings();
 buildShortcuts();
+buildConnectionForm();
 render();
+connections('list');
 renderCalibration();
 await renderCameras();
 navigator.mediaDevices?.addEventListener?.('devicechange', renderCameras);

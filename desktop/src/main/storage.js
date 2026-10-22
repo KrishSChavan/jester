@@ -5,6 +5,9 @@
  * into place so a crash mid-write can't leave half a settings file. `session`
  * lives in memory: Chrome clears it when the browser closes, the app when it
  * quits.
+ *
+ * `sealed` keys (API keys) are written encrypted, by functions the caller
+ * supplies (Electron's safeStorage: the macOS Keychain, Windows DPAPI).
  */
 
 import fs from 'node:fs';
@@ -20,7 +23,13 @@ function pick(data, keys) {
   return Object.fromEntries(Object.entries(keys).map(([key, fallback]) => [key, structuredClone(Object.hasOwn(data, key) ? data[key] : fallback)]));
 }
 
-export function createStorageArea({ file = null, onChanged = () => undefined } = {}) {
+/**
+ * @param {object} [options]
+ * @param {string|null} [options.file]
+ * @param {(changes:object) => void} [options.onChanged]
+ * @param {{keys:string[], seal:(text:string) => string, unseal:(sealed:string) => string}|null} [options.sealed]
+ */
+export function createStorageArea({ file = null, onChanged = () => undefined, sealed = null } = {}) {
   let data = {};
   if (file) {
     try {
@@ -29,11 +38,25 @@ export function createStorageArea({ file = null, onChanged = () => undefined } =
       if (err.code !== 'ENOENT') console.error(`Could not read ${file}; starting empty:`, err.message);
     }
   }
+  for (const key of sealed?.keys || []) {
+    if (typeof data[key]?.sealed !== 'string') continue;
+    try {
+      data[key] = JSON.parse(sealed.unseal(data[key].sealed));
+    } catch (err) {
+      // Sealed on another machine or account: unreadable here, so forgotten.
+      console.error(`Could not unseal ${key}:`, err.message);
+      delete data[key];
+    }
+  }
   let writing = Promise.resolve();
 
   function persist() {
     if (!file) return Promise.resolve();
-    const snapshot = JSON.stringify(data);
+    const onDisk = { ...data };
+    for (const key of sealed?.keys || []) {
+      if (Object.hasOwn(onDisk, key)) onDisk[key] = { sealed: sealed.seal(JSON.stringify(onDisk[key])) };
+    }
+    const snapshot = JSON.stringify(onDisk);
     writing = writing.then(async () => {
       await fs.promises.mkdir(path.dirname(file), { recursive: true });
       const temp = `${file}.${process.pid}.tmp`;

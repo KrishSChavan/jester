@@ -35,6 +35,8 @@ function makeWindow(display) {
     type: process.platform === 'darwin' ? 'panel' : 'toolbar',
     webPreferences: { preload: PRELOAD, contextIsolation: true, sandbox: true, backgroundThrottling: false }
   });
+  // Every click goes through to the apps below. (The assistant's question,
+  // which needs clicks, has a window of its own: approval.js.)
   win.setIgnoreMouseEvents(true);
   win.setAlwaysOnTop(true, 'screen-saver');
   // skipTransformProcessType: don't let this put Jester back in the Dock.

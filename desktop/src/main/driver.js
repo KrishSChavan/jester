@@ -88,7 +88,8 @@ export function startDriver({ binary = driverPath(), dryRun = false, timeoutMs =
         reject(new Error(`jester-driver: "${cmd}" timed out`));
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
-      child.stdin.write(`${JSON.stringify({ id, cmd, ...params })}\n`);
+      // The request's own id last: a parameter can't take its place.
+      child.stdin.write(`${JSON.stringify({ ...params, id, cmd })}\n`);
     });
   }
 

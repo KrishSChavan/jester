@@ -18,6 +18,14 @@ const OWN_PAGES = /^jester:\/\/(ext|app)\//;
 /** What `sender.url` says for the main process, so `fromJester()` accepts it. */
 const WORKER_URL = `${EXT_ROOT}src/background/service-worker.js`;
 
+/**
+ * Keys only the main process reads: the model connections, API keys and all.
+ * Pages never see them, through storage or its change events.
+ */
+export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection']);
+const isPrivate = (key) => PRIVATE_KEYS.includes(key);
+const withoutPrivate = (items) => Object.fromEntries(Object.entries(items || {}).filter(([key]) => !isPrivate(key)));
+
 const handlers = new Set();
 const storageListeners = new Set();
 let areas = null;
@@ -61,7 +69,8 @@ export const storage = {
 };
 
 function storageChanged(area, changes) {
-  for (const contents of pages()) contents.send('jester:storage-changed', changes, area);
+  const visible = withoutPrivate(changes);
+  if (Object.keys(visible).length) for (const contents of pages()) contents.send('jester:storage-changed', visible, area);
   for (const listener of storageListeners) listener(changes, area);
 }
 
@@ -84,13 +93,26 @@ function installMainChrome() {
         addListener: (fn) => void storageListeners.add(fn),
         removeListener: (fn) => void storageListeners.delete(fn)
       }
+    },
+    // credentials.js asks before saving a provider's connection. Chrome needs
+    // the user's grant for each API's site; the app reaches any site.
+    permissions: {
+      contains: async () => true
     }
   };
 }
 
-export function installBridge({ dataDir = app.getPath('userData'), onClose = null } = {}) {
+/**
+ * @param {object} [options]
+ * @param {{seal:Function, unseal:Function}|null} [options.sealer]  encrypts PRIVATE_KEYS on disk
+ */
+export function installBridge({ dataDir = app.getPath('userData'), onClose = null, sealer = null } = {}) {
   areas = {
-    local: createStorageArea({ file: path.join(dataDir, 'storage-local.json'), onChanged: (changes) => storageChanged('local', changes) }),
+    local: createStorageArea({
+      file: path.join(dataDir, 'storage-local.json'),
+      onChanged: (changes) => storageChanged('local', changes),
+      sealed: sealer && { keys: PRIVATE_KEYS, ...sealer }
+    }),
     session: createStorageArea({ onChanged: (changes) => storageChanged('session', changes) })
   };
   installMainChrome();
@@ -116,6 +138,8 @@ export function installBridge({ dataDir = app.getPath('userData'), onClose = nul
   ipcMain.handle('jester:storage', async (event, area, op, arg) => {
     const url = event.senderFrame?.url || event.sender.getURL();
     if (!OWN_PAGES.test(url) || !Object.hasOwn(areas, area) || !['get', 'set', 'remove'].includes(op)) return undefined;
-    return areas[area][op](arg);
+    if (op === 'get') return withoutPrivate(await areas[area].get(arg));
+    if (op === 'set') return areas[area].set(withoutPrivate(arg));
+    return areas[area].remove([arg].flat().filter((key) => !isPrivate(key)));
   });
 }

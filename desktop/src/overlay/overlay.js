@@ -12,6 +12,8 @@ const TOAST_MS = { info: 1600, warn: 3200 };
 const VOICE_IDLE_MS = 1600;
 /** How long what a command did stays up; a failure needs reading, and a little longer. */
 const VOICE_ANSWER_MS = { ok: 2600, bad: 5200 };
+/** The assistant ends its own phase; this only catches one that died mid-task. */
+const VOICE_THINKING_MS = 90000;
 const BAR_MIN = 6;
 const BAR_MAX = 26;
 /** What has been heard so far, kept to its end: the pill is one line. */
@@ -101,9 +103,35 @@ function answer(text, ok) {
  * The engine's voice frames — the mic's levels, what has been heard — and the
  * main process's answer once the command has been done (as in content.js).
  */
+function drawLevels(levels) {
+  if (!Array.isArray(levels)) return;
+  [...$('voice-bars').children].forEach((bar, i) => {
+    const level = Math.min(1, Math.max(0, Number(levels[i]) || 0));
+    bar.style.height = `${BAR_MIN + level * (BAR_MAX - BAR_MIN)}px`;
+  });
+}
+
+/** Which face the pill shows now, if it's up. */
+function face() {
+  const pill = $('voice');
+  return pill.hidden ? '' : ['listening', 'thinking', 'answer'].find((name) => pill.classList.contains(name)) || '';
+}
+
+/**
+ * The engine's voice frames — the mic's levels, what has been heard — and the
+ * main process's: the assistant at work and how a command went (as in
+ * content.js). The assistant's questions have a window of their own
+ * (src/main/approval.js), which takes clicks; this one never does.
+ */
 function drawVoice(voice) {
+  const showing = face();
   if (voice.mic?.detail && ['error', 'no-permission'].includes(voice.mic.state)) return answer(voice.mic.detail, false);
   if (voice.phase === 'answer') return answer(voice.text, voice.ok !== false);
+  // The assistant at work: what it's doing ("stop" ends it).
+  if (voice.phase === 'thinking') {
+    $('voice-step').textContent = voice.step || '';
+    return showVoice('thinking', VOICE_THINKING_MS);
+  }
   if (voice.transcript?.text) {
     const text = voice.transcript.text;
     $('voice-heard').textContent = text.length > HEARD_CHARS ? `…${text.slice(-HEARD_CHARS)}` : text;
@@ -111,13 +139,11 @@ function drawVoice(voice) {
   // A transcript-only frame says nothing about whether the pill should be up.
   if (voice.active === undefined) return;
   if (!voice.active) return hideVoice();
+  // The assistant at work keeps the pill, unless a new command is starting.
+  if (showing === 'thinking' && !voice.start) return;
   if (voice.start) $('voice-heard').textContent = '';
   showVoice('listening', VOICE_IDLE_MS);
-  if (!Array.isArray(voice.levels)) return;
-  [...$('voice-bars').children].forEach((bar, i) => {
-    const level = Math.min(1, Math.max(0, Number(voice.levels[i]) || 0));
-    bar.style.height = `${BAR_MIN + level * (BAR_MAX - BAR_MIN)}px`;
-  });
+  drawLevels(voice.levels);
 }
 
 function ripple(message) {

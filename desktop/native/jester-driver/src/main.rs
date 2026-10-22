@@ -130,7 +130,14 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
         Command::QuitApp { pid } => app_op(poster, "quitApp", pid, platform::quit_app),
         Command::HideApp { pid } => app_op(poster, "hideApp", pid, platform::hide_app),
         Command::ActivateApp { pid } => app_op(poster, "activateApp", pid, platform::activate_app),
-        Command::ElementAt { .. } | Command::Frontmost | Command::Wake { .. } | Command::Apps | Command::Quit => unreachable!(),
+        Command::ElementAt { .. }
+        | Command::Frontmost
+        | Command::Wake { .. }
+        | Command::Apps
+        | Command::Snapshot { .. }
+        | Command::Act { .. }
+        | Command::Focused
+        | Command::Quit => unreachable!(),
     };
     result.map(|mut body| {
         if poster.dry_run && !poster.log.is_empty() {
@@ -149,12 +156,20 @@ fn app_op(poster: &mut Poster, name: &str, pid: i32, op: fn(i32) -> Result<()>) 
     Ok(Map::new())
 }
 
-fn run_query(command: Command) -> Result<Map<String, Value>> {
+/// Accessibility work, on the query thread. `act` is input, so a dry run
+/// describes it instead.
+fn run_query(command: Command, dry_run: bool) -> Result<Map<String, Value>> {
     match command {
         Command::ElementAt { x, y, wait, debug } => platform::element_at(x, y, wait, debug).map(object),
         Command::Frontmost => platform::frontmost().map(object),
         Command::Wake { pid } => platform::wake(pid).map(object),
         Command::Apps => platform::apps().map(|apps| object(json!({ "apps": apps }))),
+        Command::Snapshot { pid, exclude, limit, debug } => platform::snapshot(pid, exclude, limit.clamp(1, 1000), debug).map(object),
+        Command::Act { snapshot, element, action, .. } if dry_run => {
+            Ok(object(json!({ "events": [{ "event": "act", "snapshot": snapshot, "element": element, "action": action }] })))
+        }
+        Command::Act { snapshot, element, action, value } => platform::act(snapshot, element, &action, value.as_deref()).map(object),
+        Command::Focused => platform::focused().map(object),
         _ => unreachable!(),
     }
 }
@@ -176,7 +191,7 @@ fn main() {
     let query_thread = std::thread::spawn(move || {
         platform::init_query_thread();
         for (id, command) in query_rx {
-            let reply = match run_query(command) {
+            let reply = match run_query(command, dry_run) {
                 Ok(body) => ok(&id, body),
                 Err(error) => fail(&id, error),
             };

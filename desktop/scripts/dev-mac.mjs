@@ -9,8 +9,8 @@
  * the computer. Started through `open`, Electron is its own app, the prompts
  * name "Electron", and the permissions stay with it.
  *
- * Its output goes to ~/Library/Logs/Jester/dev.log, which this prints as it
- * grows: `open` can't write into ~/Downloads on the app's behalf, as macOS
+ * Its output goes to ~/Library/Logs/Jester/dev.log (or JESTER_DEV_LOG), which
+ * this prints as it grows: `open` can't write into ~/Downloads on the app's behalf, as macOS
  * guards that folder. Ctrl-C quits both.
  */
 
@@ -22,7 +22,8 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electronApp = path.join(root, 'node_modules/electron/dist/Electron.app');
-const logFile = path.join(os.homedir(), 'Library/Logs/Jester/dev.log');
+// JESTER_DEV_LOG: somewhere else, so a test run leaves a running Jester's log alone.
+const logFile = process.env.JESTER_DEV_LOG ? path.resolve(process.env.JESTER_DEV_LOG) : path.join(os.homedir(), 'Library/Logs/Jester/dev.log');
 
 if (process.platform !== 'darwin') {
   console.error('dev:mac is for macOS; use npm start elsewhere.');

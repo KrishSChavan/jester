@@ -272,3 +272,34 @@ footer {
   color: var(--muted);
   font-size: 12px;
 }
+
+/* The assistant's models. */
+#connection-form {
+  margin-top: 10px;
+}
+
+#connection-form input {
+  font: inherit;
+  width: 220px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#connection-form select {
+  width: 234px;
+}
+
+.error {
+  color: var(--bad);
+  font-size: 12px;
+}
+
+/* What the camera sees, small: enough to tell a dark room or a hand out of frame. */
+#camera-preview {
+  width: 240px;
+  border-radius: 8px;
+  background: #000;
+}

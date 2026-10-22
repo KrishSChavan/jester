@@ -59,6 +59,41 @@
       </div>
     </section>
 
+    <section aria-labelledby="assistant-heading">
+      <h2 id="assistant-heading">Assistant</h2>
+      <p class="intro">Commands Jester doesn’t know (“play Gunna”, “reply to Sam on Slack”) go to an AI model of yours, which works the app in front step by step. To do that, the names and text of that window’s controls go to the model’s provider. It asks you first before anything that sends, buys, deletes or changes settings — answer with 👍, the pill’s Allow, or by saying yes — and never types into password fields.</p>
+      <div class="cards" id="connections"></div>
+      <form id="connection-form" class="cards">
+        <label class="row">
+          <span><strong>Provider</strong></span>
+          <select id="connection-provider"></select>
+        </label>
+        <label class="row" id="connection-url-row" hidden>
+          <span><strong>API address</strong><small>An OpenAI-compatible API: https, or http on this computer.</small></span>
+          <input id="connection-url" type="url" placeholder="https://…/v1" spellcheck="false" />
+        </label>
+        <label class="row">
+          <span><strong>Model</strong><small>The model’s ID, as your provider names it.</small></span>
+          <input id="connection-model" type="text" spellcheck="false" autocomplete="off" />
+        </label>
+        <label class="row">
+          <span><strong>API key</strong><small>Stored encrypted on this computer, and never shown again.</small></span>
+          <input id="connection-key" type="password" spellcheck="false" autocomplete="off" />
+        </label>
+        <label class="row">
+          <span><strong>Plan</strong><small>Free plans are paced to stay under their per-minute limits.</small></span>
+          <select id="connection-plan">
+            <option value="free">Free</option>
+            <option value="paid">Paid</option>
+          </select>
+        </label>
+        <div class="row">
+          <span id="connection-error" class="error" role="alert"></span>
+          <button id="connection-add" type="submit" class="primary">Add model</button>
+        </div>
+      </form>
+    </section>
+
     <section aria-labelledby="gestures-heading">
       <h2 id="gestures-heading">Gestures</h2>
       <p class="intro" id="gestures-intro">What each pose and swipe does. Hold a pose until its bar fills.</p>
@@ -84,6 +119,10 @@
       <div class="cards">
         <div class="row"><span><strong>Last gesture</strong></span><span id="last-gesture" class="value">None yet</span></div>
         <div class="row"><span><strong>Camera</strong></span><span id="camera-stats" class="value">—</span></div>
+        <div class="row">
+          <span><strong>Camera view</strong><small>What Jester sees, with the hand it finds drawn on it. Shown only here; nothing is saved.</small></span>
+          <img id="camera-preview" alt="Jester's camera view" hidden />
+        </div>
       </div>
       <p id="dev-note" class="intro" hidden>Using Chromium's synthetic camera (JESTER_FAKE_MEDIA): no hands will be seen.</p>
     </section>

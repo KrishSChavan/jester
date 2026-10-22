@@ -9,7 +9,9 @@ use crate::protocol::{Button, MediaKey, Modifier, ScrollUnit};
 use crate::{Poster, Result};
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags, NSEventType, NSRunningApplication};
-use objc2_application_services::{AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, AXValue, AXValueType};
+use objc2_application_services::{
+    AXCopyMultipleAttributeOptions, AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, AXValue, AXValueType,
+};
 use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton,
@@ -517,10 +519,10 @@ fn asleep(element: &AXUIElement) -> bool {
 
 /// Chromium-based apps build their accessibility tree only when something
 /// asks for it; until then a whole web page is one "scroll area". Electron
-/// apps answer to AXManualAccessibility, Chrome-family browsers to
-/// AXEnhancedUserInterface — which is kept to them, as it makes some other
-/// apps animate their windows differently. Returns when the app was first
-/// asked, and whether that is now.
+/// apps answer to AXManualAccessibility; Chromium itself (Chrome and its kin,
+/// CEF apps like Spotify) to AXEnhancedUserInterface — which is kept to them,
+/// as it makes some other apps animate their windows differently. Returns
+/// when the app was first asked, and whether that is now.
 fn wake_tree(pid: i32) -> (Instant, bool) {
     {
         let mut woken = WOKEN.lock().unwrap();
@@ -532,10 +534,27 @@ fn wake_tree(pid: i32) -> (Instant, bool) {
     let app = unsafe { AXUIElement::new_application(pid) };
     let yes: &CFType = CFBoolean::new(true);
     unsafe { app.set_attribute_value(&CFString::from_static_str("AXManualAccessibility"), yes) };
-    if app_info(pid)["bundleId"].as_str().is_some_and(|id| CHROMIUM_BROWSERS.contains(&id)) {
+    if app_info(pid)["bundleId"].as_str().is_some_and(|id| CHROMIUM_BROWSERS.contains(&id)) || chromium_based(pid) {
         unsafe { app.set_attribute_value(&CFString::from_static_str("AXEnhancedUserInterface"), yes) };
     }
     (Instant::now(), true)
+}
+
+/// Chromium-based apps — Electron's, Chrome and its kin, CEF apps like
+/// Spotify — known by the framework they carry: they build their
+/// accessibility tree only when asked, and a moment later.
+fn chromium_based(pid: i32) -> bool {
+    let Some(path) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid).and_then(|app| app.bundleURL()).and_then(|url| url.path()) else {
+        return false;
+    };
+    std::fs::read_dir(format!("{path}/Contents/Frameworks"))
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                name.ends_with("Framework.framework") && ["Electron", "Chrom", "Edge", "Brave", "Opera", "Vivaldi"].iter().any(|kind| name.contains(kind))
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn hit(system: &AXUIElement, x: f64, y: f64) -> Result<CFRetained<AXUIElement>> {
@@ -594,6 +613,14 @@ pub fn element_at(x: f64, y: f64, wait: bool, debug: bool) -> Result<Value> {
     }))
 }
 
+/// Smaller than this, a window is a tooltip, a popover or a badge (Messages
+/// shows a 66 × 22 one after sending), not what anyone is working in.
+const MIN_WINDOW: (f64, f64) = (120.0, 80.0);
+
+fn substantial(window: &WindowInfo) -> bool {
+    window.bounds.is_some_and(|(_, _, w, h)| w >= MIN_WINDOW.0 && h >= MIN_WINDOW.1)
+}
+
 /// One on-screen window, as the window server lists it.
 struct WindowInfo {
     pid: i32,
@@ -637,13 +664,435 @@ fn on_screen_windows() -> Result<Vec<WindowInfo>> {
 /// The front window: the first ordinary one (layer 0 — menus, the Dock and
 /// overlays sit above it).
 pub fn frontmost() -> Result<Value> {
-    let window = on_screen_windows()?.into_iter().find(|window| window.layer == 0).ok_or("no ordinary window is on screen")?;
+    let window = on_screen_windows()?.into_iter().find(|window| window.layer == 0 && substantial(window)).ok_or("no ordinary window is on screen")?;
     let mut app = app_info(window.pid);
     if app["name"].is_null() {
         app["name"] = json!(window.owner);
     }
     let bounds = window.bounds.map(|(x, y, w, h)| json!({ "x": x, "y": y, "w": w, "h": h }));
     Ok(json!({ "app": app, "window": { "title": window.title, "bounds": bounds } }))
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots: the front window's controls, read for the assistant and acted on
+// by number
+// ---------------------------------------------------------------------------
+
+/// Read in one call per element (AXUIElementCopyMultipleAttributeValues).
+const SNAPSHOT_ATTRIBUTES: [&str; 13] = [
+    "AXRole", "AXSubrole", "AXTitle", "AXDescription", "AXValue", "AXPlaceholderValue", "AXHelp", "AXEnabled", "AXFocused",
+    "AXSelected", "AXPosition", "AXSize", "AXChildren",
+];
+/// How many elements a snapshot looks at, at most: a mail app's message list
+/// alone can hold thousands.
+const SNAPSHOT_VISITS: usize = 3000;
+
+thread_local! {
+    /// The last snapshot's number, and its elements by their numbers in it.
+    static LISTED: std::cell::RefCell<(u64, Vec<CFRetained<AXUIElement>>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+
+/// A role in the words both platforms share; None for what a snapshot leaves out.
+fn role_name(role: &str, subrole: Option<&str>) -> Option<&'static str> {
+    Some(match (role, subrole) {
+        ("AXTextField", Some("AXSecureTextField")) => "password",
+        ("AXTextField", Some("AXSearchField")) => "searchfield",
+        ("AXTextField", _) => "textfield",
+        ("AXTextArea", _) => "textarea",
+        ("AXComboBox", _) => "combobox",
+        ("AXButton", _) => "button",
+        ("AXLink", _) => "link",
+        ("AXCheckBox", Some("AXSwitch")) => "switch",
+        ("AXCheckBox", _) => "checkbox",
+        ("AXRadioButton", Some("AXTabButton")) | ("AXTab", _) => "tab",
+        ("AXRadioButton", _) => "radio",
+        ("AXPopUpButton" | "AXMenuButton", _) => "popup",
+        ("AXMenuItem" | "AXMenuBarItem", _) => "menuitem",
+        ("AXDisclosureTriangle", _) => "disclosure",
+        ("AXSlider", _) => "slider",
+        ("AXIncrementor", _) => "stepper",
+        ("AXRow", _) => "row",
+        ("AXHeading", _) => "heading",
+        ("AXStaticText", _) => "text",
+        _ => return None,
+    })
+}
+
+/// Controls named by what's written inside them: that text isn't listed again.
+const NAMED_BY_CONTENT: &[&str] = &["button", "link", "checkbox", "switch", "radio", "tab", "popup", "menuitem", "disclosure", "heading"];
+const TEXT_INPUTS: &[&str] = &["textfield", "searchfield", "textarea", "combobox"];
+/// Containers whose name tells the controls inside apart: a result's "Play" from the player's.
+const CONTAINERS: &[&str] = &["AXGroup", "AXRow", "AXCell", "AXList", "AXTable", "AXOutline", "AXTabGroup", "AXToolbar", "AXSheet", "AXScrollArea"];
+
+/// One element's attributes, from a single round trip to its app.
+struct Read {
+    role: Option<String>,
+    subrole: Option<String>,
+    title: Option<String>,
+    description: Option<String>,
+    value: Option<CFRetained<CFType>>,
+    placeholder: Option<String>,
+    help: Option<String>,
+    enabled: Option<bool>,
+    focused: Option<bool>,
+    selected: Option<bool>,
+    frame: Option<(f64, f64, f64, f64)>,
+    children: Vec<CFRetained<AXUIElement>>,
+}
+
+fn read_all(element: &AXUIElement, names: &CFArray<CFString>) -> Option<Read> {
+    let mut values: *const CFArray = std::ptr::null();
+    let error = unsafe {
+        element.copy_multiple_attribute_values(names.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut values))
+    };
+    if error != AXError::Success || values.is_null() {
+        return None;
+    }
+    let values: CFRetained<CFArray<CFType>> = unsafe { CFRetained::from_raw(NonNull::new_unchecked(values as *mut CFArray<CFType>)) };
+    // An attribute the element doesn't have comes back as an AXValue holding the error.
+    let at = |i: usize| values.get(i).filter(|value| value.downcast_ref::<AXValue>().is_none_or(|v| unsafe { v.r#type() } != AXValueType::AXError));
+    let text = |i: usize| at(i).and_then(|value| text_value(&value));
+    let flag = |i: usize| at(i).and_then(|value| value.downcast::<CFBoolean>().ok()).map(|value| value.as_bool());
+    let point = at(10).and_then(|value| value.downcast::<AXValue>().ok()).and_then(|value| {
+        let mut point = CGPoint { x: 0.0, y: 0.0 };
+        unsafe { value.value(AXValueType::CGPoint, NonNull::from(&mut point).cast()) }.then_some(point)
+    });
+    let size = at(11).and_then(|value| value.downcast::<AXValue>().ok()).and_then(|value| {
+        let mut size = CGSize { width: 0.0, height: 0.0 };
+        unsafe { value.value(AXValueType::CGSize, NonNull::from(&mut size).cast()) }.then_some(size)
+    });
+    let children = at(12)
+        .and_then(|value| value.downcast::<CFArray>().ok())
+        .map(|array| {
+            let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
+            (0..array.len()).filter_map(|i| array.get(i)).collect()
+        })
+        .unwrap_or_default();
+    Some(Read {
+        role: text(0),
+        subrole: text(1),
+        title: text(2),
+        description: text(3),
+        value: at(4),
+        placeholder: text(5),
+        help: text(6),
+        enabled: flag(7),
+        focused: flag(8),
+        selected: flag(9),
+        frame: point.zip(size).map(|(point, size)| (point.x, point.y, size.width, size.height)),
+        children,
+    })
+}
+
+fn text_value(value: &CFType) -> Option<String> {
+    let text = value.downcast_ref::<CFString>()?.to_string();
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+fn number_value(value: &CFType) -> Option<f64> {
+    value.downcast_ref::<CFNumber>().and_then(|number| number.as_f64()).or_else(|| value.downcast_ref::<CFBoolean>().map(|flag| if flag.as_bool() { 1.0 } else { 0.0 }))
+}
+
+fn clip(text: &str, chars: usize) -> String {
+    text.chars().take(chars).collect()
+}
+
+/// One listed element, as the assistant reads it.
+fn entry(id: usize, role: &str, label: Option<String>, node: &Read, depth: usize) -> Value {
+    let mut entry = json!({ "id": id, "role": role, "depth": depth });
+    if let Some(label) = label {
+        entry["label"] = json!(clip(&label, 120));
+    }
+    // A password field's contents are never read.
+    if role != "password" {
+        if let Some(value) = node.value.as_deref() {
+            if TEXT_INPUTS.contains(&role) {
+                if let Some(text) = text_value(value) {
+                    entry["value"] = json!(clip(&text, 200));
+                }
+            } else if ["checkbox", "switch", "radio"].contains(&role) {
+                if let Some(number) = number_value(value) {
+                    entry["checked"] = json!(number != 0.0);
+                }
+            } else if ["slider", "stepper"].contains(&role) {
+                if let Some(number) = number_value(value) {
+                    entry["value"] = json!(number);
+                }
+            }
+        }
+    }
+    if let Some(placeholder) = &node.placeholder {
+        entry["placeholder"] = json!(clip(placeholder, 80));
+    }
+    if node.enabled == Some(false) {
+        entry["disabled"] = json!(true);
+    }
+    if node.focused == Some(true) {
+        entry["focused"] = json!(true);
+    }
+    if node.selected == Some(true) {
+        entry["selected"] = json!(true);
+    }
+    if let Some((x, y, w, h)) = node.frame {
+        entry["frame"] = json!({ "x": x.round(), "y": y.round(), "w": w.round(), "h": h.round() });
+    }
+    entry
+}
+
+/// Notes the section a short-labelled control is in, unless its label says it already.
+fn section(entry: &mut Value, context: &Option<String>) {
+    let Some(context) = context else { return };
+    let label = entry.get("label").and_then(Value::as_str).unwrap_or("").to_lowercase();
+    if label.split_whitespace().count() <= 3 && !label.contains(&context.to_lowercase()) {
+        entry["in"] = json!(clip(context, 60));
+    }
+}
+
+struct Walked {
+    elements: Vec<Value>,
+    handles: Vec<CFRetained<AXUIElement>>,
+    truncated: bool,
+    /// A Chromium page whose tree isn't built yet: an empty web area.
+    unbuilt: bool,
+    /// A web area with something in it: a Chromium window's page, built.
+    web_content: bool,
+    visits: usize,
+    /// With `debug`: (depth, role, children) for every element looked at.
+    visited: Option<Vec<Value>>,
+}
+
+/// Whether an accessibility frame and a window-server frame are the same
+/// window, allowing for a window just shown, which the server lists at 90%.
+fn same_window(frame: Option<(f64, f64, f64, f64)>, bounds: (f64, f64, f64, f64)) -> bool {
+    let Some((x, y, w, h)) = frame else { return false };
+    let (bx, by, bw, bh) = bounds;
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh && (w - bw).abs() <= bw * 0.15 && (h - bh).abs() <= bh * 0.15
+}
+
+/// The app's window the user sees: its front-most one on screen. An app in
+/// the background has no focused window, and its first one may be hidden.
+/// The error says what was compared, for a window that can't be found.
+fn visible_window(app: &AXUIElement, pid: i32) -> Result<CFRetained<AXUIElement>> {
+    let windows: Vec<CFRetained<AXUIElement>> = attribute(app, "AXWindows")
+        .and_then(|value| value.downcast::<CFArray>().ok())
+        .map(|array| {
+            let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
+            (0..array.len()).filter_map(|i| array.get(i)).collect()
+        })
+        .unwrap_or_default();
+    // Its windows on screen, front to back, tooltips and popovers left out.
+    let shown: Vec<(f64, f64, f64, f64)> = on_screen_windows()?
+        .into_iter()
+        .filter(|window| window.pid == pid && window.layer == 0 && substantial(window))
+        .filter_map(|window| window.bounds)
+        .collect();
+    let focused = ["AXFocusedWindow", "AXMainWindow"].iter().find_map(|name| attribute(app, name)?.downcast::<AXUIElement>().ok());
+    let frames: Vec<_> = windows
+        .iter()
+        .map(|window| (string_attribute(window, "AXRole"), string_attribute(window, "AXSubrole"), string_attribute(window, "AXTitle"), frame_rect(window)))
+        .collect();
+    let showing = |window: &CFRetained<AXUIElement>| shown.iter().any(|&bounds| same_window(frame_rect(window), bounds));
+    // The focused window if it's on screen; else the front-most one that is;
+    // else (nothing matches what's drawn, say mid-animation) the focused one
+    // anyway, or whatever the app lists first.
+    let found = focused
+        .clone()
+        .filter(|window| shown.is_empty() || showing(window))
+        .or_else(|| shown.iter().find_map(|&bounds| windows.iter().find(|window| same_window(frame_rect(window), bounds)).cloned()))
+        .or(focused)
+        .or_else(|| windows.first().cloned());
+    found.ok_or_else(|| format!("the app has no window to read (on screen: {shown:?}; its windows: {frames:?})"))
+}
+
+/// An element's identity (CFHash, as CFEqual compares them), to visit each once.
+fn identity(element: &AXUIElement) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let cf: &CFType = element;
+    cf.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The window's elements in reading order, depth first.
+fn walk(window: &CFRetained<AXUIElement>, names: &CFArray<CFString>, limit: usize, debug: bool) -> Walked {
+    let mut walked = Walked {
+        elements: Vec::new(),
+        handles: Vec::new(),
+        truncated: false,
+        unbuilt: false,
+        web_content: false,
+        visits: 0,
+        visited: debug.then(Vec::new),
+    };
+    let bounds = frame_rect(window);
+    // (element, depth, the listed control it's inside, the named section it's in)
+    let mut stack = vec![(window.clone(), 0usize, None::<usize>, None::<String>)];
+    // Some apps' trees list an element under two parents; each is read once.
+    let mut seen = HashSet::new();
+    while let Some((element, depth, inside, context)) = stack.pop() {
+        if walked.visits >= SNAPSHOT_VISITS || walked.elements.len() >= limit {
+            walked.truncated = true;
+            break;
+        }
+        if !seen.insert(identity(&element)) {
+            continue;
+        }
+        walked.visits += 1;
+        let Some(node) = read_all(&element, names) else { continue };
+        // Scrolled out of view, or on a hidden tab: neither it nor what's in it.
+        if let (Some((x, y, w, h)), Some((bx, by, bw, bh))) = (node.frame, bounds) {
+            if w > 0.0 && h > 0.0 && (x + w < bx || y + h < by || x > bx + bw || y > by + bh) {
+                continue;
+            }
+        }
+        let role = node.role.as_deref().unwrap_or("");
+        if let Some(visited) = walked.visited.as_mut() {
+            visited.push(json!([depth, role, node.children.len()]));
+        }
+        if role == "AXWebArea" {
+            if node.children.is_empty() {
+                walked.unbuilt = true;
+            } else {
+                walked.web_content = true;
+            }
+        }
+        let mut owner = inside;
+        let label = node.title.clone().or_else(|| node.description.clone());
+        // A named container names the section for everything inside it.
+        let inner = if CONTAINERS.contains(&role) && label.is_some() { label.clone() } else { context.clone() };
+        if let Some(name) = role_name(role, node.subrole.as_deref()) {
+            if name == "text" {
+                let text = label.or_else(|| node.value.as_deref().and_then(text_value));
+                match (text, inside) {
+                    // Text inside a control is its name, if it has none of its own.
+                    (Some(text), Some(index)) => {
+                        if walked.elements[index].get("label").is_none() {
+                            walked.elements[index]["label"] = json!(clip(&text, 120));
+                        }
+                    }
+                    (Some(text), None) => {
+                        walked.elements.push(entry(walked.elements.len(), name, Some(text), &node, depth));
+                        walked.handles.push(element.clone());
+                    }
+                    (None, _) => {}
+                }
+            } else {
+                if NAMED_BY_CONTENT.contains(&name) {
+                    owner = Some(walked.elements.len());
+                }
+                let mut listed = entry(walked.elements.len(), name, label.or_else(|| node.help.clone()), &node, depth);
+                // A row is a section itself; anything else may sit in one.
+                if role != "AXRow" {
+                    section(&mut listed, &context);
+                }
+                walked.elements.push(listed);
+                walked.handles.push(element.clone());
+            }
+        }
+        // Reversed, so the stack hands them back in order.
+        for child in node.children.into_iter().rev() {
+            stack.push((child, depth + 1, owner, inner.clone()));
+        }
+    }
+    walked
+}
+
+/// The controls in the front window (or `pid`'s), numbered for `act`.
+pub fn snapshot(pid: Option<i32>, exclude: Option<i32>, limit: usize, debug: bool) -> Result<Value> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    let started = Instant::now();
+    let pid = match pid {
+        Some(pid) => pid,
+        None => on_screen_windows()?
+            .into_iter()
+            .find(|window| window.layer == 0 && substantial(window) && Some(window.pid) != exclude)
+            .map(|window| window.pid)
+            .ok_or("no ordinary window is on screen")?,
+    };
+    // Set on the system-wide element, this bounds every app's replies.
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
+    let (asked, _) = wake_tree(pid);
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let window = visible_window(&app, pid)?;
+    let names = CFArray::from_retained_objects(&SNAPSHOT_ATTRIBUTES.map(CFString::from_static_str));
+    let chromium = chromium_based(pid);
+    let mut walked = walk(&window, &names, limit, debug);
+    // A Chromium app builds its tree a moment after first being asked: until
+    // then its page is missing from the window, or an empty web area.
+    while (walked.unbuilt || (chromium && !walked.web_content)) && asked.elapsed() < WAKE_TIME {
+        std::thread::sleep(WAKE_POLL);
+        walked = walk(&window, &names, limit, debug);
+    }
+    let number = LISTED.with(|listed| {
+        let mut listed = listed.borrow_mut();
+        listed.0 += 1;
+        listed.1 = walked.handles;
+        listed.0
+    });
+    Ok(json!({
+        "snapshot": number,
+        "app": app_info(pid),
+        "window": { "title": string_attribute(&window, "AXTitle"), "frame": frame(&window) },
+        "elements": walked.elements,
+        "truncated": walked.truncated,
+        "visits": walked.visits,
+        "visited": walked.visited,
+        "ms": started.elapsed().as_millis() as u64,
+    }))
+}
+
+/// Does something to an element of the last snapshot.
+pub fn act(snapshot: u64, id: usize, action: &str, value: Option<&str>) -> Result<Value> {
+    let element = LISTED.with(|listed| {
+        let listed = listed.borrow();
+        if listed.0 != snapshot {
+            return Err("the screen has been read again since; use the newest numbers".to_string());
+        }
+        listed.1.get(id).cloned().ok_or_else(|| format!("there is no element {id}"))
+    })?;
+    if is_secure(&element) && matches!(action, "focus" | "setValue") {
+        return Err("Jester never types into password fields".into());
+    }
+    let perform = |name: &'static str| {
+        let error = unsafe { element.perform_action(&CFString::from_static_str(name)) };
+        if error == AXError::Success {
+            Ok(())
+        } else {
+            Err(format!("{name} didn't work on it (AXError {})", error.0))
+        }
+    };
+    let set = |name: &'static str, to: &CFType| {
+        let error = unsafe { element.set_attribute_value(&CFString::from_static_str(name), to) };
+        if error == AXError::Success {
+            Ok(())
+        } else {
+            Err(format!("couldn't set {name} (AXError {})", error.0))
+        }
+    };
+    match action {
+        "press" => perform("AXPress"),
+        "showMenu" => perform("AXShowMenu"),
+        "increment" => perform("AXIncrement"),
+        "decrement" => perform("AXDecrement"),
+        "scrollTo" => perform("AXScrollToVisible"),
+        "focus" => set("AXFocused", CFBoolean::new(true)),
+        "setValue" => set("AXValue", &CFString::from_str(value.unwrap_or(""))),
+        other => Err(format!("unknown action \"{other}\"")),
+    }?;
+    Ok(json!({ "element": describe(&element) }))
+}
+
+/// What has the keyboard focus, and whether it's a password field.
+pub fn focused() -> Result<Value> {
+    let system = unsafe { AXUIElement::new_system_wide() };
+    let element = attribute(&system, "AXFocusedUIElement")
+        .and_then(|value| value.downcast::<AXUIElement>().ok())
+        .ok_or("nothing has the keyboard focus")?;
+    Ok(json!({ "element": describe(&element), "app": pid(&element).map(app_info) }))
 }
 
 // ---------------------------------------------------------------------------

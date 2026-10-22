@@ -10,6 +10,7 @@
  *   JESTER_FAKE_MEDIA=1       Chromium's synthetic camera and mic, treated as allowed
  *   JESTER_FAKE_AUDIO=a.wav   with FAKE_MEDIA: the mic plays this file, once
  *   JESTER_SAVE_SPEECH=dir    keep each spoken command as a WAV + what was heard
+ *   JESTER_LOG_SCREENS=1      log the screen the assistant's model is shown, each step
  *   JESTER_DATA_DIR=path      keep settings somewhere other than the user's
  *   JESTER_SPIKE_SECONDS=n    quit after n seconds
  *   JESTER_LOG=1              log engine status, gestures, telemetry and CPU
@@ -17,14 +18,22 @@
  *   JESTER_SELFTEST=1         check Settings ⇄ engine, logging what it sees
  *   JESTER_SELFTEST_CALIBRATE=1  also press Start on calibration (takes the screen)
  *   JESTER_SELFTEST_VOICE=1   also speak one command (FAKE_AUDIO) and log what it did
+ *   JESTER_SELFTEST_AGENT=1   also read Jester's own Settings as the assistant would, and
+ *                             run it there with a scripted model (needs DRIVER_DRY, and
+ *                             launching through `open` for Accessibility: dev:mac)
  *   JESTER_CAPTURE=file.png   with SELFTEST: save a picture of the whole page
  *   JESTER_THEME=light|dark   override the system's appearance
  */
 
-import { app, BrowserWindow, globalShortcut, nativeTheme, screen, session } from 'electron';
+import { app, BrowserWindow, globalShortcut, nativeTheme, safeStorage, screen, session } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE, MSG, saveSettings } from '../../../jester-extension/src/common/constants.js';
+import { createDesktopHost } from './agent/host.js';
+import { runDesktopAgent } from './agent/loop.js';
+import { screenText } from './agent/screen.js';
+import { createApprovalPrompt } from './approval.js';
+import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, storage } from './chrome-bridge.js';
 import { createDispatcher } from './dispatch.js';
 import { startDriver } from './driver.js';
@@ -48,6 +57,8 @@ const PERMISSION_POLL_MS = 2000;
 const FRONT_POLL_MS = 500;
 /** The extension's voice shortcut, kept for the desktop. */
 const VOICE_SHORTCUT = 'Alt+Shift+J';
+/** Long enough for the overlay's page to load. */
+const STARTED_TOAST_MS = 2000;
 
 registerScheme();
 if (env.JESTER_DATA_DIR) app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
@@ -76,6 +87,7 @@ const pointerCalls = [];
 let voiceHeard = null;
 let driver = null;
 let dispatch = null;
+let assistant = null;
 let speech = null;
 let voiceRunner = null;
 let quitting = false;
@@ -150,6 +162,20 @@ function desktopState() {
   };
 }
 
+/**
+ * Which camera the engine opened, for the log and Settings: with "Default
+ * camera", that's the OS's choice, which can be a nearby iPhone.
+ */
+async function noteCamera() {
+  const label = await engineWindow?.webContents
+    .executeJavaScript(`document.getElementById('camera')?.srcObject?.getVideoTracks?.()[0]?.label || ''`)
+    .catch(() => '');
+  if (!label || engine.state !== ENGINE.RUNNING) return;
+  engine = { ...engine, camera: label };
+  log('camera:', label);
+  refresh();
+}
+
 /** The speech model: 'ready', 'off' or 'missing' (see speech.js). */
 const voiceState = () => speech?.state || 'missing';
 
@@ -222,6 +248,8 @@ function toggleVoice() {
 
 /** A finished utterance, done; the pill says how it went. */
 async function onVoiceCommand(text) {
+  // An answer to the assistant's question, or "stop": the assistant's, not a command.
+  if (assistant.heard(text)) return;
   const { outcome } = await voiceRunner.run(text);
   post({ type: MSG.VOICE, voice: outcome ? { phase: 'answer', text: outcome.text, ok: outcome.ok } : { active: false } });
   voiceHeard?.({ text, outcome });
@@ -243,7 +271,8 @@ function watchFront() {
       const front = await driver.call('frontmost');
       // Chromium apps take ~2 s to build the tree aim-assist reads: start as
       // soon as an app comes to the front, while the cursor is in use.
-      if (settings?.pointerEnabled && front.app?.pid && front.app.pid !== frontPid) driver.call('wake', { pid: front.app.pid }).catch(() => undefined);
+      // Not Jester itself: its own windows have nothing to aim at.
+      if (settings?.pointerEnabled && front.app?.pid && front.app.pid !== frontPid && front.app.pid !== process.pid) driver.call('wake', { pid: front.app.pid }).catch(() => undefined);
       frontPid = front.app?.pid ?? frontPid;
       let bounds = front.window?.bounds;
       // The driver speaks physical pixels on Windows; displays are in DIPs.
@@ -313,6 +342,24 @@ function listenToPages() {
         else if (message.action === 'open-settings') openSettings(String(message.id));
         checkPermissions();
         return desktopState();
+      // Settings' AI models. Keys go in; only masked ones come back out.
+      case 'jester/desktop-connections':
+        try {
+          if (message.op === 'save') await assistant.connections.save(message.input || {});
+          else if (message.op === 'remove') await assistant.connections.remove(String(message.id));
+          return { ok: true, ...(await assistant.connections.list()) };
+        } catch (err) {
+          return { ok: false, error: err.message, ...(await assistant.connections.list()) };
+        }
+      // Settings' camera view: the engine draws one while someone asks, and
+      // only takes asking from Jester's own (worker's) messages.
+      case 'jester/desktop-preview':
+        post({ type: MSG.PREVIEW_PING });
+        return { ok: true };
+      // The assistant's question window: Allow / Don't.
+      case 'jester/approval-answer':
+        assistant.answer(message.approved === true);
+        return { ok: true };
       default:
         return undefined;
     }
@@ -354,8 +401,16 @@ function selfTest(capture) {
     }
     await reach('running');
     log('selftest: settings shows', await shows());
+    await pause(1500);
+    log('selftest: camera view —', await page(`(() => { const img = document.getElementById('camera-preview'); return img.hidden ? 'not shown' : img.naturalWidth + '×' + img.naturalHeight; })()`));
     log('selftest: voice row —', await page(`(() => { const box = document.getElementById('voiceEnabled'); return (box.checked ? '☑ ' : '☐ ') + (box.disabled ? '(disabled) ' : '') + document.getElementById('voice-hint').textContent; })()`));
     log('selftest: speech model row —', await page(`(() => { const select = document.getElementById('speechModel'); return [...select.options].map((o) => (o.selected ? '▸' : '') + o.text + (o.disabled ? ' [off]' : '')).join(' | ') + ' — ' + document.getElementById('speech-model-hint').textContent; })()`));
+    // The assistant's models: listed, and a model saved without a key refused
+    // before anything is stored (so no keychain is touched).
+    log('selftest: assistant models —', await page(`document.getElementById('connections').textContent.replace(/\\s+/g, ' ').trim()`));
+    await page(`document.getElementById('connection-model').value = 'gemini-2.5-flash'; document.getElementById('connection-key').value = ''; document.getElementById('connection-form').requestSubmit();`);
+    await pause(500);
+    log('selftest: a model without a key —', await page(`document.getElementById('connection-error').textContent`));
     await page(`document.getElementById('enabled').click()`);
     log('selftest: switched off —', (await reach('off')) ? 'engine off' : `engine still ${engine.state}`, '|', await shows());
     await page(`document.getElementById('enabled').click()`);
@@ -364,6 +419,12 @@ function selfTest(capture) {
     // Gestures' actions, as far as the driver — and only a dry-run driver,
     // which describes input instead of sending it: never press real keys here.
     if (!env.JESTER_DRIVER_DRY) return log('selftest: skipping actions (set JESTER_DRIVER_DRY=1)');
+
+    // The assistant, on this app's own Settings window only (never the
+    // user's screen): what it reads there, then a whole run with a scripted
+    // model, whose click the dry-run driver describes instead of doing.
+    if (env.JESTER_SELFTEST_AGENT) await selfTestAgent();
+    if (env.JESTER_SELFTEST_APP) await selfTestApp(env.JESTER_SELFTEST_APP);
 
     for (const [action, gesture] of [['VOLUME_UP', 'Thumb_Up'], ['APP_NEXT', 'Victory'], ['SPEED_UP', 'ILoveYou']]) {
       log('selftest: dispatch', action, '→', JSON.stringify(await dispatch(action, { source: 'pose', gesture })));
@@ -375,7 +436,43 @@ function selfTest(capture) {
       const file = capture.replace(/\.png$/, '-overlay.png');
       fs.writeFileSync(file, (await overlay.webContents.capturePage()).toPNG());
       log('selftest: captured', file);
+      // The assistant's faces on the pill: at work, then asking.
+      for (const [name, voice] of [['assistant', { phase: 'thinking', step: 'Click “Play Gunna”' }], ['approval', { phase: 'approval', text: 'Click “Send”?' }]]) {
+        post({ type: MSG.VOICE, voice });
+        await pause(400);
+        const face = capture.replace(/\.png$/, `-${name}.png`);
+        fs.writeFileSync(face, (await overlay.webContents.capturePage()).toPNG());
+        log('selftest: captured', face);
+      }
+      post({ type: MSG.VOICE, voice: { phase: 'thinking' } });
+      post({ type: MSG.VOICE, voice: { active: false } });
     }
+
+    // The assistant's question window: shown, and a click on Allow (sent to
+    // the page, not the OS) reaching the assistant.
+    const question = createApprovalPrompt();
+    question.show('Type “hello” in “Message”, then Enter?');
+    await pause(1500);
+    const asking = BrowserWindow.getAllWindows().find((win) => win.webContents.getURL().startsWith('jester://app/overlay/approval.html'));
+    if (!asking) log('selftest: question window — not shown');
+    else {
+      if (capture) {
+        const file = capture.replace(/\.png$/, '-question.png');
+        fs.writeFileSync(file, (await asking.webContents.capturePage()).toPNG());
+        log('selftest: captured', file);
+      }
+      const answered = new Promise((resolve) => {
+        const answer = assistant.answer;
+        assistant.answer = (approved) => resolve(approved);
+        setTimeout(() => resolve('no answer'), 2000);
+        setTimeout(() => (assistant.answer = answer), 2100);
+      });
+      const at = await asking.webContents.executeJavaScript(`(() => { const box = document.getElementById('allow').getBoundingClientRect(); return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }; })()`);
+      asking.webContents.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      asking.webContents.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      log('selftest: question window — Allow clicked, the assistant heard:', JSON.stringify(await answered), `· can become the active app: ${asking.isFocusable()}`);
+    }
+    question.hide();
 
     // The cursor: frames as the engine sends them, a dry-run driver taking
     // the input, every call to it recorded.
@@ -469,11 +566,53 @@ function selfTest(capture) {
   });
 }
 
+/**
+ * JESTER_SELFTEST_APP=name: what the assistant would see of that app's window
+ * (its controls, so the user's own content: only on request). JESTER_SELFTEST_GOAL
+ * ranks them as a command would.
+ */
+async function selfTestApp(name) {
+  const { apps = [] } = await driver.call('apps').catch(() => ({}));
+  const target = apps.find((app) => app.name?.toLowerCase() === name.toLowerCase());
+  if (!target) return log('selftest: not running —', name);
+  const seen = await driver.call('snapshot', { pid: target.pid }).catch((err) => ({ error: err.message }));
+  if (seen.error) return log(`selftest: ${name} —`, seen.error);
+  log(`selftest: ${name} — ${seen.elements.length} controls, ${seen.visits} looked at, in ${seen.ms} ms:\n${screenText(seen, { goal: env.JESTER_SELFTEST_GOAL || '', chars: 4000 })}`);
+}
+
+/** JESTER_SELFTEST_AGENT: see selfTest. Reads only Jester's own windows. */
+async function selfTestAgent() {
+  const goal = 'turn off cursor control';
+  // The first read of a Chromium window waits while its page's tree is built.
+  const own = await driver.call('snapshot', { pid: process.pid }).catch((err) => ({ error: err.message }));
+  if (own.error) return log('selftest: snapshot —', own.error);
+  log(`selftest: snapshot of Jester's ${JSON.stringify(own.window?.title)} — ${own.elements.length} elements in ${own.ms} ms${own.truncated ? ', truncated' : ''}:\n${screenText(own, { goal, chars: 1400 })}`);
+  const calls = [];
+  const watched = { call: async (cmd, params) => (calls.push(cmd === 'act' ? `act ${params.action} ${params.element}` : cmd), driver.call(cmd, params)) };
+  const host = createDesktopHost({ driver: watched, openApp: async () => ({ ok: false, text: 'not in a self-test' }), openUrl: async () => undefined, dispatch, pid: process.pid });
+  // A model that reads the screen it's given, as a real one would.
+  const model = async ({ prompt }) => {
+    const { screen, lastResult } = JSON.parse(prompt);
+    if (lastResult) return { json: { action: { action: 'finish', say: 'Cursor control is off.', success: lastResult.ok } } };
+    const line = screen.split('\n').find((text) => /^\[\d+\] (?:checkbox|switch) "Cursor control/.test(text));
+    return { json: { action: line ? { action: 'click', id: Number(line.match(/^\[(\d+)\]/)[1]) } : { action: 'finish', say: 'No such switch.', success: false } } };
+  };
+  const result = await runDesktopAgent({ goal, host, model, confirm: async () => false, platform: process.platform });
+  log('selftest: assistant —', JSON.stringify(result), '· driver:', calls.join(', '));
+}
+
 async function start() {
   if (!env.JESTER_KEEP_DOCK) app.dock?.hide();
   if (['light', 'dark'].includes(env.JESTER_THEME)) nativeTheme.themeSource = env.JESTER_THEME;
   serveFiles();
-  installBridge({ onClose: closeSafely });
+  // API keys are sealed on disk with the OS's keychain (macOS) or DPAPI (Windows),
+  // which is first touched when a key is saved. Without either, saving fails:
+  // a key is never written in the clear.
+  const sealer = {
+    seal: (text) => safeStorage.encryptString(text).toString('base64'),
+    unseal: (sealed) => safeStorage.decryptString(Buffer.from(sealed, 'base64'))
+  };
+  installBridge({ onClose: closeSafely, sealer });
   await seedSettings();
   installMediaPermissions();
   permissions = readPermissions();
@@ -500,15 +639,27 @@ async function start() {
   dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
   // Switched on by refresh(), from the settings.
   speech = startSpeech({ log });
-  voiceRunner = createVoiceRunner({
+  // A dry run describes `open`, `osascript` and `shortcuts` too, rather than running them.
+  const runTool = env.JESTER_DRIVER_DRY ? async (file, args) => (log('dry run: would run', file, JSON.stringify(args)), '') : runFile;
+  assistant = createAssistant({
     driver: input,
+    openApp: (name) => voiceRunner.openApp(name),
+    // Back to the front, for the app the assistant read: keys go wherever is in front.
+    activate: (app) =>
+      process.platform === 'darwin' ? runTool('open', app.bundleId ? ['-b', app.bundleId] : ['-a', String(app.name)]) : input.call('activateApp', { pid: app.pid }),
+    openUrl: (url) => (process.platform === 'darwin' ? runTool('open', [url]) : runTool('rundll32.exe', ['url.dll,FileProtocolHandler', url])),
     dispatch,
-    canPost,
-    onJester,
-    // A dry run describes `open`, `osascript` and `shortcuts` too, rather than running them.
-    run: env.JESTER_DRIVER_DRY ? async (file, args) => (log('dry run: would run', file, JSON.stringify(args)), '') : runFile,
-    log
+    prompt: createApprovalPrompt(),
+    // Jester's own windows (Settings, say) are never the app meant.
+    exclude: process.pid,
+    // A question can be answered aloud: the mic opens for it.
+    listen: () => !voiceProblem() && engineHost.voice('start'),
+    // macOS reads no app's controls while a Jester overlay is up (README): the pill blinks out meanwhile.
+    quietly: (task) => overlays.whileHidden(task),
+    log,
+    logScreens: !!env.JESTER_LOG_SCREENS
   });
+  voiceRunner = createVoiceRunner({ driver: input, dispatch, canPost, onJester, run: runTool, log, assistant });
 
   let lastTelemetryLog = 0;
   let cursorFrames = 0;
@@ -517,16 +668,22 @@ async function start() {
     screen: primaryScreen,
     context: () => context,
     onStatus: (status) => {
-      engine = { state: status.state, detail: status.detail || '' };
+      const started = status.state === ENGINE.RUNNING && engine.state !== ENGINE.RUNNING;
+      engine = { state: status.state, detail: status.detail || '', camera: started ? '' : engine.camera || '' };
       const mic = status.mic ? `${status.mic.state}${status.mic.detail ? `: ${status.mic.detail}` : ''}` : '';
       if (mic !== micState) log('mic', (micState = mic));
       log('status', status.state, status.detail || '');
+      if (started) noteCamera();
       refresh();
     },
     onTrigger: (message) => {
       log('trigger', message.action, `(${message.source} ${message.gesture})`);
+      // While the assistant asks, 👍 and 👎 answer it instead of doing their usual action.
+      if (message.source === 'pose' && assistant.gesture(message.gesture)) return;
       dispatch(message.action, { source: message.source, gesture: message.gesture });
     },
+    // The mic, opened for an answer to the assistant, may stop with none.
+    onVoice: (message) => assistant.micEnded(message.voice),
     onCursor: (cursor) => {
       cursorFrames += 1;
       if (cursor?.click) log('cursor click at', cursor.x?.toFixed(3), cursor.y?.toFixed(3));
@@ -540,7 +697,8 @@ async function start() {
       const now = Date.now();
       if (now - lastTelemetryLog < 5000) return;
       lastTelemetryLog = now;
-      log(`telemetry fps ${telemetry.fps} ${telemetry.delegate} hand ${telemetry.handPresent ? 'yes' : 'no'} gesture ${telemetry.gesture || '-'} · cursor frames ${cursorFrames} · ${cpuReport()}`);
+      const state = [telemetry.stalled && 'STALLED', telemetry.standby && 'asleep', telemetry.zoom && `zoom ${telemetry.zoom.state}`].filter(Boolean).join(' ');
+      log(`telemetry fps ${telemetry.fps} ${telemetry.delegate}${state ? ` ${state}` : ''} hand ${telemetry.handPresent ? 'yes' : 'no'} gesture ${telemetry.gesture || '-'} · cursor frames ${cursorFrames} · ${cpuReport()}`);
       cursorFrames = 0;
     }
   });
@@ -558,6 +716,8 @@ async function start() {
 
   if (env.JESTER_SELFTEST) selfTest(env.JESTER_CAPTURE && path.resolve(env.JESTER_CAPTURE));
   else if (env.JESTER_OPEN_SETTINGS || missingNeeded(permissions).length) showSettings();
+  // Started from its icon, Jester opens no window: say it's there, once the overlay has loaded.
+  else setTimeout(() => overlays.toast('Jester is on', { detail: 'It lives in the menu bar' }), STARTED_TOAST_MS);
 
   const seconds = Number(env.JESTER_SPIKE_SECONDS);
   // Destroy first: a window stuck mid-close must not keep a test run alive.
