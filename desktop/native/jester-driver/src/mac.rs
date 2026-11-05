@@ -12,7 +12,7 @@ use objc2_app_kit::{NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags
 use objc2_application_services::{
     AXCopyMultipleAttributeOptions, AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, AXValue, AXValueType,
 };
-use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGSize};
+use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize, Type};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton,
     CGPreflightPostEventAccess, CGPreflightScreenCaptureAccess, CGScrollEventUnit, CGWindowListCopyWindowInfo, CGWindowListOption,
@@ -687,9 +687,11 @@ const SNAPSHOT_ATTRIBUTES: [&str; 13] = [
 /// alone can hold thousands.
 const SNAPSHOT_VISITS: usize = 3000;
 
+/// The last snapshot: its number, its elements by their numbers in it, and its window.
+type Listed = (u64, Vec<CFRetained<AXUIElement>>, Option<CFRetained<AXUIElement>>);
+
 thread_local! {
-    /// The last snapshot's number, and its elements by their numbers in it.
-    static LISTED: std::cell::RefCell<(u64, Vec<CFRetained<AXUIElement>>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+    static LISTED: std::cell::RefCell<Listed> = const { std::cell::RefCell::new((0, Vec::new(), None)) };
 }
 
 /// A role in the words both platforms share; None for what a snapshot leaves out.
@@ -1031,6 +1033,7 @@ pub fn snapshot(pid: Option<i32>, exclude: Option<i32>, limit: usize, debug: boo
         let mut listed = listed.borrow_mut();
         listed.0 += 1;
         listed.1 = walked.handles;
+        listed.2 = Some(window.clone());
         listed.0
     });
     Ok(json!({
@@ -1045,54 +1048,594 @@ pub fn snapshot(pid: Option<i32>, exclude: Option<i32>, limit: usize, debug: boo
     }))
 }
 
-/// Does something to an element of the last snapshot.
-pub fn act(snapshot: u64, id: usize, action: &str, value: Option<&str>) -> Result<Value> {
-    let element = LISTED.with(|listed| {
+fn perform(element: &AXUIElement, name: &str) -> AXError {
+    unsafe { element.perform_action(&CFString::from_str(name)) }
+}
+
+fn set_attribute(element: &AXUIElement, name: &str, to: &CFType) -> AXError {
+    unsafe { element.set_attribute_value(&CFString::from_str(name), to) }
+}
+
+fn settable(element: &AXUIElement, name: &str) -> bool {
+    let mut flag: u8 = 0;
+    let error = unsafe { element.is_attribute_settable(&CFString::from_str(name), NonNull::from(&mut flag)) };
+    error == AXError::Success && flag != 0
+}
+
+fn parent(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
+    attribute(element, "AXParent")?.downcast::<AXUIElement>().ok()
+}
+
+/// At most this many of an element's children are looked at.
+const CHILDREN: usize = 400;
+
+fn children(element: &AXUIElement) -> Vec<CFRetained<AXUIElement>> {
+    attribute(element, "AXChildren")
+        .and_then(|value| value.downcast::<CFArray>().ok())
+        .map(|array| {
+            let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
+            (0..array.len().min(CHILDREN)).filter_map(|i| array.get(i)).collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether an element is part of a web page. A page doesn't notice a value
+/// set through accessibility (its scripts never hear of it), so text for one
+/// is typed instead.
+fn in_web_page(element: &AXUIElement) -> bool {
+    let mut current = Some(element.retain());
+    for _ in 0..40 {
+        let Some(node) = current else { return false };
+        if string_attribute(&node, "AXRole").as_deref() == Some("AXWebArea") {
+            return true;
+        }
+        current = parent(&node);
+    }
+    false
+}
+
+/// An element's whole value, as text (a password field's is never read).
+fn full_value(element: &AXUIElement) -> Option<String> {
+    let value = attribute(element, "AXValue")?;
+    value.downcast_ref::<CFString>().map(|text| text.to_string()).or_else(|| number_value(&value).map(|number| number.to_string()))
+}
+
+/// Waits up to a second for a field's value to be as wanted: an app that
+/// answered late (kAXErrorCannotComplete) still applies what it was sent.
+fn value_settles(element: &AXUIElement, want: impl Fn(&str) -> bool) -> (String, bool) {
+    let mut now = String::new();
+    for look in 0..10 {
+        if look > 0 {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        now = full_value(element).unwrap_or_default();
+        if want(&now) {
+            return (now, true);
+        }
+    }
+    (now, false)
+}
+
+/// What a value write came to: landed, not as asked, or (no answer in time,
+/// and not seen since) unknown — which is never "failed": typing it again
+/// could put it in twice.
+fn written(element: &AXUIElement, error: AXError, want: impl Fn(&str) -> bool) -> Result<Value> {
+    match error {
+        AXError::Success => {
+            let now = full_value(element).unwrap_or_default();
+            let landed = want(&now);
+            Ok(json!({ "value": clip(&now, 2000), "landed": landed }))
+        }
+        AXError::CannotComplete => match value_settles(element, want) {
+            (now, true) => Ok(json!({ "value": clip(&now, 2000), "landed": true })),
+            _ => Ok(json!({ "busy": true, "landed": null })),
+        },
+        error => Err(format!("couldn't set its value (AXError {})", error.0)),
+    }
+}
+
+/// A field's whole value replaced, and read back.
+fn write_value(element: &AXUIElement, text: &str) -> Result<Value> {
+    if in_web_page(element) {
+        return Err("web pages don't take text set this way; type it instead".into());
+    }
+    let error = set_attribute(element, "AXValue", &CFString::from_str(text));
+    written(element, error, |now| now == text)
+}
+
+/// Text added at the end of a field without rewriting it: the caret put after
+/// its last character and the text inserted there, which keeps the field's
+/// styles, lists and attachments (a whole-value write would flatten them all
+/// into plain text). Read back by how the field ends.
+fn insert_at_end(element: &AXUIElement, text: &str) -> Result<Value> {
+    if in_web_page(element) {
+        return Err("web pages don't take text set this way; type it instead".into());
+    }
+    if !settable(element, "AXSelectedTextRange") || !settable(element, "AXSelectedText") {
+        return Err("this field can't take added text this way; type it instead".into());
+    }
+    // Unread isn't empty: the caret would go to its start. It's typed instead.
+    let old = full_value(element).ok_or("couldn't read the field; type it instead")?;
+    // AX ranges count UTF-16 units, as Cocoa's strings do.
+    let mut end = CFRange { location: old.encode_utf16().count() as isize, length: 0 };
+    let caret = unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut end).cast()) }.ok_or("couldn't describe the caret")?;
+    match set_attribute(element, "AXSelectedTextRange", &caret) {
+        AXError::Success => {}
+        error => return Err(format!("couldn't put the caret at the end (AXError {})", error.0)),
+    }
+    let error = set_attribute(element, "AXSelectedText", &CFString::from_str(text));
+    let want = crate::protocol::squashed(&format!("{old}{text}"));
+    written(element, error, |now| crate::protocol::squashed(now).ends_with(&crate::protocol::squashed(text)) && crate::protocol::squashed(now).len() >= want.len())
+}
+
+/// How long a scroll's effect may take to show, a look at a time.
+const SCROLL_LOOKS_MS: [u64; 3] = [25, 75, 75];
+/// A scroll area is looked for this far through the window, at most.
+const SCROLL_SEARCH: usize = 1500;
+/// Of a page, how much one step moves (a little of the last page stays in view).
+const PAGE_OVERLAP: f64 = 0.9;
+
+/// The scroll area an element is in (or is), else the window's largest.
+fn scroll_area(element: &AXUIElement, window: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
+    let mut current = Some(element.retain());
+    for _ in 0..30 {
+        let Some(node) = current else { break };
+        if string_attribute(&node, "AXRole").as_deref() == Some("AXScrollArea") {
+            return Some(node);
+        }
+        current = parent(&node);
+    }
+    let started = Instant::now();
+    let mut queue = std::collections::VecDeque::from([window.retain()]);
+    let (mut best, mut best_area, mut visits) = (None, 0.0, 0);
+    while let Some(node) = queue.pop_front() {
+        visits += 1;
+        if visits > SCROLL_SEARCH || started.elapsed() > Duration::from_millis(300) {
+            break;
+        }
+        if string_attribute(&node, "AXRole").as_deref() == Some("AXScrollArea") {
+            let area = frame_rect(&node).map(|(_, _, w, h)| w * h).unwrap_or(0.0);
+            if area > best_area {
+                best_area = area;
+                best = Some(node.clone());
+            }
+        }
+        queue.extend(children(&node));
+    }
+    best
+}
+
+fn scroll_bar(area: &AXUIElement, horizontal: bool) -> Option<CFRetained<AXUIElement>> {
+    attribute(area, if horizontal { "AXHorizontalScrollBar" } else { "AXVerticalScrollBar" })?.downcast::<AXUIElement>().ok()
+}
+
+/// Where a scroll bar is, from 0 (the top, or left) to 1.
+fn bar_value(bar: &AXUIElement) -> Option<f64> {
+    let value = attribute(bar, "AXValue")?;
+    number_value(&value)
+}
+
+/// Whether the bar moved from `before` within a moment, by at least `least`.
+fn bar_moved(bar: &AXUIElement, before: f64, least: f64) -> bool {
+    SCROLL_LOOKS_MS.iter().any(|&ms| {
+        std::thread::sleep(Duration::from_millis(ms));
+        bar_value(bar).is_some_and(|now| (now - before).abs() >= least)
+    })
+}
+/// A bar move worth noticing, when nothing says how far a page goes.
+const BAR_MOVE: f64 = 0.001;
+
+/// How far one page moves the scroll bar, whose value spans the whole scroll
+/// range: the visible part over what's out of view, from the scroll area's
+/// frame and its content's. None when the content can't be measured.
+fn page_step(area: &AXUIElement, horizontal: bool) -> Option<f64> {
+    let (_, _, area_w, area_h) = frame_rect(area)?;
+    let content = attribute(area, "AXContents")
+        .and_then(|value| value.downcast::<CFArray>().ok())
+        .and_then(|array| {
+            let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
+            array.get(0)
+        })
+        .or_else(|| children(area).into_iter().find(|kid| string_attribute(kid, "AXRole").as_deref() != Some("AXScrollBar")))?;
+    let (_, _, content_w, content_h) = frame_rect(&content)?;
+    let (visible, whole) = if horizontal { (area_w, content_w) } else { (area_h, content_h) };
+    (whole > visible + 1.0).then(|| (visible * PAGE_OVERLAP / (whole - visible)).clamp(0.0005, 1.0))
+}
+
+/// Whether a bar's value is at the end a scroll goes toward.
+fn at_end(value: Option<f64>, forward: bool) -> bool {
+    value.is_some_and(|value| if forward { value >= 0.999 } else { value <= 0.001 })
+}
+
+/// One page, through the scroll area's own actions — no pointer, no keys, and
+/// the app needn't be in front. `moved`: true or false when its scroll bar
+/// says, null when it can't (no bar, or a list so long a page barely moves
+/// it). False without `atEnd` means it couldn't scroll this way: the caller
+/// turns the wheel instead.
+fn scroll_page(area: &AXUIElement, horizontal: bool, forward: bool) -> Value {
+    let bar = scroll_bar(area, horizontal);
+    let before = bar.as_deref().and_then(bar_value);
+    if at_end(before, forward) {
+        return json!({ "moved": false, "position": before, "atEnd": true });
+    }
+    let name = match (horizontal, forward) {
+        (false, false) => "AXScrollUpByPage",
+        (false, true) => "AXScrollDownByPage",
+        (true, false) => "AXScrollLeftByPage",
+        (true, true) => "AXScrollRightByPage",
+    };
+    let pages = actions(area).iter().any(|action| action == name);
+    if pages && perform(area, name) == AXError::Success {
+        return match (&bar, before) {
+            (Some(bar), Some(before)) if bar_moved(bar, before, BAR_MOVE) => json!({ "moved": true, "position": bar_value(bar) }),
+            _ => json!({ "moved": null }),
+        };
+    }
+    // Else the scroll bar itself, one page along (WebKit's views have no page action).
+    if let (Some(bar), Some(before), Some(step)) = (&bar, before, page_step(area, horizontal)) {
+        if settable(bar, "AXValue") {
+            let to = (before + if forward { step } else { -step }).clamp(0.0, 1.0);
+            if set_attribute(bar, "AXValue", &CFNumber::new_f64(to)) == AXError::Success && bar_moved(bar, before, (step / 2.0).min(BAR_MOVE)) {
+                return json!({ "moved": true, "position": bar_value(bar) });
+            }
+        }
+    }
+    json!({ "moved": false, "position": before, "atEnd": false })
+}
+
+/// All the way to one end: the bar set there, else page by page. Paged with
+/// no bar to say, it's `unconfirmed`.
+fn scroll_end(area: &AXUIElement, horizontal: bool, forward: bool) -> Value {
+    if let Some(bar) = scroll_bar(area, horizontal) {
+        if let Some(before) = bar_value(&bar) {
+            if at_end(Some(before), forward) {
+                return json!({ "moved": false, "position": before, "atEnd": true });
+            }
+            let end = if forward { 1.0 } else { 0.0 };
+            if settable(&bar, "AXValue") && set_attribute(&bar, "AXValue", &CFNumber::new_f64(end)) == AXError::Success && bar_moved(&bar, before, BAR_MOVE) {
+                return json!({ "moved": true, "position": bar_value(&bar) });
+            }
+        }
+    }
+    let (mut moved, mut unseen) = (false, false);
+    let mut last = json!({ "moved": false });
+    for _ in 0..30 {
+        last = scroll_page(area, horizontal, forward);
+        match last["moved"].as_bool() {
+            Some(true) => moved = true,
+            // Paging past the end is harmless; with no bar to say, keep going.
+            None => unseen = true,
+            Some(false) => break,
+        }
+    }
+    if moved || unseen {
+        last["moved"] = if moved { json!(true) } else { Value::Null };
+        if unseen && !moved {
+            last["unconfirmed"] = json!(true);
+        }
+    }
+    last
+}
+
+/// Does something to an element of the last snapshot (or, for scrolling, its window).
+pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) -> Result<Value> {
+    let (element, window) = LISTED.with(|listed| {
         let listed = listed.borrow();
         if listed.0 != snapshot {
             return Err("the screen has been read again since; use the newest numbers".to_string());
         }
-        listed.1.get(id).cloned().ok_or_else(|| format!("there is no element {id}"))
+        let window = listed.2.clone().ok_or("nothing has been read yet")?;
+        match id {
+            Some(id) => Ok((listed.1.get(id).cloned().ok_or_else(|| format!("there is no element {id}"))?, window)),
+            None if matches!(action, "scrollPage" | "scrollEnd") => Ok((window.clone(), window)),
+            None => Err(format!("{action} needs an element")),
+        }
     })?;
-    if is_secure(&element) && matches!(action, "focus" | "setValue") {
+    if is_secure(&element) && matches!(action, "focus" | "setValue" | "appendValue" | "read") {
         return Err("Jester never types into password fields".into());
     }
-    let perform = |name: &'static str| {
-        let error = unsafe { element.perform_action(&CFString::from_static_str(name)) };
-        if error == AXError::Success {
-            Ok(())
-        } else {
-            Err(format!("{name} didn't work on it (AXError {})", error.0))
-        }
-    };
-    let set = |name: &'static str, to: &CFType| {
-        let error = unsafe { element.set_attribute_value(&CFString::from_static_str(name), to) };
-        if error == AXError::Success {
-            Ok(())
-        } else {
-            Err(format!("couldn't set {name} (AXError {})", error.0))
-        }
+    let done = |name: &str| match perform(&element, name) {
+        AXError::Success => Ok(json!({ "element": describe(&element) })),
+        // The app stopped answering because the action opened something
+        // modal (a sheet, a dialog, a context menu, which runs until it
+        // closes): it was done, and doing it again (say, by clicking) would
+        // do it twice. Asking about the element now would only wait out the
+        // timeout.
+        AXError::CannotComplete if matches!(name, "AXPress" | "AXShowMenu") => Ok(json!({ "element": null, "busy": true })),
+        error => Err(format!("{name} didn't work on it (AXError {})", error.0)),
     };
     match action {
-        "press" => perform("AXPress"),
-        "showMenu" => perform("AXShowMenu"),
-        "increment" => perform("AXIncrement"),
-        "decrement" => perform("AXDecrement"),
-        "scrollTo" => perform("AXScrollToVisible"),
-        "focus" => set("AXFocused", CFBoolean::new(true)),
-        "setValue" => set("AXValue", &CFString::from_str(value.unwrap_or(""))),
+        "press" => done("AXPress"),
+        "showMenu" => done("AXShowMenu"),
+        "increment" => done("AXIncrement"),
+        "decrement" => done("AXDecrement"),
+        "scrollTo" => done("AXScrollToVisible"),
+        "focus" => match set_attribute(&element, "AXFocused", CFBoolean::new(true)) {
+            AXError::Success => Ok(json!({ "element": describe(&element) })),
+            error => Err(format!("couldn't focus it (AXError {})", error.0)),
+        },
+        "read" => Ok(crate::protocol::read_reply(&full_value(&element).unwrap_or_default(), value)),
+        "setValue" => write_value(&element, value.unwrap_or("")),
+        "appendValue" => insert_at_end(&element, value.unwrap_or("")),
+        "scrollPage" | "scrollEnd" => {
+            let (horizontal, forward) = crate::protocol::scroll_direction(value)?;
+            let area = scroll_area(&element, &window).ok_or("nothing here scrolls")?;
+            Ok(if action == "scrollPage" { scroll_page(&area, horizontal, forward) } else { scroll_end(&area, horizontal, forward) })
+        }
         other => Err(format!("unknown action \"{other}\"")),
-    }?;
-    Ok(json!({ "element": describe(&element) }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Menus and windows
+// ---------------------------------------------------------------------------
+
+fn title(element: &AXUIElement) -> String {
+    string_attribute(element, "AXTitle").unwrap_or_default()
+}
+
+/// The items a menu-bar title, or a menu item with a submenu, opens onto;
+/// None for a command, which holds no menu (an empty list is a menu that
+/// fills itself only as it opens).
+fn menu_items(element: &AXUIElement) -> Option<Vec<CFRetained<AXUIElement>>> {
+    let kids = children(element);
+    if string_attribute(element, "AXRole").as_deref() == Some("AXMenuBar") {
+        return Some(kids);
+    }
+    kids.into_iter().find(|kid| string_attribute(kid, "AXRole").as_deref() == Some("AXMenu")).map(|menu| children(&menu))
+}
+
+/// Menu titles of commands that put text where the focus is.
+fn inserts_text(title: &str) -> bool {
+    let title = title.to_lowercase();
+    ["paste", "autofill", "emoji", "dictation", "insert"].iter().any(|word| title.contains(word))
+}
+
+/// What has an app's keyboard focus, if it answers.
+fn app_focus(app: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
+    attribute(app, "AXFocusedUIElement")?.downcast::<AXUIElement>().ok()
+}
+
+/// Finds an app's menu-bar command by its titles and, with `press`, chooses
+/// it. Menus are read, not opened (macOS lists them closed). One that fills
+/// itself only as it opens (Open Recent) can't be read so: looked up, its
+/// level comes back as asked (`partial`); pressed, it's opened to be read,
+/// and closed again if what was asked for isn't there. Nothing is chosen
+/// while a password field has the app's focus: Paste, AutoFill and the like
+/// would put text into it.
+pub fn menu(pid: i32, path: &[String], press: bool, exact: bool) -> Result<Value> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let focus = app_focus(&app);
+    if press && focus.as_deref().is_some_and(is_secure) {
+        return Err("a password field has the focus, so no menu command was chosen (one could put text into it)".into());
+    }
+    // A web page's password field, its tree not read yet, shows only as secure input: nothing that puts text in goes then.
+    let plain_text_focus = focus.as_deref().is_some_and(|focus| matches!(string_attribute(focus, "AXRole").as_deref(), Some("AXTextField" | "AXTextArea" | "AXComboBox")));
+    let guarded = press && unsafe { IsSecureEventInputEnabled() } != 0 && !plain_text_focus;
+    let bar = attribute(&app, "AXMenuBar").and_then(|value| value.downcast::<AXUIElement>().ok()).ok_or("this app has no menu bar to read")?;
+    let mut current = bar;
+    let mut found: Vec<String> = Vec::new();
+    let mut opened: Option<CFRetained<AXUIElement>> = None;
+    let close = |opened: &Option<CFRetained<AXUIElement>>| {
+        if let Some(menu) = opened.as_deref().and_then(|item| children(item).into_iter().find(|kid| string_attribute(kid, "AXRole").as_deref() == Some("AXMenu"))) {
+            perform(&menu, "AXCancel");
+        }
+    };
+    for (depth, part) in path.iter().enumerate() {
+        // A command holds nothing: a path that goes on past it names no command.
+        let Some(mut items) = menu_items(&current) else {
+            close(&opened);
+            return Err(format!("“{}” is a command, with nothing under it", crate::protocol::menu_words(&found)));
+        };
+        if items.is_empty() && depth > 0 {
+            if !press {
+                let mut whole = found.clone();
+                whole.extend(path[depth..].iter().cloned());
+                return Ok(json!({ "path": whole, "enabled": true, "pressed": false, "partial": true }));
+            }
+            // It holds a menu, which fills itself as it opens: opened to be read (closed again below if needed).
+            if perform(&current, "AXPress") == AXError::Success {
+                opened.get_or_insert_with(|| current.clone());
+                std::thread::sleep(Duration::from_millis(250));
+                items = menu_items(&current).unwrap_or_default();
+            }
+        }
+        // The Apple menu is the system's, not the app's.
+        if depth == 0 {
+            items.retain(|item| title(item) != "Apple");
+        }
+        let titles: Vec<String> = items.iter().map(|item| title(item)).collect();
+        let Some(i) = crate::protocol::title_match(&titles, part, exact) else {
+            close(&opened);
+            let place = if found.is_empty() { "the menu bar".to_string() } else { format!("“{}”", crate::protocol::menu_words(&found)) };
+            return Err(format!("no “{part}” in {place}; there is: {}", crate::protocol::listing(&titles)));
+        };
+        found.push(titles[i].clone());
+        current = items[i].clone();
+    }
+    let enabled = bool_attribute(&current, "AXEnabled").unwrap_or(true);
+    if press {
+        if !enabled {
+            close(&opened);
+            return Err(format!("“{}” is greyed out right now", crate::protocol::menu_words(&found)));
+        }
+        if guarded && found.last().is_some_and(|title| inserts_text(title)) {
+            close(&opened);
+            return Err("a password field may have the focus, so nothing that puts text in was chosen".into());
+        }
+        // The title asked for opens a menu: it names no command.
+        if menu_items(&current).is_some_and(|items| !items.is_empty()) {
+            close(&opened);
+            return Err(format!("“{}” opens a menu: name an item in it", crate::protocol::menu_words(&found)));
+        }
+        match perform(&current, "AXPress") {
+            AXError::Success => {}
+            // It opened something modal: it was chosen.
+            AXError::CannotComplete => return Ok(json!({ "path": found, "enabled": true, "pressed": true, "busy": true })),
+            error => {
+                close(&opened);
+                return Err(format!("“{}” didn't work (AXError {})", crate::protocol::menu_words(&found), error.0));
+            }
+        }
+    }
+    Ok(json!({ "path": found, "enabled": enabled, "pressed": press }))
+}
+
+fn ax_point(x: f64, y: f64) -> Option<CFRetained<AXValue>> {
+    let mut point = CGPoint { x, y };
+    unsafe { AXValue::new(AXValueType::CGPoint, NonNull::from(&mut point).cast()) }
+}
+
+fn ax_size(w: f64, h: f64) -> Option<CFRetained<AXValue>> {
+    let mut size = CGSize { width: w, height: h };
+    unsafe { AXValue::new(AXValueType::CGSize, NonNull::from(&mut size).cast()) }
+}
+
+/// The app's window as `window` reports it.
+fn window_state(window: &AXUIElement) -> Value {
+    json!({
+        "title": string_attribute(window, "AXTitle"),
+        "frame": frame(window),
+        "minimized": bool_attribute(window, "AXMinimized").unwrap_or(false),
+        "fullscreen": bool_attribute(window, "AXFullScreen").unwrap_or(false),
+    })
+}
+
+/// An app's window, as the user sees it (or would, out of the Dock).
+pub fn window(pid: i32) -> Result<Value> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let window = visible_window(&app, pid)?;
+    Ok(window_state(&window))
+}
+
+/// Waits up to `tries` tenths of a second for a window's full-screen state.
+fn await_fullscreen(window: &AXUIElement, want: bool, tries: u32) -> bool {
+    for _ in 0..tries {
+        if bool_attribute(window, "AXFullScreen").unwrap_or(false) == want {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Moves and sizes an app's window: the app unhidden, the window out of the
+/// Dock and out of full screen first (a full-screen window can't move), then
+/// size, place and size again (moved onto a smaller display, a window is
+/// first cut to fit it). Reports where it landed and whether it's full
+/// screen, which the caller checks rather than assumes.
+///
+/// With AXEnhancedUserInterface on (wake_tree sets it for Chromium apps),
+/// macOS animates frame changes made through accessibility and a size set
+/// mid-animation is lost: it's off while the window moves, then back on, as
+/// Rectangle and yabai do.
+pub fn place_window(pid: i32, frame: (f64, f64, f64, f64), _maximize: bool, fullscreen: bool) -> Result<Value> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
+    if let Some(running) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        if running.isHidden() {
+            running.unhide();
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let enhanced = bool_attribute(&app, "AXEnhancedUserInterface") == Some(true);
+    if enhanced {
+        set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(false));
+    }
+    let placed = move_window(&app, pid, frame, fullscreen);
+    if enhanced {
+        set_attribute(&app, "AXEnhancedUserInterface", CFBoolean::new(true));
+        // Chromium rebuilds its tree when the flag comes back: the next read waits for it.
+        if let Some(entry) = WOKEN.lock().unwrap().iter_mut().find(|(woken, _)| *woken == pid) {
+            entry.1 = Instant::now();
+        }
+    }
+    placed
+}
+
+fn move_window(app: &AXUIElement, pid: i32, (x, y, w, h): (f64, f64, f64, f64), fullscreen: bool) -> Result<Value> {
+    let window = visible_window(app, pid)?;
+    if bool_attribute(&window, "AXMinimized") == Some(true) {
+        set_attribute(&window, "AXMinimized", CFBoolean::new(false));
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    if bool_attribute(&window, "AXFullScreen") == Some(true) {
+        let (cx, cy) = frame_rect(&window).map(|(fx, fy, fw, fh)| (fx + fw / 2.0, fy + fh / 2.0)).unwrap_or((f64::NAN, f64::NAN));
+        if fullscreen && cx >= x && cx <= x + w && cy >= y && cy <= y + h {
+            return Ok(window_state(&window));
+        }
+        set_attribute(&window, "AXFullScreen", CFBoolean::new(false));
+        await_fullscreen(&window, false, 20);
+        // The way out of full screen is an animation; a move during it is lost.
+        std::thread::sleep(Duration::from_millis(700));
+    }
+    let (Some(point), Some(size)) = (ax_point(x, y), ax_size(w, h)) else { return Err("couldn't describe the frame".into()) };
+    if !settable(&window, "AXPosition") {
+        return Err("this window can't be moved".into());
+    }
+    set_attribute(&window, "AXSize", &size);
+    let moved = set_attribute(&window, "AXPosition", &point);
+    set_attribute(&window, "AXSize", &size);
+    if moved != AXError::Success {
+        return Err(format!("couldn't move the window (AXError {})", moved.0));
+    }
+    if fullscreen {
+        // Asked during another full-screen animation, macOS drops it: once more if so.
+        for _ in 0..2 {
+            set_attribute(&window, "AXFullScreen", CFBoolean::new(true));
+            if await_fullscreen(&window, true, 15) {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(700));
+    } else {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(window_state(&window))
+}
+
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    /// On while any app takes keystrokes in secret: a password field has the
+    /// focus (Chrome and WebKit turn it on for theirs), or a terminal's Secure
+    /// Keyboard Entry.
+    fn IsSecureEventInputEnabled() -> u8;
 }
 
 /// What has the keyboard focus, and whether it's a password field.
+/// `secureInput`: some app takes keystrokes in secret right now — what a web
+/// page's password field still says when its tree isn't built, so the field
+/// itself reads as nothing in particular.
 pub fn focused() -> Result<Value> {
+    let secure_input = unsafe { IsSecureEventInputEnabled() } != 0;
     let system = unsafe { AXUIElement::new_system_wide() };
-    let element = attribute(&system, "AXFocusedUIElement")
-        .and_then(|value| value.downcast::<AXUIElement>().ok())
-        .ok_or("nothing has the keyboard focus")?;
-    Ok(json!({ "element": describe(&element), "app": pid(&element).map(app_info) }))
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { system.copy_attribute_value(&CFString::from_static_str("AXFocusedUIElement"), NonNull::from(&mut value)) };
+    if error == AXError::Success && !value.is_null() {
+        let value = unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) };
+        if let Ok(element) = value.downcast::<AXUIElement>() {
+            return Ok(json!({ "element": describe(&element), "app": pid(&element).map(app_info), "secureInput": secure_input }));
+        }
+    }
+    // Unread (a busy app, a timeout): with secure input on, a password field may have it, and callers type nothing.
+    if secure_input {
+        return Ok(json!({ "element": null, "app": null, "secureInput": true }));
+    }
+    if error == AXError::NoValue {
+        return Err("nothing has the keyboard focus".into());
+    }
+    Err(format!("couldn't read what has the keyboard focus (AXError {})", error.0))
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ACTIONS } from '../jester-extension/src/common/constants.js';
-import { bindable, describePlan, fillsDisplay, osPlan, parseShortcut } from '../desktop/src/main/os-actions.js';
+import { bindable, describePlan, fillsDisplay, osPlan, parseShortcut, wakeHint } from '../desktop/src/main/os-actions.js';
 import { createDispatcher } from '../desktop/src/main/dispatch.js';
 
 const key = (name, ...modifiers) => ({ kind: 'key', key: name, modifiers });
@@ -45,6 +45,12 @@ test('every action the extension knows has a desktop answer, even if that answer
   assert.equal(bindable('APP_NEXT', 'win32'), true);
   assert.deepEqual(osPlan('SLEEP', 'darwin'), { kind: 'none' });
   assert.deepEqual(osPlan('VOICE_CAPTURE_TOGGLE', 'win32'), { kind: 'jester', op: 'voice' });
+});
+
+test('what wakes Jester is its gesture, else the menu', () => {
+  assert.equal(wakeHint('✌️ or ⬅️', 'darwin'), '✌️ or ⬅️ to wake');
+  assert.equal(wakeHint('', 'darwin'), 'wake it from the menu bar');
+  assert.equal(wakeHint('', 'win32'), 'wake it from its tray icon');
 });
 
 test('scrolling follows the scroll step setting', () => {

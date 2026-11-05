@@ -23,6 +23,8 @@ let active = false;
 let showHud = true;
 let toastTimer = null;
 let voiceTimer = null;
+/** The last place reportPill said the pill ends. */
+let pillSaid = '';
 
 /**
  * Keeps the pills inside the screen's usable area. macOS slides this window
@@ -78,9 +80,26 @@ function drawCursor(message) {
   cursor.hidden = false;
 }
 
+/**
+ * Says where the pill ends, for the × beside it (src/main/stop-button.js), which
+ * has a window of its own: this one lets every click through. Where it's laid
+ * out, so before it has slid into place too.
+ */
+function reportPill() {
+  const pill = $('voice');
+  if (pill.hidden) return;
+  const end = { x: pill.offsetLeft + pill.offsetWidth / 2, y: pill.offsetTop + pill.offsetHeight / 2 };
+  const said = JSON.stringify(end);
+  if (said === pillSaid) return;
+  pillSaid = said;
+  chrome.runtime.sendMessage({ type: 'jester/pill', display, end });
+}
+
 function hideVoice() {
   clearTimeout(voiceTimer);
   $('voice').hidden = true;
+  $('voice').style.minWidth = '';
+  pillSaid = '';
   document.body.classList.remove('voice-up');
 }
 
@@ -88,10 +107,12 @@ function hideVoice() {
 function showVoice(face, ms) {
   if ($('voice').hidden) fitToScreen();
   $('voice').className = `voice ${face}`;
+  if (face !== 'thinking') $('voice').style.minWidth = '';
   $('voice').hidden = false;
   document.body.classList.add('voice-up');
   clearTimeout(voiceTimer);
   voiceTimer = setTimeout(hideVoice, ms);
+  reportPill();
 }
 
 function answer(text, ok) {
@@ -131,7 +152,10 @@ function drawVoice(voice) {
   if (voice.phase === 'thinking') {
     $('voice-task').textContent = voice.task || '';
     $('voice-step').textContent = voice.step || '';
-    return showVoice('thinking', VOICE_THINKING_MS);
+    showVoice('thinking', VOICE_THINKING_MS);
+    // It only grows during a task: the × beside it is something to aim at.
+    $('voice').style.minWidth = `${$('voice').offsetWidth}px`;
+    return;
   }
   if (voice.transcript?.text) {
     const text = voice.transcript.text;
@@ -154,6 +178,8 @@ function ripple(message) {
   void ring.offsetWidth; // restart the animation
   ring.classList.add('go');
 }
+
+new ResizeObserver(reportPill).observe($('voice'));
 
 chrome.runtime.onMessage.addListener((message) => {
   switch (message?.type) {

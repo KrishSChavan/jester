@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { driverPath, startDriver, toOsPoint } from '../desktop/src/main/driver.js';
+import { driverPath, startDriver, toDipFrame, toOsFrame, toOsPoint } from '../desktop/src/main/driver.js';
 
 let binary = null;
 try {
@@ -67,8 +67,30 @@ test('bad requests fail with a reason and leave the driver running', { skip }, (
     assert.equal((await driver.call('hello')).ok, true);
   }));
 
+test('choosing a menu command, placing a window and acting are described in a dry run, not done', { skip }, () =>
+  withDriver(async (driver) => {
+    assert.deepEqual((await driver.call('menu', { pid: 1, path: ['File', 'New Note'], press: true, exact: true })).events, [{ event: 'menu', pid: 1, path: ['File', 'New Note'], exact: true }]);
+    assert.deepEqual((await driver.call('placeWindow', { pid: 1, x: 0, y: 25, w: 756, h: 957, maximize: true })).events, [
+      { event: 'placeWindow', pid: 1, frame: { x: 0, y: 25, w: 756, h: 957 }, maximize: true, fullscreen: false }
+    ]);
+    // A window's own scrolling needs no element.
+    assert.deepEqual((await driver.call('act', { snapshot: 3, action: 'scrollPage', value: 'down' })).events, [{ event: 'act', snapshot: 3, element: null, action: 'scrollPage', value: 'down' }]);
+    await assert.rejects(driver.call('menu', { pid: 1, path: [] }), /1 to 6 titles/);
+    await assert.rejects(driver.call('menu', { pid: 1, path: ['File', ' '] }), /1 to 6 titles/);
+    await assert.rejects(driver.call('placeWindow', { pid: 1, x: 0, y: 0, w: 0, h: 500 }), /width and height/);
+    assert.equal((await driver.call('hello')).ok, true);
+  }));
+
 test('Electron DIPs become physical pixels only on Windows', () => {
-  const screen = { dipToScreenPoint: ({ x, y }) => ({ x: x * 1.5, y: y * 1.5 }) };
+  const screen = {
+    dipToScreenPoint: ({ x, y }) => ({ x: x * 1.5, y: y * 1.5 }),
+    dipToScreenRect: (_window, { x, y, width, height }) => ({ x: x * 1.5, y: y * 1.5, width: width * 1.5, height: height * 1.5 }),
+    screenToDipRect: (_window, { x, y, width, height }) => ({ x: x / 1.5, y: y / 1.5, width: width / 1.5, height: height / 1.5 })
+  };
   assert.deepEqual(toOsPoint(screen, { x: 100, y: 40 }, 'win32'), { x: 150, y: 60 });
   assert.deepEqual(toOsPoint(screen, { x: 100, y: 40 }, 'darwin'), { x: 100, y: 40 });
+  const frame = { x: 100, y: 40, w: 800, h: 600 };
+  assert.deepEqual(toOsFrame(screen, frame, 'win32'), { x: 150, y: 60, w: 1200, h: 900 });
+  assert.deepEqual(toDipFrame(screen, toOsFrame(screen, frame, 'win32'), 'win32'), frame);
+  assert.deepEqual(toOsFrame(screen, frame, 'darwin'), frame);
 });

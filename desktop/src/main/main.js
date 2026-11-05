@@ -28,7 +28,7 @@
 import { app, BrowserWindow, globalShortcut, nativeTheme, safeStorage, screen, session } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE, MSG, saveSettings } from '../../../jester-extension/src/common/constants.js';
+import { ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
 import { createDesktopHost } from './agent/host.js';
 import { runDesktopAgent } from './agent/loop.js';
 import { screenText } from './agent/screen.js';
@@ -36,15 +36,17 @@ import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, storage } from './chrome-bridge.js';
 import { createDispatcher } from './dispatch.js';
-import { startDriver } from './driver.js';
+import { startDriver, toDipFrame, toOsFrame } from './driver.js';
 import { desktopSettings, loadSettings, startEngineHost } from './engine-host.js';
-import { fillsDisplay } from './os-actions.js';
+import { createLearned } from './learned.js';
+import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
 import { startSpeech } from './speech.js';
+import { createStopButton } from './stop-button.js';
 import { createTray } from './tray.js';
 import { trayModel } from './tray-menu.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
@@ -88,6 +90,7 @@ let voiceHeard = null;
 let driver = null;
 let dispatch = null;
 let assistant = null;
+let stopButton = null;
 let speech = null;
 let voiceRunner = null;
 let quitting = false;
@@ -215,13 +218,36 @@ function onJester(op) {
   if (op === 'voice') toggleVoice();
   else if (op === 'calibrate') showCalibration(pointerDisplay());
   else if (op === 'settings') showSettings();
+  else if (op === 'sleep') sleep(true);
+}
+
+/** How to wake Jester, in a few words. */
+const wakeWords = () => wakeHint(resumeGlyphs(settings), process.platform);
+
+/**
+ * Sleep or wake from a spoken command or the menu; a gesture's is done in the
+ * engine. Asleep is a full stop, so a task running ends with it, as in Chrome.
+ */
+function sleep(on) {
+  if (on) assistant.cancel();
+  engineHost.sleep(on);
+}
+
+/** The ×, answered Yes. */
+async function stopAutomation() {
+  if (!assistant.running) return;
+  log('assistant stopped from the pill');
+  // The mic may be open for a spoken yes: anything said next isn't meant for it.
+  engineHost.voice('cancel');
+  await assistant.cancel();
+  overlays.toast('Automation stopped');
 }
 
 /** Why the mic can't open for a command right now, or '' if it can. `mic: false` leaves the permission out. */
 function voiceProblem({ mic = true } = {}) {
   if (!settings?.enabled) return 'Jester is off';
   if (!settings.voiceEnabled) return 'Voice commands are off in Jester’s Settings';
-  if (engine.state === ENGINE.SLEEPING) return 'Jester is asleep: make your wake gesture first';
+  if (engine.state === ENGINE.SLEEPING) return `Jester is asleep: ${wakeWords()}`;
   if (voiceState() === 'missing') return 'The speech model isn’t installed (in desktop/: npm run models)';
   if (mic && !mediaAllowed('audio')) return 'Allow the Microphone in Jester’s Settings first';
   return '';
@@ -246,11 +272,16 @@ function toggleVoice() {
   engineHost.voice('toggle');
 }
 
+/** Each spoken command's number: an older one that ends late (a task it was cancelled out of) leaves the pill to the newer. */
+let commandCount = 0;
+
 /** A finished utterance, done; the pill says how it went. */
 async function onVoiceCommand(text) {
   // An answer to the assistant's question, or "stop": the assistant's, not a command.
   if (assistant.heard(text)) return;
+  const mine = ++commandCount;
   const { outcome } = await voiceRunner.run(text);
+  if (mine !== commandCount) return;
   post({ type: MSG.VOICE, voice: outcome ? { phase: 'answer', text: outcome.text, ok: outcome.ok } : { active: false } });
   voiceHeard?.({ text, outcome });
   voiceHeard = null;
@@ -315,14 +346,26 @@ async function onTrayAction(id, checked) {
       return saveSettings({ voiceEnabled: checked });
     case 'listen':
       return toggleVoice();
+    case 'sleep':
+      return sleep(true);
+    case 'wake':
+      return sleep(false);
     case 'permissions':
     case 'settings':
       return showSettings();
+    case 'restart':
+      return restart();
     case 'quit':
       return app.quit();
     default:
       return undefined;
   }
+}
+
+/** The new Jester starts once this one has quit, so its single-instance lock is free. */
+function restart() {
+  app.relaunch();
+  app.quit();
 }
 
 function listenToPages() {
@@ -334,6 +377,9 @@ function listenToPages() {
     switch (message?.type) {
       case 'jester/desktop-calibrate':
         showCalibration(pointerDisplay());
+        return { ok: true };
+      case 'jester/desktop-restart':
+        restart();
         return { ok: true };
       case 'jester/desktop-state':
         return desktopState();
@@ -359,6 +405,13 @@ function listenToPages() {
       // The assistant's question window: Allow / Don't.
       case 'jester/approval-answer':
         assistant.answer(message.approved === true);
+        return { ok: true };
+      // The × beside the pill, and where the pill is for it to sit beside.
+      case 'jester/stop':
+        stopButton.clicked(String(message.op));
+        return { ok: true };
+      case 'jester/pill':
+        stopButton.anchor(overlays.toScreen(message.display, message.end));
         return { ok: true };
       default:
         return undefined;
@@ -473,6 +526,44 @@ function selfTest(capture) {
       log('selftest: question window — Allow clicked, the assistant heard:', JSON.stringify(await answered), `· can become the active app: ${asking.isFocusable()}`);
     }
     question.hide();
+
+    // The × beside the pill: its question on a click, No going back, and Yes
+    // reaching whoever stops the task, all without Jester becoming the active
+    // app. As above, clicks go to the page, not the OS.
+    let stops = 0;
+    const stop = createStopButton({ onStop: () => (stops += 1) });
+    stop.show();
+    await pause(1500);
+    const stopWindow = BrowserWindow.getAllWindows().find((win) => win.webContents.getURL().startsWith('jester://app/overlay/stop.html'));
+    if (!stopWindow) log('selftest: stop button — not shown');
+    else {
+      const pressStop = async (id) => {
+        const at = await stopWindow.webContents.executeJavaScript(`(() => { const box = document.getElementById('${id}').getBoundingClientRect(); return { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }; })()`);
+        stopWindow.webContents.sendInputEvent({ type: 'mouseDown', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+        stopWindow.webContents.sendInputEvent({ type: 'mouseUp', x: at.x, y: at.y, button: 'left', clickCount: 1 });
+        await pause(400);
+      };
+      // The real button's clicks reach the main process's: this one listens in.
+      const clicked = stopButton.clicked;
+      stopButton.clicked = stop.clicked;
+      const width = () => stopWindow.getBounds().width;
+      const small = width();
+      await pressStop('stop');
+      const asked = width();
+      if (capture) {
+        const file = capture.replace(/\.png$/, '-stop.png');
+        fs.writeFileSync(file, (await stopWindow.webContents.capturePage()).toPNG());
+        log('selftest: captured', file);
+      }
+      await pressStop('no');
+      const back = width();
+      const activates = stopWindow.isFocusable();
+      await pressStop('stop');
+      await pressStop('yes');
+      stopButton.clicked = clicked;
+      log(`selftest: stop button — ${small} px, asking ${asked} px, No ${back} px, Yes stopped ${stops} time(s), gone: ${stopWindow.isDestroyed()} · can become the active app: ${activates}`);
+    }
+    stop.hide();
 
     // The cursor: frames as the engine sends them, a dry-run driver taking
     // the input, every call to it recorded.
@@ -619,7 +710,7 @@ async function start() {
 
   // JESTER_NO_OVERLAY (tests): no windows over the displays, toasts dropped.
   overlays = env.JESTER_NO_OVERLAY
-    ? { track() {}, toast() {}, cursor() {}, ripple() {}, whileHidden: (task) => task(), windows: () => [], activeWindow: () => null, destroy() {} }
+    ? { track() {}, toast() {}, cursor() {}, ripple() {}, whileHidden: (task) => task(), toScreen: () => null, windows: () => [], activeWindow: () => null, destroy() {} }
     : createOverlays();
   startInput();
   pointer = createPointer({
@@ -641,6 +732,7 @@ async function start() {
   speech = startSpeech({ log });
   // A dry run describes `open`, `osascript` and `shortcuts` too, rather than running them.
   const runTool = env.JESTER_DRIVER_DRY ? async (file, args) => (log('dry run: would run', file, JSON.stringify(args)), '') : runFile;
+  stopButton = createStopButton({ onStop: stopAutomation });
   assistant = createAssistant({
     driver: input,
     openApp: (name) => voiceRunner.openApp(name),
@@ -649,6 +741,7 @@ async function start() {
       process.platform === 'darwin' ? runTool('open', app.bundleId ? ['-b', app.bundleId] : ['-a', String(app.name)]) : input.call('activateApp', { pid: app.pid }),
     openUrl: (url) => (process.platform === 'darwin' ? runTool('open', [url]) : runTool('rundll32.exe', ['url.dll,FileProtocolHandler', url])),
     dispatch,
+    place: (request) => voiceRunner.place(request),
     prompt: createApprovalPrompt(),
     // Jester's own windows (Settings, say) are never the app meant.
     exclude: process.pid,
@@ -656,10 +749,28 @@ async function start() {
     listen: () => !voiceProblem() && engineHost.voice('start'),
     // macOS reads no app's controls while a Jester overlay is up (README): the pill blinks out meanwhile.
     quietly: (task) => overlays.whileHidden(task),
+    onBusy: (busy) => (busy ? stopButton.show() : stopButton.hide()),
     log,
     logScreens: !!env.JESTER_LOG_SCREENS
   });
-  voiceRunner = createVoiceRunner({ driver: input, dispatch, canPost, onJester, run: runTool, log, assistant });
+  voiceRunner = createVoiceRunner({
+    driver: input,
+    dispatch,
+    canPost,
+    onJester,
+    run: runTool,
+    log,
+    assistant,
+    // Taught phrases and learned tasks, kept with the app's settings.
+    learned: createLearned({ storage: storage.local }),
+    displays: () => {
+      const primary = screen.getPrimaryDisplay().id;
+      return screen.getAllDisplays().map((display) => ({ id: display.id, bounds: display.bounds, workArea: display.workArea, internal: !!display.internal, primary: display.id === primary }));
+    },
+    toOsFrame: (frame) => toOsFrame(screen, frame),
+    toDipFrame: (frame) => toDipFrame(screen, frame),
+    quietly: (task) => overlays.whileHidden(task)
+  });
 
   let lastTelemetryLog = 0;
   let cursorFrames = 0;
@@ -669,17 +780,28 @@ async function start() {
     context: () => context,
     onStatus: (status) => {
       const started = status.state === ENGINE.RUNNING && engine.state !== ENGINE.RUNNING;
+      const fell = status.state === ENGINE.SLEEPING && engine.state !== ENGINE.SLEEPING;
+      const woke = status.state === ENGINE.RUNNING && engine.state === ENGINE.SLEEPING;
       engine = { state: status.state, detail: status.detail || '', camera: started ? '' : engine.camera || '' };
       const mic = status.mic ? `${status.mic.state}${status.mic.detail ? `: ${status.mic.detail}` : ''}` : '';
       if (mic !== micState) log('mic', (micState = mic));
       log('status', status.state, status.detail || '');
       if (started) noteCamera();
+      // Asleep looks just like awake, so it's said, however it came about.
+      if (fell) overlays.toast('Jester is asleep', { detail: wakeWords() });
+      else if (woke) overlays.toast('Jester is awake');
       refresh();
     },
     onTrigger: (message) => {
       log('trigger', message.action, `(${message.source} ${message.gesture})`);
-      // While the assistant asks, 👍 and 👎 answer it instead of doing their usual action.
-      if (message.source === 'pose' && assistant.gesture(message.gesture)) return;
+      const toggledSleep = message.action === 'SLEEP';
+      // While the assistant asks, 👍 and 👎 answer it instead of doing their
+      // usual action, which sleep has already done: the engine does it on the spot.
+      if (message.source === 'pose' && assistant.gesture(message.gesture)) {
+        if (toggledSleep) engineHost.sleep(!message.sleeping);
+        return;
+      }
+      if (toggledSleep && message.sleeping) assistant.cancel();
       dispatch(message.action, { source: message.source, gesture: message.gesture });
     },
     // The mic, opened for an answer to the assistant, may stop with none.

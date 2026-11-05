@@ -21,12 +21,13 @@ export function createTray(onAction) {
   const tray = new Tray(trayIcon());
   let current = null;
   return {
-    /** @param {{tooltip:string, items:object[]}} model  from tray-menu.js */
+    /** @param {{tooltip:string, title:string, items:object[]}} model  from tray-menu.js */
     update(model) {
       const key = JSON.stringify(model);
       if (key === current) return;
       current = key;
       tray.setToolTip(model.tooltip);
+      if (process.platform === 'darwin') tray.setTitle(model.title);
       tray.setContextMenu(
         Menu.buildFromTemplate(
           model.items.map((item) =>

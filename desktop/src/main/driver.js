@@ -40,6 +40,21 @@ export function toDipFrame(screen, frame, platform = process.platform) {
   return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
 }
 
+/** A frame in Electron's DIPs ({x, y, w, h}) in the driver's coordinates. */
+export function toOsFrame(screen, frame, platform = process.platform) {
+  if (platform !== 'win32') return { x: frame.x, y: frame.y, w: frame.w, h: frame.h };
+  const rect = screen.dipToScreenRect(null, { x: frame.x, y: frame.y, width: frame.w, height: frame.h });
+  return { x: rect.x, y: rect.y, w: rect.width, h: rect.height };
+}
+
+/**
+ * Commands that may take longer than most. A snapshot waits up to 3 s for a
+ * Chromium app to build its tree (mac.rs WAKE_TIME), so it can't share the
+ * 3 s default; placing a window may wait out a full-screen animation;
+ * scrolling to an end goes a page at a time.
+ */
+const SLOW_MS = { snapshot: 8000, act: 8000, menu: 6000, window: 4000, placeWindow: 8000 };
+
 /**
  * @param {object} [options]
  * @param {string} [options.binary]
@@ -85,8 +100,8 @@ export function startDriver({ binary = driverPath(), dryRun = false, timeoutMs =
       const id = nextId++;
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`jester-driver: "${cmd}" timed out`));
-      }, timeoutMs);
+        reject(Object.assign(new Error(`jester-driver: "${cmd}" timed out`), { code: 'timeout' }));
+      }, Math.max(timeoutMs, SLOW_MS[cmd] || 0));
       pending.set(id, { resolve, reject, timer });
       // The request's own id last: a parameter can't take its place.
       child.stdin.write(`${JSON.stringify({ ...params, id, cmd })}\n`);

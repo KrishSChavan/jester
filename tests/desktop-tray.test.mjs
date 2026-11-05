@@ -19,6 +19,37 @@ test('the menu says what the engine is doing and offers the switches', () => {
   assert.equal(items.permissions, undefined);
 });
 
+test('awake, it offers sleep; asleep, it shows, says how to wake, and offers that', () => {
+  assert.equal(byId(trayModel({ engine: { state: 'running' }, settings: on })).sleep.label, 'Put Jester to sleep');
+  assert.equal(byId(trayModel({ engine: { state: 'running' }, settings: on })).wake, undefined);
+  assert.equal(trayModel({ engine: { state: 'running' }, settings: on }).title, '');
+
+  const bound = mergeSettings({ enabled: true, bindings: { Victory: { action: 'SLEEP', repeat: false } } });
+  const asleep = trayModel({ engine: { state: 'sleeping' }, settings: bound, platform: 'darwin' });
+  assert.equal(byId(asleep).status.label, 'Asleep — ✌️ to wake');
+  assert.equal(byId(asleep).wake.label, 'Wake Jester');
+  assert.equal(byId(asleep).sleep, undefined);
+  assert.equal(asleep.title, 'Zz');
+  assert.equal(asleep.tooltip, 'Jester — Asleep — ✌️ to wake');
+});
+
+test('asleep with no gesture to wake it, the menu is the way back, and says so', () => {
+  const asleep = trayModel({ engine: { state: 'sleeping' }, settings: on, platform: 'darwin' });
+  assert.equal(byId(asleep).status.label, 'Asleep — wake it from the menu bar');
+  assert.equal(byId(asleep).wake.label, 'Wake Jester');
+});
+
+test('neither is offered while there\'s no engine to put to sleep', () => {
+  for (const state of ['starting', 'off', 'error']) {
+    const items = byId(trayModel({ engine: { state }, settings: on }));
+    assert.equal(items.sleep, undefined, state);
+    assert.equal(items.wake, undefined, state);
+  }
+  const off = trayModel({ engine: { state: 'sleeping' }, settings: { ...on, enabled: false } });
+  assert.equal(byId(off).wake, undefined);
+  assert.equal(off.title, '');
+});
+
 test('switched off, it says so and the switches that depend on it are greyed', () => {
   const model = trayModel({ engine: { state: 'off' }, settings: { ...on, enabled: false } });
   const items = byId(model);

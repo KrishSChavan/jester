@@ -11,7 +11,7 @@
 
 import { requiresConfirmation } from '../../../../jester-extension/src/common/agent-permissions.js';
 import { createMemory, MEMORY_LIMITS, updateMemory } from '../../../../jester-extension/src/common/task-memory.js';
-import { classify, describeAction, READ_ACTIONS, taskCaption, validateTurn } from './actions.js';
+import { classify, describeAction, menuPath, READ_ACTIONS, taskCaption, validateTurn } from './actions.js';
 import { DESKTOP_SCHEMA, systemPrompt } from './prompt.js';
 import { elementById, screenText } from './screen.js';
 
@@ -42,6 +42,8 @@ function sensitiveKey(action, screen) {
   if (action.action === 'type') return `type ${action.text}${action.enter ? ', Enter' : ''} in ${where}`;
   if (action.action === 'click') return `click ${element?.label || action.id} in ${where}`;
   if (action.action === 'press') return `press ${action.keys} in ${where}`;
+  if (action.action === 'menu') return `menu ${(action.resolved || menuPath(action.path)).join(' > ')} in ${where}`;
+  if (action.action === 'drag') return `drag ${elementById(screen, action.from)?.label || action.from} onto ${elementById(screen, action.to)?.label || action.to} in ${where}`;
   return `${action.action} ${action.url || ''} in ${where}`;
 }
 /** model-client.js's codes for a reply the model can be asked to redo. */
@@ -52,6 +54,49 @@ function modelTrouble(err) {
   if (/rate|429|limit/i.test(`${err?.name} ${err?.message}`)) return 'The AI models are at their limits for now. Try again in a minute.';
   if (/timeout/i.test(err?.name || '')) return 'The AI model took too long to answer.';
   return `The AI model didn’t answer: ${tidy(err?.message || err, 160)}`;
+}
+
+/**
+ * A step that worked, as it can be done again without the model (learned.js):
+ * the action without its screen numbers, and the controls it was done to by
+ * kind, name and section, which a fresh read can find again.
+ */
+function traced(action, screen, category, result) {
+  const target = (id) => {
+    const element = elementById(screen, id);
+    return element ? { role: element.role, label: element.label || '', ...(element.in ? { in: element.in } : {}) } : null;
+  };
+  const { id, resolved, ...rest } = action;
+  // A drag's ends are controls; a scroll's `to` is "end".
+  if (action.action === 'drag') {
+    delete rest.from;
+    delete rest.to;
+  }
+  const step = { action: rest, app: screen?.app?.name || '' };
+  if (resolved) step.action.path = resolved.join(' > ');
+  if (id !== undefined) step.target = target(id);
+  if (action.action === 'drag') step.targets = { from: target(action.from), to: target(action.to) };
+  if (category === 'sensitive') step.sensitive = true;
+  // Whether it visibly changed the screen then: a replay expects the same.
+  if (typeof result?.changed === 'boolean') step.changed = result.changed;
+  return step;
+}
+
+/** The screen with the keyboard focus on one element: what a typed or clicked control may leave for the next action of a group. */
+function focusOn(screen, id) {
+  return { ...screen, elements: (screen?.elements || []).map((element) => ({ ...element, focused: element.id === id })) };
+}
+
+const CAUTION = { read: 0, browse: 1, sensitive: 2, blocked: 3 };
+
+/**
+ * How careful to be with an action of a group, judged both on the screen
+ * from before the group and on the focus the actions before it may have left
+ * (a press or a value set through accessibility doesn't always move it), the
+ * more careful of the two.
+ */
+function judge(action, screens, goal) {
+  return screens.map((screen) => classify(action, { screen, goal })).reduce((most, next) => (CAUTION[next.category] > CAUTION[most.category] ? next : most));
 }
 
 /**
@@ -66,9 +111,11 @@ function modelTrouble(err) {
  *   step went), invalid (an unusable reply), unseen (why the screen couldn't be read)
  * @param {AbortSignal} [options.signal]
  * @param {string} [options.platform]
- * @returns {Promise<{ok:boolean, say:string, cancelled?:boolean, declined?:boolean, actions:number}>}
+ * @param {string} [options.note]  what the model should know first: a saved way of doing it that failed
+ * @returns {Promise<{ok:boolean, say:string, cancelled?:boolean, declined?:boolean, actions:number, trace?:object[]}>}
+ *   trace (on success): the steps done, as learned.js can do them again
  */
-export async function runDesktopAgent({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now }) {
+export async function runDesktopAgent({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now, note = '' }) {
   const memory = createMemory(goal);
   const startedAt = now();
   const system = systemPrompt(platform);
@@ -82,6 +129,9 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
   /** Sensitive steps done in this task (sensitiveKey), and how often the model has asked for one again. */
   const doneSensitive = new Set();
   let repeats = 0;
+  /** The screen as read just after the last step, which is the next step's. */
+  let next = null;
+  const trace = [];
   const end = (ok, say, extra = {}) => ({ ok, say, actions, ...extra });
   // What the user said stands in for the caption until the model gives a shorter one.
   onStep({ phase: 'task', caption: taskCaption(goal), by: 'goal' });
@@ -91,7 +141,8 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
     if (signal?.aborted) return end(false, '', { cancelled: true });
     if (actions >= limits.maxActions || now() - startedAt > limits.runBudgetMs) return end(false, 'That was taking too many steps, so I stopped.');
     onStep({ phase: 'thinking' });
-    const seen = await host.observe();
+    const seen = next ? { ok: true, snapshot: next } : await host.observe();
+    next = null;
     if (!seen.ok) {
       onStep({ phase: 'unseen', detail: tidy(seen.detail, 400) });
       return end(false, lastDone ? `I did “${lastDone}”, but then couldn’t read the screen to check it, so I stopped.` : 'I couldn’t read what’s on screen, so I stopped.');
@@ -100,6 +151,7 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
     onStep({ phase: 'seen', app: seen.snapshot.app?.name, window: seen.snapshot.window?.title, elements: seen.snapshot.elements?.length ?? 0, screen });
     const prompt = JSON.stringify({
       originalGoal: goal,
+      ...(note ? { note: tidy(note, 300) } : {}),
       ...(previous.length ? { previousCommands: previous.slice(-3) } : {}),
       memory: { subgoal: memory.subgoal, constraints: memory.constraints, facts: memory.facts, completed: memory.completed.slice(-4), recent: memory.recent },
       screen,
@@ -133,11 +185,33 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
     }
 
     let progressed = false;
-    for (const action of turn.actions) {
-      if (action.action === 'finish') return end(action.success, action.say);
+    // Each action of a group is judged on the focus the ones before it left:
+    // a typed or clicked control has it; after a key, where it went is unknown.
+    let judged = seen.snapshot;
+    let focusKnown = true;
+    for (const [index, action] of turn.actions.entries()) {
+      if (action.action === 'finish') return end(action.success, action.say, action.success ? { trace } : {});
       if (signal?.aborted) return end(false, '', { cancelled: true });
+      if (!focusKnown && (action.action === 'press' || (action.action === 'type' && action.id === undefined))) {
+        const label = describeAction(action, seen.snapshot, platform);
+        onStep({ phase: 'acted', label, ok: false, detail: 'left for a fresh look' });
+        lastResult = { action: label, ok: false, detail: 'Not done: a key before it in the group may have moved the focus. Look at the screen and choose it again.' };
+        remember(memory, label, lastResult, false);
+        break;
+      }
+      // What it is exactly (a menu command's real titles) before it's judged.
+      const ready = host.prepare ? await host.prepare(action, seen.snapshot) : { ok: true };
+      if (signal?.aborted) return end(false, '', { cancelled: true });
+      if (!ready.ok) {
+        const label = describeAction(action, seen.snapshot, platform);
+        onStep({ phase: 'acted', label, ok: false, detail: tidy(ready.detail, 160) });
+        lastResult = { action: label, ok: false, detail: tidy(ready.detail, 240) };
+        remember(memory, label, lastResult, false);
+        failures += 1;
+        break;
+      }
       const label = describeAction(action, seen.snapshot, platform);
-      const { category, reason } = classify(action, { screen: seen.snapshot, goal });
+      const { category, reason } = judge(action, judged === seen.snapshot ? [seen.snapshot] : [seen.snapshot, judged], goal);
       if (category === 'blocked') {
         onStep({ phase: 'acted', label, ok: false, detail: reason });
         lastResult = { action: label, ok: false, detail: reason };
@@ -162,14 +236,24 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
       onStep({ phase: 'acting', label });
       let result;
       try {
-        result = await host.execute(action, seen.snapshot);
+        // The last of a group is checked: what it changed, read once, is the next step's screen.
+        result = await host.execute(action, seen.snapshot, { verify: index === turn.actions.length - 1, signal });
       } catch (err) {
         result = { ok: false, detail: tidy(err?.message || err, 200) };
       }
       actions += 1;
-      onStep({ phase: 'acted', label, ok: result.ok === true, detail: tidy(result.detail, 160) });
+      if (result.snapshot) next = result.snapshot;
+      if (action.id !== undefined && (action.action === 'click' || action.action === 'type')) judged = focusOn(judged, action.id);
+      else if (action.action === 'press' || action.action === 'type') focusKnown = false;
+      onStep({ phase: 'acted', label, ok: result.ok === true, detail: tidy(result.detail, 160), ...(result.changes ? { changes: tidy(result.changes, 600) } : {}) });
       remember(memory, label, result, READ_ACTIONS.has(action.action));
-      lastResult = { action: label, ok: result.ok === true, detail: tidy(result.detail, 240), ...(result.found ? { found: result.found } : {}) };
+      lastResult = {
+        action: label,
+        ok: result.ok === true,
+        detail: tidy(result.detail, 240),
+        ...(result.changes ? { changes: tidy(result.changes, 600) } : {}),
+        ...(result.found ? { found: result.found } : {})
+      };
       if (!result.ok) {
         failures += 1;
         // The rest of a group was chosen for a screen that didn't happen.
@@ -177,7 +261,9 @@ export async function runDesktopAgent({ goal, previous = [], host, model, confir
       }
       failures = 0;
       if (key) doneSensitive.add(key);
-      if (!READ_ACTIONS.has(action.action)) {
+      if (!READ_ACTIONS.has(action.action)) trace.push(traced(action, seen.snapshot, category, result));
+      // A step that changed nothing on screen is no progress, nor is one whose effect can't be seen.
+      if (!READ_ACTIONS.has(action.action) && result.changed !== false && !result.unseen) {
         progressed = true;
         lastDone = label;
       }

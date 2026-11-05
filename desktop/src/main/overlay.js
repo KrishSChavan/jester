@@ -97,6 +97,13 @@ export function createOverlays() {
       cursorOn = target.id;
       postTo(target.win.webContents, { type: 'jester/overlay-cursor', ...state, x: target.x, y: target.y });
     },
+    /** A point on a display's overlay, on the screen. */
+    toScreen(id, point) {
+      const win = windows.get(id);
+      if (!win || win.isDestroyed()) return null;
+      const bounds = win.getBounds();
+      return { x: bounds.x + point.x, y: bounds.y + point.y };
+    },
     /** A click's ripple, where it landed. */
     ripple(point) {
       const target = over(point);

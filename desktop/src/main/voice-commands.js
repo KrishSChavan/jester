@@ -16,7 +16,12 @@
  *   { kind: 'play', query, service }    service: spotify | youtube | null (the default)
  *   { kind: 'search', query, site }     site: web | youtube | spotify
  *   { kind: 'shortcut', name }          a Shortcuts shortcut (macOS)
- *   { kind: 'jester', op }              Jester's own: calibrate, settings
+ *   { kind: 'place', app, heard, where, screen }   a window moved: where left | right | full |
+ *                                       center | fullscreen, screen current | laptop | monitor | other;
+ *                                       app null: the window in front
+ *   { kind: 'teach', phrase, then }     "when I say <phrase>, <then>": the user's own command
+ *   { kind: 'forget', phrase }          a taught phrase (or a learned task) forgotten
+ *   { kind: 'jester', op }              Jester's own: calibrate, settings, sleep
  *   { kind: 'cancel' } · { kind: 'unknown', text }
  */
 
@@ -142,6 +147,8 @@ const TO = '(?:(?:go|switch|move) to )?(?:the )?';
 const PHRASES = [
   [/^(?:cancel|never ?mind|nothing|forget it)$/, () => ({ kind: 'cancel' })],
   [/^(?:open |show )?(?:the )?jester(?:'s)? settings$/, () => ({ kind: 'jester', op: 'settings' })],
+  // Jester's own sleep, before "go to" takes it for an app. The computer's isn't this.
+  [/^(?:go (?:back )?to sleep|sleep(?: now)?|go to bed|take a nap|put (?:jester|yourself) to sleep)$/, () => ({ kind: 'jester', op: 'sleep' })],
   // Volume
   [/^(?:turn |set )?(?:the )?volume up$|^turn (?:it |the volume |the sound )?up(?: the (?:volume|sound))?$|^louder$/, () => action('VOLUME_UP')],
   [/^(?:turn |set )?(?:the )?volume down$|^turn (?:it |the volume |the sound )?down(?: the (?:volume|sound))?$|^(?:quieter|softer)$/, () => action('VOLUME_DOWN')],
@@ -217,6 +224,104 @@ function searchTerms(text) {
 /** Dictation takes the rest of a sentence, whatever is in it. */
 const DICTATION = /^\W*(?:please\s+)?(type|write|say)\b[\s,:]*(.+)$/i;
 
+/** "When I say focus mode, open Notes and put it on the left": the phrase, then what it does. */
+const TEACH = /^\W*(?:(?:ok|okay|hey)\s+)?(?:jester\W+)?when(?:ever)? i say\s+["“']?(.+?)["”']?\s*,\s*(?:(?:then|please|you should)\s+)?(.+?)[.!]*$/i;
+/** The same without a comma: where the phrase ends is found by what follows being a command. */
+const TEACH_LOOSE = /^\W*(?:(?:ok|okay|hey)\s+)?(?:jester\W+)?when(?:ever)? i say\s+(.+?)[.!]*$/i;
+const FORGET = /^(?:forget|delete|remove|unlearn) (?:the |my )?(?:shortcut|command|phrase) (?:called |named |for )?(.+)$|^forget how to (.+)$/;
+/** The longest phrase a teach without a comma may have. */
+const PHRASE_WORDS = 4;
+
+/** Ways to say where a window goes, or which screen, each made one word. Order matters: "full screen" before "screen". */
+const PLACE_WORDS = [
+  [/\bfull ?screen\b/g, ' fullscreen '],
+  [/\bmaximi[sz]e[ds]?\b|\bfull size\b|\bfill (?:the )?screen\b/g, ' full '],
+  [/\b(?:the )?(?:other|another|second|next) (?:screen|monitor|display)\b/g, ' other '],
+  [/\b(?:(?:big|bigger|large|larger|external) (?:screen|monitor|display)|external (?:monitor|display)|monitor)\b/g, ' monitor '],
+  [/\b(?:laptop|macbook|built ?in)(?: (?:screen|display))?\b|\b(?:small|smaller|little) (?:screen|display)\b/g, ' laptop '],
+  [/\b(?:middle|centre)\b/g, ' center ']
+];
+const WHERE = new Set(['left', 'right', 'full', 'fullscreen', 'center']);
+const SCREENS = new Set(['laptop', 'monitor', 'other']);
+/** Everything else a placement may say. */
+const PLACE_FILLER = new Set(['put', 'move', 'snap', 'throw', 'send', 'place', 'make', 'set', 'open', 'launch', 'drag', 'to', 'on', 'onto', 'in', 'into', 'at', 'over', 'the', 'my', 'of', 'and', 'a', 'side', 'half', 'screen', 'window', 'app', 'its']);
+const THE_FRONT = new Set(['it', 'this', 'that']);
+const PLACE_VERB = /^(?:put|move|snap|throw|send|place|make|maximi[sz]e|center|centre)\b/;
+/** A placement's verb and the word straight after it, where an app not running is named on Windows. */
+const WIN_PLACE = /^(?:put|move|snap|place|maximi[sz]e|open|launch)\s+(\S+)/;
+/** What comes before a thing, not an app: "move the meeting to the right". */
+const ARTICLES = new Set(['a', 'an', 'the', 'this', 'that', 'these', 'those', 'my', 'your', 'our', 'his', 'her', 'their', 'its', 'it', 'all', 'some', 'every']);
+/** Words of a browser's own commands, never an app to place ("open a new tab on the left"). */
+const NOT_APPS = new Set(['new', 'tab', 'tabs', 'window', 'windows', 'page', 'click']);
+const nameWords = (name) => plainName(name).replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * The app a heard name is, strictly: its whole name, or its last words
+ * ("chrome" for Google Chrome) — never a guess from a few letters or a near
+ * spelling, which suits opening an app but not finding one in a sentence.
+ */
+export function matchAppStrictly(heard, apps = []) {
+  const wanted = nameWords(heard);
+  if (!wanted) return null;
+  const fits = apps.filter((name) => nameWords(name) === wanted || ` ${nameWords(name)}`.endsWith(` ${wanted}`));
+  return fits.sort((a, b) => a.length - b.length)[0] || null;
+}
+
+/** An app named in full in a sentence, longest name first: it, and the sentence without it. */
+function appNamedIn(text, apps) {
+  for (const name of [...apps].sort((a, b) => b.length - a.length)) {
+    const words = nameWords(name);
+    if (words.length < 3 || !` ${text} `.includes(` ${words} `)) continue;
+    return { app: name, heard: words, rest: ` ${text} `.replace(` ${words} `, ' ').trim() };
+  }
+  return null;
+}
+
+/**
+ * "Put Chrome on the left", "Safari on my monitor", "maximize Notes", "move
+ * this to the other screen": everything but the app, one place and one screen
+ * must be filler, so "what's on my monitor" stays someone else's. An app
+ * named in full is the app, place words in its name and all, so "open
+ * Activity Monitor" is an app opened, not one moved to a monitor.
+ */
+function parsePlace(text, apps, platform, listed = false) {
+  const named = appNamedIn(text, apps);
+  let said = ` ${named ? named.rest : text} `;
+  for (const [pattern, word] of PLACE_WORDS) said = said.replace(pattern, word);
+  const words = said.trim().split(/\s+/).filter(Boolean);
+  const where = words.filter((word) => WHERE.has(word));
+  const screen = words.filter((word) => SCREENS.has(word));
+  if (where.length > 1 || screen.length > 1 || !(where.length || screen.length)) return null;
+  const rest = words.filter((word) => !WHERE.has(word) && !SCREENS.has(word) && !PLACE_FILLER.has(word));
+  const place = { kind: 'place', where: where[0] || 'center', screen: screen[0] || 'current' };
+  if (named) return rest.length ? null : { ...place, app: named.app, heard: named.heard };
+  // Nothing named: the window in front, if the sentence plainly moves one ("snap it left", not "left").
+  if (rest.every((word) => THE_FRONT.has(word))) return rest.length || PLACE_VERB.test(text) ? { ...place, app: null, heard: null } : null;
+  const heard = rest.join(' ');
+  const app = matchAppStrictly(heard, apps);
+  if (app) return { ...place, app, heard };
+  // Windows knows only the apps running: one that isn't, placed in so many words, is opened from the Start menu.
+  // "In so many words": a move verb and straight away a name ("put Notepad on the left"), not "move the meeting…".
+  const object = text.match(WIN_PLACE)?.[1];
+  const plainly = listed || (object && !ARTICLES.has(object));
+  if (platform === 'win32' && plainly && rest.length <= 3 && !rest.some((word) => NOT_APPS.has(word))) return { ...place, app: heard, heard };
+  return null;
+}
+
+/** "When I say …": the phrase and what it does; without a comma, cut where the rest is a command. */
+function parseTeach(original, context) {
+  const taught = original.match(TEACH);
+  if (taught) return { kind: 'teach', phrase: taught[1].trim(), then: taught[2].trim() };
+  const loose = original.match(TEACH_LOOSE);
+  if (!loose) return null;
+  const words = loose[1].split(/\s+/);
+  for (let cut = 1; cut <= Math.min(PHRASE_WORDS, words.length - 1); cut++) {
+    const then = words.slice(cut).join(' ');
+    if (parseSequence(then, context).every(known)) return { kind: 'teach', phrase: words.slice(0, cut).join(' '), then };
+  }
+  return { kind: 'unknown', text: original };
+}
+
 /** Polite padding and the recognizer's punctuation, gone: "Please, mute." → "mute". */
 export function normalize(text) {
   return String(text)
@@ -238,11 +343,18 @@ export function normalize(text) {
  * @param {object} [context]
  * @param {string[]} [context.apps]  installed app names (macOS)
  * @param {string} [context.platform]
+ * @param {boolean} [context.listed]  one of several moves listed with commas: plainly a placement
  */
-export function parseCommand(transcript, { apps = [], platform = 'darwin' } = {}) {
+export function parseCommand(transcript, { apps = [], platform = 'darwin', listed = false } = {}) {
   const original = String(transcript || '').trim();
   const text = normalize(original);
   if (!text) return { kind: 'unknown', text: original };
+
+  // A command being taught holds others ("…, type hello"): it comes first.
+  const taught = parseTeach(original, { apps, platform });
+  if (taught) return taught;
+  const forget = text.match(FORGET);
+  if (forget) return { kind: 'forget', phrase: forget[1] || forget[2] };
 
   // Typed text keeps its own case and punctuation, from the original. "Write
   // a new note" is a new note, not those words; "type" is always typing.
@@ -285,6 +397,10 @@ export function parseCommand(transcript, { apps = [], platform = 'darwin' } = {}
     return { kind: 'minimize', app: heard ? matchApp(heard, apps) || heard : null, heard: heard || null };
   }
 
+  // Before "open": "open Chrome on my monitor" opens it there.
+  const place = parsePlace(text, apps, platform, listed);
+  if (place) return place;
+
   const verbs = [
     [/^(?:open|launch|start|run) (.+)$/, 'open'],
     [/^(?:switch to|go to|bring up|show me|show) (.+)$/, 'open'],
@@ -315,10 +431,17 @@ const known = (step) => step.kind !== 'unknown' && step.kind !== 'cancel';
  */
 export function parseSequence(transcript, context = {}) {
   const original = String(transcript || '').trim();
+  // "Chrome left, Terminal right": moves listed with commas, every one of them a move.
+  if (/[,;]/.test(original)) {
+    const moves = original.split(/\s*[,;]\s*|\s+(?:and\s+then|then|and)\s+/i).filter((part) => part.trim());
+    const placed = moves.map((part) => parseCommand(part, { ...context, listed: true }));
+    if (placed.length > 1 && placed.every((step) => step.kind === 'place')) return placed;
+  }
   let partial = null;
   for (const join of original.matchAll(JOINS)) {
     const first = parseCommand(original.slice(0, join.index), context);
-    if (['unknown', 'type', 'cancel'].includes(first.kind)) continue;
+    // Dictation and a command being taught take the rest of the sentence.
+    if (['unknown', 'type', 'cancel', 'teach'].includes(first.kind)) continue;
     const rest = parseSequence(original.slice(join.index + join[0].length), context);
     if (rest.every(known)) return [first, ...rest];
     partial ||= [first, ...rest];

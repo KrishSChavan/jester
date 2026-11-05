@@ -24,6 +24,18 @@ test('what the recognizer actually wrote becomes the command meant (phase 0 tran
   assert.deepEqual(parse('Pause the music.'), { kind: 'action', action: 'PLAY_PAUSE' });
 });
 
+test('"go to sleep" is Jester\'s own sleep, never an app to go to, and never the computer\'s', () => {
+  const sleep = { kind: 'jester', op: 'sleep' };
+  const apps = [...APPS, 'Sleep Cycle'];
+  for (const said of ['Go to sleep.', 'go to sleep', 'Jester, go to sleep.', 'Hey Jester, go to sleep.', 'Please go back to sleep.', 'Sleep.', 'Sleep now.', 'Go to bed.', 'Take a nap.', 'Put Jester to sleep.', 'Put yourself to sleep.']) {
+    assert.deepEqual(parseCommand(said, { apps, platform: 'darwin' }), sleep, said);
+    assert.deepEqual(parseCommand(said, { apps: [], platform: 'win32' }), sleep, `${said} on Windows`);
+  }
+  assert.deepEqual(parse('Put the computer to sleep.').kind, 'unknown');
+  assert.deepEqual(parse('Sleep the computer.').kind, 'unknown');
+  assert.deepEqual(parseCommand('Open Sleep Cycle.', { apps, platform: 'darwin' }).app, 'Sleep Cycle');
+});
+
 test('typing keeps exactly what was said, in its own case', () => {
   assert.deepEqual(parse("Type Hello, I'll be there in five minutes."), { kind: 'type', text: "Hello, I'll be there in five minutes." });
   assert.deepEqual(parse('type: ok'), { kind: 'type', text: 'ok' });
@@ -138,4 +150,57 @@ test('new things, music and searches', () => {
   assert.deepEqual(parse('Play some music.'), { kind: 'action', action: 'PLAY_PAUSE' });
   assert.deepEqual(parse('Google the weather in Austin.'), { kind: 'search', query: 'the weather in austin', site: 'web' });
   assert.deepEqual(parse('Search YouTube for cat videos.'), { kind: 'search', query: 'cat videos', site: 'youtube' });
+});
+
+test('windows go where they\'re told: a half, all of it, the middle, another screen', () => {
+  const place = (app, where, screen = 'current', heard = app && app.toLowerCase()) => ({ kind: 'place', where, screen, app, heard });
+  assert.deepEqual(parse('Put Safari on the left.'), place('Safari', 'left'));
+  assert.deepEqual(parse('Snap slack to the right half'), place('Slack', 'right'));
+  assert.deepEqual(parse('Maximize notes.'), place('Notes', 'full'));
+  assert.deepEqual(parse('Make chrome full screen.'), place('Google Chrome', 'fullscreen', 'current', 'chrome'));
+  assert.deepEqual(parse('Move Safari to my other screen.'), place('Safari', 'center', 'other'));
+  assert.deepEqual(parse('Open Chrome on my monitor.'), place('Google Chrome', 'center', 'monitor', 'chrome'), 'opened there');
+  assert.deepEqual(parse('Put messages on the left of the laptop screen'), place('Messages', 'left', 'laptop'));
+  // The window in front, when the sentence plainly moves one.
+  assert.deepEqual(parse('Snap it right.'), { kind: 'place', where: 'right', screen: 'current', app: null, heard: null });
+  assert.deepEqual(parse('Center this window.'), { kind: 'place', where: 'center', screen: 'current', app: null, heard: null });
+  assert.deepEqual(parse('Maximize.'), { kind: 'place', where: 'full', screen: 'current', app: null, heard: null });
+  // Not a placement: no window named or meant, or a word that isn't filler.
+  assert.equal(parse('Left.').kind, 'unknown');
+  assert.equal(parse("What's on my monitor?").kind, 'unknown');
+  assert.equal(parse('Turn left.').kind, 'unknown');
+  assert.deepEqual(parse('Full screen.'), { kind: 'action', action: 'FULLSCREEN_TOGGLE' }, 'the key, as before');
+  // An app named in full is the app, place words in its name and all; leftovers must be an app's name, not a guess.
+  const withMonitor = (text) => parseCommand(text, { apps: [...APPS, 'Activity Monitor', 'Clock', 'TextEdit', 'Pages', 'Screenshot'], platform: 'darwin' });
+  assert.deepEqual(withMonitor('Open Activity Monitor.'), { kind: 'open', app: 'Activity Monitor', heard: 'activity monitor' });
+  assert.equal(withMonitor('Move Activity Monitor to the left.').app, 'Activity Monitor');
+  for (const text of ['Middle click.', 'Click on the right.', 'Center the text.', 'Take a screenshot of the other screen.', 'Page left.', 'Open a new tab on the left.']) {
+    assert.notEqual(withMonitor(text).kind, 'place', text);
+  }
+  // Windows knows only running apps: one placed in so many words is still meant.
+  assert.deepEqual(parseCommand('Put Notepad on the left.', { apps: [], platform: 'win32' }), { kind: 'place', where: 'left', screen: 'current', app: 'notepad', heard: 'notepad' });
+  assert.deepEqual(parseSequence('Notepad left, Code right', { apps: ['Code'], platform: 'win32' }).map((step) => step.app), ['notepad', 'Code']);
+  // …and only then: a thing moved, or an email sent, is no app (the assistant takes those).
+  for (const text of ['Send an email to Sam on my laptop.', 'Move the meeting to the right.', 'Move this email to the other screen.']) {
+    assert.equal(parseCommand(text, { apps: [], platform: 'win32' }).kind, 'unknown', text);
+  }
+
+  const steps = (text) => parseSequence(text, { apps: APPS, platform: 'darwin' });
+  assert.deepEqual(steps('Chrome left, Slack right.'), [place('Google Chrome', 'left', 'current', 'chrome'), place('Slack', 'right')]);
+  assert.deepEqual(steps('Safari on the left and Notes on the right'), [place('Safari', 'left'), place('Notes', 'right')]);
+});
+
+test('"when I say …" teaches a command; "forget the shortcut …" unteaches it', () => {
+  assert.deepEqual(parse('When I say focus mode, open Notes and put it on the left.'), { kind: 'teach', phrase: 'focus mode', then: 'open Notes and put it on the left' });
+  assert.deepEqual(parse('Whenever I say "bedtime", then set the volume to ten.'), { kind: 'teach', phrase: 'bedtime', then: 'set the volume to ten' });
+  // No comma: the phrase ends where the rest is a command.
+  assert.deepEqual(parse('when I say study time open notes'), { kind: 'teach', phrase: 'study time', then: 'open notes' });
+  assert.equal(parse('when I say nothing in particular').kind, 'unknown');
+  // A taught command keeps its "and": it isn't cut into steps.
+  assert.deepEqual(parseSequence('When I say focus mode, open Notes and put it on the left', { apps: APPS }), [
+    { kind: 'teach', phrase: 'focus mode', then: 'open Notes and put it on the left' }
+  ]);
+  assert.deepEqual(parse('Forget the shortcut focus mode.'), { kind: 'forget', phrase: 'focus mode' });
+  assert.deepEqual(parse('Forget how to open my notes'), { kind: 'forget', phrase: 'open my notes' });
+  assert.deepEqual(parse('Forget it.'), { kind: 'cancel' }, 'as before');
 });

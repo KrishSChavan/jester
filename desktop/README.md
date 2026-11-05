@@ -28,15 +28,17 @@ front window fills its display.
 | `src/main/permissions.js`, `permission-list.js` | Reading and asking for Camera, Accessibility, Microphone, Screen Recording. |
 | `src/main/windows.js`, `src/settings/` | The engine's hidden window and the Settings window. |
 | `src/main/os-actions.js`, `dispatch.js` | What each action does on each OS, and doing it through the driver. |
-| `src/main/overlay.js`, `src/overlay/` | Click-through windows over every display: hold progress, toasts, the cursor ring. |
+| `src/main/overlay.js`, `src/overlay/` | Click-through windows over every display: hold progress, toasts, the cursor ring, the voice pill. |
+| `src/main/approval.js`, `stop-button.js`, `pill-math.js` | The small windows that do take clicks: the assistant's question, and the × beside the pill. |
 | `src/main/pointer.js`, `pointer-math.js` | The real cursor: placing, easing, freezing the aim, clicking with aim assist. |
 | `src/preload/chrome-shim.cjs`, `src/main/chrome-bridge.js` | The slice of `chrome.runtime` / `chrome.storage` the extension's pages use, over IPC. |
 | `src/main/engine-host.js` | The service worker's half of the engine: settings, gestures, cursor, voice. |
 | `src/main/protocol.js`, `files.js` | `jester://ext/…` serves the extension folder, `jester://app/…` this app's pages. |
 | `src/main/speech.js`, `src/main/speech/` | Offline speech (sherpa-onnx) in a `utilityProcess`, fed by the engine page's stand-in `SpeechRecognition` (in the preload). |
-| `src/main/voice-commands.js`, `voice-runner.js`, `apps.js` | What a sentence means, and doing it: actions, apps, volume, keys, typing, clicks, Shortcuts. |
+| `src/main/voice-commands.js`, `voice-runner.js`, `apps.js` | What a sentence means, and doing it: actions, apps, volume, keys, typing, clicks, windows, Spotify, Shortcuts. |
+| `src/main/learned.js` | What's taught ("when I say …") and learned (a task the assistant got done, kept to be done again without it). |
 | `src/worklets/` | The mic for speech, captured on the audio thread; served to the engine page as `jester://ext/_desktop/worklets/…`. |
-| `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`) and the hands (`host.js`). |
+| `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it, and what a step changed (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`), the hands (`host.js`) and learned tasks done again (`replay.js`). |
 | `src/main/driver.js`, `native/jester-driver/` | Rust helper for OS input and the accessibility tree, JSON lines over stdio. Also Chrome's native-messaging relay. |
 | `src/main/link.js` | The app's end of the link to the extension. |
 | `spikes/` | Phase 0 experiments. |
@@ -97,24 +99,79 @@ Spotify", "switch to Slack", "quit Notes", "minimize Safari"), windows and
 tabs, desktops, "screenshot", "lock the screen", edits ("undo", "copy",
 "select all"), "type …", "press command shift four", "click" / "double click"
 / "right click" at the cursor, "new note" (or email, message, reminder,
-event, document), "play Gunna" (Spotify's search, else YouTube's: picking the
-song is left to you until the assistant), "search for …" / "search YouTube
-for …", and "run shortcut …" (macOS Shortcuts). App names are matched
-forgivingly against what is installed and running, so "spot of fire" still
-opens Spotify.
+event, document), "play Gunna" (below), "search for …" / "search YouTube
+for …", "run shortcut …" (macOS Shortcuts), and "go to sleep". App names are
+matched forgivingly against what is installed and running, so "spot of fire"
+still opens Spotify.
+
+Asleep, Jester ignores everything but the gesture bound to Sleep / wake
+Jester, and a task running ends. A gesture bound to it, "go to sleep", or the
+menu put it to sleep; that gesture or the menu wake it (the mic is off while it
+sleeps, so voice can't). A toast says which way it went, and the menu bar shows
+Zz. Sleep is a toggle, so the pose that did it must be gone for a full second
+before it can fire again: a held pose drops out for longer than the usual
+`releaseMs` whenever the hand shifts, which used to flip it straight back.
+
+Windows go where they're told, as in Atticus: "put Chrome on the left",
+"Safari on my monitor", "maximize Notes", "make Chrome full screen", "move
+this to the other screen", "Chrome left, Slack right". Everything but the
+app, one place (left, right, full, center, full screen) and one screen
+(laptop, monitor, other) must be filler, so "what's on my monitor" never
+moves anything; an app named in full is the app, place words in its name and
+all ("open Activity Monitor" opens it). The app is brought forward (opened
+first if it isn't running), so "put Notes on the left and type hello" types
+into Notes. The driver brings a window out of the Dock, out of hiding and out
+of full screen, sets its size, its place and its size again, and the runner
+checks where it landed: a window that stayed put (in its own full-screen
+space, say) is said to have, never claimed moved, as is one that couldn't go
+full screen or keeps a size of its own. On macOS the Chromium apps' enhanced
+accessibility, which animates window moves, is off while one moves. On
+Windows a window is put back to its ordinary state first (one minimized while
+maximized would come back maximized), placed again if a display of another
+scale resized it, and maximized for full screen.
+
+"Play Gunna" opens Spotify's search for it, waits for the search box to show
+those words (an earlier search's page may still be up), then presses the top
+result's Play (or the result named by what was said) through accessibility,
+and checks Spotify shows it playing — no model, about a second. No Automation
+permission is needed, and it's the same on Windows. If the result can't be
+found, picking one goes to the assistant; if Play was pressed but it can't be
+seen playing, the pill says so and nothing presses it again (a second press
+would pause it).
+
+"When I say focus mode, open Notes and put it on the left" does that, and
+keeps it: "focus mode" does it again. "Forget the shortcut focus mode" drops
+it. A task the assistant gets done is learned too (`learned.js`, Atticus's
+idea): next time the same words — politeness and filler aside — do it again
+step by step, without the model (`agent/replay.js`), each control found
+afresh by its kind and name. Only what can be found again is kept (never a
+screen number or a spot), and never a task that needed your OK, typed words
+you didn't say, was about "this", or asked something (its answer was that
+day's screen; "Can you make a new note?" is a request, not a question). Nothing the model said is kept: a replay answers "Done, the
+way it worked before." A replay that finds something not as it was stops
+there, and the assistant takes over, told where; what it then does is kept
+after the steps the replay had done. Learned tasks unused for 30 days are
+dropped. They're kept sealed, as API keys are (`chrome-bridge.js`
+`PRIVATE_KEYS`): they hold what was typed.
 
 A sentence can hold several steps — "open a new note and write hello
 world" — cut at "and" / "then" only where every piece is a command
 (dictation keeps its "and": "type salt and pepper"). Steps run in order;
 after one brings an app forward, the next waits until it's in front, and
-nothing is typed if it never gets there. A sentence understood only in part
-does nothing and says which part. Anything else says it isn't a command yet;
-phase 6's assistant will take those.
+nothing is typed if it never gets there, if a password field has the focus,
+or if what has the focus can't be read (macOS's secure input on, with the
+focus on something that isn't plainly a text field, counts as a password
+field: a web page's not yet read looks like that). A sentence understood only in part goes, whole, to a learned way of
+doing it, then to the assistant; without one, it does nothing and says which
+part. A new command ends an assistant task still running.
 
 Apps open through LaunchServices (`open -a`) on macOS and quit or hide
 through `NSRunningApplication` (jester-driver's `quitApp`/`hideApp`), so no
 Automation permission is asked for. On Windows, running apps are brought
-forward by the driver and others are found by typing into the Start menu.
+forward by the driver and others are found by typing into the Start menu;
+one counts as in front by its program's name (a few that don't say the
+app's are known: PowerPoint is POWERPNT) or by its window's title in whole
+words, never by a name inside another's ("word" in 1Password).
 
 Two recognizers, chosen in Settings › Speech model: **Accurate** (Parakeet
 TDT 0.6B v2, ~650 MB download: `npm run models -- parakeet-0.6b`) and
@@ -156,23 +213,100 @@ App: Spotify — "Spotify Premium"
 ```
 
 It answers with one action (or up to three on controls already on screen):
-click, type (optionally then Enter), press a key or shortcut, scroll, open an
-app, open a link, a media key, find, wait, finish. A click is the control's own
-accessibility action, falling back to a real click where it's drawn.
+click (or double- or right-click), type (replacing a one-line field's text,
+adding to a longer one's, or at the cursor; optionally then Enter), press a
+key or shortcut (some times over), scroll (sideways too, or to the end),
+scroll to some words, choose a menu-bar command ("File > New Note"), drag
+one control onto another, place a window, open an app, open a link, a media
+key, find, wait, finish.
+
+The hands are accessibility first, as Atticus's are: a control's own press, a
+field's value set outright and read back, a scroll area's own scrolling and a
+menu command reach the app wherever it is, without the pointer or the
+keyboard. A real click, typed keys or the wheel are the fallback.
+
+Typing replaces a one-line field's text and adds to a longer one's: on
+macOS by putting the caret at the end and inserting there, which keeps the
+field's styles, lists and attachments (a whole-value write would flatten a
+note to plain text); on Windows, and in web pages (which don't notice a value
+set from outside), by typing. A field holding more than the screen showed is
+never replaced: that would wipe text the model never saw. With Enter to
+come, the app and its focus are checked before anything is written; what was
+typed is read back (the whole value, however long, a few times while a web
+page catches up) before Enter, so a search or a message with the wrong words
+in it isn't sent. Text added through accessibility that can't be confirmed
+is said to maybe be there, never typed again.
+
+A press (or a context menu) that gets no answer may have opened a dialog or
+a menu that holds the app, and counts as done — clicking it again could do it
+twice; on Windows an Invoke gets a second, on another thread, so a dialog
+can't hold the driver. A step whose screen was read again in between is
+refused, never clicked where it used to be. A menu command is looked up
+first (no press), so its real titles are what's judged and shown, then
+pressed by those titles word for word: what's chosen is what was approved,
+judged on every title of the path ("Message › Move to › Bin" deletes). A
+level that can't be read without opening it (Open Recent; most of a Windows
+UI Automation menu) comes back as asked, and the press takes it exactly; a
+path that goes on past a command names no command, and nothing is pressed. A
+wrong title comes back with the titles there are; Windows' classic menus are
+brought up to date first, as Windows does before showing one. No menu
+command is chosen while a password field has the focus (Paste would fill it).
+
+Scrolling pages through the scroll area itself and says whether it moved; a
+scroll bar set directly moves one page, measured from the content. Where the
+area can't scroll itself (Chromium pages), the wheel does it. On Windows the
+area chosen is one that scrolls that way. `scroll_to` pages until the words
+are on screen, turning back once at an end or where nothing moves.
+
+The last step of each reply is checked: the screen is read again and
+compared, by each control's kind and name (numbers change every read; a
+clock's digits don't count), and the model hears what changed — "New: button
+"Save"", "Now in Mail", "Focus is on …" — or "Nothing on screen changed",
+which it's told means it may not have worked (to look, and never to redo a
+toggle or formatting for it). A menu command or key whose effect a read
+can't show (bold text, a copy) is "no visible change", not a failure. That
+read is the next step's screen, so checking costs no extra reads, and a step
+that changed nothing isn't progress (six in a row end the task).
+
+Each action of a group is judged on the focus the ones before it left, and on
+the screen from before the group, the more careful of the two (a press
+through accessibility doesn't always move the focus): after typing into the
+message box, an Enter is an Enter there (and asks); after a key that may have
+moved the focus (Tab, say), an action that depends on where the focus is
+waits for a fresh look at the screen. A step whose effect can't be seen isn't
+progress either.
 
 The user's rules (2026-10-21): it acts by itself, except before anything that
 sends or posts, buys, deletes, or changes system settings, where the pill asks
 — 👍, the pill's Allow, or "yes" (👎, Don't, "no", or a minute's silence is a
 no). It never types into, or reads, a password field: the driver refuses too.
-A link to a site the user didn't name counts as sensitive. "Stop", ×, or a new
-command ends a task.
+A link to a site the user didn't name counts as sensitive. Within those same
+rules: a menu command or a drop that deletes (the Trash, the Bin, the Recycle
+Bin, "Recently Deleted", "Deleted Items"), a plain "OK" in a dialog asking
+whether to delete, send or buy (clicked, or pressed with Enter or Space, or
+Enter from anywhere in it that isn't a text field or a button — its default
+button may be the delete — or text typed into it with Enter), Enter or Space
+on a focused Send or Buy button, Delete or Backspace outside a
+text field (a selected file or message), a line break typed into a message
+(it's an Enter), and anything in Windows' Settings, Control Panel or its
+tools all ask first. A Windows Store app is named after the app its frame
+holds (SystemSettings, Calculator), not ApplicationFrameHost. A menu command,
+a drop or Paste into a password field never happens.
+
+"Stop", any new command, going to sleep, or the × beside the pill ends a task.
+The × asks first ("Stop automation?", Yes or No); the task carries on until
+Yes, which cuts off a model call in flight, lets a step already being done
+finish and closes a mic opened for a spoken yes. Like the question, the × has a
+small window of its own, since the overlay lets every click through. The pill
+says where it ends, and only grows during a task, so the × stays put to aim at.
 
 While it works, the pill shows the task in a few words ("Texting Trisha
 hello", the model's caption from its first reply; until then, what you said,
 cut at 32 characters) and, smaller under it, the step it's on.
 
 Reading the screen hides Jester's overlays for the moment it takes (see
-below), so the pill blinks out while the assistant looks.
+below), so the pill blinks out while the assistant looks. The × doesn't: a click
+meant for it must never land in the app below.
 
 Keys go to whichever app is in front when they're sent, and that can change
 while a step waits for an OK — on 2026-10-22 a click that fell through the
@@ -228,6 +362,25 @@ models decode in under 35 ms.
 2. **Camera**: `npm run dev:mac`. Settings opens asking for the camera; click
    Allow…, and the engine starts. Raise an open palm, make a fist, try a few
    bound gestures: each shows under Activity › Last gesture and in the log.
+3. **Hands** (the Atticus-style actions; the tests cover their logic, not real
+   apps): with Spotify installed, say "play Gunna" — it should play with no
+   model, and the log's `voice:` line shows the steps. "Put Notes on the
+   left", "Notes on my monitor" (with one), "maximize Notes". With a model
+   saved: "open a new note and write hello world" through the assistant (it
+   may choose File › New Note), then say it again — the pill should say it's
+   doing it the way that worked before. `JESTER_LOG_SCREENS=1` shows what the
+   model read and what each step changed (without it, screen text in the log
+   is masked as “…”). On Windows: the same, with Notepad
+   (a classic menu bar) and the new Notepad (a UI Automation one).
+
+4. **Sleep and the ×** (the tests script the hand and press the × from inside
+   its page; these want a real camera and a real click): bind a gesture to
+   Sleep / wake Jester in Settings › Gestures, in both sets if "Different
+   gestures outside full screen" is on, and hold it. Jester says it's asleep,
+   the menu bar shows Zz, and only that gesture does anything until it's made
+   again after letting go. With a model saved, give the assistant a long job,
+   click the × beside the pill, No, then × and Yes: the app it's working in
+   should stay in front throughout, and the click should never reach that app.
 
 ## Things learned the hard way
 
@@ -304,6 +457,16 @@ models decode in under 35 ms.
   its app element; with that Jester quit, the same read found its Settings
   window and 144 controls in 38 ms. So the assistant reads with overlays
   hidden, and `JESTER_SELFTEST_AGENT` needs no other Jester running.
+- None of that reproduced on 2026-11-04 (macOS 26, Darwin 25.6): with Jester's
+  real overlays up, reads and hit tests of a separate Electron app worked, with
+  or without Jester's own tree switched on, and 40 of 40 reads of Calculator
+  worked with the × and its question up. What changed isn't known, so the
+  overlays still hide. The × stays up, at `pop-up-menu` level rather than the
+  overlay's `screen-saver`, as the failures were only ever seen at that level.
+  Should reads ever fail while a task runs, look there first.
+- Electron holds `ready` until the entry module's top-level `await`s finish, so
+  a test entry that imports `main.js` and then waits for the app at top level
+  never starts: run the waiting in a detached async function.
 - A Chromium window's page isn't in its tree at all until about a second
   after the app is first asked (not even as an empty web area), so the driver
   knows Chromium apps by the framework in their bundle (Electron, Chrome,

@@ -135,8 +135,10 @@ test('playing something: the model sees the screen, presses Play, and finishes',
   );
   const { host, done } = fakeHost(SPOTIFY);
   const steps = [];
-  const result = await runDesktopAgent({ goal: 'play Gunna on Spotify', host, model, confirm: async () => assert.fail('nothing here needs asking'), onStep: (step) => steps.push(step), platform: 'darwin' });
+  const { trace, ...result } = await runDesktopAgent({ goal: 'play Gunna on Spotify', host, model, confirm: async () => assert.fail('nothing here needs asking'), onStep: (step) => steps.push(step), platform: 'darwin' });
   assert.deepEqual(result, { ok: true, say: 'Playing Gunna.', actions: 1 });
+  // What worked, as it can be done again: the control by kind and name, not its number.
+  assert.deepEqual(trace, [{ action: { action: 'click' }, app: 'Spotify', target: { role: 'button', label: 'Play Gunna' } }]);
   assert.deepEqual(done, [{ action: 'click', id: 2 }]);
   assert.match(prompts[0].screen, /\[2\] button "Play Gunna"/);
   assert.equal(prompts[1].lastResult.action, 'Click “Play Gunna”');
@@ -253,14 +255,19 @@ test('the host presses through accessibility, clicks where drawn if refused, and
   assert.deepEqual(calls.slice(0, 3), [['act', { snapshot: 7, element: 2, action: 'press' }], ['frontmost', undefined], ['click', { x: 440, y: 215 }]]);
 
   calls.length = 0;
+  // A search field's text is replaced: the app and its focus checked before anything's written
+  // (Enter follows), set outright where it takes that (this one didn't say), else selected and
+  // typed over — and read back before Enter.
   assert.deepEqual(await host.execute({ action: 'type', id: 0, text: 'gunna', enter: true }, SPOTIFY), { ok: true });
-  assert.deepEqual(calls.map(([cmd]) => cmd), ['frontmost', 'act', 'focused', 'text', 'key']);
+  assert.deepEqual(calls.map(([cmd, params]) => (cmd === 'act' ? `act ${params.action}` : cmd)), ['frontmost', 'act focus', 'focused', 'act setValue', 'key', 'text', 'act read', 'key']);
+  assert.deepEqual(calls[4], ['key', { key: 'a', modifiers: ['cmd'] }]);
   const focusedSecure = (fake.state.secure = true);
   assert.ok(focusedSecure);
 
   assert.deepEqual(await host.execute({ action: 'type', text: 'hunter2' }, SPOTIFY), { ok: false, detail: 'Jester never types into password fields.' });
   assert.equal(calls.filter(([cmd]) => cmd === 'text').length, 1, 'nothing more was typed');
-  assert.deepEqual(await host.execute({ action: 'find', query: 'shuffle' }, SPOTIFY), { ok: true, detail: '1 found', found: ['[3] checkbox "Shuffle" (unchecked)'] });
+  // What find lists is numbered as this read is, so this read is the next step's screen too.
+  assert.deepEqual(await host.execute({ action: 'find', query: 'shuffle' }, SPOTIFY), { ok: true, detail: '1 found', found: ['[3] checkbox "Shuffle" (unchecked)'], snapshot: SPOTIFY });
 });
 
 test('keys go only to the app that was read: brought back to the front, or nothing is typed', async () => {
@@ -268,7 +275,12 @@ test('keys go only to the app that was read: brought back to the front, or nothi
   const back = fakeDriver({ front: 7, focusedIn: 9 });
   const typed = await hostWith(back).execute({ action: 'type', id: 0, text: 'hello', enter: true }, MESSAGES);
   assert.deepEqual(typed, { ok: true });
-  assert.deepEqual(back.calls.filter(([cmd]) => ['activate', 'text', 'key'].includes(cmd)), [['activate', 9], ['text', { text: 'hello' }], ['key', { key: 'enter', modifiers: [] }]]);
+  assert.deepEqual(back.calls.filter(([cmd]) => ['activate', 'text', 'key'].includes(cmd)), [
+    ['activate', 9],
+    ['key', { key: 'a', modifiers: ['cmd'] }],
+    ['text', { text: 'hello' }],
+    ['key', { key: 'enter', modifiers: [] }]
+  ]);
 
   // It won't come back: nothing is typed, and the model is told why.
   const stuck = fakeDriver({ front: 7, comesBack: false });

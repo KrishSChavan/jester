@@ -170,6 +170,14 @@ export function bindable(action, platform) {
   return osPlan(action, platform).kind !== 'unsupported';
 }
 
+/**
+ * How to wake Jester, in a few words. `glyphs`: its wake gestures (constants.js's
+ * resumeGlyphs). With none bound it's the menu: the mic is off while it sleeps.
+ */
+export function wakeHint(glyphs, platform) {
+  return glyphs ? `${glyphs} to wake` : `wake it from ${platform === MAC ? 'the menu bar' : 'its tray icon'}`;
+}
+
 /** What the desktop calls an action, where the extension's name would mislead. */
 export const DESKTOP_LABELS = {
   // A computer has one play/pause key; these press it too.

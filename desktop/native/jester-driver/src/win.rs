@@ -16,18 +16,24 @@ use windows::core::{Interface, BOOL, BSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW, SetForegroundWindow, ShowWindow, SwitchToThisWindow,
-    GWL_EXSTYLE, GW_OWNER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
-    WS_EX_TOOLWINDOW,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetMenu, GetMenuItemCount, GetMenuItemID, GetMenuState,
+    GetMenuStringW, GetSubMenu, GetSystemMetrics, GetWindow, GetWindowLongW, GetWindowPlacement, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, IsZoomed, PostMessageW, SendMessageTimeoutW, SetForegroundWindow,
+    SetWindowPlacement, SetWindowPos, ShowWindow, SwitchToThisWindow, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, HMENU, MF_BYPOSITION, MF_DISABLED,
+    MF_GRAYED, SMTO_ABORTIFHUNG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_NOZORDER,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOWNORMAL, WINDOWPLACEMENT, WM_CLOSE, WM_COMMAND, WM_INITMENU, WM_INITMENUPOPUP,
+    WPF_RESTORETOMAXIMIZED, WS_EX_TOOLWINDOW,
 };
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 
 /// One wheel notch.
 const WHEEL_DELTA: f64 = 120.0;
@@ -495,6 +501,46 @@ pub fn activate_app(pid: i32) -> Result<()> {
     Ok(())
 }
 
+/// A program file's name without its folder or ".exe".
+fn exe_stem(exe: &Option<String>) -> Option<String> {
+    exe.as_deref().and_then(|path| path.rsplit('\\').next()).map(|file| file.trim_end_matches(".exe").to_string())
+}
+
+/// The process of the app a Store app's frame holds: ApplicationFrameHost
+/// draws the window, the app (SystemSettings, Calculator) is the CoreWindow inside.
+fn hosted_pid(window: HWND) -> Option<u32> {
+    unsafe extern "system" fn each(child: HWND, found: LPARAM) -> BOOL {
+        let mut class = [0u16; 64];
+        let length = unsafe { GetClassNameW(child, &mut class) };
+        if String::from_utf16_lossy(&class[..length.max(0) as usize]) == "Windows.UI.Core.CoreWindow" {
+            unsafe { GetWindowThreadProcessId(child, Some(found.0 as *mut u32)) };
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut pid = 0u32;
+    let _ = unsafe { EnumChildWindows(Some(window), Some(each), LPARAM(&mut pid as *mut u32 as isize)) };
+    (pid != 0).then_some(pid)
+}
+
+/// The app a top-level window belongs to, named after its program. A Store
+/// app's is named after the app it holds, not its frame, with that app's
+/// process as `hostedPid` (the frame's pid is what moves and raises it).
+fn app_entry(window: HWND) -> Value {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+    let (exe, elevated) = exe_name(pid);
+    let name = exe_stem(&exe);
+    let mut entry = json!({ "pid": pid, "name": name, "exe": exe, "elevated": elevated });
+    if name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("ApplicationFrameHost")) {
+        if let Some(hosted) = hosted_pid(window) {
+            entry["name"] = json!(exe_stem(&exe_name(hosted).0));
+            entry["hostedPid"] = json!(hosted);
+        }
+    }
+    entry
+}
+
 pub fn frontmost() -> Result<Value> {
     let window = unsafe { GetForegroundWindow() };
     if window.is_invalid() {
@@ -502,16 +548,12 @@ pub fn frontmost() -> Result<Value> {
     }
     let mut title = [0u16; 512];
     let length = unsafe { GetWindowTextW(window, &mut title) };
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
     let mut rect = RECT::default();
     let bounds = unsafe { GetWindowRect(window, &mut rect) }
         .ok()
         .map(|_| json!({ "x": rect.left, "y": rect.top, "w": rect.right - rect.left, "h": rect.bottom - rect.top }));
-    let (exe, elevated) = exe_name(pid);
-    let name = exe.as_deref().and_then(|path| path.rsplit('\\').next()).map(|file| file.trim_end_matches(".exe").to_string());
     Ok(json!({
-        "app": { "pid": pid, "name": name, "exe": exe, "elevated": elevated },
+        "app": app_entry(window),
         "window": { "title": String::from_utf16_lossy(&title[..length.max(0) as usize]), "bounds": bounds },
     }))
 }
@@ -524,9 +566,11 @@ pub fn frontmost() -> Result<Value> {
 /// How many elements a snapshot looks at, at most.
 const SNAPSHOT_VISITS: usize = 3000;
 
+/// The last snapshot: its number, its elements by their numbers in it, and its window.
+type Listed = (u64, Vec<IUIAutomationElement>, Option<IUIAutomationElement>);
+
 thread_local! {
-    /// The last snapshot's number, and its elements by their numbers in it.
-    static LISTED: RefCell<(u64, Vec<IUIAutomationElement>)> = const { RefCell::new((0, Vec::new())) };
+    static LISTED: RefCell<Listed> = const { RefCell::new((0, Vec::new(), None)) };
 }
 
 /// A control type in the words both platforms share; None for what a snapshot leaves out.
@@ -551,6 +595,17 @@ fn role_name(kind: UIA_CONTROLTYPE_ID, password: bool) -> Option<&'static str> {
         UIA_TextControlTypeId => "text",
         _ => return None,
     })
+}
+
+/// Whether an edit box takes several lines: a Win32 one by its style, any
+/// other by whether its text already holds a line break.
+fn multiline(element: &IUIAutomationElement) -> bool {
+    const ES_MULTILINE: u32 = 0x0004;
+    let styled = unsafe { element.CurrentNativeWindowHandle() }
+        .ok()
+        .filter(|window| !window.is_invalid())
+        .is_some_and(|window| unsafe { GetWindowLongW(window, GWL_STYLE) } as u32 & ES_MULTILINE != 0);
+    styled || current_value(element).is_some_and(|value| value.contains(['\r', '\n']))
 }
 
 /// Controls named by what's written inside them: that text isn't listed again.
@@ -640,7 +695,7 @@ pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: b
     let mut handles = Vec::new();
     let mut truncated = false;
     // (element, depth, the listed control it's inside, the named section it's in)
-    let mut stack = vec![(root, 0usize, None::<usize>, None::<String>)];
+    let mut stack = vec![(root.clone(), 0usize, None::<usize>, None::<String>)];
     let mut visits = 0;
     while let Some((element, depth, inside, context)) = stack.pop() {
         if visits >= SNAPSHOT_VISITS || elements.len() >= limit {
@@ -661,7 +716,7 @@ pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: b
         let mut owner = inside;
         // A named container names the section for everything inside it.
         let inner = if CONTAINERS.contains(&kind) && name.is_some() { name.clone() } else { context.clone() };
-        if let Some(role) = role_name(kind, password) {
+        if let Some(role) = role_name(kind, password).map(|role| if role == "textfield" && multiline(&element) { "textarea" } else { role }) {
             if role == "text" {
                 match (name, inside) {
                     // Text inside a control is its name, if it has none of its own.
@@ -704,12 +759,9 @@ pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: b
         let mut listed = listed.borrow_mut();
         listed.0 += 1;
         listed.1 = handles;
+        listed.2 = Some(root);
         listed.0
     });
-    let mut pid = 0u32;
-    unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
-    let (exe, elevated) = exe_name(pid);
-    let name = exe.as_deref().and_then(|path| path.rsplit('\\').next()).map(|file| file.trim_end_matches(".exe").to_string());
     let mut title = [0u16; 512];
     let length = unsafe { GetWindowTextW(window, &mut title) };
     let mut rect = RECT::default();
@@ -718,7 +770,7 @@ pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: b
         .map(|_| json!({ "x": rect.left, "y": rect.top, "w": rect.right - rect.left, "h": rect.bottom - rect.top }));
     Ok(json!({
         "snapshot": number,
-        "app": { "pid": pid, "name": name, "exe": exe, "elevated": elevated },
+        "app": app_entry(window),
         "window": { "title": String::from_utf16_lossy(&title[..length.max(0) as usize]), "frame": frame },
         "elements": elements,
         "truncated": truncated,
@@ -726,42 +778,198 @@ pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: b
     }))
 }
 
-/// Does something to an element of the last snapshot.
-pub fn act(snapshot: u64, id: usize, action: &str, value: Option<&str>) -> Result<Value> {
-    let element = LISTED.with(|listed| {
+/// Whether an element is part of a web page (Chromium's or Firefox's): a page
+/// doesn't notice a value set through UI Automation, so text for one is typed.
+fn in_web_page(element: &IUIAutomationElement) -> bool {
+    unsafe { element.CurrentFrameworkId() }.is_ok_and(|framework| matches!(framework.to_string().as_str(), "Chrome" | "Gecko"))
+}
+
+fn current_value(element: &IUIAutomationElement) -> Option<String> {
+    pattern::<IUIAutomationValuePattern>(element, UIA_ValuePatternId).and_then(|found| unsafe { found.CurrentValue() }.ok()).map(|value| value.to_string())
+}
+
+/// A one-line field's text replaced, and read back: whether it took is the
+/// caller's to judge. (Text is added to longer ones by typing: a whole-value
+/// write would replace a rich document's text, formatting and all.)
+fn write_value(element: &IUIAutomationElement, text: &str) -> Result<Value> {
+    if in_web_page(element) {
+        return Err("web pages don't take text set this way; type it instead".into());
+    }
+    let found = pattern::<IUIAutomationValuePattern>(element, UIA_ValuePatternId).ok_or("it doesn't take text")?;
+    unsafe { found.SetValue(&BSTR::from(text)) }.map_err(|err| format!("couldn't set its value ({err})"))?;
+    let now = current_value(element).unwrap_or_default();
+    Ok(json!({ "value": clip(&now, 2000), "landed": now == text }))
+}
+
+/// A pattern's action (Invoke, Toggle, Select, Expand), given a second. One
+/// that opens a modal dialog or a menu (Qt's, WinForms') holds the call until
+/// it closes, and this thread answers every query; still running, it was done
+/// (`Ok(true)`: busy).
+fn bounded<T: Interface + 'static>(found: &T, action: fn(&T) -> windows::core::Result<()>) -> std::result::Result<bool, String> {
+    let agile = windows::core::AgileReference::new(found).map_err(|err| err.to_string())?;
+    let (sent, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        let result = agile.resolve().and_then(|pattern| action(&pattern));
+        let _ = sent.send(result.map_err(|err| err.to_string()));
+    });
+    match answer.recv_timeout(std::time::Duration::from_millis(1000)) {
+        Ok(Ok(())) => Ok(false),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Ok(true),
+    }
+}
+
+/// How long a scroll's effect may take to show, a look at a time.
+const SCROLL_LOOKS_MS: [u64; 3] = [25, 75, 75];
+
+/// Where a scrollable area is along one axis, 0–100; negative when it can't scroll that way.
+fn scroll_percent(found: &IUIAutomationScrollPattern, horizontal: bool) -> f64 {
+    if horizontal {
+        unsafe { found.CurrentHorizontalScrollPercent() }.unwrap_or(-1.0)
+    } else {
+        unsafe { found.CurrentVerticalScrollPercent() }.unwrap_or(-1.0)
+    }
+}
+
+/// The scroll pattern of what scrolls this way: the element, or the nearest
+/// around it that does, else the window's largest area that does. (A web
+/// app's page often can't scroll itself while a pane inside it can.)
+fn scroll_pattern(element: &IUIAutomationElement, window: &IUIAutomationElement, horizontal: bool) -> Result<IUIAutomationScrollPattern> {
+    let automation = automation()?;
+    let walker = unsafe { automation.ControlViewWalker() }.map_err(|err| err.to_string())?;
+    let mut current = Some(element.clone());
+    for _ in 0..30 {
+        let Some(node) = current else { break };
+        if let Some(found) = pattern::<IUIAutomationScrollPattern>(&node, UIA_ScrollPatternId) {
+            if scroll_percent(&found, horizontal) >= 0.0 {
+                return Ok(found);
+            }
+        }
+        current = unsafe { walker.GetParentElement(&node) }.ok();
+    }
+    let condition = unsafe { automation.CreatePropertyCondition(UIA_IsScrollPatternAvailablePropertyId, &VARIANT::from(true)) }.map_err(|err| err.to_string())?;
+    let all = unsafe { window.FindAll(TreeScope_Descendants, &condition) }.map_err(|err| err.to_string())?;
+    let mut best: Option<(i64, IUIAutomationScrollPattern)> = None;
+    for i in 0..unsafe { all.Length() }.unwrap_or(0).min(400) {
+        let Ok(candidate) = (unsafe { all.GetElement(i) }) else { continue };
+        let Some(found) = pattern::<IUIAutomationScrollPattern>(&candidate, UIA_ScrollPatternId) else { continue };
+        if scroll_percent(&found, horizontal) < 0.0 {
+            continue;
+        }
+        let rect = unsafe { candidate.CurrentBoundingRectangle() }.unwrap_or_default();
+        let area = (rect.right - rect.left) as i64 * (rect.bottom - rect.top) as i64;
+        if best.as_ref().is_none_or(|(top, _)| area > *top) {
+            best = Some((area, found));
+        }
+    }
+    best.map(|(_, found)| found).ok_or_else(|| "nothing here scrolls that way".into())
+}
+
+fn scroll_moved(found: &IUIAutomationScrollPattern, horizontal: bool, before: f64) -> bool {
+    SCROLL_LOOKS_MS.iter().any(|&ms| {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        (scroll_percent(found, horizontal) - before).abs() >= 0.1
+    })
+}
+
+/// One page, through the area's own scrolling: no pointer, no keys, and the
+/// app needn't be in front. False without `atEnd`: it couldn't, and the
+/// caller turns the wheel.
+fn scroll_page(found: &IUIAutomationScrollPattern, horizontal: bool, forward: bool) -> Value {
+    let before = scroll_percent(found, horizontal);
+    if before < 0.0 {
+        return json!({ "moved": false, "scrollable": false, "atEnd": false });
+    }
+    if if forward { before >= 99.9 } else { before <= 0.1 } {
+        return json!({ "moved": false, "position": before / 100.0, "atEnd": true });
+    }
+    let amount = if forward { ScrollAmount_LargeIncrement } else { ScrollAmount_LargeDecrement };
+    let (across, down) = if horizontal { (amount, ScrollAmount_NoAmount) } else { (ScrollAmount_NoAmount, amount) };
+    if unsafe { found.Scroll(across, down) }.is_ok() && scroll_moved(found, horizontal, before) {
+        return json!({ "moved": true, "position": scroll_percent(found, horizontal) / 100.0 });
+    }
+    json!({ "moved": false, "position": before / 100.0, "atEnd": false })
+}
+
+/// All the way to one end.
+fn scroll_end(found: &IUIAutomationScrollPattern, horizontal: bool, forward: bool) -> Value {
+    let before = scroll_percent(found, horizontal);
+    if before < 0.0 {
+        return json!({ "moved": false, "scrollable": false, "atEnd": false });
+    }
+    let end = if forward { 100.0 } else { 0.0 };
+    if (before - end).abs() < 0.1 {
+        return json!({ "moved": false, "position": before / 100.0, "atEnd": true });
+    }
+    let (across, down) = if horizontal { (end, UIA_ScrollPatternNoScroll) } else { (UIA_ScrollPatternNoScroll, end) };
+    if unsafe { found.SetScrollPercent(across, down) }.is_ok() && scroll_moved(found, horizontal, before) {
+        return json!({ "moved": true, "position": scroll_percent(found, horizontal) / 100.0 });
+    }
+    json!({ "moved": false, "position": before / 100.0, "atEnd": false })
+}
+
+/// Does something to an element of the last snapshot (or, for scrolling, its window).
+pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) -> Result<Value> {
+    let (element, window) = LISTED.with(|listed| {
         let listed = listed.borrow();
         if listed.0 != snapshot {
             return Err("the screen has been read again since; use the newest numbers".to_string());
         }
-        listed.1.get(id).cloned().ok_or_else(|| format!("there is no element {id}"))
+        let window = listed.2.clone().ok_or("nothing has been read yet")?;
+        match id {
+            Some(id) => Ok((listed.1.get(id).cloned().ok_or_else(|| format!("there is no element {id}"))?, window)),
+            None if matches!(action, "scrollPage" | "scrollEnd") => Ok((window.clone(), window)),
+            None => Err(format!("{action} needs an element")),
+        }
     })?;
     let password = unsafe { element.CurrentIsPassword() }.is_ok_and(|password| password.as_bool());
-    if password && matches!(action, "focus" | "setValue") {
+    if password && matches!(action, "focus" | "setValue" | "appendValue" | "read") {
         return Err("Jester never types into password fields".into());
     }
+    match action {
+        "read" => return Ok(crate::protocol::read_reply(&current_value(&element).unwrap_or_default(), value)),
+        "setValue" => return write_value(&element, value.unwrap_or("")),
+        "appendValue" => return Err("text is added here by typing it".into()),
+        "scrollPage" | "scrollEnd" => {
+            let (horizontal, forward) = crate::protocol::scroll_direction(value)?;
+            let found = scroll_pattern(&element, &window, horizontal)?;
+            return Ok(if action == "scrollPage" { scroll_page(&found, horizontal, forward) } else { scroll_end(&found, horizontal, forward) });
+        }
+        _ => {}
+    }
     let done = |result: windows::core::Result<()>| result.map_err(|err| format!("{action} didn't work on it ({err})"));
+    // Held by a dialog or a menu it opened: done, and not to be clicked again.
+    let held = |result: std::result::Result<bool, String>| -> Result<Option<Value>> {
+        match result {
+            Ok(true) => Ok(Some(json!({ "element": null, "busy": true }))),
+            Ok(false) => Ok(None),
+            Err(err) => Err(format!("{action} didn't work on it ({err})")),
+        }
+    };
     match action {
         "press" => {
-            if let Some(found) = pattern::<IUIAutomationInvokePattern>(&element, UIA_InvokePatternId) {
-                done(unsafe { found.Invoke() })?
+            let busy = if let Some(found) = pattern::<IUIAutomationInvokePattern>(&element, UIA_InvokePatternId) {
+                held(bounded(&found, |pattern| unsafe { pattern.Invoke() }))?
             } else if let Some(found) = pattern::<IUIAutomationTogglePattern>(&element, UIA_TogglePatternId) {
-                done(unsafe { found.Toggle() })?
+                held(bounded(&found, |pattern| unsafe { pattern.Toggle() }))?
             } else if let Some(found) = pattern::<IUIAutomationSelectionItemPattern>(&element, UIA_SelectionItemPatternId) {
-                done(unsafe { found.Select() })?
+                held(bounded(&found, |pattern| unsafe { pattern.Select() }))?
             } else if let Some(found) = pattern::<IUIAutomationExpandCollapsePattern>(&element, UIA_ExpandCollapsePatternId) {
-                done(unsafe { found.Expand() })?
+                held(bounded(&found, |pattern| unsafe { pattern.Expand() }))?
             } else {
                 return Err("it can't be pressed this way; click it instead".into());
+            };
+            if let Some(busy) = busy {
+                return Ok(busy);
             }
         }
         "focus" => done(unsafe { element.SetFocus() })?,
-        "setValue" => {
-            let found = pattern::<IUIAutomationValuePattern>(&element, UIA_ValuePatternId).ok_or("it doesn't take text")?;
-            done(unsafe { found.SetValue(&BSTR::from(value.unwrap_or(""))) })?
-        }
         "showMenu" => {
             let found = pattern::<IUIAutomationExpandCollapsePattern>(&element, UIA_ExpandCollapsePatternId).ok_or("it has no menu")?;
-            done(unsafe { found.Expand() })?
+            if let Some(busy) = held(bounded(&found, |pattern| unsafe { pattern.Expand() }))? {
+                return Ok(busy);
+            }
         }
         "scrollTo" => {
             let found = pattern::<IUIAutomationScrollItemPattern>(&element, UIA_ScrollItemPatternId).ok_or("it can't be scrolled to")?;
@@ -779,4 +987,282 @@ pub fn focused() -> Result<Value> {
     let pid = unsafe { element.CurrentProcessId() }.unwrap_or(0) as u32;
     let (exe, elevated) = exe_name(pid);
     Ok(json!({ "element": describe(&element), "app": { "pid": pid, "exe": exe, "elevated": elevated } }))
+}
+
+// ---------------------------------------------------------------------------
+// Menus and windows
+// ---------------------------------------------------------------------------
+
+/// A classic menu item's title: "&New\tCtrl+N" is "New" ("&&" is a real "&").
+fn menu_title(menu: HMENU, position: i32) -> String {
+    let mut buffer = [0u16; 256];
+    let length = unsafe { GetMenuStringW(menu, position as u32, Some(&mut buffer), MF_BYPOSITION) };
+    let text = String::from_utf16_lossy(&buffer[..length.max(0) as usize]);
+    let text = text.split('\t').next().unwrap_or("");
+    text.replace("&&", "\u{0}").replace('&', "").replace('\u{0}', "&")
+}
+
+/// Has the app bring a menu up to date, as Windows does before showing it:
+/// apps enable, grey and fill their menus (Recent files) only then.
+fn refresh_menu(window: HWND, message: u32, menu: HMENU, position: usize) {
+    let _ = unsafe { SendMessageTimeoutW(window, message, WPARAM(menu.0 as usize), LPARAM(position as isize), SMTO_ABORTIFHUNG, 250, None) };
+}
+
+/// A classic (Win32) menu bar: read and chosen by posting its command, which
+/// needs neither the pointer nor the window in front.
+fn classic_menu(window: HWND, bar: HMENU, path: &[String], press: bool, exact: bool) -> Result<Value> {
+    refresh_menu(window, WM_INITMENU, bar, 0);
+    let mut menu = bar;
+    let mut found: Vec<String> = Vec::new();
+    for (depth, part) in path.iter().enumerate() {
+        let count = unsafe { GetMenuItemCount(Some(menu)) }.clamp(0, 400);
+        let titles: Vec<String> = (0..count).map(|i| menu_title(menu, i)).collect();
+        let Some(i) = crate::protocol::title_match(&titles, part, exact) else {
+            let place = if found.is_empty() { "the menu bar".to_string() } else { format!("“{}”", crate::protocol::menu_words(&found)) };
+            return Err(format!("no “{part}” in {place}; there is: {}", crate::protocol::listing(&titles)));
+        };
+        found.push(titles[i].clone());
+        let position = i as i32;
+        if depth + 1 < path.len() {
+            let sub = unsafe { GetSubMenu(menu, position) };
+            if sub.is_invalid() {
+                return Err(format!("“{}” has no menu of its own", crate::protocol::menu_words(&found)));
+            }
+            refresh_menu(window, WM_INITMENUPOPUP, sub, i);
+            menu = sub;
+            continue;
+        }
+        let state = unsafe { GetMenuState(menu, position as u32, MF_BYPOSITION) };
+        let enabled = state & (MF_DISABLED.0 | MF_GRAYED.0) == 0;
+        let command = unsafe { GetMenuItemID(menu, position) };
+        if press {
+            if command == u32::MAX {
+                return Err(format!("“{}” opens a menu: name an item in it", crate::protocol::menu_words(&found)));
+            }
+            if !enabled {
+                return Err(format!("“{}” is greyed out right now", crate::protocol::menu_words(&found)));
+            }
+            unsafe { PostMessageW(Some(window), WM_COMMAND, WPARAM(command as usize), LPARAM(0)) }.map_err(|err| err.to_string())?;
+        }
+        return Ok(json!({ "path": found, "enabled": enabled, "pressed": press }));
+    }
+    Err("an empty menu path".into())
+}
+
+fn menu_items_in(scope: &IUIAutomationElement, tree: TreeScope) -> Result<Vec<IUIAutomationElement>> {
+    let automation = automation()?;
+    let condition = unsafe { automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_MenuItemControlTypeId.0)) }.map_err(|err| err.to_string())?;
+    let all = unsafe { scope.FindAll(tree, &condition) }.map_err(|err| err.to_string())?;
+    Ok((0..unsafe { all.Length() }.unwrap_or(0).min(400)).filter_map(|i| unsafe { all.GetElement(i) }.ok()).collect())
+}
+
+fn element_name(element: &IUIAutomationElement) -> String {
+    unsafe { element.CurrentName() }.map(|name| name.to_string()).unwrap_or_default()
+}
+
+/// A menu bar of UI Automation menu items (newer apps: Notepad, Paint):
+/// each title expanded in turn, and the last invoked. What an expanded item
+/// opens is looked for under it, then among the window's items not seen at
+/// any level before, then in the app's pop-up windows. Looked up without
+/// pressing, nothing is opened: the levels below the bar come back as
+/// asked (`partial`), and the press that follows takes them word for word.
+/// The menu is closed again on every way out but the command's own.
+fn automation_menu(window: HWND, pid: i32, path: &[String], press: bool, exact: bool) -> Result<Value> {
+    let automation = automation()?;
+    let root = unsafe { automation.ElementFromHandle(window) }.map_err(|err| err.to_string())?;
+    let condition = unsafe { automation.CreatePropertyCondition(UIA_ControlTypePropertyId, &VARIANT::from(UIA_MenuBarControlTypeId.0)) }.map_err(|err| err.to_string())?;
+    let bar = unsafe { root.FindFirst(TreeScope_Descendants, &condition) }.map_err(|_| "this app has no menu bar to read".to_string())?;
+    let mut expanded: Option<IUIAutomationExpandCollapsePattern> = None;
+    let result = (|| -> Result<Value> {
+        let mut items = menu_items_in(&bar, TreeScope_Children)?;
+        let mut seen: Vec<String> = items.iter().map(element_name).collect();
+        let mut found: Vec<String> = Vec::new();
+        for (depth, part) in path.iter().enumerate() {
+            let titles: Vec<String> = items.iter().map(element_name).collect();
+            let Some(i) = crate::protocol::title_match(&titles, part, exact) else {
+                let place = if found.is_empty() { "the menu bar".to_string() } else { format!("“{}”", crate::protocol::menu_words(&found)) };
+                return Err(format!("no “{part}” in {place}; there is: {}", crate::protocol::listing(&titles)));
+            };
+            found.push(titles[i].clone());
+            let item = items[i].clone();
+            let enabled = unsafe { item.CurrentIsEnabled() }.map(|value| value.as_bool()).unwrap_or(true);
+            if depth + 1 == path.len() {
+                if press {
+                    if !enabled {
+                        return Err(format!("“{}” is greyed out right now", crate::protocol::menu_words(&found)));
+                    }
+                    let invoke = pattern::<IUIAutomationInvokePattern>(&item, UIA_InvokePatternId).ok_or_else(|| format!("“{}” can't be chosen this way", crate::protocol::menu_words(&found)))?;
+                    let busy = bounded(&invoke, |pattern| unsafe { pattern.Invoke() })?;
+                    return Ok(json!({ "path": found, "enabled": true, "pressed": true, "busy": busy }));
+                }
+                return Ok(json!({ "path": found, "enabled": enabled, "pressed": false }));
+            }
+            if !press {
+                let mut whole = found.clone();
+                whole.extend(path[depth + 1..].iter().cloned());
+                return Ok(json!({ "path": whole, "enabled": enabled, "pressed": false, "partial": true }));
+            }
+            let opener = pattern::<IUIAutomationExpandCollapsePattern>(&item, UIA_ExpandCollapsePatternId).ok_or_else(|| format!("“{}” has no menu of its own", crate::protocol::menu_words(&found)))?;
+            let _ = bounded(&opener, |pattern| unsafe { pattern.Expand() });
+            if expanded.is_none() {
+                expanded = Some(opener);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let fresh = |candidates: Vec<IUIAutomationElement>| candidates.into_iter().filter(|candidate| !seen.contains(&element_name(candidate))).collect::<Vec<_>>();
+            let mut next = menu_items_in(&item, TreeScope_Descendants).unwrap_or_default();
+            if next.is_empty() {
+                next = fresh(menu_items_in(&root, TreeScope_Descendants).unwrap_or_default());
+            }
+            if next.is_empty() {
+                for (popup, owner) in app_windows_all() {
+                    if owner as i32 != pid || popup == window {
+                        continue;
+                    }
+                    // One pop-up that won't answer is skipped, not the end.
+                    if let Ok(element) = unsafe { automation.ElementFromHandle(popup) } {
+                        next.extend(fresh(menu_items_in(&element, TreeScope_Descendants).unwrap_or_default()));
+                    }
+                }
+            }
+            seen.extend(next.iter().map(element_name));
+            items = next;
+        }
+        Err("an empty menu path".into())
+    })();
+    if let (Err(_), Some(top)) = (&result, &expanded) {
+        let _ = unsafe { top.Collapse() };
+    }
+    result
+}
+
+/// Every visible top-level window and its process, pop-ups included.
+fn app_windows_all() -> Vec<(HWND, u32)> {
+    unsafe extern "system" fn each(window: HWND, list: LPARAM) -> BOOL {
+        let list = unsafe { &mut *(list.0 as *mut Vec<(HWND, u32)>) };
+        if unsafe { IsWindowVisible(window) }.as_bool() {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) };
+            list.push((window, pid));
+        }
+        BOOL(1)
+    }
+    let mut list: Vec<(HWND, u32)> = Vec::new();
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut list as *mut _ as isize)) };
+    list
+}
+
+/// Finds an app's menu-bar command by its titles and, with `press`, chooses
+/// it — never while a password field of the app has the focus: Paste and the
+/// like would put text into it.
+pub fn menu(pid: i32, path: &[String], press: bool, exact: bool) -> Result<Value> {
+    if press {
+        let focus = unsafe { automation()?.GetFocusedElement() }.ok();
+        let secret = focus.is_some_and(|focus| {
+            unsafe { focus.CurrentIsPassword() }.is_ok_and(|password| password.as_bool()) && unsafe { focus.CurrentProcessId() }.is_ok_and(|owner| owner == pid)
+        });
+        if secret {
+            return Err("a password field has the focus, so no menu command was chosen (one could put text into it)".into());
+        }
+    }
+    let window = windows_of(pid)?[0];
+    let bar = unsafe { GetMenu(window) };
+    if !bar.is_invalid() && unsafe { GetMenuItemCount(Some(bar)) } > 0 {
+        return classic_menu(window, bar, path, press, exact);
+    }
+    automation_menu(window, pid, path, press, exact)
+}
+
+/// A window's frame as drawn: GetWindowRect counts the invisible resize border.
+fn drawn_frame(window: HWND) -> RECT {
+    let mut rect = RECT::default();
+    let drawn = unsafe { DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &mut rect as *mut RECT as *mut _, size_of::<RECT>() as u32) };
+    if drawn.is_err() {
+        let _ = unsafe { GetWindowRect(window, &mut rect) };
+    }
+    rect
+}
+
+/// Where a minimized window will be once restored, in screen coordinates
+/// (its placement counts from the work area, not the screen).
+fn restored_frame(window: HWND) -> Option<RECT> {
+    let mut placement = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    unsafe { GetWindowPlacement(window, &mut placement) }.ok()?;
+    let normal = placement.rcNormalPosition;
+    let monitor = unsafe { MonitorFromRect(&normal, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return Some(normal);
+    }
+    if placement.flags.0 & WPF_RESTORETOMAXIMIZED.0 != 0 {
+        return Some(info.rcWork);
+    }
+    let (dx, dy) = (info.rcWork.left - info.rcMonitor.left, info.rcWork.top - info.rcMonitor.top);
+    Some(RECT { left: normal.left + dx, top: normal.top + dy, right: normal.right + dx, bottom: normal.bottom + dy })
+}
+
+fn window_state(window: HWND) -> Value {
+    let mut title = [0u16; 512];
+    let length = unsafe { GetWindowTextW(window, &mut title) };
+    let minimized = unsafe { IsIconic(window) }.as_bool();
+    // A minimized window sits off screen at -32000: what's meant is where it comes back.
+    let rect = if minimized { restored_frame(window).unwrap_or_else(|| drawn_frame(window)) } else { drawn_frame(window) };
+    json!({
+        "title": String::from_utf16_lossy(&title[..length.max(0) as usize]),
+        "frame": { "x": rect.left, "y": rect.top, "w": rect.right - rect.left, "h": rect.bottom - rect.top },
+        "minimized": minimized,
+        "maximized": unsafe { IsZoomed(window) }.as_bool(),
+        "fullscreen": false,
+    })
+}
+
+/// An app's top window: where it is, and whether it's minimized.
+pub fn window(pid: i32) -> Result<Value> {
+    Ok(window_state(windows_of(pid)?[0]))
+}
+
+/// The window moved so what's drawn lands on the frame given: the invisible
+/// border measured, and the move made.
+fn set_drawn_frame(window: HWND, (x, y, w, h): (i32, i32, i32, i32)) -> Result<()> {
+    let mut outer = RECT::default();
+    unsafe { GetWindowRect(window, &mut outer) }.map_err(|err| err.to_string())?;
+    let drawn = drawn_frame(window);
+    let (left, top) = (drawn.left - outer.left, drawn.top - outer.top);
+    let (right, bottom) = (outer.right - drawn.right, outer.bottom - drawn.bottom);
+    unsafe { SetWindowPos(window, None, x - left, y - top, w + left + right, h + top + bottom, SWP_NOZORDER | SWP_NOACTIVATE) }.map_err(|err| format!("couldn't move the window ({err})"))
+}
+
+/// Moves and sizes an app's top window so what's drawn lands on the frame
+/// given. It's first put back to its ordinary state — not minimized, not
+/// maximized, and not to be maximized on restoring (a window minimized while
+/// maximized comes back maximized, and a maximized window can't be sized).
+/// Moved onto a display of another scale, the app resizes itself for it, and
+/// the border differs: it's measured again and the move made once more.
+/// Windows has no system full screen: `fullscreen` maximizes.
+pub fn place_window(pid: i32, (x, y, w, h): (f64, f64, f64, f64), maximize: bool, fullscreen: bool) -> Result<Value> {
+    let window = windows_of(pid)?[0];
+    if unsafe { IsIconic(window) }.as_bool() || unsafe { IsZoomed(window) }.as_bool() {
+        let mut placement = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+        if unsafe { GetWindowPlacement(window, &mut placement) }.is_ok() {
+            placement.flags.0 &= !WPF_RESTORETOMAXIMIZED.0;
+            placement.showCmd = SW_SHOWNORMAL.0 as u32;
+            let _ = unsafe { SetWindowPlacement(window, &placement) };
+        } else {
+            let _ = unsafe { ShowWindow(window, SW_RESTORE) };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    let goal = (x.round() as i32, y.round() as i32, w.round() as i32, h.round() as i32);
+    set_drawn_frame(window, goal)?;
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let drawn = drawn_frame(window);
+    let off = (drawn.left - goal.0).abs().max((drawn.top - goal.1).abs()).max((drawn.right - drawn.left - goal.2).abs()).max((drawn.bottom - drawn.top - goal.3).abs());
+    if off > 2 {
+        set_drawn_frame(window, goal)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if maximize || fullscreen {
+        let _ = unsafe { ShowWindow(window, SW_MAXIMIZE) };
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+    Ok(window_state(window))
 }

@@ -137,6 +137,9 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
         | Command::Snapshot { .. }
         | Command::Act { .. }
         | Command::Focused
+        | Command::Menu { .. }
+        | Command::Window { .. }
+        | Command::PlaceWindow { .. }
         | Command::Quit => unreachable!(),
     };
     result.map(|mut body| {
@@ -156,8 +159,9 @@ fn app_op(poster: &mut Poster, name: &str, pid: i32, op: fn(i32) -> Result<()>) 
     Ok(Map::new())
 }
 
-/// Accessibility work, on the query thread. `act` is input, so a dry run
-/// describes it instead.
+/// Accessibility work, on the query thread. `act` (except reading a value),
+/// pressing a menu command and placing a window are input, so a dry run
+/// describes them instead.
 fn run_query(command: Command, dry_run: bool) -> Result<Map<String, Value>> {
     match command {
         Command::ElementAt { x, y, wait, debug } => platform::element_at(x, y, wait, debug).map(object),
@@ -165,11 +169,22 @@ fn run_query(command: Command, dry_run: bool) -> Result<Map<String, Value>> {
         Command::Wake { pid } => platform::wake(pid).map(object),
         Command::Apps => platform::apps().map(|apps| object(json!({ "apps": apps }))),
         Command::Snapshot { pid, exclude, limit, debug } => platform::snapshot(pid, exclude, limit.clamp(1, 1000), debug).map(object),
-        Command::Act { snapshot, element, action, .. } if dry_run => {
-            Ok(object(json!({ "events": [{ "event": "act", "snapshot": snapshot, "element": element, "action": action }] })))
+        Command::Act { snapshot, element, action, value } if dry_run && action != "read" => {
+            Ok(object(json!({ "events": [{ "event": "act", "snapshot": snapshot, "element": element, "action": action, "value": value }] })))
         }
         Command::Act { snapshot, element, action, value } => platform::act(snapshot, element, &action, value.as_deref()).map(object),
         Command::Focused => platform::focused().map(object),
+        Command::Menu { path, .. } if path.is_empty() || path.len() > 6 || path.iter().any(|part| part.trim().is_empty()) => {
+            Err("a menu path has 1 to 6 titles, like [\"File\", \"New Note\"]".into())
+        }
+        Command::Menu { pid, path, press: true, exact } if dry_run => Ok(object(json!({ "events": [{ "event": "menu", "pid": pid, "path": path, "exact": exact }] }))),
+        Command::Menu { pid, path, press, exact } => platform::menu(pid, &path, press, exact).map(object),
+        Command::Window { pid } => platform::window(pid).map(object),
+        Command::PlaceWindow { w, h, .. } if !(w >= 1.0 && h >= 1.0) => Err("a window needs a width and height of at least 1".into()),
+        Command::PlaceWindow { pid, x, y, w, h, maximize, fullscreen } if dry_run => Ok(object(json!({
+            "events": [{ "event": "placeWindow", "pid": pid, "frame": { "x": x, "y": y, "w": w, "h": h }, "maximize": maximize, "fullscreen": fullscreen }]
+        }))),
+        Command::PlaceWindow { pid, x, y, w, h, maximize, fullscreen } => platform::place_window(pid, (x, y, w, h), maximize, fullscreen).map(object),
         _ => unreachable!(),
     }
 }

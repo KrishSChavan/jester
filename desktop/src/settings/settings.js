@@ -7,10 +7,10 @@
  * from the main process as `jester/desktop-state` messages.
  */
 
-import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings } from '../ext/src/common/constants.js';
+import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings, resumeGlyphs } from '../ext/src/common/constants.js';
 import { PROVIDERS } from '../ext/src/common/credentials.js';
 import { calibrationGrade, loadCalibration, usableModel } from '../ext/src/common/gaze-store.js';
-import { DESKTOP_LABELS, bindable, describePlan, parseShortcut } from '../main/os-actions.js';
+import { DESKTOP_LABELS, bindable, describePlan, parseShortcut, wakeHint } from '../main/os-actions.js';
 
 const $ = (id) => document.getElementById(id);
 const SHORTCUTS = ['SHORTCUT_1', 'SHORTCUT_2', 'SHORTCUT_3'];
@@ -20,7 +20,7 @@ const STATUS = {
   [ENGINE.STARTING]: ['Starting…', 'warn'],
   [ENGINE.RUNNING]: ['Watching for gestures', 'ok'],
   [ENGINE.SUSPENDED]: ['Paused', 'idle'],
-  [ENGINE.SLEEPING]: ['Asleep — make your wake gesture', 'idle'],
+  [ENGINE.SLEEPING]: ['Asleep', 'idle'],
   [ENGINE.NO_PERMISSION]: ['Camera access needed', 'bad'],
   [ENGINE.ERROR]: ['Something went wrong', 'bad']
 };
@@ -60,7 +60,9 @@ function settingsChanged(before) {
 function renderStatus() {
   const engine = desktop?.engine || { state: ENGINE.OFF };
   const [text, tone] = settings && !settings.enabled ? ['Jester is off', 'idle'] : STATUS[engine.state] || [engine.state, 'idle'];
-  $('status-text').textContent = engine.state === ENGINE.ERROR && engine.detail ? `${text}: ${engine.detail}` : text;
+  if (engine.state === ENGINE.ERROR && engine.detail) $('status-text').textContent = `${text}: ${engine.detail}`;
+  else if (engine.state === ENGINE.SLEEPING && settings?.enabled) $('status-text').textContent = `${text} — ${wakeHint(resumeGlyphs(settings), platform())}`;
+  else $('status-text').textContent = text;
   $('status').dataset.tone = tone;
   // The last frame rate means nothing once the camera has stopped.
   if (![ENGINE.RUNNING, ENGINE.SLEEPING].includes(engine.state) || (settings && !settings.enabled)) $('camera-stats').textContent = '—';
@@ -504,6 +506,11 @@ $('speechModel').addEventListener('change', (event) => save({ speechModel: event
 $('pointerAim').addEventListener('change', (event) => save({ pointerAim: event.target.value }));
 $('headSpeed').addEventListener('change', (event) => save({ headSpeed: Number(event.target.value) }));
 $('calibrate').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-calibrate' }));
+$('restart').addEventListener('click', (event) => {
+  event.target.disabled = true;
+  event.target.textContent = 'Restarting…';
+  chrome.runtime.sendMessage({ type: 'jester/desktop-restart' });
+});
 $('cameraDeviceId').addEventListener('change', (event) => save({ cameraDeviceId: event.target.value }));
 $('windowedBindingsEnabled').addEventListener('change', (event) => save({ windowedBindingsEnabled: event.target.checked }));
 

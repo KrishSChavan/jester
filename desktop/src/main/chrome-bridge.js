@@ -19,10 +19,12 @@ const OWN_PAGES = /^jester:\/\/(ext|app)\//;
 const WORKER_URL = `${EXT_ROOT}src/background/service-worker.js`;
 
 /**
- * Keys only the main process reads: the model connections, API keys and all.
- * Pages never see them, through storage or its change events.
+ * Keys only the main process reads: the model connections, API keys and all,
+ * and what Jester has learned (learned.js), which holds what was typed.
+ * Pages never see them, through storage or its change events, and they're
+ * sealed on disk.
  */
-export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection']);
+export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection', 'desktopLearned']);
 const isPrivate = (key) => PRIVATE_KEYS.includes(key);
 const withoutPrivate = (items) => Object.fromEntries(Object.entries(items || {}).filter(([key]) => !isPrivate(key)));
 

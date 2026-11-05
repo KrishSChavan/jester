@@ -93,6 +93,10 @@ export function startEngineHost(hooks) {
     suspend(suspend) {
       post({ type: MSG.ENGINE_CONFIG, suspend: !!suspend });
     },
+    /** Puts Jester to sleep or wakes it, as its gesture does. */
+    sleep(on) {
+      post({ type: MSG.ENGINE_CONFIG, standby: !!on });
+    },
     voice(action) {
       post({ type: MSG.VOICE_CONTROL, action });
     }

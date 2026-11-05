@@ -2484,9 +2484,22 @@ function continuesTrail(last, hand, W, H) {
   return true;
 }
 
-/** A pose not seen for `releaseMs` is let go of, and can fire again. */
+/**
+ * How long the pose that put Jester to sleep, or woke it, must be gone before
+ * it counts as let go. `releaseMs` is five frames at the usual rate, and a
+ * held pose drops out for longer than that whenever the hand shifts. Sleep is
+ * a toggle, so it would undo itself: one long hold, and Jester is awake again.
+ */
+const SLEEP_RELEASE_MS = 1000;
+
+/** How long a pose must go unseen to be let go of. */
+function releaseTime() {
+  return rec.fired && poseBinding(rec.candidate).action === 'SLEEP' ? Math.max(settings.releaseMs, SLEEP_RELEASE_MS) : settings.releaseMs;
+}
+
+/** A pose not seen for `releaseTime()` is let go of, and can fire again. */
 function releaseIfGone(now) {
-  if (rec.candidate && now - rec.candidateSeenAt > settings.releaseMs) {
+  if (rec.candidate && now - rec.candidateSeenAt > releaseTime()) {
     rec.candidate = null;
     rec.fired = false;
     rec.switchTo = null;
@@ -2596,15 +2609,15 @@ function processHand(now, click, W, H) {
 
   if (rec.candidate !== name) {
     // A pose that already fired stays spent until the hand has really moved
-    // on: another has to hold for releaseMs to take over. The model naming
+    // on: another has to hold for `releaseTime()` to take over. The model naming
     // something else for a frame or two on the way would otherwise re-arm it,
     // and a held toggle would undo itself when the pose came back.
-    if (rec.fired && rec.candidate && now - rec.candidateSeenAt <= settings.releaseMs) {
+    if (rec.fired && rec.candidate && now - rec.candidateSeenAt <= releaseTime()) {
       if (rec.switchTo !== name) {
         rec.switchTo = name;
         rec.switchSince = now;
       }
-      if (now - rec.switchSince < settings.releaseMs) {
+      if (now - rec.switchSince < releaseTime()) {
         return { gesture: name, score: hand.score, progress: 0, handPresent: true };
       }
     }
@@ -3023,6 +3036,8 @@ chrome.runtime.onMessage.addListener((message, sender) => {
           if (running) reportRunning();
         }
       }
+      // The desktop's spoken command and menu; a gesture's is done in fire().
+      if (typeof message.standby === 'boolean') setStandby(message.standby);
       if (message.context) {
         pushed.context = true;
         setContext(message.context);
