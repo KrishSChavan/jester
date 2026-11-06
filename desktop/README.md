@@ -54,8 +54,21 @@ cd desktop
 npm install
 node node_modules/electron/install.js   # Electron 44 downloads its binary on first use
 npm run driver                           # needs Rust: https://rustup.rs
-npm run models                           # speech models, ~135 MB, into models/
+npm run models                           # speech and voice models, ~175 MB, into models/
 ```
+
+`npm run models` downloads what's too big for git, skipping anything already
+there. Run it on every new checkout, and again after pulling a new model:
+
+| Model | Size | What it's for |
+|---|---|---|
+| `vad` | 1 MB | Finds where speech starts and stops |
+| `voice` | 40 MB | Tells the user's voice from anyone else's; without it, he listens to everyone |
+| `parakeet-110m` | 130 MB | Turns speech into text |
+
+To add one that isn't in the default set, name it: `npm run models --
+parakeet-0.6b` (the Accurate recognizer, ~650 MB) or `npm run models --
+moonshine-tiny`.
 
 ## Running
 
