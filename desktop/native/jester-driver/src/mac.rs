@@ -19,6 +19,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::NSPoint;
 use serde_json::{json, Value};
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ptr::NonNull;
 use std::sync::Mutex;
@@ -247,6 +248,14 @@ impl Input {
             return Ok(());
         }
         post(CGEvent::new_mouse_event(self.source(), kind, CGPoint { x, y }, button))
+    }
+
+    /// Lets go of every button still down.
+    pub fn release_buttons(&mut self, poster: &mut Poster) {
+        let at = self.cursor().unwrap_or((0.0, 0.0));
+        for button in self.held.iter().copied().collect::<Vec<_>>() {
+            let _ = self.button(poster, button, false, at, 1);
+        }
     }
 
     pub fn button(&mut self, poster: &mut Poster, button: Button, down: bool, at: (f64, f64), count: u32) -> Result<()> {
@@ -1562,6 +1571,49 @@ pub fn place_window(pid: i32, frame: (f64, f64, f64, f64), _maximize: bool, full
         }
     }
     placed
+}
+
+thread_local! {
+    /// The window being carried by hand.
+    static CARRIED: RefCell<Option<CFRetained<AXUIElement>>> = const { RefCell::new(None) };
+}
+
+/// The window under a point, climbing from whatever's there.
+fn window_under(x: f64, y: f64) -> Result<CFRetained<AXUIElement>> {
+    let element = element_under(x, y, &mut None)?;
+    if string_attribute(&element, "AXRole").as_deref() == Some("AXWindow") {
+        return Ok(element);
+    }
+    attribute(&element, "AXWindow").and_then(|window| window.downcast::<AXUIElement>().ok()).ok_or_else(|| "there's no window here".to_string())
+}
+
+pub fn window_at(x: f64, y: f64) -> Result<Value> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
+    let window = window_under(x, y)?;
+    if bool_attribute(&window, "AXFullScreen") == Some(true) {
+        return Err("this window is full screen".into());
+    }
+    if !settable(&window, "AXPosition") {
+        return Err("this window can't be moved".into());
+    }
+    perform(&window, "AXRaise");
+    let reply = json!({ "title": string_attribute(&window, "AXTitle"), "app": pid(&window).map(app_info), "frame": frame(&window) });
+    CARRIED.with(|carried| *carried.borrow_mut() = Some(window));
+    Ok(reply)
+}
+
+pub fn move_window_to(x: f64, y: f64) -> Result<()> {
+    let Some(point) = ax_point(x, y) else { return Err("couldn't describe the point".into()) };
+    CARRIED.with(|carried| match carried.borrow().as_ref() {
+        None => Err("no window is being carried".to_string()),
+        Some(window) => match set_attribute(window, "AXPosition", &point) {
+            AXError::Success => Ok(()),
+            error => Err(format!("couldn't move the window (AXError {})", error.0)),
+        },
+    })
 }
 
 fn move_window(app: &AXUIElement, pid: i32, (x, y, w, h): (f64, f64, f64, f64), fullscreen: bool) -> Result<Value> {

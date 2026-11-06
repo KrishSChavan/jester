@@ -10,8 +10,9 @@
     "start": "node scripts/start.mjs",
     "dev:mac": "node scripts/dev-mac.mjs",
     "driver": "node scripts/build-driver.mjs",
+    "watch": "node scripts/build-watch.mjs",
     "launcher": "node scripts/make-launcher.mjs",
-    "models": "node scripts/fetch-models.mjs vad parakeet-110m"
+    "models": "node scripts/fetch-models.mjs vad voice parakeet-110m"
   },
   "dependencies": {
     "sherpa-onnx-node": "1.13.8"

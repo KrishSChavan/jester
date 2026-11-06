@@ -81,6 +81,7 @@ export function createOverlays() {
     return { id, win, x: point.x - bounds.x, y: point.y - bounds.y };
   }
   let cursorOn = null;
+  let outlinedOn = null;
   const hideCursor = () => {
     const win = cursorOn === null ? null : windows.get(cursorOn);
     if (win && !win.isDestroyed()) postTo(win.webContents, { type: 'jester/overlay-cursor', hidden: true });
@@ -103,6 +104,16 @@ export function createOverlays() {
       if (!win || win.isDestroyed()) return null;
       const bounds = win.getBounds();
       return { x: bounds.x + point.x, y: bounds.y + point.y };
+    },
+    /** The outline round a window being carried ({x, y, w, h}), on the display most of it is on. null hides it. */
+    outline(frame) {
+      const target = frame && over({ x: frame.x + frame.w / 2, y: frame.y + frame.h / 2 });
+      if (outlinedOn !== null && outlinedOn !== target?.id) {
+        const win = windows.get(outlinedOn);
+        if (win && !win.isDestroyed()) postTo(win.webContents, { type: 'jester/overlay-outline', hidden: true });
+      }
+      outlinedOn = target ? target.id : null;
+      if (target) postTo(target.win.webContents, { type: 'jester/overlay-outline', x: target.x - frame.w / 2, y: target.y - frame.h / 2, w: frame.w, h: frame.h });
     },
     /** A click's ripple, where it landed. */
     ripple(point) {

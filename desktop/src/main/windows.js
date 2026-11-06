@@ -10,6 +10,9 @@ import { ENGINE_PAGE } from './engine-host.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PRELOAD = path.join(here, '../preload/chrome-shim.cjs');
 const SETTINGS_PAGE = 'jester://app/settings/settings.html';
+const TALK_PAGE = 'jester://app/talk/talk.html';
+/** Behind the page while it loads: the window never flashes white. */
+const TALK_GROUND = '#08060c';
 
 const pageDefaults = { preload: PRELOAD, contextIsolation: true, sandbox: true };
 
@@ -69,6 +72,45 @@ export function showSettings({ quiet = false } = {}) {
   });
   settings.loadURL(SETTINGS_PAGE);
   return settings;
+}
+
+let talk = null;
+
+/**
+ * Opens the window for talking to Jester, or brings it forward. Like Settings,
+ * it puts him in the Dock while it's open.
+ */
+export function showTalk() {
+  if (talk && !talk.isDestroyed()) {
+    talk.show();
+    talk.focus();
+    return talk;
+  }
+  talk = new BrowserWindow({
+    width: 560,
+    height: 680,
+    minWidth: 400,
+    minHeight: 520,
+    title: 'Jester',
+    show: false,
+    backgroundColor: TALK_GROUND,
+    acceptFirstMouse: true,
+    // The page draws to the top of the window, around the close button.
+    titleBarStyle: 'hidden',
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 16, y: 16 } } : { titleBarOverlay: { color: TALK_GROUND, symbolColor: '#a79bbe', height: 48 } }),
+    webPreferences: pageDefaults
+  });
+  talk.once('ready-to-show', () => {
+    app.dock?.show();
+    talk.show();
+    talk.focus();
+  });
+  talk.on('closed', () => {
+    talk = null;
+    if (!BrowserWindow.getAllWindows().some((win) => win.isVisible())) app.dock?.hide();
+  });
+  talk.loadURL(TALK_PAGE);
+  return talk;
 }
 
 /**

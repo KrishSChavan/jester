@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jester</title>
+    <link rel="stylesheet" href="talk.css" />
+  </head>
+  <body data-state="resting">
+    <header class="top">
+      <span class="name">Jester</span>
+      <span id="light" class="light" role="status"><i></i><span id="light-text"></span></span>
+    </header>
+    <main class="stage">
+      <div class="presence" aria-hidden="true">
+        <i class="ring"></i>
+        <i class="ring"></i>
+        <i class="disc"></i>
+      </div>
+      <div class="captions" aria-live="polite">
+        <p id="heard" class="heard"></p>
+        <p id="said" class="said"></p>
+      </div>
+    </main>
+    <footer class="bar">
+      <button id="earlier" type="button">Earlier</button>
+      <form id="type">
+        <label class="unseen" for="text">Type to him</label>
+        <input id="text" type="text" placeholder="Type to him" autocomplete="off" spellcheck="true" maxlength="2000" />
+      </form>
+      <button id="listen" type="button"></button>
+    </footer>
+    <aside id="drawer" class="drawer" aria-labelledby="drawer-heading" hidden>
+      <header>
+        <h2 id="drawer-heading">Earlier conversations</h2>
+        <button id="close" type="button" aria-label="Close">×</button>
+      </header>
+      <ol id="conversations"></ol>
+      <p id="none" hidden>Nothing yet. Once a conversation is over, it’s kept here as one sentence for a week.</p>
+    </aside>
+    <script type="module" src="talk.js"></script>
+  </body>
+</html>

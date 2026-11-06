@@ -2,5 +2,8 @@
 models/
 # Rust build output.
 native/jester-driver/target/
+# The watch's Bluetooth helper (npm run watch), and Xcode's per-user files.
+native/jester-watch/build/
+xcuserdata/
 # What spikes/input-in-electron.mjs saw on this machine.
 spikes/*-report.json

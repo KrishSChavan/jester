@@ -15,20 +15,23 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 const RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/';
+/** Their spelling. */
+const VOICE_RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/';
 
 export const MODELS = {
   vad: { file: 'silero_vad.onnx' },
+  voice: { file: 'nemo_en_titanet_small.onnx', release: VOICE_RELEASE },
   'moonshine-tiny': { archive: 'sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2' },
   kroko: { archive: 'sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2' },
   'parakeet-110m': { archive: 'sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2' },
   'parakeet-0.6b': { archive: 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2' }
 };
-const DEFAULT_SET = ['vad', 'moonshine-tiny'];
+const DEFAULT_SET = ['vad', 'voice', 'moonshine-tiny'];
 
 const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../models');
 
-async function download(name, target) {
-  const response = await fetch(RELEASE + name, { redirect: 'follow' });
+async function download(name, target, release = RELEASE) {
+  const response = await fetch(release + name, { redirect: 'follow' });
   if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
   const temp = `${target}.part`;
   await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temp));
@@ -41,7 +44,7 @@ async function fetchModel(key) {
   fs.mkdirSync(dir, { recursive: true });
   if (model.file) {
     const target = path.join(dir, model.file);
-    if (!fs.existsSync(target)) await download(model.file, target);
+    if (!fs.existsSync(target)) await download(model.file, target, model.release);
     return target;
   }
   const folder = path.join(dir, model.archive.replace(/\.tar\.bz2$/, ''));

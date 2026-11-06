@@ -202,6 +202,14 @@ impl Input {
 
     /// Windows decides what is a double-click from timing and distance, so
     /// `count` only matters to the dry-run log.
+    /// Lets go of every button still down.
+    pub fn release_buttons(&mut self, poster: &mut Poster) {
+        let at = self.cursor().unwrap_or((0.0, 0.0));
+        for button in self.held.clone() {
+            let _ = self.button(poster, button, false, at, 1);
+        }
+    }
+
     pub fn button(&mut self, poster: &mut Poster, button: Button, down: bool, at: (f64, f64), count: u32) -> Result<()> {
         let name = match button {
             Button::Left => "left",
@@ -1238,6 +1246,15 @@ fn set_drawn_frame(window: HWND, (x, y, w, h): (i32, i32, i32, i32)) -> Result<(
 /// Moved onto a display of another scale, the app resizes itself for it, and
 /// the border differs: it's measured again and the move made once more.
 /// Windows has no system full screen: `fullscreen` maximizes.
+/// Carrying windows by hand is for the Apple Watch, which is Mac only.
+pub fn window_at(_x: f64, _y: f64) -> Result<Value> {
+    Err("carrying a window by hand isn't on Windows".into())
+}
+
+pub fn move_window_to(_x: f64, _y: f64) -> Result<()> {
+    Err("carrying a window by hand isn't on Windows".into())
+}
+
 pub fn place_window(pid: i32, (x, y, w, h): (f64, f64, f64, f64), maximize: bool, fullscreen: bool) -> Result<Value> {
     let window = windows_of(pid)?[0];
     if unsafe { IsIconic(window) }.as_bool() || unsafe { IsZoomed(window) }.as_bool() {

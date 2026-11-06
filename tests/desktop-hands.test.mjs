@@ -179,11 +179,11 @@ test('a menu command is found first (its real titles judged), then chosen', asyn
 test('text is set outright where a field takes it, read back, and never sent wrong', async () => {
   // Native field: set, landed, nothing typed and the app needn't be in front.
   const set = scriptedDriver({ act: (params) => (params.action === 'setValue' ? { value: params.value, landed: true } : { value: 'gro', length: 3 }) });
-  assert.deepEqual(await hostOn(set.driver).execute({ action: 'type', id: 0, text: 'groceries' }, NOTES), { ok: true });
+  assert.deepEqual(await hostOn(set.driver).execute({ action: 'type', id: 0, text: 'groceries' }, NOTES), { ok: true, landed: true });
   assert.deepEqual(set.calls, [['act', { snapshot: 11, element: 0, action: 'setValue', value: 'groceries' }]]);
   // A long one-line value (an address bar's) is meant to be replaced.
   const url = scriptedDriver({ act: (params) => (params.action === 'setValue' ? { value: params.value, landed: true } : { value: 'x'.repeat(310), length: 310 }) });
-  assert.deepEqual(await hostOn(url.driver).execute({ action: 'type', id: 0, text: 'weather in Paris' }, NOTES), { ok: true });
+  assert.deepEqual(await hostOn(url.driver).execute({ action: 'type', id: 0, text: 'weather in Paris' }, NOTES), { ok: true, landed: true });
   // A text area is never replaced whole: its formatting would go.
   const whole = scriptedDriver();
   assert.match((await hostOn(whole.driver).execute({ action: 'type', id: 3, text: 'eggs', mode: 'replace' }, NOTES)).detail, /isn’t replaced whole/);
@@ -498,7 +498,7 @@ test('second review: steps whose effect can\'t be seen aren\'t progress, and a c
     platform: 'darwin'
   });
   assert.equal(result.say, 'I wasn’t getting anywhere, so I stopped.');
-  assert.equal(steps, 6);
+  assert.equal(steps, 2);
 
   const controller = new AbortController();
   const host = {
@@ -507,4 +507,208 @@ test('second review: steps whose effect can\'t be seen aren\'t progress, and a c
   };
   const replayed = await replaySteps({ steps: [{ action: { action: 'click' }, app: 'Notes', target: { role: 'row', label: 'Trip ideas' } }], goal: 'x', host, signal: controller.signal });
   assert.equal(replayed.cancelled, true);
+});
+
+test('stuck detectors: failures add up across groups led by a click that worked', async () => {
+  const done = [];
+  let reads = 0;
+  const host = {
+    observe: async () => ({ ok: true, snapshot: { ...NOTES, window: { title: `Notes ${(reads += 1)}` } } }),
+    execute: async (action) => (done.push(action.action), action.action === 'click' ? { ok: true } : { ok: false, detail: 'No.' })
+  };
+  const result = await runDesktopAgent({
+    goal: 'tidy my note',
+    host,
+    model: async () => ({ json: { actions: [{ action: 'click', id: 1 }, { action: 'press', keys: 'cmd+k' }] } }),
+    confirm: async () => assert.fail('nothing to ask'),
+    platform: 'darwin'
+  });
+  assert.equal(result.say, 'I got stuck: No.');
+  assert.deepEqual(done, ['click', 'press', 'click', 'press', 'click', 'press'], 'three groups, not forever');
+});
+
+test('stuck detectors: a key left for a fresh look counts as a failure, each time', async () => {
+  let reads = 0;
+  const pressed = [];
+  const result = await runDesktopAgent({
+    goal: 'clear my note',
+    host: { observe: async () => ({ ok: true, snapshot: { ...NOTES, window: { title: `Notes ${(reads += 1)}` } } }), execute: async (action) => (pressed.push(action.keys), { ok: true }) },
+    model: async () => ({ json: { actions: [{ action: 'press', keys: 'cmd+a' }, { action: 'press', keys: 'backspace' }] } }),
+    confirm: async () => assert.fail('nothing to ask'),
+    platform: 'darwin'
+  });
+  assert.match(result.say, /^I got stuck: Not done: a key before it in the group may have moved the focus/);
+  assert.deepEqual(pressed, ['cmd+a', 'cmd+a', 'cmd+a'], '⌫ never pressed');
+});
+
+test('stuck detectors: a step in the middle of a group, unchecked, is no progress', async () => {
+  let group = 0;
+  const host = {
+    observe: async () => ({ ok: true, snapshot: { ...NOTES, window: { title: `Notes ${(group += 1)}` } } }),
+    // The last of each group changes nothing; the one before it can't say.
+    execute: async (action, screen, { verify }) => ({ ok: true, ...(verify ? { changed: false } : {}) })
+  };
+  const result = await runDesktopAgent({
+    goal: 'tidy my note',
+    host,
+    model: async () => ({ json: { actions: [{ action: 'click', id: 1 }, { action: 'click', id: 2 }] } }),
+    confirm: async () => assert.fail('nothing to ask'),
+    platform: 'darwin'
+  });
+  assert.equal(result.say, 'I wasn’t getting anywhere, so I stopped.');
+  assert.equal(result.actions, 6, 'three idle groups');
+});
+
+test('stuck detectors: the same actions on the same screen a third time aren\'t done', async () => {
+  let done = 0;
+  const steps = [];
+  const result = await runDesktopAgent({
+    goal: 'tidy my note',
+    host: { observe: async () => ({ ok: true, snapshot: NOTES }), execute: async () => ((done += 1), { ok: true, changed: true }) },
+    model: async () => ({ json: { action: { action: 'click', id: 1 } } }),
+    confirm: async () => assert.fail('nothing to ask'),
+    onStep: (step) => steps.push(step.phase),
+    platform: 'darwin'
+  });
+  assert.equal(result.say, 'I wasn’t getting anywhere, so I stopped.');
+  assert.equal(done, 2);
+  assert.equal(steps.filter((phase) => phase === 'seen').length, 3, 'the third was asked for, and refused');
+});
+
+test('stuck detectors: unusable replies add up, even with good ones between them', async () => {
+  const notJson = () => Object.assign(new Error('The model did not return valid JSON.'), { code: 'invalid_json' });
+  const replies = [notJson(), { action: { action: 'wait', ms: 100 } }, notJson(), { action: { action: 'click', id: 1 } }, notJson(), { action: { action: 'finish', say: 'Never reached.', success: true } }];
+  const invalid = [];
+  const result = await runDesktopAgent({
+    goal: 'tidy my note',
+    host: { observe: async () => ({ ok: true, snapshot: NOTES }), execute: async () => ({ ok: true, changed: true }) },
+    model: async () => {
+      const next = replies.shift();
+      if (next instanceof Error) throw next;
+      return { json: next };
+    },
+    confirm: async () => assert.fail('nothing to ask'),
+    onStep: (step) => step.phase === 'invalid' && invalid.push(step.code),
+    platform: 'darwin'
+  });
+  assert.equal(result.say, 'The AI model’s replies didn’t make sense, so I stopped.');
+  assert.deepEqual(invalid, ['invalid_json', 'invalid_json', 'invalid_json'], 'the log can tell what kind');
+});
+
+test('every model call counts, and the run stops at the limit however good the replies', async () => {
+  let calls = 0;
+  let reads = 0;
+  const result = await runDesktopAgent({
+    goal: 'tidy my note',
+    host: { observe: async () => ({ ok: true, snapshot: { ...NOTES, window: { title: `Notes ${(reads += 1)}` } } }), execute: async () => ({ ok: true, changed: true }) },
+    model: async () => ((calls += 1), { json: { action: { action: 'click', id: 1 } } }),
+    confirm: async () => assert.fail('nothing to ask'),
+    limits: { maxActions: 1000, maxModelCalls: 4, runBudgetMs: 60000, failures: 3, invalidReplies: 2, invalidTotal: 3, idleSteps: 3 },
+    platform: 'darwin'
+  });
+  assert.equal(calls, 4);
+  assert.equal(result.say, 'That was taking too many steps, so I stopped.');
+});
+
+test('⌘A then a field\'s id types over the selection; ⌘A then ⌫ is still left for a fresh look', async () => {
+  const done = [];
+  const replies = [{ actions: [{ action: 'press', keys: 'cmd+a' }, { action: 'type', id: 3, text: 'eggs' }] }, { action: { action: 'finish', say: 'Done.', success: true } }];
+  await runDesktopAgent({
+    goal: 'change my note to eggs',
+    host: { observe: async () => ({ ok: true, snapshot: NOTES }), execute: async (action) => (done.push(action), { ok: true }) },
+    model: async () => ({ json: replies.shift() }),
+    confirm: async () => assert.fail('nothing to ask'),
+    platform: 'darwin'
+  });
+  assert.deepEqual(done, [{ action: 'press', keys: 'cmd+a' }, { action: 'type', id: 3, text: 'eggs', mode: 'insert' }], 'added to the end, it would have doubled');
+
+  // What was asked for outright stands: a replace is still the host's to refuse.
+  const named = [];
+  const explicit = [{ actions: [{ action: 'press', keys: 'cmd+a' }, { action: 'type', id: 3, text: 'eggs', mode: 'replace' }] }, { action: { action: 'finish', say: 'Done.', success: true } }];
+  await runDesktopAgent({
+    goal: 'change my note to eggs',
+    host: { observe: async () => ({ ok: true, snapshot: NOTES }), execute: async (action) => (named.push(action), { ok: true }) },
+    model: async () => ({ json: explicit.shift() }),
+    confirm: async () => assert.fail('nothing to ask'),
+    platform: 'darwin'
+  });
+  assert.equal(named[1].mode, 'replace');
+
+  // A key between them moves the selection on.
+  const later = [];
+  const moved = [{ actions: [{ action: 'press', keys: 'cmd+a' }, { action: 'click', id: 1 }, { action: 'type', id: 3, text: 'eggs' }] }, { action: { action: 'finish', say: 'Done.', success: true } }];
+  await runDesktopAgent({
+    goal: 'change my note to eggs',
+    host: { observe: async () => ({ ok: true, snapshot: NOTES }), execute: async (action) => (later.push(action), { ok: true }) },
+    model: async () => ({ json: moved.shift() }),
+    confirm: async () => assert.fail('nothing to ask'),
+    platform: 'darwin'
+  });
+  assert.equal(later[2].mode, undefined);
+
+  const pressed = [];
+  const prompts = [];
+  const refused = [{ actions: [{ action: 'press', keys: 'cmd+a' }, { action: 'press', keys: 'backspace' }] }, { action: { action: 'finish', say: 'Stopped.', success: false } }];
+  await runDesktopAgent({
+    goal: 'clear my note',
+    host: { observe: async () => ({ ok: true, snapshot: NOTES }), execute: async (action) => (pressed.push(action.keys), { ok: true }) },
+    model: async ({ prompt }) => (prompts.push(JSON.parse(prompt)), { json: refused.shift() }),
+    confirm: async () => assert.fail('nothing to ask'),
+    platform: 'darwin'
+  });
+  assert.deepEqual(pressed, ['cmd+a'], '⌫ wasn\'t pressed');
+  assert.match(prompts[1].lastResult.detail, /moved the focus/);
+});
+
+test('a text area with nothing in it takes a replace as an add; one with something in it never does', async () => {
+  const blank = { ...NOTES, elements: NOTES.elements.map((item) => (item.id === 3 ? { ...item, value: undefined } : item)) };
+  const empty = scriptedDriver({ act: (params) => (params.action === 'read' ? { value: '', length: 0, contains: true } : { value: params.value, landed: true }) });
+  assert.deepEqual(await hostOn(empty.driver).execute({ action: 'type', id: 3, text: 'eggs', mode: 'replace' }, blank), { ok: true, landed: true });
+  assert.deepEqual(empty.calls.map(([, params]) => params.action), ['read', 'appendValue']);
+
+  // Shown as empty, but holding something (a blank line): not replaced, and said why.
+  const lines = scriptedDriver({ act: { value: '\n\n', length: 2, contains: true } });
+  const refused = await hostOn(lines.driver).execute({ action: 'type', id: 3, text: 'eggs', mode: 'replace' }, blank);
+  assert.match(refused.detail, /isn’t replaced whole/);
+  assert.match(refused.detail, /press cmd\+a and type/);
+  assert.equal(lines.calls.some(([, params]) => params.action === 'appendValue'), false);
+
+  // Can't be read: not known to be empty.
+  const unread = scriptedDriver({ act: {} });
+  assert.match((await hostOn(unread.driver).execute({ action: 'type', id: 3, text: 'eggs', mode: 'replace' }, blank)).detail, /isn’t replaced whole/);
+});
+
+test('text that\'s read back says so, and nothing that wasn\'t does', async () => {
+  const written = scriptedDriver({ act: (params) => (params.action === 'appendValue' ? { value: `milk${params.value}`, landed: true } : {}) });
+  assert.deepEqual(await hostOn(written.driver).execute({ action: 'type', id: 3, text: ' eggs' }, NOTES), { ok: true, landed: true });
+  // Typed by keys, and read back.
+  const keys = scriptedDriver({ act: (params) => (params.action === 'read' ? { value: 'eggs', length: 4, contains: true } : Promise.reject(new Error('web pages don’t take text set this way'))), frontmost: inFront(50), focused: { element: {}, app: { pid: 50 } } });
+  assert.deepEqual(await hostOn(keys.driver).execute({ action: 'type', id: 0, text: 'eggs' }, NOTES), { ok: true, landed: true });
+  // Typed where the cursor is: nothing to read.
+  const blind = scriptedDriver({ frontmost: inFront(50), focused: { element: {}, app: { pid: 50 } } });
+  assert.deepEqual(await hostOn(blind.driver).execute({ action: 'type', text: 'eggs' }, NOTES), { ok: true });
+  // A field read, whatever else it holds, and a password field never.
+  const peeked = scriptedDriver({ act: { value: 'milk', tail: 'milk', length: 4, contains: false } });
+  assert.deepEqual(await hostOn(peeked.driver).peek(NOTES, 3, 'eggs'), { contains: false, length: 4, value: 'milk', tail: 'milk' });
+  const login = { ...NOTES, elements: [{ id: 0, role: 'password', label: 'Password' }] };
+  assert.equal(await hostOn(peeked.driver).peek(login, 0), null);
+});
+
+test('a patient step looks once more before saying nothing changed; an app that opened gets a moment', async () => {
+  const later = { ...structuredClone(NOTES), snapshot: 15, elements: [...NOTES.elements, { id: 6, role: 'row', label: 'New Note' }] };
+  const reads = [NOTES, later];
+  const { driver } = scriptedDriver({ snapshot: () => reads.shift(), frontmost: inFront(50), focused: { element: {}, app: { pid: 50 } } });
+  const waits = [];
+  const patient = await hostOn(driver, { wait: async (ms) => void waits.push(ms) }).execute({ action: 'press', keys: 'cmd+n' }, NOTES, { verify: true, patient: true });
+  assert.equal(patient.changed, true);
+  assert.deepEqual(waits, [350, 700]);
+  const hasty = scriptedDriver({ snapshot: NOTES, frontmost: inFront(50), focused: { element: {}, app: { pid: 50 } } });
+  assert.equal((await hostOn(hasty.driver).execute({ action: 'press', keys: 'cmd+n' }, NOTES, { verify: true })).unseen, true);
+
+  const settled = [];
+  await hostOn(scriptedDriver().driver, { wait: async (ms) => void settled.push(ms) }).execute({ action: 'open_app', name: 'Notes' }, NOTES);
+  assert.deepEqual(settled, [400]);
+  const missing = [];
+  await hostOn(scriptedDriver().driver, { wait: async (ms) => void missing.push(ms), openApp: async () => ({ ok: false, text: 'No.' }) }).execute({ action: 'open_app', name: 'Nope' }, NOTES);
+  assert.deepEqual(missing, []);
 });

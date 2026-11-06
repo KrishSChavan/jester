@@ -11,7 +11,7 @@ import { execFile } from 'node:child_process';
 import { goalWords, hasWord } from './agent/screen.js';
 import { appCatalog, findApp, installedApps } from './apps.js';
 import { describePlan } from './os-actions.js';
-import { matchApp, parseSequence } from './voice-commands.js';
+import { asksFirst, matchApp, parseSequence } from './voice-commands.js';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Windows' volume keys move it 2% a press. */
@@ -167,7 +167,7 @@ export function dictation(text) {
  * @param {(...parts:any[]) => void} [deps.log]
  * @param {(ms:number) => Promise<void>} [deps.wait]
  * @param {object} [deps.assistant]  takes what the matcher can't do (phase 6), when a model is set up:
- *   ready(), run(goal, {note}) → {ok, text, trace?}|null, replay(entry, goal) → {ok, text}|{ok:false, step, detail},
+ *   ready(), run(goal, {note, pick}) → {ok, text, trace?}|null, replay(entry, goal) → {ok, text}|{ok:false, step, detail},
  *   running, cancel()
  * @param {ReturnType<import('./learned.js').createLearned>} [deps.learned]  what's been taught and learned
  * @param {() => {id:number, bounds:object, workArea:object, internal:boolean, primary?:boolean}[]} [deps.displays]
@@ -507,10 +507,11 @@ export function createVoiceRunner({
 
   /**
    * The assistant, on what the matcher couldn't do; a task it got done is
-   * learned, to be done without it next time.
+   * learned, to be done without it next time. `pick`: a search is waiting for
+   * its result to be pressed, which is all that's left to do.
    */
-  async function assisted(text, note = '', done = []) {
-    const result = await assistant.run(text, note ? { note } : {});
+  async function assisted(text, note = '', done = [], { pick = false } = {}) {
+    const result = await assistant.run(text, { ...(note ? { note } : {}), ...(pick ? { pick } : {}) });
     if (!result) return null;
     const { trace, ...outcome } = result;
     if (outcome.ok && trace && learned) {
@@ -523,7 +524,7 @@ export function createVoiceRunner({
   }
 
   /** @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say */
-  async function runSentence(text, depth = 0) {
+  async function runSentence(text, depth = 0, context = {}) {
     // A new command ends a task still running (the assistant hears "stop" and its answers first).
     if (depth === 0 && assistant?.running) await assistant.cancel();
     // A phrase the user taught stands for its sentence.
@@ -534,7 +535,7 @@ export function createVoiceRunner({
     }
     const apps = catalog && Date.now() - catalog.at < CATALOG_MS ? await catalog.apps : await readCatalog();
     catalog = null;
-    const steps = parseSequence(text, { apps: apps.flatMap((app) => app.names), platform });
+    const steps = parseSequence(text, { ...context, apps: apps.flatMap((app) => app.names), platform });
     log('voice:', JSON.stringify(text), '→', JSON.stringify(steps));
     if (steps.some((step) => step.kind === 'cancel')) return { steps, outcome: null };
     if (steps[0]?.kind === 'teach') {
@@ -583,11 +584,17 @@ export function createVoiceRunner({
     if (outcome.ok && pick) {
       if (await assistantReady()) {
         await wait(SEARCH_LOAD_MS);
-        return { steps, outcome: await assisted(text) };
+        return { steps, outcome: await assisted(text, '', [], { pick: true }) };
       }
       if (assistant) return { steps, outcome: ok(`${outcome.text}. To have Jester press Play, add an AI model in Settings › Assistant.`) };
     }
     return { steps, outcome };
+  }
+
+  /** The apps, as read a moment ago if they were, and left for the command that follows. */
+  function freshApps() {
+    if (!catalog || Date.now() - catalog.at >= CATALOG_MS) catalog = { at: Date.now(), apps: readCatalog() };
+    return catalog.apps;
   }
 
   return {
@@ -595,8 +602,30 @@ export function createVoiceRunner({
     prepare() {
       catalog = { at: Date.now(), apps: readCatalog() };
     },
-    /** @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say */
-    run: (text) => runSentence(text),
+    /**
+     * @param {string} text
+     * @param {{talking?:boolean}} [context]  talking: said in conversation (parseCommand)
+     * @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say
+     */
+    run: (text, context = {}) => runSentence(text, 0, context),
+    /** Whether a sentence is one Jester can do with no model. Does nothing, and stops nothing running. */
+    async knows(text) {
+      if (learned && (await learned.phrase(text).catch(() => null))) return true;
+      const apps = (await freshApps()).flatMap((app) => app.names);
+      if (!parseSequence(text, { apps, platform, talking: true }).some((step) => step.kind === 'unknown')) return true;
+      return !!(learned && (await learned.find(text).catch(() => null)));
+    },
+    /**
+     * Whether a sentence should ask before it's done, having been overheard. What
+     * goes to the assistant doesn't: it asks for itself, at the step that needs it.
+     */
+    async risky(text) {
+      const taught = learned ? await learned.phrase(text).catch(() => null) : null;
+      const names = (await freshApps()).flatMap((app) => app.names);
+      const steps = parseSequence(taught?.say ?? text, { apps: names, platform, talking: !taught });
+      if (steps.some((step) => step.kind === 'unknown')) return false;
+      return steps.some((step) => asksFirst(step, { platform, listed: (app) => !!matchApp(app, names) }));
+    },
     /** Moves a window, as the assistant's place asks: {app?, pid?, name?, where, screen}. */
     async place(request) {
       return placeWindow(request, await readCatalog());

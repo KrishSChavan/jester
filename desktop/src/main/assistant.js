@@ -1,6 +1,7 @@
 /**
  * Jester Desktop's assistant (phase 6): what the voice matcher can't do, given
- * to an AI model that works the front app through its controls (agent/loop.js).
+ * to an AI model that plans it, for the app to carry out (agent/executor.js),
+ * and works the front app through its controls where it takes eyes (agent/loop.js).
  *
  * The models are the user's own, saved through the extension's credentials.js
  * (their keys sealed on disk, never shown to a page) and paced through its
@@ -11,10 +12,11 @@
 import { approvalAnswer } from '../../../jester-extension/src/background/browser-intent.js';
 import { createPooledModelClient } from '../../../jester-extension/src/background/model-pool.js';
 import { MSG } from '../../../jester-extension/src/common/constants.js';
-import { clearConnection, connectionSummary, loadConnections, saveConnection } from '../../../jester-extension/src/common/credentials.js';
+import { clearConnection, connectionSummary, loadConnections, normaliseConnection, saveConnection } from '../../../jester-extension/src/common/credentials.js';
 import { taskCaption } from './agent/actions.js';
+import { runPlannedAgent } from './agent/executor.js';
 import { createDesktopHost } from './agent/host.js';
-import { runDesktopAgent } from './agent/loop.js';
+import { planSummary, stepLine } from './agent/plan.js';
 import { replaySteps } from './agent/replay.js';
 import { post } from './chrome-bridge.js';
 
@@ -24,6 +26,10 @@ const APPROVAL_MS = 60000;
 const REMEMBERED = 3;
 const STOP = /^\W*(?:stop|cancel|never ?mind|stop it|that'?s enough)\W*$/i;
 const WAITING = 'Waiting for your OK';
+const PLANNING = 'Planning…';
+const REPLANNING = 'Changing the plan…';
+/** How long a plan of a few steps stays on the pill, to be read. */
+const PLAN_HOLD_MS = 700;
 const REPLAYING = 'Doing it the way that worked before';
 /** A replay's answer: what the model said the first time described that time's screen, not this one's. */
 const REPLAYED = 'Done, the way it worked before.';
@@ -40,7 +46,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {(url:string) => Promise<unknown>} deps.openUrl
  * @param {Function} deps.dispatch
  * @param {(request:object) => Promise<{ok:boolean, text:string}>} [deps.place]  moves a window (voice-runner.js's)
- * @param {() => void} deps.listen  opens the mic for a spoken answer
+ * @param {(label:string) => void} deps.listen  opens the mic for a spoken answer to this question
  * @param {{show:(question:string) => void, hide:() => void}} deps.prompt  the question's window, with Allow and Don't
  * @param {number} [deps.exclude]  Jester's own process, whose windows the assistant never works in
  * @param {(task:Function) => Promise} [deps.quietly]  with the overlays hidden, as screen reading needs
@@ -49,10 +55,18 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {boolean} [deps.logScreens]  log the screen the model is shown each step: your own
  *   content, so only for debugging (JESTER_LOG_SCREENS)
  * @param {string} [deps.platform]
+ * @param {() => Promise<string>} [deps.localModel]  an Ollama model to work with when no model is saved
  */
-export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform }) {
+export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => '' }) {
   const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, quietly, exclude, platform });
+  /** The models saved in Settings, or with none, the one the continuous assistant talks through. */
+  const connections = async () => {
+    const saved = await loadConnections();
+    const local = saved.length ? '' : await localModel();
+    return local ? [{ id: 'ollama-local', ...normaliseConnection({ provider: 'ollama', model: local }), cooldownUntil: 0 }] : saved;
+  };
   const model = createPooledModelClient({
+    load: connections,
     onSelected: ({ provider, model: id }) => log('assistant model:', provider, id),
     onLimited: ({ provider, model: id, readyAt }) => log('assistant model limited:', provider, id, 'until', new Date(readyAt).toLocaleTimeString()),
     onPacing: ({ waitMs }) => working(`Waiting ${Math.ceil(waitMs / 1000)} s for the model’s per-minute limit`)
@@ -116,51 +130,86 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
       // The question in its own window (clickable); the pill listens for a spoken yes.
       prompt.show(`${label}?`);
       working(WAITING);
-      listen();
+      listen(label);
     });
   }
 
   return {
     /** Whether a model is set up to take commands. */
     async ready() {
-      return (await loadConnections()).length > 0;
+      return (await connections()).length > 0;
+    },
+
+    /** Whether a question is waiting on the user. */
+    get asking() {
+      return !!approval;
+    },
+
+    /**
+     * The same question, for a command the matcher knows, heard on the always-on mic:
+     * 👍, Allow or a spoken yes; no answer is a no; "stop" and the × end it.
+     */
+    async confirm(label) {
+      const task = await begin(taskCaption(label));
+      try {
+        return await ask(label, task.controller.signal);
+      } finally {
+        end(task);
+      }
     },
 
     /**
      * @param {string} goal
-     * @param {{note?:string}} [options]  note: a learned way of doing it that failed, and where
+     * @param {{note?:string, pick?:boolean}} [options]  note: a learned way of doing it that failed, and
+     *   where; pick: a search is waiting for its result to be pressed
      * @returns {Promise<{ok:boolean, text:string, trace?:object[]}|null>} null: cancelled, nothing to say;
      *   trace (when done): the steps, for learned.js
      */
-    async run(goal, { note = '' } = {}) {
+    async run(goal, { note = '', pick = false } = {}) {
       // A new command replaces one still running.
       const task = await begin('');
       working();
+      /** The step of a plan it's on, for the pill to count. */
+      let place = null;
+      const line = (label = '') => (place ? stepLine(place.index, place.total, label || place.label) : label);
       try {
-        const result = await runDesktopAgent({
+        const result = await runPlannedAgent({
           goal,
           note,
+          pick,
           previous,
           host,
           model,
           platform,
           signal: task.controller.signal,
           confirm: ({ label }) => ask(label, task.controller.signal),
+          onPlan: (labels) => (labels.length > 1 ? pause(PLAN_HOLD_MS) : undefined),
           onStep: (step) => {
             // A task that's been replaced keeps logging, but leaves the pill to the new one.
             if (step.phase === 'task') {
               task.caption = step.caption;
-              if (step.by === 'model') log('assistant task:', JSON.stringify(step.caption));
+              if (step.by !== 'goal') log('assistant task:', JSON.stringify(step.caption));
               if (current === task) working(task.step);
             } else if (step.phase === 'thinking' || step.phase === 'acting') {
-              if (current === task) working(step.phase === 'acting' ? step.label : '');
+              if (current === task) working(line(step.phase === 'acting' ? step.label : ''));
+            } else if (step.phase === 'planning') {
+              if (current === task) working(PLANNING);
+            } else if (step.phase === 'plan') {
+              log('assistant plan:', JSON.stringify(step.labels));
+              if (current === task && step.labels.length > 1) working(planSummary(step.labels));
+            } else if (step.phase === 'step') {
+              place = step;
+              if (current === task) working(line());
+            } else if (step.phase === 'replanning') {
+              log(`assistant replan (${step.attempt} of ${step.of}): ${step.why}`);
+              if (current === task) working(REPLANNING);
             } else if (step.phase === 'seen') log(`assistant sees ${step.app} — ${JSON.stringify(step.window || '')}: ${step.elements} controls${logScreens ? `\n${step.screen}` : ''}`);
             else if (step.phase === 'acted') log(`assistant ${step.ok ? 'did' : 'couldn’t'}: ${step.label}${step.detail ? ` (${private_(step.detail)})` : ''}${logScreens && step.changes ? ` → ${step.changes}` : ''}`);
-            else if (step.phase === 'invalid') log('assistant reply unusable:', step.detail);
+            else if (step.phase === 'invalid') log(`assistant reply unusable${step.code ? ` (${step.code})` : ''}:`, step.detail);
             else if (step.phase === 'unseen') log('assistant couldn’t read the screen:', step.detail);
           }
         });
-        log('assistant:', JSON.stringify(goal), '→', result.cancelled ? 'cancelled' : result.ok ? 'done' : 'not done', JSON.stringify(result.say), `· ${result.actions} steps`);
+        log('assistant:', JSON.stringify(goal), '→', result.cancelled ? 'cancelled' : result.ok ? 'done' : 'not done', JSON.stringify(result.say), `· ${result.actions} steps · ${result.calls} model calls`);
         previous = [...previous, { said: goal.slice(0, 200), result: result.cancelled ? 'cancelled' : result.ok ? 'done' : `failed: ${result.say}`.slice(0, 200) }].slice(-REMEMBERED);
         if (result.cancelled) return null;
         return { ok: result.ok, text: result.say || (result.ok ? 'Done.' : 'That didn’t work.'), ...(result.ok && result.trace?.length ? { trace: result.trace } : {}) };
@@ -221,7 +270,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
         if (answer) approval.settle(answer === 'yes');
         else {
           prompt.show(`${approval.label}? Say yes or no.`);
-          listen();
+          listen(approval.label);
         }
         return true;
       }

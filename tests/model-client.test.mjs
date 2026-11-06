@@ -397,3 +397,24 @@ test('timings include actual requests, retries, and provider token counts withou
     assert.equal(JSON.stringify(result.timings).includes('Private'), false);
   }
 });
+
+test('Ollama needs no key, turns thinking off and keeps its model loaded', () => {
+  const selected = normalizeModelConfig({ provider: 'ollama', model: 'qwen3.5:9b' });
+  assert.equal(selected.baseUrl, 'http://localhost:11434/v1');
+  const request = buildModelRequest(selected, { system: 'JSON', prompt: 'Play.' });
+  const body = JSON.parse(request.init.body);
+  assert.equal(request.url, 'http://localhost:11434/v1/chat/completions');
+  assert.equal(body.reasoning_effort, 'none');
+  assert.equal(body.keep_alive, '30m');
+  assert.equal(body.max_tokens, 600);
+  assert.equal(body.response_format.type, 'json_schema');
+  assert.deepEqual(body.response_format.json_schema.schema, AGENT_RESPONSE_SCHEMA);
+  assert.equal(Object.hasOwn(request.init.headers, 'authorization'), false);
+  const custom = normalizeModelConfig({ provider: 'custom', baseUrl: 'http://localhost:11434/v1', model: 'local' });
+  assert.equal(Object.hasOwn(JSON.parse(buildModelRequest(custom, { system: 'JSON', prompt: 'Play.' }).init.body), 'keep_alive'), false);
+});
+
+test('Ollama not running says so', async () => {
+  await assert.rejects(requestModel({ env: { provider: 'ollama', model: 'qwen3.5:9b' }, system: 'JSON', prompt: 'Play.',
+    fetchImpl: async () => { throw new TypeError('fetch failed'); } }), /Ollama isn’t running/);
+});

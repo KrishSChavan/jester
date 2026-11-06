@@ -81,14 +81,15 @@ export function createPooledModelClient({
     await untilAborted(pace(estimate, options), options.signal);
     aborted(options.signal);
     const startedAt = clock();
-    const budget = Math.min(MODEL_REQUEST_LIMITS.maxElapsedMs,
+    let budget = Math.min(MODEL_REQUEST_LIMITS.maxElapsedMs,
       Math.max(1, Number.isFinite(options.maxElapsedMs) ? options.maxElapsedMs : MODEL_REQUEST_LIMITS.maxElapsedMs));
     const tried = new Set();
     const operation = new AbortController();
     const signal = operation.signal;
     const onAbort = () => operation.abort(abortError());
     options.signal?.addEventListener('abort',onAbort,{once:true});
-    const timer = setTimeout(()=>operation.abort(new ModelTimeoutError()),budget);
+    const expire = (ms) => setTimeout(()=>operation.abort(new ModelTimeoutError()),ms);
+    let timer = expire(budget);
     let rejectInterrupted;
     const interrupted = new Promise((_,reject)=>{
       rejectInterrupted = () => reject(signal.reason || abortError());
@@ -128,6 +129,12 @@ export function createPooledModelClient({
             'Every model tried in this turn was rate-limited. A saved model can be retried now.'
           ), {code:'model_pool_retry_ready',retryAfterMs:0,retryable:true});
           throw new AllModelsRateLimitedError(cooldown, now());
+        }
+        // A local model may have to load into memory first, on this request's time.
+        if (selected.provider === 'ollama' && !Number.isFinite(options.maxElapsedMs)) {
+          budget = MODEL_REQUEST_LIMITS.localElapsedMs;
+          clearTimeout(timer);
+          timer = expire(budget-(clock()-startedAt));
         }
         const remaining = budget-(clock()-startedAt);
         if (remaining <= 0) throw new ModelTimeoutError();

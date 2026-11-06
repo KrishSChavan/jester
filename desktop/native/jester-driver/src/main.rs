@@ -85,12 +85,12 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
             }
             Ok(Map::new())
         }
-        Command::Button { x, y, button, down } => {
+        Command::Button { x, y, button, down, count } => {
             let at = match (x, y) {
                 (Some(x), Some(y)) => (x, y),
                 _ => input.cursor()?,
             };
-            input.button(poster, button, down, at, 1).map(|_| Map::new())
+            input.button(poster, button, down, at, count.clamp(1, 3)).map(|_| Map::new())
         }
         Command::Scroll { x, y, dx, dy, unit } => {
             let at = match (x, y) {
@@ -140,6 +140,8 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
         | Command::Menu { .. }
         | Command::Window { .. }
         | Command::PlaceWindow { .. }
+        | Command::WindowAt { .. }
+        | Command::MoveWindow { .. }
         | Command::Quit => unreachable!(),
     };
     result.map(|mut body| {
@@ -185,6 +187,14 @@ fn run_query(command: Command, dry_run: bool) -> Result<Map<String, Value>> {
             "events": [{ "event": "placeWindow", "pid": pid, "frame": { "x": x, "y": y, "w": w, "h": h }, "maximize": maximize, "fullscreen": fullscreen }]
         }))),
         Command::PlaceWindow { pid, x, y, w, h, maximize, fullscreen } => platform::place_window(pid, (x, y, w, h), maximize, fullscreen).map(object),
+        // A stand-in in a dry run: nothing real is brought to the front or moved.
+        Command::WindowAt { x, y } if dry_run => Ok(object(json!({
+            "events": [{ "event": "windowAt", "x": x, "y": y }],
+            "title": "dry run", "frame": { "x": x - 100.0, "y": y - 40.0, "w": 800.0, "h": 600.0 },
+        }))),
+        Command::WindowAt { x, y } => platform::window_at(x, y).map(object),
+        Command::MoveWindow { x, y } if dry_run => Ok(object(json!({ "events": [{ "event": "moveWindow", "x": x, "y": y }] }))),
+        Command::MoveWindow { x, y } => platform::move_window_to(x, y).map(|_| Map::new()),
         _ => unreachable!(),
     }
 }
@@ -237,6 +247,7 @@ fn main() {
             }
         };
         if matches!(command, Command::Quit) {
+            input.release_buttons(&mut poster);
             drop(queries);
             let _ = query_thread.join();
             write_line(&out, &ok(&id, Map::new()));
@@ -252,7 +263,28 @@ fn main() {
         };
         write_line(&out, &reply);
     }
-    // stdin closed: the app is gone. Let queries in flight answer first.
+    // stdin closed: the app is gone. Nothing else would let go of a drag.
+    input.release_buttons(&mut poster);
+    // Let queries in flight answer first.
     drop(queries);
     let _ = query_thread.join();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_button_left_down_is_let_go() {
+        let mut input = platform::Input::new();
+        let mut poster = Poster { dry_run: true, log: Vec::new() };
+        input.button(&mut poster, protocol::Button::Left, true, (4.0, 5.0), 1).unwrap();
+        poster.log.clear();
+        input.release_buttons(&mut poster);
+        assert_eq!(poster.log.len(), 1);
+        assert_eq!(poster.log[0]["event"], "up");
+        poster.log.clear();
+        input.release_buttons(&mut poster);
+        assert!(poster.log.is_empty(), "nothing is down any more");
+    }
 }

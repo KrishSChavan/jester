@@ -14,6 +14,8 @@ const VOICE_IDLE_MS = 1600;
 const VOICE_ANSWER_MS = { ok: 2600, bad: 5200 };
 /** The assistant ends its own phase; this only catches one that died mid-task. */
 const VOICE_THINKING_MS = 90000;
+/** The main process ends what's said; this only catches a voice that died mid-sentence. */
+const VOICE_SPEAKING_MS = 120000;
 const BAR_MIN = 6;
 const BAR_MAX = 26;
 /** What has been heard so far, kept to its end: the pill is one line. */
@@ -23,6 +25,8 @@ let active = false;
 let showHud = true;
 let toastTimer = null;
 let voiceTimer = null;
+/** What came for the pill while Jester talked, and takes it when he stops. */
+let afterSpeech = null;
 /** The last place reportPill said the pill ends. */
 let pillSaid = '';
 
@@ -80,6 +84,16 @@ function drawCursor(message) {
   cursor.hidden = false;
 }
 
+/** The outline round a window being carried, in this overlay's own coordinates. */
+function drawOutline(message) {
+  const outline = $('outline');
+  outline.hidden = !!message.hidden;
+  if (message.hidden) return;
+  outline.style.transform = `translate3d(${message.x}px, ${message.y}px, 0)`;
+  outline.style.width = `${message.w}px`;
+  outline.style.height = `${message.h}px`;
+}
+
 /**
  * Says where the pill ends, for the × beside it (src/main/stop-button.js), which
  * has a window of its own: this one lets every click through. Where it's laid
@@ -97,6 +111,7 @@ function reportPill() {
 
 function hideVoice() {
   clearTimeout(voiceTimer);
+  afterSpeech = null;
   $('voice').hidden = true;
   $('voice').style.minWidth = '';
   pillSaid = '';
@@ -107,7 +122,7 @@ function hideVoice() {
 function showVoice(face, ms) {
   if ($('voice').hidden) fitToScreen();
   $('voice').className = `voice ${face}`;
-  if (face !== 'thinking') $('voice').style.minWidth = '';
+  if (face !== 'thinking' && face !== 'speaking') $('voice').style.minWidth = '';
   $('voice').hidden = false;
   document.body.classList.add('voice-up');
   clearTimeout(voiceTimer);
@@ -135,7 +150,21 @@ function drawLevels(levels) {
 /** Which face the pill shows now, if it's up. */
 function face() {
   const pill = $('voice');
-  return pill.hidden ? '' : ['listening', 'thinking', 'answer'].find((name) => pill.classList.contains(name)) || '';
+  return pill.hidden ? '' : ['speaking', 'listening', 'thinking', 'answer'].find((name) => pill.classList.contains(name)) || '';
+}
+
+/** Jester talking: {text?, ms?} starts or updates it, {done:true} ends it, and what waited takes over. */
+function speak({ done = false, text = '', ms = VOICE_SPEAKING_MS }) {
+  if (!done) {
+    $('voice-spoken').textContent = String(text || '');
+    return showVoice('speaking', ms);
+  }
+  if (face() !== 'speaking') return;
+  const next = afterSpeech;
+  afterSpeech = null;
+  $('voice').classList.remove('speaking');
+  if (next) drawVoice(next);
+  else hideVoice();
 }
 
 /**
@@ -146,6 +175,13 @@ function face() {
  */
 function drawVoice(voice) {
   const showing = face();
+  if (voice.phase === 'speaking') return speak(voice);
+  if (showing === 'speaking') {
+    // Only the end of speech, or a deliberate new command, takes the pill from him.
+    if (voice.phase === 'thinking' || voice.phase === 'answer' || voice.hold) afterSpeech = voice;
+    else if (voice.active === false || voice.start) afterSpeech = null;
+    if (!voice.start || voice.hold) return;
+  }
   if (voice.mic?.detail && ['error', 'no-permission'].includes(voice.mic.state)) return answer(voice.mic.detail, false);
   if (voice.phase === 'answer') return answer(voice.text, voice.ok !== false);
   // The assistant at work: what it's doing ("stop" ends it).
@@ -167,7 +203,8 @@ function drawVoice(voice) {
   // The assistant at work keeps the pill, unless a new command is starting.
   if (showing === 'thinking' && !voice.start) return;
   if (voice.start) $('voice-heard').textContent = '';
-  showVoice('listening', VOICE_IDLE_MS);
+  // `hold`: Jester waiting for more, with no mic frames to keep the pill up.
+  showVoice('listening', voice.hold || VOICE_IDLE_MS);
   drawLevels(voice.levels);
 }
 
@@ -186,6 +223,9 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'jester/overlay-cursor':
       drawCursor(message);
       break;
+    case 'jester/overlay-outline':
+      drawOutline(message);
+      break;
     case 'jester/overlay-ripple':
       ripple(message);
       break;
@@ -201,7 +241,8 @@ chrome.runtime.onMessage.addListener((message) => {
       toast(message.text, message.tone, message.detail);
       break;
     case MSG.VOICE:
-      if (active) drawVoice(message.voice || {});
+      // The end of speech reaches a display the pointer has left, or its pill would stay up.
+      if (active || (message.voice?.phase === 'speaking' && message.voice.done)) drawVoice(message.voice || {});
       break;
     default:
       break;

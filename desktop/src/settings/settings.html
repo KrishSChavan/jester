@@ -63,8 +63,58 @@
       </div>
     </section>
 
+    <section aria-labelledby="watch-heading" id="watch-section">
+      <h2 id="watch-heading">Apple Watch</h2>
+      <div class="cards">
+        <label class="row">
+          <span><strong>Steer with your watch</strong><small id="watch-hint"></small></span>
+          <input type="checkbox" id="watchEnabled" />
+        </label>
+        <div class="row">
+          <span><strong id="watch-pair-title"></strong><small id="watch-pair-hint"></small></span>
+          <div class="actions">
+            <button id="watch-pair" type="button"></button>
+            <button id="watch-cancel" type="button" hidden>Cancel</button>
+          </div>
+        </div>
+        <label class="row">
+          <span><strong>Watch speed</strong><small>How far a turn of the wrist moves the cursor.</small></span>
+          <input type="range" id="watchSpeed" min="0.4" max="2.5" step="0.1" />
+        </label>
+        <label class="row">
+          <span><strong>Reverse up and down</strong><small>If tipping your hand up moves the cursor down.</small></span>
+          <input type="checkbox" id="watchInvertY" />
+        </label>
+      </div>
+    </section>
+
     <section aria-labelledby="assistant-heading">
       <h2 id="assistant-heading">Assistant</h2>
+      <div class="cards">
+        <label class="row" id="continuous-row">
+          <span><strong>Continuous assistant</strong><small id="continuous-hint"></small></span>
+          <input type="checkbox" id="continuousAssistant" />
+        </label>
+        <div class="row">
+          <span><strong>Your voice</strong><small id="voice-print-hint"></small></span>
+          <span class="buttons">
+            <button id="voice-print-teach" type="button"></button>
+            <button id="voice-print-forget" type="button" hidden>Forget</button>
+          </span>
+        </div>
+        <label class="row">
+          <span><strong>Talks through</strong><small id="chat-model-hint"></small></span>
+          <select id="assistantModel"></select>
+        </label>
+        <div class="row">
+          <span><strong>Jester’s voice</strong><small id="puter-hint"></small><small id="puter-error" class="error" role="alert"></small></span>
+          <button id="puter-connect" type="button"></button>
+        </div>
+        <div class="row">
+          <span><strong>What he remembers</strong><small>Conversations are kept word for word for up to an hour, then as one sentence each for a week. All of it stays on this computer.</small></span>
+          <button id="forget-conversations" type="button">Forget it all</button>
+        </div>
+      </div>
       <p class="intro">Commands Jester doesn’t know (“play Gunna”, “reply to Sam on Slack”) go to an AI model of yours, which works the app in front step by step. To do that, the names and text of that window’s controls go to the model’s provider. It asks you first before anything that sends, buys, deletes or changes settings — answer with 👍, the pill’s Allow, or by saying yes — and never types into password fields.</p>
       <div class="cards" id="connections"></div>
       <form id="connection-form" class="cards">
@@ -80,11 +130,11 @@
           <span><strong>Model</strong><small>The model’s ID, as your provider names it.</small></span>
           <input id="connection-model" type="text" spellcheck="false" autocomplete="off" />
         </label>
-        <label class="row">
+        <label class="row" id="connection-key-row">
           <span><strong>API key</strong><small>Stored encrypted on this computer, and never shown again.</small></span>
           <input id="connection-key" type="password" spellcheck="false" autocomplete="off" />
         </label>
-        <label class="row">
+        <label class="row" id="connection-plan-row">
           <span><strong>Plan</strong><small>Free plans are paced to stay under their per-minute limits.</small></span>
           <select id="connection-plan">
             <option value="free">Free</option>

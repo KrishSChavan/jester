@@ -404,7 +404,8 @@ let editingConnectionId = null;
 let connectionBusy = false;
 let cooldownTimer = null;
 let connectionRefresh = 0;
-fillSelect(providerSelect, PROVIDERS);
+// Ollama refuses extension origins unless told otherwise (OLLAMA_ORIGINS): the desktop app's alone.
+fillSelect(providerSelect, Object.fromEntries(Object.entries(PROVIDERS).filter(([id]) => id !== 'ollama')));
 providerSelect.value = 'groq';
 function paintProvider() {
   const google = providerSelect.value === 'google';

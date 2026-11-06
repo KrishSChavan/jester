@@ -4,6 +4,7 @@ export const PROVIDERS = {
   anthropic: { label: 'Anthropic (Claude)', protocol: 'anthropic', baseUrl: 'https://api.anthropic.com/v1' },
   google: { label: 'Google (Gemini)', protocol: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' },
   groq: { label: 'Groq', protocol: 'openai-compatible', baseUrl: 'https://api.groq.com/openai/v1' },
+  ollama: { label: 'Ollama (on this computer)', protocol: 'openai-compatible', baseUrl: 'http://localhost:11434/v1' },
   custom: { label: 'Custom OpenAI-compatible API', protocol: 'openai-compatible', baseUrl: '' }
 };
 const STORE_KEY = 'modelConnections';

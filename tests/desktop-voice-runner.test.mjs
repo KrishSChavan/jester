@@ -240,6 +240,7 @@ test('with the assistant but no model saved, the pill says where to add one', as
   });
 
   let asked = null;
+  let told = null;
   const ready = createVoiceRunner({
     driver: { call: async (cmd) => (cmd === 'apps' ? { apps: RUNNING } : cmd === 'frontmost' ? { app: { name: 'Spotify' } } : {}) },
     dispatch: async () => ({ ok: true, label: '', detail: '' }),
@@ -249,10 +250,11 @@ test('with the assistant but no model saved, the pill says where to add one', as
     installed: () => INSTALLED,
     platform: 'darwin',
     wait: async () => undefined,
-    assistant: { ready: async () => true, run: async (goal) => ((asked = goal), { ok: true, text: 'Playing Gunna.' }) }
+    assistant: { ready: async () => true, run: async (goal, options) => ((asked = goal), (told = options), { ok: true, text: 'Playing Gunna.' }) }
   });
   assert.deepEqual((await ready.run('Open Spotify and play Gunna')).outcome, { ok: true, text: 'Playing Gunna.' });
   assert.equal(asked, 'Open Spotify and play Gunna', 'the assistant gets the whole sentence, after the search');
+  assert.deepEqual(told, { pick: true }, 'all that\'s left is pressing Play: nothing to plan');
 });
 
 const LAPTOP = { id: 1, internal: true, primary: true, bounds: { x: 0, y: 0, width: 1512, height: 982 }, workArea: { x: 0, y: 25, width: 1512, height: 957 } };

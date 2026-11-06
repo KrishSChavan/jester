@@ -20,11 +20,13 @@ const WORKER_URL = `${EXT_ROOT}src/background/service-worker.js`;
 
 /**
  * Keys only the main process reads: the model connections, API keys and all,
- * and what Jester has learned (learned.js), which holds what was typed.
+ * what Jester has learned (learned.js), which holds what was typed, the
+ * key that proves a watch is yours (watch.js), the Puter sign-in (puter.js), and
+ * the user's voiceprint (voiceprint.js).
  * Pages never see them, through storage or its change events, and they're
  * sealed on disk.
  */
-export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection', 'desktopLearned']);
+export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection', 'desktopLearned', 'watchKey', 'puterToken', 'voiceprint']);
 const isPrivate = (key) => PRIVATE_KEYS.includes(key);
 const withoutPrivate = (items) => Object.fromEntries(Object.entries(items || {}).filter(([key]) => !isPrivate(key)));
 

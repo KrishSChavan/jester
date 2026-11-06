@@ -1,0 +1,305 @@
+/* Jester, with no face: a flat disc that pulses, and the words. Nothing is
+   shaded: every shape is one solid colour. The palette is these six tokens. */
+
+:root {
+  color-scheme: dark;
+  --ground: #08060c;
+  --disc: #4b1e8f;
+  --ring: #8a63d8;
+  --text: #efe9f7;
+  --dim: #a79bbe;
+  --edge: #2a2138;
+}
+
+/* How he moves, by what he's doing. */
+body[data-state='resting'] { --speed: 4.5s; --swell: 1.05; --show: 0.22; }
+body[data-state='listening'] { --speed: 2s; --swell: 1.12; --show: 0.5; }
+body[data-state='thinking'] { --speed: 1.1s; --swell: 0.94; --show: 0; }
+body[data-state='speaking'] { --speed: 0.9s; --swell: 1.2; --show: 0.75; }
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--ground);
+  color: var(--text);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  user-select: none;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.unseen {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* The title bar's place: the window is dragged by it. */
+.top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 0 18px 0 84px;
+  font-size: 13px;
+  color: var(--dim);
+  -webkit-app-region: drag;
+}
+
+.light {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.light i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--edge);
+}
+
+.light.on i {
+  background: var(--ring);
+}
+
+.stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(16px, 5vh, 44px);
+  padding: 0 32px;
+}
+
+.presence {
+  position: relative;
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 300px;
+  height: min(300px, 44vh);
+}
+
+.disc {
+  width: 168px;
+  height: 168px;
+  border-radius: 50%;
+  background: var(--disc);
+  animation: pulse var(--speed) ease-in-out infinite;
+}
+
+.ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 168px;
+  height: 168px;
+  margin: -84px 0 0 -84px;
+  border: 2px solid var(--ring);
+  border-radius: 50%;
+  opacity: 0;
+  animation: spread calc(var(--speed) * 2) ease-out infinite;
+}
+
+.ring + .ring {
+  animation-delay: var(--speed);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(var(--swell));
+  }
+}
+
+@keyframes spread {
+  from {
+    transform: scale(0.92);
+    opacity: var(--show);
+  }
+  to {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+.captions {
+  width: 100%;
+  max-width: 460px;
+  min-height: 92px;
+  text-align: center;
+  user-select: text;
+}
+
+.captions p {
+  margin: 0;
+}
+
+.heard {
+  color: var(--dim);
+}
+
+.said {
+  margin-top: 6px !important;
+  font-size: 18px;
+  line-height: 1.4;
+}
+
+.bar {
+  flex: none;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 14px;
+}
+
+.bar button,
+.bar input {
+  min-height: 44px;
+  border: 1px solid var(--edge);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.bar button {
+  flex: none;
+  padding: 0 14px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.bar button:hover {
+  color: var(--text);
+  border-color: var(--ring);
+}
+
+#type {
+  flex: 1;
+  min-width: 0;
+}
+
+#text {
+  width: 100%;
+  padding: 0 14px;
+  user-select: text;
+}
+
+#text::placeholder {
+  color: var(--dim);
+}
+
+.drawer {
+  position: fixed;
+  inset: 48px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  background: var(--ground);
+  user-select: text;
+}
+
+.drawer[hidden] {
+  display: none;
+}
+
+.drawer header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 8px 8px 18px;
+}
+
+.drawer h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+#close {
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 22px;
+}
+
+#conversations {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 18px 18px;
+  overflow: auto;
+  list-style: none;
+}
+
+#conversations li {
+  padding: 12px 0;
+  border-top: 1px solid var(--edge);
+}
+
+#conversations time {
+  display: block;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+#none {
+  margin: 0;
+  padding: 0 18px 18px;
+  color: var(--dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc,
+  .ring {
+    animation: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .bar {
+    flex-wrap: wrap;
+  }
+
+  #type {
+    order: -1;
+    flex-basis: 100%;
+  }
+}

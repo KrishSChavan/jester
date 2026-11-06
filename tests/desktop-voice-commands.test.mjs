@@ -27,10 +27,11 @@ test('what the recognizer actually wrote becomes the command meant (phase 0 tran
 test('"go to sleep" is Jester\'s own sleep, never an app to go to, and never the computer\'s', () => {
   const sleep = { kind: 'jester', op: 'sleep' };
   const apps = [...APPS, 'Sleep Cycle'];
-  for (const said of ['Go to sleep.', 'go to sleep', 'Jester, go to sleep.', 'Hey Jester, go to sleep.', 'Please go back to sleep.', 'Sleep.', 'Sleep now.', 'Go to bed.', 'Take a nap.', 'Put Jester to sleep.', 'Put yourself to sleep.']) {
+  for (const said of ['Go to sleep.', 'go to sleep', 'Jester, go to sleep.', 'Hey Jester, go to sleep.', 'Please go back to sleep.', 'Sleep.', 'Sleep now.', 'Go to bed.', 'Take a nap.', 'Pause Jester.', 'Pause yourself.', 'Put Jester to sleep.', 'Put yourself to sleep.']) {
     assert.deepEqual(parseCommand(said, { apps, platform: 'darwin' }), sleep, said);
     assert.deepEqual(parseCommand(said, { apps: [], platform: 'win32' }), sleep, `${said} on Windows`);
   }
+  assert.notEqual(parse('Pause.').kind, 'jester', '"pause" alone is the music\'s');
   assert.deepEqual(parse('Put the computer to sleep.').kind, 'unknown');
   assert.deepEqual(parse('Sleep the computer.').kind, 'unknown');
   assert.deepEqual(parseCommand('Open Sleep Cycle.', { apps, platform: 'darwin' }).app, 'Sleep Cycle');

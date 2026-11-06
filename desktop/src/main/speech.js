@@ -11,6 +11,10 @@
  * when a command begins and let go after IDLE_MS without one. Loading takes
  * 0.5–1.4 s, about what it takes to say a command; what is said meanwhile
  * waits in the service's queue behind the load and is heard once it's done.
+ *
+ * The continuous assistant keeps it loaded and listening, fed by a page of its
+ * own (src/voice/voice.html). A command spoken with the shortcut, or the mic
+ * opened for a yes, comes first: listening picks up again once that's over.
  */
 
 import { app, ipcMain, utilityProcess } from 'electron';
@@ -22,8 +26,12 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE = path.join(here, 'speech/service.js');
 /** Only the engine page listens. */
 const ENGINE_PAGE = 'jester://ext/src/offscreen/offscreen.html';
+/** The always-on mic. */
+const VOICE_PAGE = 'jester://app/voice/voice.html';
 const IDLE_MS = 10 * 60 * 1000;
 const SAMPLE_RATE = 16000;
+/** A service that died is started again after this long, if something is listening. */
+const REVIVE_MS = 1000;
 
 export function startSpeech({ log = () => undefined } = {}) {
   /** The service, from the moment it's asked to load until it's let go. */
@@ -35,6 +43,11 @@ export function startSpeech({ log = () => undefined } = {}) {
   let idleTimer = null;
   /** The utterance being heard: who asked, which of their sessions, and how much audio has come. */
   let current = null;
+  /** Called with everything overheard, while the continuous assistant is on. */
+  let listener = null;
+  /** The user's voice, sent to each service as it starts. */
+  let voiceprint = null;
+  let teaching = false;
 
   function send(message) {
     if (!current || current.contents.isDestroyed()) return;
@@ -54,7 +67,7 @@ export function startSpeech({ log = () => undefined } = {}) {
   function rest() {
     clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      if (current) return rest();
+      if (current || listener) return rest();
       log(`speech: unloaded after ${IDLE_MS / 60000} idle minutes`);
       unload();
     }, IDLE_MS);
@@ -69,6 +82,12 @@ export function startSpeech({ log = () => undefined } = {}) {
     child.on('message', (message) => {
       if (service !== child) return;
       if (message?.type === 'ready') return log('speech loaded:', message.model, `${message.loadMs} ms`);
+      if (message?.type === 'heard') {
+        // Every score, for tuning voiceprint.js against a real voice.
+        if (message.score !== null) log(`speech: your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
+        return void listener?.(message.text, message);
+      }
+      if (message?.type === 'stranger') return log(`speech: not your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
       if (message?.type === 'error') log('speech error:', message.detail);
       if (message?.type === 'final' && current) {
         // Audio heard well short of the time taken means some never arrived.
@@ -76,9 +95,10 @@ export function startSpeech({ log = () => undefined } = {}) {
         log('speech heard', JSON.stringify(message.text), `in ${message.decodeMs} ms · ${heard.toFixed(1)} s of audio over ${((Date.now() - current.started) / 1000).toFixed(1)} s`);
       }
       send(message);
-      if (message?.type === 'final' || message?.type === 'error') {
+      if (current && (message?.type === 'final' || message?.type === 'error')) {
         current = null;
         rest();
+        resume();
       }
     });
     child.on('exit', (code) => {
@@ -87,11 +107,20 @@ export function startSpeech({ log = () => undefined } = {}) {
       service = null;
       if (current) send({ type: 'error', detail: 'service-ended' });
       current = null;
-      if (!quitting) log('speech service exited', code);
+      if (quitting) return;
+      log('speech service exited', code);
+      if (listener) setTimeout(resume, REVIVE_MS);
     });
     // Messages queue behind this one, so audio sent while it loads waits.
     child.postMessage({ type: 'start', model });
+    child.postMessage({ type: 'voiceprint', print: voiceprint });
+    child.postMessage({ type: 'teaching', on: teaching });
     return child;
+  }
+
+  /** Back to listening, if that's wanted and nobody's holding the mic. */
+  function resume() {
+    if (listener && !current) load()?.postMessage({ type: 'listen' });
   }
 
   const fromEngine = (event) => String(event.senderFrame?.url || event.sender.getURL()).startsWith(ENGINE_PAGE);
@@ -129,7 +158,14 @@ export function startSpeech({ log = () => undefined } = {}) {
       current = null;
       service?.postMessage({ type: 'abort' });
       rest();
+      resume();
     }
+  });
+
+  // The always-on mic, unless a command has it. Only ever the voice page's.
+  ipcMain.on('jester:listen-audio', (event, samples) => {
+    if (!String(event.senderFrame?.url || event.sender.getURL()).startsWith(VOICE_PAGE)) return;
+    if (listener && !current && samples?.length) service?.postMessage({ type: 'audio', samples });
   });
 
   app.on('will-quit', () => {
@@ -161,6 +197,34 @@ export function startSpeech({ log = () => undefined } = {}) {
     /** The setting's choice, or the best downloaded model without one. */
     setModel(wanted) {
       model = pickModel(wanted);
+      if (listener && service && loadedModel !== model && !current) {
+        unload();
+        resume();
+      }
+    },
+    /** Every utterance from now on goes to `onHeard`, until stopListening. */
+    listen(onHeard) {
+      listener = onHeard;
+      clearTimeout(idleTimer);
+      resume();
+    },
+    /** Whatever's being heard right now doesn't count: he's just stopped talking, and it's him. */
+    listenAfresh: () => resume(),
+    /** @param {number[]|null} print */
+    setVoiceprint(print) {
+      voiceprint = print;
+      service?.postMessage({ type: 'voiceprint', print });
+    },
+    /** While on, what's heard comes with its voice, and nobody's turned away. */
+    setTeaching(on) {
+      teaching = on;
+      service?.postMessage({ type: 'teaching', on });
+    },
+    stopListening() {
+      if (!listener) return;
+      listener = null;
+      if (!current) service?.postMessage({ type: 'abort' });
+      rest();
     }
   };
 }

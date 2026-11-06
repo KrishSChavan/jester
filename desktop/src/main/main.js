@@ -25,7 +25,7 @@
  *   JESTER_THEME=light|dark   override the system's appearance
  */
 
-import { app, BrowserWindow, globalShortcut, nativeTheme, safeStorage, screen, session } from 'electron';
+import { app, BrowserWindow, globalShortcut, nativeTheme, powerMonitor, safeStorage, screen, session, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
@@ -35,6 +35,8 @@ import { screenText } from './agent/screen.js';
 import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, storage } from './chrome-bridge.js';
+import { askOllama, createConversation, ollamaModels, pickModel, summarize } from './conversation.js';
+import { createConversationLog } from './conversation-log.js';
 import { createDispatcher } from './dispatch.js';
 import { startDriver, toDipFrame, toOsFrame } from './driver.js';
 import { desktopSettings, loadSettings, startEngineHost } from './engine-host.js';
@@ -42,15 +44,22 @@ import { createLearned } from './learned.js';
 import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
+import { createSteady, steerBy } from './pointer-math.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
+import { signInToPuter, synthesize } from './puter.js';
+import { createRecollections } from './recollections.js';
+import { createSpeaker, systemVoice } from './speaker.js';
 import { startSpeech } from './speech.js';
 import { createStopButton } from './stop-button.js';
 import { createTray } from './tray.js';
+import { createWatch } from './watch.js';
 import { trayModel } from './tray-menu.js';
+import { createVoicePage } from './voice-page.js';
+import { averageVoice, TEACHING_LINES, TEACHING_SECONDS } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
-import { closeSafely, createEngineWindow, showCalibration, showSettings } from './windows.js';
+import { closeSafely, createEngineWindow, showCalibration, showSettings, showTalk } from './windows.js';
 
 const env = process.env;
 /** Permissions change in System Settings, behind the app's back. */
@@ -61,6 +70,10 @@ const FRONT_POLL_MS = 500;
 const VOICE_SHORTCUT = 'Alt+Shift+J';
 /** Long enough for the overlay's page to load. */
 const STARTED_TOAST_MS = 2000;
+/** The conversation log's hour is checked this often, so a sleeping Mac doesn't stretch it. */
+const LOG_CHECK_MS = 60000;
+/** Teaching him a voice gives up after this long with nothing read. */
+const TEACHING_MS = 90000;
 
 registerScheme();
 if (env.JESTER_DATA_DIR) app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
@@ -83,6 +96,10 @@ let engineHost = null;
 let tray = null;
 let overlays = null;
 let pointer = null;
+let watch = null;
+/** Said once, until it's no longer so. */
+let watchRefused = '';
+const steady = createSteady();
 /** What the pointer asked the driver for, during a self-test. */
 const pointerCalls = [];
 /** The self-test's ear: called with the next voice command and how it went. */
@@ -93,6 +110,21 @@ let assistant = null;
 let stopButton = null;
 let speech = null;
 let voiceRunner = null;
+let conversation = null;
+let recollections = null;
+let speaker = null;
+let voicePage = null;
+/** Whether the always-on mic is open. */
+let listening = false;
+/** Why it's closed for the moment, whatever the setting says: 'locked', 'suspended'. */
+const away = new Set();
+let puterConnected = false;
+/** The user's voice, once taught. */
+let voiceprint = null;
+/** Teaching him a voice: the takes so far, and what ends it. */
+let teaching = null;
+/** Why Puter's voice isn't being used, when it's connected. */
+let puterTrouble = '';
 let quitting = false;
 let engine = { state: 'off', detail: '' };
 let permissions = [];
@@ -161,6 +193,16 @@ function desktopState() {
     voice: voiceState(),
     speechModel: speech?.model || null,
     speechChoices: speech?.choices || [],
+    watch: watch?.state || null,
+    continuous: {
+      listening,
+      wanted: !!settings?.continuousAssistant,
+      problem: settings?.continuousAssistant ? voiceProblem() : '',
+      puter: puterConnected,
+      puterTrouble,
+      knowsYou: !!voiceprint,
+      teaching: teaching ? { line: TEACHING_LINES[teaching.takes.length], done: teaching.takes.length, of: TEACHING_LINES.length } : null
+    },
     fakeMedia: !!env.JESTER_FAKE_MEDIA
   };
 }
@@ -186,8 +228,69 @@ async function refresh() {
   settings = await loadSettings();
   speech?.setModel(settings.speechModel);
   speech?.setEnabled(settings.enabled && settings.voiceEnabled);
-  tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState() }));
+  watch?.setEnabled(settings.enabled && !!settings.watchEnabled);
+  const { puterToken, voiceprint: print } = await storage.local.get(['puterToken', 'voiceprint']);
+  puterConnected = !!puterToken;
+  voiceprint = print || null;
+  speech?.setVoiceprint(teaching ? null : voiceprint);
+  updateListening();
+  tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState(), watch: watch?.state }));
   post(desktopState());
+}
+
+/**
+ * The continuous assistant's mic follows the setting and everything that stops
+ * voice: Jester off, asleep, no permission. A locked or sleeping computer isn't
+ * being talked to. Closing it ends whatever he was saying or doing about it.
+ */
+function updateListening() {
+  if (!conversation) return;
+  const on = (!!settings?.continuousAssistant || !!teaching) && !voiceProblem() && !away.size;
+  if (on === listening) return;
+  listening = on;
+  log(on ? 'continuous assistant: listening' : 'continuous assistant: stopped');
+  if (on) {
+    voicePage.open();
+    speech.listen((text, heard) => (teaching ? tookLine(heard) : conversation.heard(text)));
+  } else {
+    speech.stopListening();
+    conversation.reset();
+    voicePage.close();
+  }
+}
+
+/** Starts teaching him the user's voice: they read each line, and what they read comes back here. */
+function teachVoice() {
+  if (voiceProblem()) return voiceProblem();
+  clearTimeout(teaching?.limit);
+  teaching = { takes: [], limit: setTimeout(() => stopTeaching(), TEACHING_MS) };
+  speech.setVoiceprint(null);
+  speech.setTeaching(true);
+  refresh();
+  return '';
+}
+
+async function stopTeaching(takes) {
+  clearTimeout(teaching?.limit);
+  teaching = null;
+  speech.setTeaching(false);
+  if (takes) await storage.local.set({ voiceprint: averageVoice(takes) });
+  log(takes ? 'voice taught' : 'voice not taught');
+  refresh();
+}
+
+/** One line read. Too short, or without a voice to take, and it's asked for again. */
+function tookLine({ voice, seconds, score }) {
+  log('teaching: heard', seconds?.toFixed(1), 's', score ?? '');
+  if (!teaching || !voice || seconds < TEACHING_SECONDS) return;
+  teaching.takes.push(voice);
+  if (teaching.takes.length >= TEACHING_LINES.length) stopTeaching(teaching.takes);
+  else post(desktopState());
+}
+
+/** Which Ollama model he talks through: the one chosen, or the best that's there. */
+async function chatModel() {
+  return settings?.assistantModel || pickModel((await ollamaModels()).models);
 }
 
 /** jester-driver, restarted if it dies. JESTER_DRIVER_DRY=1: it describes input instead of sending it. */
@@ -212,6 +315,16 @@ function startInput() {
 function canPost() {
   if (env.JESTER_DRIVER_DRY || process.platform !== 'darwin') return true;
   return !!permissions.find((item) => item.id === 'accessibility')?.granted;
+}
+
+/** One report from the watch: asleep means a full stop for it too. */
+function onWatchReport(report) {
+  const refused = !report.steering ? '' : engine.state === ENGINE.SLEEPING ? `Jester is asleep: ${wakeWords()}` : canPost() ? '' : 'Allow Accessibility in Jester’s Settings first';
+  if (refused && refused !== watchRefused) overlays.toast(refused, { tone: 'warn' });
+  watchRefused = refused;
+  if (refused) return pointer.nudge({ steering: false });
+  const moved = steerBy(steady(report), { speed: settings?.watchSpeed, invertY: settings?.watchInvertY });
+  return pointer.nudge({ ...moved, click: report.click && !report.typing, held: report.held && !report.typing, whole: report.whole, steering: report.steering });
 }
 
 function onJester(op) {
@@ -239,6 +352,7 @@ async function stopAutomation() {
   log('assistant stopped from the pill');
   // The mic may be open for a spoken yes: anything said next isn't meant for it.
   engineHost.voice('cancel');
+  conversation.hush();
   await assistant.cancel();
   overlays.toast('Automation stopped');
 }
@@ -268,6 +382,7 @@ function toggleVoice() {
     }
     return overlays?.toast('Voice commands', { tone: 'warn', detail: voiceProblem() });
   }
+  conversation.hush();
   voiceRunner.prepare();
   engineHost.voice('toggle');
 }
@@ -279,6 +394,8 @@ let commandCount = 0;
 async function onVoiceCommand(text) {
   // An answer to the assistant's question, or "stop": the assistant's, not a command.
   if (assistant.heard(text)) return;
+  // On purpose, and for him: he answers it as he would anything else, aloud.
+  if (listening) return void conversation.told(text);
   const mine = ++commandCount;
   const { outcome } = await voiceRunner.run(text);
   if (mine !== commandCount) return;
@@ -344,12 +461,18 @@ async function onTrayAction(id, checked) {
       return saveSettings({ pointerEnabled: checked });
     case 'voice':
       return saveSettings({ voiceEnabled: checked });
+    case 'watch':
+      return saveSettings({ watchEnabled: checked });
+    case 'continuous':
+      return saveSettings({ continuousAssistant: checked });
     case 'listen':
       return toggleVoice();
     case 'sleep':
       return sleep(true);
     case 'wake':
       return sleep(false);
+    case 'talk':
+      return showTalk();
     case 'permissions':
     case 'settings':
       return showSettings();
@@ -397,6 +520,42 @@ function listenToPages() {
         } catch (err) {
           return { ok: false, error: err.message, ...(await assistant.connections.list()) };
         }
+      // Settings' continuous assistant: the models there are, and signing in to Puter for his voice.
+      case 'jester/desktop-ollama':
+        return { ...(await ollamaModels()), chosen: await chatModel() };
+      case 'jester/desktop-voiceprint':
+        if (message.op === 'teach') return { ok: !teachVoice(), error: voiceProblem() };
+        if (message.op === 'cancel') await stopTeaching();
+        else if (message.op === 'forget') await storage.local.remove('voiceprint');
+        await refresh();
+        return { ok: true };
+      case 'jester/desktop-forget':
+        conversation.forget();
+        return { ok: true };
+      // The window for talking to him. A sentence typed is a command given on purpose.
+      case 'jester/talk-type':
+        conversation.told(String(message.text).slice(0, 2000));
+        return { ok: true };
+      case 'jester/talk-listen':
+        await saveSettings({ continuousAssistant: message.on === true });
+        return { ok: true };
+      case 'jester/talk-earlier':
+        return { conversations: recollections.all() };
+      case 'jester/desktop-puter':
+        try {
+          if (message.op === 'connect') {
+            await storage.local.set({ puterToken: await signInToPuter((url) => shell.openExternal(url)) });
+            speaker.connected();
+          } else await storage.local.remove('puterToken');
+          await refresh();
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err.message };
+        }
+      // Settings' Apple Watch section: pairing is only ever started from here.
+      case 'jester/desktop-watch':
+        if (['pair', 'confirm', 'cancel', 'forget'].includes(message.op)) await watch[message.op]();
+        return desktopState();
       // Settings' camera view: the engine draws one while someone asks, and
       // only takes asking from Jester's own (worker's) messages.
       case 'jester/desktop-preview':
@@ -726,6 +885,14 @@ async function start() {
     log,
     dryRun: !!env.JESTER_DRIVER_DRY
   });
+  watch = createWatch({
+    loadKey: async () => (await storage.local.get('watchKey')).watchKey,
+    saveKey: (watchKey) => storage.local.set({ watchKey }),
+    forgetKey: () => storage.local.remove('watchKey'),
+    onReport: onWatchReport,
+    onChange: () => refresh(),
+    log
+  });
   const input = { call: (...args) => (driver ? driver.call(...args) : Promise.reject(new Error('jester-driver is not running'))) };
   dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
   // Switched on by refresh(), from the settings.
@@ -745,13 +912,15 @@ async function start() {
     prompt: createApprovalPrompt(),
     // Jester's own windows (Settings, say) are never the app meant.
     exclude: process.pid,
-    // A question can be answered aloud: the mic opens for it.
-    listen: () => !voiceProblem() && engineHost.voice('start'),
+    // A question can be answered aloud: the mic opens for it, or is open, and he asks it.
+    listen: (label) => (listening ? conversation.ask(label) : !voiceProblem() && engineHost.voice('start')),
     // macOS reads no app's controls while a Jester overlay is up (README): the pill blinks out meanwhile.
     quietly: (task) => overlays.whileHidden(task),
     onBusy: (busy) => (busy ? stopButton.show() : stopButton.hide()),
     log,
-    logScreens: !!env.JESTER_LOG_SCREENS
+    logScreens: !!env.JESTER_LOG_SCREENS,
+    // With no model saved, tasks go to the one he talks through.
+    localModel: chatModel
   });
   voiceRunner = createVoiceRunner({
     driver: input,
@@ -771,6 +940,55 @@ async function start() {
     toDipFrame: (frame) => toDipFrame(screen, frame),
     quietly: (task) => overlays.whileHidden(task)
   });
+  voicePage = createVoicePage({ log });
+  speaker = createSpeaker({
+    token: async () => (await storage.local.get('puterToken')).puterToken || null,
+    synthesize,
+    play: (bytes, type) => voicePage.play(bytes, type),
+    stopPlaying: () => voicePage.stop(),
+    // A self-test is never heard: the fake mic would hear it, and so would the room.
+    system: systemVoice({ muted: !!env.JESTER_FAKE_MEDIA }),
+    onTrouble: (trouble) => {
+      if (trouble === puterTrouble) return;
+      puterTrouble = trouble;
+      refresh();
+    },
+    log
+  });
+  recollections = createRecollections({
+    file: path.join(app.getPath('userData'), 'recollections.json'),
+    summarize: async (entries) => summarize({ model: await chatModel(), entries }),
+    log
+  });
+  const memory = createConversationLog({
+    file: path.join(app.getPath('userData'), 'conversation.json'),
+    onEmptied: (entries) => recollections.keep(entries).catch((err) => log('couldn’t keep a conversation:', err.message))
+  });
+  setInterval(memory.expire, LOG_CHECK_MS);
+  conversation = createConversation({
+    chat: async (request) => askOllama({ ...request, model: await chatModel() }),
+    speaker,
+    memory,
+    recollections,
+    listenAfresh: () => speech.listenAfresh(),
+    // Only with the mic open: typing to him with it closed, there's nobody to wait for.
+    knowsYou: () => !!voiceprint && listening,
+    commands: {
+      knows: (text) => voiceRunner.knows(text),
+      risky: (text) => voiceRunner.risky(text),
+      run: (text) => voiceRunner.run(text, { talking: true })
+    },
+    assistant,
+    show: (voice) => post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } }),
+    log
+  });
+  for (const [event, reason, on] of [['lock-screen', 'locked', true], ['unlock-screen', 'locked', false], ['suspend', 'suspended', true], ['resume', 'suspended', false]]) {
+    powerMonitor.on(event, () => {
+      if (on) away.add(reason);
+      else away.delete(reason);
+      updateListening();
+    });
+  }
 
   let lastTelemetryLog = 0;
   let cursorFrames = 0;
@@ -795,6 +1013,8 @@ async function start() {
     onTrigger: (message) => {
       log('trigger', message.action, `(${message.source} ${message.gesture})`);
       const toggledSleep = message.action === 'SLEEP';
+      // The camera sees the arm that's steering, and a swipe would move what it's aiming at.
+      if (message.source === 'swipe' && !toggledSleep && pointer.aiming()) return log('trigger ignored: the watch is aiming');
       // While the assistant asks, 👍 and 👎 answer it instead of doing their
       // usual action, which sleep has already done: the engine does it on the spot.
       if (message.source === 'pose' && assistant.gesture(message.gesture)) {
@@ -859,5 +1079,6 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true;
     globalShortcut.unregisterAll();
     driver?.close();
+    watch?.close();
   });
 }

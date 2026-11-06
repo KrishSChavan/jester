@@ -39,13 +39,16 @@ pub enum Command {
         #[serde(default = "one")]
         count: u32,
     },
-    /// Press or release without the other half, for drags.
+    /// Press or release without the other half, for drags, and for the second
+    /// click of a pair whose first has already landed (`count` 2).
     Button {
         x: Option<f64>,
         y: Option<f64>,
         #[serde(default)]
         button: Button,
         down: bool,
+        #[serde(default = "one")]
+        count: u32,
     },
     /// Positive `dy` scrolls up (content moves down), as a wheel turned away from you.
     Scroll {
@@ -156,6 +159,17 @@ pub enum Command {
     QuitApp {
         pid: i32,
     },
+    /// The window under a point: where it is, brought to the front, and from
+    /// now on the one `MoveWindow` moves.
+    WindowAt {
+        x: f64,
+        y: f64,
+    },
+    /// The window `WindowAt` found, to here. Quick enough to follow a hand.
+    MoveWindow {
+        x: f64,
+        y: f64,
+    },
     /// Hide an app (macOS) or minimize its windows (Windows).
     HideApp {
         pid: i32,
@@ -184,6 +198,8 @@ impl Command {
                 | Command::Menu { .. }
                 | Command::Window { .. }
                 | Command::PlaceWindow { .. }
+                | Command::WindowAt { .. }
+                | Command::MoveWindow { .. }
         )
     }
 }

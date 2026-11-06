@@ -14,9 +14,11 @@
  * Pure: snapshots in, text out.
  */
 
-export const SCREEN_LIMITS = Object.freeze({ chars: 6000, found: 40 });
+export const SCREEN_LIMITS = Object.freeze({ chars: 3200, found: 40 });
 
 const quote = (text) => `"${String(text).replace(/\s+/g, ' ').replace(/"/g, "'")}"`;
+/** Line breaks as the model reads them, which squashing whitespace would lose: "Milk ⏎ Eggs". */
+export const markBreaks = (text) => String(text).replace(/\r\n?|\n|\u2028|\u2029/g, ' ⏎ ');
 const STOP_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'into', 'that', 'this', 'then', 'open', 'please', 'app']);
 
 /** The words worth matching against labels. */
@@ -38,7 +40,7 @@ function describeElement(element) {
   const parts = [element.role];
   if (element.label) parts.push(quote(element.label));
   if (typeof element.value === 'number') parts.push(`value: ${element.value}`);
-  else if (element.value) parts.push(`value: ${quote(element.value)}`);
+  else if (element.value) parts.push(`value: ${quote(markBreaks(element.value))}`);
   if (element.placeholder && element.placeholder !== element.label) parts.push(`placeholder: ${quote(element.placeholder)}`);
   // A short label ("Play") says where it is: the top result's, not the player's.
   if (element.in) parts.push(`— in ${quote(element.in)}`);
@@ -108,7 +110,7 @@ export function elementById(snapshot, id) {
   return (snapshot?.elements || []).find((element) => element.id === id) || null;
 }
 
-const plain = (text) => String(text ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+export const plain = (text) => String(text ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
 /** Which element this is, across reads: its kind, name and section, digits aside (a clock's "10:41" is still the clock). */
 const identity = (element) => [element.role, plain(element.label).replace(/\d+/g, '#'), plain(element.in)].join('|');
 const state = (element) => JSON.stringify([element.value ?? null, element.checked ?? null, !!element.selected, !!element.disabled]);

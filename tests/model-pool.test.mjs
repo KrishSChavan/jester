@@ -178,3 +178,13 @@ test('model failover continues the same assistant step and executes its page act
   assert.equal(checkpoints.at(-1),null);
   assert.equal(checkpoints.find(state=>state?.pendingAction)?.goal,'Open this episode');
 });
+
+test('a local model gets time to load, and a remote one keeps its deadline',async()=>{
+  const local={id:'l',...normalizeModelConfig({provider:'ollama',model:'qwen3.5:9b'}),cooldownUntil:0};
+  const budgets=[];
+  const request=async({maxElapsedMs})=>{budgets.push(maxElapsedMs);return {json:result,usage:null,timings:{}};};
+  await createPooledModelClient({...fixture([local]),clock:()=>0,request})(options);
+  await createPooledModelClient({...fixture(),clock:()=>0,request})(options);
+  await createPooledModelClient({...fixture([local]),clock:()=>0,request})({...options,maxElapsedMs:2000});
+  assert.deepEqual(budgets,[30000,10000,2000]);
+});

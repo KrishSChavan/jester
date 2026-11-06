@@ -33,6 +33,8 @@ const SETTLE_MS = 350;
 const BUSY_MS = 700;
 /** After opening a link, the browser needs a little longer. */
 const PAGE_MS = 1200;
+/** Once in front, an app just started needs a moment before it takes keys. */
+const OPENED_MS = 400;
 const SCROLL_PIXELS = 400;
 /** Before reading the screen again when a read fails. */
 const OBSERVE_RETRY_MS = 400;
@@ -49,6 +51,8 @@ const SCROLL_TO_PAGES = 15;
 const DRAG_STEPS = 12;
 /** What the snapshot shows of a field's value: one longer than this holds text the model never saw. */
 const SHOWN_VALUE = 200;
+/** Text areas whose line breaks are read back at each look of the screen. */
+const LINED_FIELDS = 2;
 const NO_PASSWORDS = 'Jester never types into password fields.';
 const FOCUS_UNKNOWN = 'Jester couldn’t tell what has the keyboard focus, so nothing was typed.';
 /** Keys that can't put anything into a field. */
@@ -204,14 +208,14 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
 
   /**
    * A field's text, read back: whether it holds `text` (in full, however long
-   * the field), and how long it is. Null when it can't be read, which is no
-   * verdict either way.
+   * the field), how long it is, and how it starts and ends. Null when it can't
+   * be read, which is no verdict either way.
    */
   async function readField(snapshot, element, text) {
     const reply = await act(snapshot, element, 'read', text).catch(() => null);
     if (!reply || (typeof reply.contains !== 'boolean' && typeof reply.value !== 'string')) return null;
     const contains = typeof reply.contains === 'boolean' ? reply.contains : `${reply.value || ''}${reply.tail || ''}`.toLowerCase().includes(tidy(text, 60).toLowerCase());
-    return { contains, length: reply.length ?? String(reply.value ?? '').length, value: reply.value ?? '' };
+    return { contains, length: reply.length ?? String(reply.value ?? '').length, value: reply.value ?? '', tail: reply.tail ?? '' };
   }
 
   /**
@@ -222,7 +226,8 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
    * checked before anything is written, and what was written is read back
    * before any Enter: a search or a message with the wrong words in it isn't
    * sent. A field holding more than the screen showed isn't replaced: that
-   * would wipe text the model never saw.
+   * would wipe text the model never saw. Text read back says so (`landed`);
+   * with nothing to read, the answer is a plain ok.
    */
   async function type(snapshot, element, action) {
     if (element?.role === 'password') return { ok: false, detail: NO_PASSWORDS };
@@ -230,12 +235,19 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     if (action.text.includes('\t')) return { ok: false, detail: 'Typed text can’t hold a tab (it moves to the next field): type each field on its own.' };
     const shown = typeof element?.value === 'string' ? element.value : '';
     const lines = element?.role === 'textarea' || /[\r\n]/.test(shown);
-    const mode = action.mode || (!element ? 'insert' : LINE_INPUTS.has(element.role) && !lines ? 'replace' : element.role === 'textarea' ? 'append' : 'insert');
+    let mode = action.mode || (!element ? 'insert' : LINE_INPUTS.has(element.role) && !lines ? 'replace' : element.role === 'textarea' ? 'append' : 'insert');
     if (element && mode === 'replace' && lines) {
       // Its formatting, its lists and attachments, and whatever the screen didn't show of it would all go.
-      if (element.role === 'textarea') return { ok: false, detail: 'A text area isn’t replaced whole (its formatting would go): add to it, or select what to change and type over it.' };
-      const before = await readField(snapshot, element, '');
-      if (before && before.length > SHOWN_VALUE) return { ok: false, detail: `That field holds more lines than the screen showed (${before.length} characters), so it wasn’t replaced.` };
+      if (element.role === 'textarea') {
+        // An empty one has nothing to lose: adding to it is replacing it.
+        if (shown || (await readField(snapshot, element, ''))?.length !== 0) {
+          return { ok: false, detail: `A text area isn’t replaced whole (its formatting would go): to add, use mode append; to change all of it, press ${primary}+a and type with the field’s id in the same reply.` };
+        }
+        mode = 'append';
+      } else {
+        const before = await readField(snapshot, element, '');
+        if (before && before.length > SHOWN_VALUE) return { ok: false, detail: `That field holds more lines than the screen showed (${before.length} characters), so it wasn’t replaced.` };
+      }
     }
     // With Enter to come, the app and its focus are checked before the text goes in, not after.
     if (action.enter || !element || mode === 'insert') {
@@ -245,12 +257,14 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       if (!keys.ok) return keys;
     }
     let typed = false;
+    let landed = false;
     if (element && mode !== 'insert') {
       let late = false;
       const set = await act(snapshot, element, mode === 'append' ? 'appendValue' : 'setValue', action.text).catch((err) => ((late = err?.code === 'timeout'), null));
       // No answer in time: the driver may still set it, and added again it would go in twice.
       if (late && mode === 'append') return { ok: false, detail: 'The app was busy: the text may have been added. Check the field before trying again.' };
       typed = set?.landed === true;
+      landed = typed;
       // Set, but not as asked, or no answer: typing it again could add it twice (replacing is safe to redo; adding isn't).
       if (mode === 'append' && (set?.landed === false || set?.busy)) {
         return { ok: false, detail: set.busy ? 'The app was busy: the text may have been added. Check the field before trying again.' : `Added the text, but the field reads ${quoted(set.value)}: check it before trying again.` };
@@ -278,10 +292,11 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         if (now && !(now.contains && (!before || now.length > before.length))) {
           return { ok: false, detail: `The text didn’t land: the field reads ${quoted(now.value)}${action.enter ? ', so Enter wasn’t pressed' : ''}.` };
         }
+        landed = !!now;
       }
     }
     if (action.enter) await driver.call('key', { key: 'enter', modifiers: [] });
-    return { ok: true };
+    return landed ? { ok: true, landed: true } : { ok: true };
   }
 
   /** The wheel, over the element or the window's middle: what scrolls when a scroll area won't by itself. */
@@ -389,6 +404,23 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     return { ok: true };
   }
 
+  /**
+   * The snapshot with its text areas' line breaks back: the driver squashes a
+   * value's whitespace, so a finished list reads as one line. One with no
+   * space in it has no break to lose. A copy, for the snapshot may be shared.
+   */
+  async function withLineBreaks(snapshot) {
+    const flattened = (snapshot?.elements || []).filter((element) => element.role === 'textarea' && /\s/.test(typeof element.value === 'string' ? element.value : ''));
+    const first = [...flattened.filter((element) => element.focused), ...flattened.filter((element) => !element.focused)].slice(0, LINED_FIELDS);
+    const lined = new Map();
+    for (const element of first) {
+      const reply = await driver.call('act', { snapshot: snapshot.snapshot, element: element.id, action: 'read' }).catch(() => null);
+      if (typeof reply?.value === 'string' && /[\r\n\u2028\u2029]/.test(reply.value)) lined.set(element.id, reply.value.slice(0, SHOWN_VALUE));
+    }
+    if (!lined.size) return snapshot;
+    return { ...snapshot, elements: snapshot.elements.map((element) => (lined.has(element.id) ? { ...element, value: lined.get(element.id) } : element)) };
+  }
+
   async function observe() {
     const target = pid ? { pid } : exclude ? { exclude } : {};
     let failed = null;
@@ -396,7 +428,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     for (let tries = 0; tries < 2; tries++) {
       if (failed) await wait(OBSERVE_RETRY_MS);
       try {
-        return { ok: true, snapshot: await quietly(() => driver.call('snapshot', { limit: 300, ...target })) };
+        return { ok: true, snapshot: await quietly(async () => withLineBreaks(await driver.call('snapshot', { limit: 300, ...target }))) };
       } catch (err) {
         failed = err;
       }
@@ -441,6 +473,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       }
       case 'open_app': {
         const opened = await openApp(action.name);
+        if (opened.ok) await wait(OPENED_MS);
         return { ok: opened.ok, detail: opened.text };
       }
       case 'open_url':
@@ -488,21 +521,41 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     },
 
     /**
+     * What a field of the snapshot holds now, however long it is, and whether
+     * that takes in `text`. Null when it can't be read, or is a password
+     * field's, which is never read.
+     * @returns {Promise<{length:number, value:string, tail:string, contains:boolean}|null>}
+     */
+    async peek(snapshot, id, text = '') {
+      const element = elementById(snapshot, id);
+      return element && element.role !== 'password' ? readField(snapshot, element, text) : null;
+    },
+
+    /**
      * Does it. With `verify`, a step whose effect shows on screen is checked:
      * the screen is read again, and the result says what changed (`changes`,
      * `changed`) and carries that read (`snapshot`) for the next step. A menu
      * command or a key whose effect the read can't show (bold text, a copy)
-     * isn't "nothing changed" but unseen: `changed` is left unsaid. Cancelled
-     * (`signal`), it stops where it is and reads nothing more.
+     * isn't "nothing changed" but unseen: `changed` is left unsaid. `patient`:
+     * a slow app gets one more look before that's said. Cancelled (`signal`),
+     * it stops where it is and reads nothing more.
      */
-    async execute(action, snapshot, { verify = false, signal } = {}) {
+    async execute(action, snapshot, { verify = false, signal, patient = false } = {}) {
       const result = await perform(action, snapshot, signal);
       if (!result.ok || !VISIBLE.has(action.action)) return result;
       await wait(result.busy ? BUSY_MS : SETTLE_MS);
       if (!verify || signal?.aborted) return result;
-      const seen = await observe();
+      let seen = await observe();
       if (!seen.ok) return result;
-      const { changed, summary } = screenChanges(snapshot, seen.snapshot);
+      let { changed, summary } = screenChanges(snapshot, seen.snapshot);
+      if (!changed && patient && !signal?.aborted) {
+        await wait(BUSY_MS);
+        const again = await observe();
+        if (again.ok) {
+          seen = again;
+          ({ changed, summary } = screenChanges(snapshot, seen.snapshot));
+        }
+      }
       if (!changed && UNSEEN.has(action.action)) return { ...result, unseen: true, changes: 'No visible change (its effect may not show here).', snapshot: seen.snapshot };
       return { ...result, changed, changes: summary, snapshot: seen.snapshot };
     }

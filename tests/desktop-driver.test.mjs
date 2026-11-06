@@ -53,6 +53,30 @@ test('moving with a button held is a drag', { skip }, () =>
     assert.equal((await driver.call('move', { x: 70, y: 60 })).events[0].event, 'move');
   }));
 
+test('the second click of a pair can be pressed on its own, numbered as the second', { skip }, () =>
+  withDriver(async (driver) => {
+    const down = await driver.call('button', { x: 30, y: 40, down: true, count: 2 });
+    const up = await driver.call('button', { x: 30, y: 40, down: false, count: 2 });
+    assert.deepEqual([down.events[0].count, up.events[0].count], [2, 2]);
+    assert.equal((await driver.call('button', { x: 30, y: 40, down: true })).events[0].count, 1, 'a plain press is a first click');
+    await driver.call('button', { down: false });
+  }));
+
+test('a display left of the main one is at negative coordinates, and works', { skip }, () =>
+  withDriver(async (driver) => {
+    const { events } = await driver.call('move', { x: -1200, y: -40 });
+    assert.deepEqual([events[0].x, events[0].y], [-1200, -40]);
+  }));
+
+test('carrying a window moves nothing real in a dry run', { skip }, () =>
+  withDriver(async (driver) => {
+    const found = await driver.call('windowAt', { x: 500, y: 300 });
+    assert.deepEqual(found.events, [{ event: 'windowAt', x: 500, y: 300 }]);
+    assert.equal(found.frame.w, 800);
+    const { events } = await driver.call('moveWindow', { x: -40, y: 90 });
+    assert.deepEqual(events, [{ event: 'moveWindow', x: -40, y: 90 }]);
+  }));
+
 test('text keeps every character, and line breaks are Enter', { skip }, () =>
   withDriver(async (driver) => {
     const { events } = await driver.call('text', { text: 'héllo\nworld 👋' });

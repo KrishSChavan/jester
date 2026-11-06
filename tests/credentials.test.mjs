@@ -68,6 +68,13 @@ test('unsafe endpoint URLs and malformed keys/models never enter storage', async
   assert.equal(values.modelConnection, undefined);
 });
 
+test('an Ollama connection needs only a model and is not paced', () => {
+  const config = normaliseConnection({ provider: 'ollama', model: 'qwen3.5:9b' });
+  assert.equal(config.baseUrl, 'http://localhost:11434/v1');
+  assert.equal(config.key, '');
+  assert.equal(config.plan, 'paid');
+});
+
 test('a local custom model can omit a key and exposes only a local-connection summary', async (t) => {
   mockChrome(t, { permitted: ['http://localhost:11434/*'] });
   const summary = await saveConnection({ provider: 'custom', baseUrl: 'http://localhost:11434/v1', model: 'local-model' });

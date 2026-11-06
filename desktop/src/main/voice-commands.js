@@ -148,7 +148,7 @@ const PHRASES = [
   [/^(?:cancel|never ?mind|nothing|forget it)$/, () => ({ kind: 'cancel' })],
   [/^(?:open |show )?(?:the )?jester(?:'s)? settings$/, () => ({ kind: 'jester', op: 'settings' })],
   // Jester's own sleep, before "go to" takes it for an app. The computer's isn't this.
-  [/^(?:go (?:back )?to sleep|sleep(?: now)?|go to bed|take a nap|put (?:jester|yourself) to sleep)$/, () => ({ kind: 'jester', op: 'sleep' })],
+  [/^(?:go (?:back )?to sleep|sleep(?: now)?|go to bed|take a nap|put (?:jester|yourself) to sleep|pause (?:jester|yourself))$/, () => ({ kind: 'jester', op: 'sleep' })],
   // Volume
   [/^(?:turn |set )?(?:the )?volume up$|^turn (?:it |the volume |the sound )?up(?: the (?:volume|sound))?$|^louder$/, () => action('VOLUME_UP')],
   [/^(?:turn |set )?(?:the )?volume down$|^turn (?:it |the volume |the sound )?down(?: the (?:volume|sound))?$|^(?:quieter|softer)$/, () => action('VOLUME_DOWN')],
@@ -211,7 +211,7 @@ const LEVEL_WORDS = { max: 100, maximum: 100, full: 100, half: 50, off: 0 };
 /** "A new note", "new email", "take a note": something new, in the app it belongs to. */
 const NEW_ITEM = /^(?:(?:open|create|make|start|write|compose) )?(?:me )?(?:a |an )?new (note|e ?mail|mail|message|text(?: message)?|reminder|(?:calendar )?event|document|doc|file)$|^(?:take|make|create) a (note)$/;
 const ITEM_NAMES = { note: 'note', email: 'email', 'e mail': 'email', mail: 'email', message: 'message', text: 'message', 'text message': 'message', reminder: 'reminder', event: 'event', 'calendar event': 'event', document: 'document', doc: 'document', file: 'document' };
-const SERVICES = { spotify: 'spotify', youtube: 'youtube', google: 'web', web: 'web', 'the web': 'web' };
+const SERVICES = { spotify: 'spotify', youtube: 'youtube', google: 'web', web: 'web', 'the web': 'web', 'the internet': 'web', online: 'web' };
 
 /** What to look for, without the words around it: "a Gunna song" → "gunna". */
 function searchTerms(text) {
@@ -344,8 +344,9 @@ export function normalize(text) {
  * @param {string[]} [context.apps]  installed app names (macOS)
  * @param {string} [context.platform]
  * @param {boolean} [context.listed]  one of several moves listed with commas: plainly a placement
+ * @param {boolean} [context.talking]  said in conversation, where "write me a poem" and "say something funny" aren't dictation; "type" still is
  */
-export function parseCommand(transcript, { apps = [], platform = 'darwin', listed = false } = {}) {
+export function parseCommand(transcript, { apps = [], platform = 'darwin', listed = false, talking = false } = {}) {
   const original = String(transcript || '').trim();
   const text = normalize(original);
   if (!text) return { kind: 'unknown', text: original };
@@ -360,7 +361,7 @@ export function parseCommand(transcript, { apps = [], platform = 'darwin', liste
   // a new note" is a new note, not those words; "type" is always typing.
   const fresh = text.match(NEW_ITEM);
   const dictated = original.match(DICTATION);
-  if (dictated && (dictated[1].toLowerCase() === 'type' || !fresh)) return { kind: 'type', text: dictated[2].trim() };
+  if (dictated && (dictated[1].toLowerCase() === 'type' || (!fresh && !talking))) return { kind: 'type', text: dictated[2].trim() };
   if (fresh) return { kind: 'new', item: ITEM_NAMES[fresh[1] || fresh[2]] };
 
   for (const [pattern, make] of PHRASES) {
@@ -371,9 +372,9 @@ export function parseCommand(transcript, { apps = [], platform = 'darwin', liste
   const play = text.match(/^play (.+?)(?: (?:on|in|from) (spotify|youtube))?$/);
   if (play && searchTerms(play[1])) return { kind: 'play', query: searchTerms(play[1]), service: SERVICES[play[2]] || null };
 
-  const searchOn = text.match(/^search (youtube|google|spotify|the web) for (.+)$/);
+  const searchOn = text.match(/^search (youtube|google|spotify|the web|the internet|online) for (.+)$/);
   if (searchOn) return { kind: 'search', query: searchOn[2], site: SERVICES[searchOn[1]] };
-  const searchFor = text.match(/^(?:search|google|look up)(?: for| up)? (.+?)(?: (?:on|in) (youtube|google|spotify|the web))?$/);
+  const searchFor = text.match(/^(?:search|google|look up)(?: for| up)? (.+?)(?: (?:on|in) (youtube|google|spotify|the web|the internet))?$/);
   if (searchFor) return { kind: 'search', query: searchFor[1], site: SERVICES[searchFor[2]] || 'web' };
 
   const volume = text.match(/^(?:(?:set|turn|change|put) )?(?:the )?volume (?:to |at )?(.+)$/);
@@ -448,4 +449,25 @@ export function parseSequence(transcript, context = {}) {
   }
   const whole = parseCommand(original, context);
   return whole.kind === 'unknown' && partial ? partial : [whole];
+}
+
+/** What goes ahead without asking when overheard: the worst of these is a nuisance. Anything not listed asks. */
+const UNASKED_KINDS = new Set(['action', 'volume', 'open', 'new', 'minimize', 'place', 'play', 'search', 'jester', 'cancel']);
+const UNASKED_KEYS = new Set(['Copy', 'Select all', 'Find', 'Page up', 'Page down', 'New window', 'Undo', 'Redo']);
+/** The same ⌘W as closing a window, which asks. */
+const ASKED_ACTIONS = new Set(['TAB_CLOSE']);
+
+/**
+ * Whether a step should ask first when it comes off the always-on mic, where
+ * anything saying the name can set it off. Typing, keys, quitting and clicks do.
+ * @param {object} step  from parseSequence
+ * @param {object} [context]
+ * @param {string} [context.platform]
+ * @param {(app:string) => boolean} [context.listed]  Windows: an unlisted name goes to the Start menu, and Enter
+ */
+export function asksFirst(step, { platform = 'darwin', listed = () => true } = {}) {
+  if (step.kind === 'press') return !UNASKED_KEYS.has(step.label);
+  if (step.kind === 'action') return ASKED_ACTIONS.has(step.action);
+  if (step.kind === 'open' && platform === 'win32') return !listed(step.app);
+  return !UNASKED_KINDS.has(step.kind);
 }

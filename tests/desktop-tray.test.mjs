@@ -81,3 +81,10 @@ test('voice needs its speech model, and offers to listen once it has loaded', ()
   assert.equal(off.voice.checked, false);
   assert.equal(off.listen, undefined);
 });
+
+test('his window is a click away, and so is turning the mic off', () => {
+  const on = { enabled: true, voiceEnabled: true, continuousAssistant: true };
+  const items = byId(trayModel({ engine: { state: 'running' }, settings: on, voice: 'ready' }));
+  assert.equal(items.talk.label, 'Talk to Jester…');
+  assert.equal(items.continuous.checked, true);
+});

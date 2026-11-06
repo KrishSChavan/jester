@@ -87,6 +87,8 @@ export const SPEECH_MODELS = {
   }
 };
 
+/** Tells one person's voice from another's (voiceprint.js). */
+export const VOICE_MODEL = path.join(MODELS_DIR, 'nemo_en_titanet_small.onnx');
 export const VAD_MODEL = path.join(MODELS_DIR, 'silero_vad.onnx');
 
 /** The models Settings offers, most accurate first: without a choice, the first one downloaded. */

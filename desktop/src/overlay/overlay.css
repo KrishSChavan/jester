@@ -173,6 +173,54 @@ body {
   display: none;
 }
 
+/* Jester talking: a squiggle that waves, and what he's saying. Only transform
+   moves, so the pill keeps its size and the x beside it stays put. */
+.voice .wave,
+.voice .spoken {
+  display: none;
+}
+
+.voice.speaking .bars,
+.voice.speaking .heard {
+  display: none;
+}
+
+.voice.speaking .wave {
+  display: block;
+  flex: none;
+  overflow: hidden;
+}
+
+.voice.speaking .spoken {
+  display: block;
+  max-width: 380px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+}
+
+.voice.speaking .spoken:empty {
+  display: none;
+}
+
+.voice .wave path {
+  fill: none;
+  stroke: #e8ecf2;
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.voice.speaking:not([hidden]) .wave path {
+  animation: jester-wave 0.9s linear infinite;
+}
+
+@keyframes jester-wave {
+  to {
+    transform: translateX(-40px);
+  }
+}
+
 @keyframes jester-spin {
   to {
     transform: rotate(360deg);
@@ -298,6 +346,17 @@ body {
   display: block;
 }
 
+.outline {
+  position: fixed;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  border: 3px solid var(--fill);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--fill) 10%, transparent);
+  pointer-events: none;
+}
+
 .ripple {
   position: fixed;
   left: 0;
@@ -336,5 +395,9 @@ body {
 
   .ripple.go {
     animation-duration: 1ms;
+  }
+
+  .voice.speaking:not([hidden]) .wave path {
+    animation: none;
   }
 }

@@ -10,7 +10,7 @@
 
 import { isRecord } from '../../../../jester-extension/src/common/agent-actions.js';
 import { describePlan, parseShortcut } from '../os-actions.js';
-import { elementById } from './screen.js';
+import { elementById, markBreaks } from './screen.js';
 
 const FIELDS = {
   click: ['id', 'button', 'count'],
@@ -50,7 +50,7 @@ export function menuPath(path) {
     .filter(Boolean);
 }
 
-function text(value, name, max, required = false) {
+export function text(value, name, max, required = false) {
   if (value === undefined && !required) return;
   if (typeof value !== 'string' || !value.trim() || value.length > max) throw new Error(`${name} must be text of at most ${max} characters.`);
 }
@@ -165,7 +165,7 @@ export function taskCaption(text, max = CAPTION_CHARS) {
   return `${(space >= max / 2 ? cut.slice(0, space) : cut).replace(/[\s,;:–—-]+$/, '')}…`;
 }
 
-const quoted = (value) => `“${String(value).replace(/\s+/g, ' ').trim().slice(0, 50)}”`;
+export const quoted = (value) => `“${markBreaks(value).replace(/\s+/g, ' ').trim().slice(0, 50)}”`;
 
 const SCROLL_ENDS = { up: 'the top', down: 'the bottom', left: 'the far left', right: 'the far right' };
 const PLACE_WORDS = { left: 'on the left', right: 'on the right', full: 'full size', center: 'in the middle', fullscreen: 'full screen' };

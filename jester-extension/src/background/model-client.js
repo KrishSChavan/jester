@@ -7,6 +7,7 @@ const DEFAULTS = {
   anthropic: ['anthropic', 'https://api.anthropic.com/v1'],
   google: ['gemini', 'https://generativelanguage.googleapis.com/v1beta'],
   groq: ['openai-compatible', 'https://api.groq.com/openai/v1'],
+  ollama: ['openai-compatible', 'http://localhost:11434/v1'],
   custom: ['openai-compatible', '']
 };
 const ALIASES = { claude: 'anthropic', gemini: 'google', chatgpt: 'openai' };
@@ -14,11 +15,13 @@ const PROTOCOL_ALIASES = { responses: 'openai-responses', 'chat-completions': 'o
   'openai-chat': 'openai-compatible', messages: 'anthropic', generateContent: 'gemini' };
 const MAX_BODY_CHARS = 65536;
 export const MODEL_REQUEST_LIMITS = Object.freeze({ maxElapsedMs: 10000, maxRetryWaitMs: 1000,
-  maxRetries: 1, maxOutputTokens: 600 });
+  maxRetries: 1, maxOutputTokens: 600, localElapsedMs: 30000 });
 const GROQ_GPT_OSS_MODELS = new Set(['openai/gpt-oss-20b', 'openai/gpt-oss-120b']);
 /** Room for a Claude model's thinking, on top of the reply's own output budget. */
 const CLAUDE_THINKING_TOKENS = 1500;
-const PROVIDER_NAMES = { google: 'Gemini', anthropic: 'Claude', openai: 'OpenAI', groq: 'Groq' };
+/** How long Ollama keeps a model in memory after a request: a reload costs 5 s or more. */
+const OLLAMA_KEEP_ALIVE = '30m';
+const PROVIDER_NAMES = { google: 'Gemini', anthropic: 'Claude', openai: 'OpenAI', groq: 'Groq', ollama: 'Ollama' };
 const limits = { tokens: 0, remaining: 0 };
 export const rateLimits = () => ({ ...limits });
 // Kept for older worker diagnostics. There is deliberately no fallback model ladder.
@@ -43,7 +46,7 @@ export function normalizeModelConfig(env = {}) {
   if ((url.protocol !== 'https:' && !(local && url.protocol === 'http:')) || url.username || url.password || url.search || url.hash) {
     throw new Error('Use an HTTPS API URL, or HTTP for a model on localhost.');
   }
-  if (!key && !(provider === 'custom' && local)) throw new Error('Add your model API key in Settings.');
+  if (!key && !(['custom', 'ollama'].includes(provider) && local)) throw new Error('Add your model API key in Settings.');
   if (/[\r\n]/.test(key)) throw new Error('The API key contains a line break.');
   return { provider, protocol, model, key, baseUrl: url.href.replace(/\/$/, '') };
 }
@@ -88,7 +91,7 @@ const dataUrl = (image) => `data:${image.mimeType};base64,${image.data}`;
 /** `schema`: the reply's shape for Gemini's structured output — the browser agent's unless
  * a caller with other actions (Jester Desktop) passes its own. */
 export function buildModelRequest(config, { system, prompt, images = [], maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens,
-  schema = AGENT_RESPONSE_SCHEMA }) {
+  schema = AGENT_RESPONSE_SCHEMA, history = [] }) {
   if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 8192) {
     throw new Error('Output token limit must be between 1 and 8192.');
   }
@@ -125,7 +128,7 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
       max_output_tokens: maxOutputTokens, store: false, text: { format: { type: 'json_object' } } };
   } else {
     if (config.key) headers.authorization = `Bearer ${config.key}`;
-    body = { model: config.model, messages: [{ role: 'system', content: system }, { role: 'user',
+    body = { model: config.model, messages: [{ role: 'system', content: system }, ...history, { role: 'user',
       content: pictures.length ? [{ type: 'text', text: prompt },
         ...pictures.map((image) => ({ type: 'image_url', image_url: { url: dataUrl(image) } }))] : prompt }],
       ...(config.provider === 'groq' ? { max_completion_tokens: maxOutputTokens } : { max_tokens: maxOutputTokens }),
@@ -137,6 +140,11 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
       body.reasoning_effort = 'low';
       body.include_reasoning = false;
     }
+    // Thinking counts toward max_tokens: left on, a local model spends the whole
+    // budget on it and returns no reply. Plain JSON mode gets half of a small
+    // model's plans refused, so it's held to the schema as Gemini is.
+    if (config.provider === 'ollama') Object.assign(body, { reasoning_effort: 'none', keep_alive: OLLAMA_KEEP_ALIVE,
+      response_format: { type: 'json_schema', json_schema: { name: 'reply', schema } } });
   }
   return { url: endpoint(config), init: { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error' } };
 }
@@ -400,9 +408,9 @@ function httpError(config, status, body) {
 export async function requestModel({ env, config = normalizeModelConfig(env), system, prompt, signal,
   fetchImpl = globalThis.fetch, timeoutMs = MODEL_REQUEST_LIMITS.maxElapsedMs,
   maxElapsedMs = MODEL_REQUEST_LIMITS.maxElapsedMs, maxRetryWaitMs = MODEL_REQUEST_LIMITS.maxRetryWaitMs,
-  maxRetries = MODEL_REQUEST_LIMITS.maxRetries, maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens, onRetry, images = [], schema }) {
+  maxRetries = MODEL_REQUEST_LIMITS.maxRetries, maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens, onRetry, images = [], schema, history }) {
   checkAbort(signal);
-  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens, schema });
+  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens, schema, history });
   const bounded = (value, fallback, min, max) => Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
   const elapsedLimit = bounded(maxElapsedMs, MODEL_REQUEST_LIMITS.maxElapsedMs, 1, 60000);
   const attemptLimit = bounded(timeoutMs, elapsedLimit, 1, 60000);
@@ -492,7 +500,9 @@ export async function requestModel({ env, config = normalizeModelConfig(env), sy
   try {
     return await Promise.race([run(), interrupted]);
   } catch (error) {
-    const failure = signal?.aborted ? abortError() : error instanceof Error ? error : new Error(String(error));
+    const failure = signal?.aborted ? abortError()
+      : config.provider === 'ollama' && error instanceof TypeError ? new Error('Ollama isn’t running. Open it and try again.')
+        : error instanceof Error ? error : new Error(String(error));
     failure.timings = timings();
     throw failure;
   } finally {

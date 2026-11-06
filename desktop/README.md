@@ -40,6 +40,7 @@ front window fills its display.
 | `src/worklets/` | The mic for speech, captured on the audio thread; served to the engine page as `jester://ext/_desktop/worklets/…`. |
 | `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it, and what a step changed (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`), the hands (`host.js`) and learned tasks done again (`replay.js`). |
 | `src/main/driver.js`, `native/jester-driver/` | Rust helper for OS input and the accessibility tree, JSON lines over stdio. Also Chrome's native-messaging relay. |
+| `src/main/watch.js`, `watch-status.js`, `native/jester-watch/` | The Apple Watch: its app, the Mac's Swift Bluetooth helper, and steering the cursor with them (Mac only). |
 | `src/main/link.js` | The app's end of the link to the extension. |
 | `spikes/` | Phase 0 experiments. |
 
@@ -100,9 +101,9 @@ tabs, desktops, "screenshot", "lock the screen", edits ("undo", "copy",
 "select all"), "type …", "press command shift four", "click" / "double click"
 / "right click" at the cursor, "new note" (or email, message, reminder,
 event, document), "play Gunna" (below), "search for …" / "search YouTube
-for …", "run shortcut …" (macOS Shortcuts), and "go to sleep". App names are
-matched forgivingly against what is installed and running, so "spot of fire"
-still opens Spotify.
+for …", "run shortcut …" (macOS Shortcuts), and "go to sleep" or "pause
+Jester". App names are matched forgivingly against what is installed and
+running, so "spot of fire" still opens Spotify.
 
 Asleep, Jester ignores everything but the gesture bound to Sleep / wake
 Jester, and a task running ends. A gesture bound to it, "go to sleep", or the
@@ -202,6 +203,112 @@ through its model pool, as in Chrome. Keys are sealed on disk with the OS
 keychain (macOS) or DPAPI (Windows) via `safeStorage`, and pages never see them
 (`chrome-bridge.js` keeps `modelConnections` out of their storage).
 
+Ollama is the free choice, and nothing leaves the computer: install it, `ollama
+pull` a model, and pick "Ollama (on this computer)" with the model's name, no
+key. Thinking is turned off for it (left on, it spends the whole output budget
+and returns no reply), replies are held to the schema (plain JSON mode had half
+the plans refused), the model stays loaded for 30 minutes after each request,
+and it gets 30 s where cloud models get 10, since a first request loads it into
+memory. On an M4 Pro `qwen3.5:9b` planned in about 2 to 4 s, 13 s from cold;
+`qwen3.5:2b` is quicker but chose the wrong app or step too often to use. Ollama
+refuses extension origins, so Chrome's settings don't offer it.
+
+### The continuous assistant
+
+Settings › Assistant › Continuous assistant keeps a mic open (`src/voice/`, a
+hidden page opened with the setting and closed without it) and turns Jester into
+something to talk to. Speech is still recognized here: `speech/service.js`'s
+`listen` mode hands over every utterance, keeps about a second between them, and
+restarts the voice detector every 6 hours, because its 32-bit sample counter stops
+it finding anything after 37 hours. The detector takes about 0.2% of a core.
+
+`wake.js` decides what was said to him. The word lists come from 18,000
+transcripts of twelve synthetic voices: American ones get "Jester", but British,
+Indian and Australian ones mostly get "Just a…", so "just" counts with a request
+after it, and Jay and Jess with a sign they're being called. Across all twelve,
+Parakeet catches about 78% in the clear and 63% in a room (Moonshine 56%), and 17
+of 140,000 ordinary sentences set it off, some of them really about Jester. That's
+synthetic, not a real voice: saying his name alone and then the rest is the other way.
+
+What was said to him (`conversation.js`) goes to the matcher if it's a known
+command, and otherwise to an Ollama model chosen in Settings, which answers and
+can hand back a command. Results are said aloud. Commands that could do harm ask
+first when overheard (`asksFirst`, fail closed: anything not listed asks), since
+anything saying his name can reach them; tasks ask for themselves.
+
+He'd otherwise hear himself, and did: through a Mac's speakers, his replies came
+back garbled as if the user had said them, and he answered them. So while he
+talks and for 1.2 s after, only "stop" gets through; when he stops, whatever was
+mid-utterance is thrown away (`listenAfresh`), since it began with him in it; and
+anything heard that's mostly words he said in the last 30 s is dropped as an echo.
+
+Teaching him a voice (Settings › Assistant › Your voice) keeps everyone else out
+at the door. Five sentences make a voiceprint (`voiceprint.js`, sealed with the API
+keys), and `service.js` compares each utterance to it before decoding it, in about
+8 ms, so nothing anyone else says becomes text at all. TitaNet small was chosen on
+twelve synthetic voices: same voice 0.75-0.9, others 0.2, 2-3% equal error on clips
+up to 1.6 s and 5% on longer ones, against 21% for CAM++ and 6% for ResNet34. The
+thresholds (`MATCH`) are untested on real voices: each refusal logs its score.
+Only with a voiceprint does he take what's said after an answer without his name;
+his name alone opens the next 8 seconds either way.
+
+`conversation.json` in the app's data folder holds what was said to him and what
+he said, for the model's context, and is emptied every hour. What's overheard
+isn't kept.
+
+Conversations are told apart: one ends after 5 minutes of quiet, or when the model
+says a new subject has begun (`new` in its reply). What's over stops being sent as
+the conversation so far, and `recollections.js` keeps it as a sentence for a week.
+Up to six of those, the ones sharing words with what's being said and then the
+latest, reach the model marked as over and separate, to use only if they matter.
+
+Menu bar › Talk to Jester opens `src/talk/`, his window: a flat disc that pulses
+with what he's doing, live captions, a light for whose voice he's listening to,
+what he remembers, a box to type to him (a typed command is on purpose, so it
+doesn't ask first), and a way to stop him listening. It draws from the same frames
+as the pill, so the two can't disagree. The palette is the tokens atop `talk.css`.
+
+His voice (`speaker.js`) is the computer's own until Puter is connected, and again
+whenever Puter fails. `puter.js` makes the call Puter's script makes, from the main
+process, so no remote code runs in the app; signing in goes through the browser,
+as Puter's Node package does. It isn't unlimited: Puter's source gives a free
+account $0.50 a month, or about 31,000 characters at this voice's price, and it
+answers 402 past that. Only what he says goes to Puter.
+
+Before anything is done, one model call plans the command (`agent/plan.js`):
+up to eight steps — open an app or a link, a menu command, a key, a media key,
+place a window, write some text, or look, for anything that needs eyes. The
+planner never sees the screen: it gets what was said, the platform, the name of
+the app in front and how the last few commands ended, so nothing a window says
+can reach the plan. There's no field in a plan for approving anything.
+
+`agent/executor.js` then does the steps with no model, each one checked — a key
+or menu command by what it changed on screen (one read again after a moment for
+a slow app), written text by reading it back — and the run ends the moment the
+last one passes, with no call to ask whether it's finished. A write goes only
+into the field with the focus, or the only text area on screen, and only if it's
+empty (unless the plan says to add to the end): when ⌘N fails, the list isn't
+added to whatever document was open. After an app is opened, keys wait for it
+to be in front. Every action, planned or not, goes through the same checks as
+the model's, on the user's words and the screen as it is then.
+
+A `look` step, and a step that failed, go to the model as below, told which
+step it's on and what failed: at most six calls, and a step that's looking for
+a control that appears (`until`, like Pause) or text that lands ends the moment
+it does. Still stuck, the rest is planned again, at most twice and never the
+same way, told why in words with anything quoted from the screen taken out;
+then the run stops and says how far it got ("I did 2 of 3 steps (Open TextEdit,
+New document), then stopped: …"). There's no replan after a no, a cancel or a
+model that says it can't.
+
+A command about what's on screen ("this", a question, "click…"), a saved way
+that stopped part way, and pressing Play on a search's results skip the planner
+and go straight to the model; so does a plan that comes back unusable. A task takes at most 30 actions and 16 model calls. A run that's
+stuck can't hide it: the same actions on the same screen stop at the third
+time, and text that's read back isn't typed again. The pill shows `Planning…`,
+the plan, then `2 of 3 · New document`; the log has each plan's step labels
+(never the text it writes) and why a reply was unusable.
+
 Each step the model gets the goal, a short memory and the front window, read
 by jester-driver's `snapshot` — its controls in reading order, numbered, with
 their roles, names, values and states, in the same vocabulary on both OSes:
@@ -211,6 +318,9 @@ App: Spotify — "Spotify Premium"
 [12] button "Play Gunna"
 [14] searchfield "What do you want to play?" value: "gunna"
 ```
+
+The snapshot squashes a value's whitespace, so a text area's value is read
+again in full for its line breaks, which the model sees as `⏎`.
 
 It answers with one action (or up to three on controls already on screen):
 click (or double- or right-click), type (replacing a one-line field's text,
@@ -266,7 +376,7 @@ which it's told means it may not have worked (to look, and never to redo a
 toggle or formatting for it). A menu command or key whose effect a read
 can't show (bold text, a copy) is "no visible change", not a failure. That
 read is the next step's screen, so checking costs no extra reads, and a step
-that changed nothing isn't progress (six in a row end the task).
+that changed nothing isn't progress (three in a row end the task).
 
 Each action of a group is judged on the focus the ones before it left, and on
 the screen from before the group, the more careful of the two (a press
@@ -338,6 +448,138 @@ accessibility tree, and clicks that. Eye aiming needs the extension's own
 calibration screen, opened from Settings or a gesture bound to "Calibrate the
 eye pointer"; head aiming doesn't.
 
+## The Apple Watch
+
+The cursor can follow your wrist: turn your hand to move it, tap thumb to finger
+to click. It's Jester's own app on the watch, talking only to Jester on the Mac,
+and it works with the camera off or the hand out of view. Mac only.
+
+**Setting it up** (once):
+
+1. `npm run watch`, which builds the Mac's Bluetooth helper.
+2. With Xcode open, connect your iPhone to the Mac with a cable that carries
+   data, unlock it and tap Trust. Developer Mode stays hidden until Xcode has
+   seen the device; it then appears at the bottom of Settings › Privacy &
+   Security. Turn it on and let the phone restart. The watch works the same way,
+   through the phone: keep it unlocked with its screen on when you plug the phone
+   in, tap Trust on it, and only then does its Developer Mode appear. If that
+   prompt doesn't come, restart the watch and plug the phone in again. On
+   watchOS 27, pair it from Device Hub instead (File › Pair Nearby Device…).
+3. Open `native/jester-watch/JesterWatch.xcodeproj`, pick your watch as the run
+   destination and press Run. It's signed with the Personal Team, so the app
+   stops opening after 7 days; press Run again to renew it. A paid team (Signing
+   & Capabilities) makes that a year.
+4. Start Jester from the Dock or with `npm run dev:mac`, so that macOS asks
+   Electron about Bluetooth rather than your terminal. In Settings › Apple Watch,
+   turn on "Steer with your watch" and allow Bluetooth. Click Pair, tap Pair on
+   the watch, and click They match if both show the same number.
+5. On the watch, tap Teach my pinch, pinching as you would to click. Until then,
+   click with the watch's button. If pinches then feel too hard or too easy, the
+   Pinch button on the watch goes between Light, Normal and Firm, from the next
+   Start.
+
+Moving windows has to be taught first: Teach window move on the watch has you
+take turns holding each pinch for about two minutes, and turns it on only if it
+then gets at least 11 in 12 fresh ones right.
+
+**Using it:** open Jester on the watch and tap Start, then lower your arm and
+point. A slow turn aims and a quick one travels, as with a mouse, and the cursor
+crosses from screen to screen as a mouse does. Tap Stop when done. Moving the
+real mouse or typing takes over at once, as does putting Jester to sleep.
+Steering stops after an hour, a limit of watchOS; tap Start to go on.
+
+| To | Pinch | Or on the watch's Click button |
+|---|---|---|
+| Click | Pinch | Tap |
+| Double-click | Pinch twice, and keep still | Tap twice |
+| Drag | Pinch and hold, move, let go | Hold, and move |
+| Move a whole window | All fingers: pinch and hold, move, let go | |
+
+Holding a pinch ticks on the wrist when it takes, and the ring around the cursor
+fills in while the mouse button is down. You can let go on the move, but it's
+surest with the arm still; if it's missed, the drag ends by itself once the arm
+has been still for a moment. Two pinches and a move also picks something up, and
+the next pinch puts it down. Stopping, losing the connection, typing or taking
+the real mouse all let go of a drag.
+
+How it works, and why:
+
+- **Bluetooth, with the Mac as the peripheral.** A watch can only be a Bluetooth
+  central (`CBPeripheralManager` isn't available on watchOS), and Apple keeps
+  sockets and WebSockets on a watch for audio and calls (TN3135), so Wi-Fi is out
+  and the Mac advertises instead. That needs a helper: `jester-watch-bridge`, in
+  Swift, separate from `jester-driver` so that a Bluetooth problem can never take
+  the mouse and keyboard down with it. It runs only while the switch is on,
+  because its first run is what makes macOS ask about Bluetooth.
+- **Nothing on the radio is believed unproven.** Anyone in range can connect to
+  a Bluetooth service, and this one clicks. Pairing is a key exchange (X25519)
+  with a number you compare, after the watch commits to its key; every motion
+  frame is then signed (HMAC-SHA256) over a challenge fresh to the connection,
+  with a counter that only rises. The key lives in the watch's Keychain and
+  sealed on the Mac. See `Core/Wire.swift`.
+- **A click can't be lost or doubled.** Frames can be dropped, so each carries a
+  running count of clicks rather than a "clicked" flag.
+- **Steering reads the arm, not the watch.** `Core/Steering.swift` uses gravity
+  to turn the gyroscope's spin into a turn and a tilt, so how you hold your hand
+  doesn't matter and rolling your wrist moves nothing.
+- **Pinches are learned.** A tap is a sharp jolt in the acceleration, which is
+  all there is to go on at 100 Hz, and how hard it is varies by person, so
+  `Core/Pinch.swift` learns the threshold from yours. It is a heuristic, not a
+  trained model like Doublepoint's: expect the odd miss, and tune it there. Its
+  tests for a shake and a swinging arm mustn't catch a firm tap, which rings for
+  longer and jolts the wrist, so they're judged on the tap's own peak and on what
+  the arm was doing just before. To tune on real pinches, each Stop saves what the
+  watch felt to `Documents/pinches.csv`, and Test pinch and hold saves raw motion to
+  `Documents/lab.csv`. They stay on the watch until read with
+  `xcrun devicectl device copy from --domain-type appDataContainer`.
+  Double Tap (Series 9, Ultra 2 and later) also presses the Click button, but
+  only with the screen on.
+- **A click lands where you aimed.** Fingers coming together turn the wrist from
+  well before they touch, and the watch only knows it was a pinch after they have,
+  so a press goes where the cursor was 180 ms earlier, or 90 ms if it had come
+  more than 40 px since, which is a hand travelling and not a pinch. Replaying
+  `Tests/pinch-recording-fingers.csv` through the steering, that's 4 px off where
+  20 pinches started, against 10 with 90 ms alone. None of those were aiming at
+  anything, so it's worth checking against the `watch click` lines in the log.
+  Letting go is felt the moment it happens, so a drop only looks back 40 ms. The
+  cursor waits out the jolt before steering goes on. Aim assist reaches 16 px, for
+  near misses: the watch aims well enough that any further would pull clicks onto
+  things it wasn't pointed at.
+- **A swipe isn't a swipe while you steer.** The camera sees the arm wearing the
+  watch, and a scroll or a tab change would move what it's aiming at, so swipes
+  are ignored until the arm has been still for 800 ms. Poses still count: ✌️ has
+  to work, and 👍 answers the assistant.
+- **Steadying has to add up.** `createSteady` is a 1€ filter on the turning
+  rates: heavy near stillness, which takes out a hand's 8 to 12 Hz tremor, and out
+  of the way at speed. Filtering rates keeps every deliberate turn. The trap is
+  anything that treats a tremor's two halves differently, which turns shaking into
+  a slow creep: its cutoff falls slowly, so it holds steady through a shake, and
+  the gain follows how fast the hand is really going, not each frame's speed.
+- **Which fingers.** All fingers and one look alike in strength, but differ in
+  direction and twist in the first 100 ms. That only holds within a style of
+  pinching: a recording told them apart 18 times in 20 taking turns, and little
+  better than chance going from firm pinches to light ones, so `PinchKinds` is taught
+  in one sitting and scored on pinches it hasn't seen. It's only ever consulted on
+  a pinch that's held, so a click can't move a window. A window is carried with
+  accessibility rather than a drag, by `windowAt` and `moveWindow`, Mac only.
+- **A pinch is a real press.** Nothing can be felt while fingers stay together,
+  but both ends can, which was found by recording a wrist: fingers parting after
+  a quick pinch are a burst 120 to 200 ms later, where a held pinch is silent, and
+  letting go of a hold is a jolt about as strong as the pinch. Mid-drag it's
+  weaker and the arm makes jolts as big, but the arm's are broad humps and letting
+  go is a spike standing clear of the moment before, so that's what's looked for:
+  it catches about three in five mid-drag, on two recordings, so that's evidence
+  and not a guarantee (`Tests/pinch-recording-moving.csv`). So `PinchDetector`
+  says when fingers meet and part, and the Mac treats that just as it treats a
+  finger on the watch's button: quick is a click, and held past 300 ms is the mouse
+  button down at the spot aimed at. The recording is `Tests/pinch-recording.csv`,
+  replayed by the tests, and the watch's Test pinch and hold makes another. Whatever
+  ends steering lets go, and the driver lets go of anything still down when it exits.
+
+`tests/desktop-watch.test.mjs` runs the pairing, frames, steering and pinch logic
+(`Tests/main.swift`) and steers the real pointer code with a stand-in helper. No
+test reaches a real radio or a real wrist; see check 5 below.
+
 ## Phase 0 results (MacBook Pro, Apple silicon, macOS 26)
 
 | Question | Answer |
@@ -381,6 +623,13 @@ models decode in under 35 ms.
    again after letting go. With a model saved, give the assistant a long job,
    click the × beside the pill, No, then × and Yes: the app it's working in
    should stay in front throughout, and the click should never reach that app.
+
+5. **Apple Watch** (the tests have no radio, sensors or wrist): set it up as in
+   [The Apple Watch](#the-apple-watch). Check that the watch finds the Mac; that
+   the cursor keeps moving, smoothly, with your wrist down and the screen off;
+   that a turn right is right and tipping up is up (if not, "Reverse up and
+   down"); that a pinch clicks and ordinary movement, typing included, doesn't;
+   and that Stop, the real mouse and sleep each take the cursor back.
 
 ## Things learned the hard way
 

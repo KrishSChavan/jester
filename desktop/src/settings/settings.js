@@ -11,6 +11,7 @@ import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings, resumeG
 import { PROVIDERS } from '../ext/src/common/credentials.js';
 import { calibrationGrade, loadCalibration, usableModel } from '../ext/src/common/gaze-store.js';
 import { DESKTOP_LABELS, bindable, describePlan, parseShortcut, wakeHint } from '../main/os-actions.js';
+import { watchPairing, watchStatus } from '../main/watch-status.js';
 
 const $ = (id) => document.getElementById(id);
 const SHORTCUTS = ['SHORTCUT_1', 'SHORTCUT_2', 'SHORTCUT_3'];
@@ -159,7 +160,31 @@ function renderControls() {
   $('headSpeed').value = String(settings.headSpeed);
   $('headSpeed').disabled = cursorOff || settings.pointerAim === 'eyes';
   $('calibrate').disabled = cursorOff;
+  renderWatch();
   renderStatus();
+}
+
+/** Only on a Mac: there's no Apple Watch to steer with on Windows. */
+function renderWatch() {
+  $('watch-section').hidden = platform() !== 'darwin';
+  const watch = desktop?.watch || {};
+  const pairing = watchPairing(watch, settings);
+  $('watchEnabled').checked = !!settings.watchEnabled;
+  $('watchEnabled').disabled = !settings.enabled || !watch.built;
+  $('watch-hint').textContent = watchStatus(watch, settings);
+  $('watch-pair-title').textContent = pairing.title;
+  $('watch-pair-hint').textContent = pairing.hint;
+  $('watch-pair').textContent = pairing.action;
+  $('watch-pair').disabled = pairing.disabled;
+  $('watch-pair').dataset.op = pairing.op;
+  $('watch-cancel').hidden = !pairing.cancellable;
+  $('watchSpeed').value = String(settings.watchSpeed ?? 1);
+  $('watchInvertY').checked = !!settings.watchInvertY;
+}
+
+async function watchOp(op) {
+  desktop = await chrome.runtime.sendMessage({ type: 'jester/desktop-watch', op });
+  renderWatch();
 }
 
 /** How to start a command: the gesture bound to voice, if any, and the shortcut. */
@@ -181,6 +206,46 @@ function renderVoice() {
     ? 'Needs its speech model, which isn’t installed. In desktop/, run: npm run models'
     : `${voiceStarters()} starts a command: say “open Spotify”, “volume 30”, “type hello”. Speech is recognized on this computer.`;
   renderSpeechModel(missing);
+  renderContinuous();
+}
+
+/** The always-on assistant: whether it can listen, and how he sounds. */
+function renderContinuous() {
+  const { listening, problem, puter, puterTrouble, knowsYou, teaching } = desktop?.continuous || {};
+  $('continuousAssistant').checked = !!settings.continuousAssistant;
+  $('continuousAssistant').disabled = !settings.enabled || !settings.voiceEnabled;
+  $('continuous-hint').textContent = problem || (listening
+    ? 'Listening. Say “Jester”, “J” or “Jes” first. Nothing else you say is kept or sent anywhere.'
+    : 'Keeps the mic open for his name, then talks with you and does what you ask. What you hear is recognized on this computer.');
+  $('voice-print-teach').textContent = teaching ? 'Cancel' : knowsYou ? 'Teach again' : 'Teach him';
+  $('voice-print-teach').disabled = !settings.enabled || !settings.voiceEnabled;
+  $('voice-print-forget').hidden = !knowsYou || !!teaching;
+  $('voice-print-hint').textContent = teaching
+    ? `Read this aloud (${teaching.done + 1} of ${teaching.of}): “${teaching.line}”`
+    : knowsYou
+      ? 'He only listens to you. Anyone else is ignored before their words are even worked out, and you can talk on without saying his name.'
+      : 'Read five sentences so he can tell you from everyone else. What’s kept describes your voice and can’t be played back. It stays on this computer.';
+  $('puter-connect').textContent = puter ? 'Disconnect' : 'Connect Puter';
+  $('puter-hint').textContent = puterTrouble
+    ? `${puterTrouble} Using this computer’s voice until then.`
+    : puter
+      ? 'Puter speaks for him, so what he says goes to Puter. Its free allowance is small: past it, this computer’s voice takes over.'
+      : 'This computer’s voice, for now. Connect a free Puter account for a better one. What he says then goes to Puter.';
+}
+
+/** The models Ollama has, asked when Settings opens and whenever it's come back to. */
+async function renderChatModels() {
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-ollama' }).catch(() => null);
+  const select = $('assistantModel');
+  const models = reply?.models || [];
+  select.replaceChildren(...models.map(({ name, size }) => new Option(`${name} (${Math.round(size / 1e9)} GB)`, name)));
+  select.value = settings?.assistantModel && models.some((model) => model.name === settings.assistantModel) ? settings.assistantModel : reply?.chosen || '';
+  select.disabled = !models.length;
+  $('chat-model-hint').textContent = !reply?.running
+    ? 'Ollama isn’t running. Open it, then come back here.'
+    : models.length
+      ? 'An Ollama model on this computer. What you say to him stays here.'
+      : 'Ollama has no models yet. In a terminal, run: ollama pull qwen3.5:9b';
 }
 
 /** Which recognizer hears commands; one not downloaded yet is listed, and says how to get it. */
@@ -220,7 +285,7 @@ async function renderCalibration() {
 // ---------------------------------------------------------------------------
 
 /** Examples for the model field: fast models suit one-step-at-a-time work. */
-const MODEL_EXAMPLES = { google: 'gemini-2.5-flash', groq: 'openai/gpt-oss-120b', openai: 'gpt-5-mini', anthropic: 'claude-haiku-5-5', custom: '' };
+const MODEL_EXAMPLES = { google: 'gemini-2.5-flash', groq: 'openai/gpt-oss-120b', openai: 'gpt-5-mini', anthropic: 'claude-haiku-5-5', ollama: 'qwen3.5:9b', custom: '' };
 
 /** Asks the main process, which alone holds the keys; the reply lists them masked. */
 async function connections(op, extra = {}) {
@@ -248,7 +313,8 @@ function renderConnections(reply) {
       name.textContent = `${PROVIDERS[connection.provider]?.label || connection.provider} · ${connection.model}`;
       const detail = document.createElement('small');
       const resting = connection.cooldownUntil > Date.now() ? ` · resting until ${new Date(connection.cooldownUntil).toLocaleTimeString()}` : '';
-      detail.textContent = `${connection.masked} · ${connection.plan === 'free' ? 'Free' : 'Paid'}${saved.length > 1 && i === 0 ? ' · tried first' : ''}${resting}`;
+      const plan = connection.provider === 'ollama' ? '' : ` · ${connection.plan === 'free' ? 'Free' : 'Paid'}`;
+      detail.textContent = `${connection.masked}${plan}${saved.length > 1 && i === 0 ? ' · tried first' : ''}${resting}`;
       text.append(name, detail);
       const remove = document.createElement('button');
       remove.type = 'button';
@@ -266,6 +332,7 @@ function buildConnectionForm() {
   const fit = () => {
     $('connection-model').placeholder = MODEL_EXAMPLES[provider.value] ? `e.g. ${MODEL_EXAMPLES[provider.value]}` : 'The model’s ID';
     $('connection-url-row').hidden = provider.value !== 'custom';
+    $('connection-key-row').hidden = $('connection-plan-row').hidden = provider.value === 'ollama';
     $('connection-plan').value = ['google', 'groq'].includes(provider.value) ? 'free' : 'paid';
   };
   provider.addEventListener('change', fit);
@@ -274,7 +341,7 @@ function buildConnectionForm() {
     event.preventDefault();
     $('connection-add').disabled = true;
     const reply = await connections('save', {
-      input: { provider: provider.value, model: $('connection-model').value, key: $('connection-key').value, plan: $('connection-plan').value, baseUrl: $('connection-url').value }
+      input: { provider: provider.value, model: $('connection-model').value, key: provider.value === 'ollama' ? '' : $('connection-key').value, plan: $('connection-plan').value, baseUrl: $('connection-url').value }
     });
     $('connection-add').disabled = false;
     // The key isn't kept in the page once it's saved.
@@ -503,9 +570,35 @@ $('enabled').addEventListener('change', (event) => save({ enabled: event.target.
 $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled: event.target.checked }));
 $('voiceEnabled').addEventListener('change', (event) => save({ voiceEnabled: event.target.checked }));
 $('speechModel').addEventListener('change', (event) => save({ speechModel: event.target.value }));
+$('continuousAssistant').addEventListener('change', (event) => save({ continuousAssistant: event.target.checked }));
+$('assistantModel').addEventListener('change', (event) => save({ assistantModel: event.target.value }));
+$('puter-connect').addEventListener('click', async () => {
+  const button = $('puter-connect');
+  const op = desktop?.continuous?.puter ? 'disconnect' : 'connect';
+  button.disabled = true;
+  if (op === 'connect') button.textContent = 'Waiting for your browser…';
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-puter', op });
+  button.disabled = false;
+  $('puter-error').textContent = reply?.ok === false ? reply.error : '';
+  renderContinuous();
+});
+$('voice-print-teach').addEventListener('click', () =>
+  chrome.runtime.sendMessage({ type: 'jester/desktop-voiceprint', op: desktop?.continuous?.teaching ? 'cancel' : 'teach' }));
+$('voice-print-forget').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-voiceprint', op: 'forget' }));
+$('forget-conversations').addEventListener('click', async (event) => {
+  await chrome.runtime.sendMessage({ type: 'jester/desktop-forget' });
+  event.target.textContent = 'Forgotten';
+});
+renderChatModels();
+window.addEventListener('focus', renderChatModels);
 $('pointerAim').addEventListener('change', (event) => save({ pointerAim: event.target.value }));
 $('headSpeed').addEventListener('change', (event) => save({ headSpeed: Number(event.target.value) }));
 $('calibrate').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-calibrate' }));
+$('watchEnabled').addEventListener('change', (event) => save({ watchEnabled: event.target.checked }));
+$('watchSpeed').addEventListener('change', (event) => save({ watchSpeed: Number(event.target.value) }));
+$('watchInvertY').addEventListener('change', (event) => save({ watchInvertY: event.target.checked }));
+$('watch-pair').addEventListener('click', (event) => watchOp(event.target.dataset.op));
+$('watch-cancel').addEventListener('click', () => watchOp('cancel'));
 $('restart').addEventListener('click', (event) => {
   event.target.disabled = true;
   event.target.textContent = 'Restarting…';

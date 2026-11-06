@@ -40,6 +40,9 @@ function asks(goal) {
   return /\?\s*$/.test(said) && request === said;
 }
 
+/** Whether what was said is about what's on screen now: "this", or a question. */
+export const aboutTheScreen = (goal) => DEICTIC.test(goal) || asks(goal);
+
 const words = (text) => String(text ?? '').toLowerCase().replace(/[’']/g, '').match(/[\p{L}\p{N}]+/gu) || [];
 
 /** The words that matter, in order: "Um, can you make a new Zoom meeting?" is "make new zoom meeting". */
