@@ -37,40 +37,23 @@ Upload new package**. The store rejects a version it has already seen.
 **Description**
 
 ```text
-Jester lets you control video and your browser without reaching for the keyboard or mouse: hand gestures from across the room, a cursor you aim with your eyes or head, and voice commands that carry out whole tasks.
+Jester lets you control YouTube, Netflix and other streaming sites without touching your keyboard or mouse. Hold up a hand to pause or play from across the room, steer a cursor with your eyes or head, or just say what you want to watch. Camera tracking and speech recognition run on your device.
 
-HAND GESTURES
-• Closed fist to pause, open palm to play. Peace sign to mute, thumbs up or down for volume.
-• Swipe left or right to seek, up or down for volume.
-• Rebind any pose or swipe in Settings, with a second set for when you're not in fullscreen.
-• Works on YouTube, Netflix, Disney+, Hulu, Prime Video and other major streaming sites.
+Main features:
+• Hand gestures: a closed fist pauses, an open palm plays, a peace sign mutes, thumbs up or down change the volume, and swipes seek. You can rebind every gesture.
+• Voice commands: point one finger up or press Alt+Shift+J, then say "play season 3 episode 1", "next episode" or "switch to the recipe tab". Jester works through the site step by step and asks before anything sensitive.
+• Eye and head cursor: steer by turning your head, with no calibration, or with your eyes after a short calibration. Close your hand to click.
+• Your choice of AI: voice tasks use the model you pick, with your own API key: Google Gemini (which has a free tier), OpenAI, Anthropic Claude, Groq or any OpenAI-compatible endpoint. Simple tab commands work without one.
+• Private by design: video and audio never leave your computer, and there are no Jester servers, analytics or ads. Voice tasks share only what the task needs, such as your command and a summary of the page, and only with the AI provider you chose.
 
-VOICE COMMANDS
-• Point one finger up, or press Alt+Shift+J, and say what you want: "Play season 3 episode 1", "next episode", "switch to the recipe tab", "search Amazon for a USB hub".
-• Jester works through the site step by step, from search to the show, season and episode, and asks before anything sensitive.
-• Uses the AI model you choose, with your own API key: Google Gemini (which has a free tier), OpenAI, Anthropic Claude, Groq, or any OpenAI-compatible endpoint. Simple tab commands work without one.
-
-EYE AND HEAD CURSOR
-• Steer a cursor by turning your head, with no calibration, or with your eyes after a short calibration.
-• Raise an open palm to show it and close your hand into a fist to click.
-
-PRIVATE BY DESIGN
-• Camera tracking runs on your computer with MediaPipe. Video never leaves your device.
-• Speech is recognized on-device by Chrome. Audio is never uploaded.
-• No Jester servers, no analytics, no ads. A voice task sends your command and a compact description of the page to the AI provider you picked, and nothing else.
-
-GETTING STARTED
-1. Click the Jester toolbar button, turn it on, and allow camera access.
-2. For voice, open Settings, allow the microphone and choose "Set up on-device speech".
-3. For AI voice tasks, add a model and its API key under "AI assistant".
-
-Needs a webcam. Voice needs Chrome's on-device speech recognition for your language. AI providers may charge for API use.
+Works on YouTube, Netflix, Disney+, Hulu, Prime Video and other major streaming sites. Gestures and the cursor need a webcam, and voice needs Chrome's on-device speech recognition for your language. AI providers may charge for API use.
 
 Jester is not affiliated with YouTube, Netflix or any other streaming service.
 ```
 
-- **Category:** Make Chrome Yours › Accessibility. Lifestyle › Entertainment also
-  fits if you'd rather lead with streaming.
+- **Category:** Accessibility (under Make Chrome Yours). Everything Jester adds
+  is another way to control Chrome, and the category is far less crowded than
+  Entertainment.
 - **Language:** English (United States)
 
 **Graphic assets** (all in this folder):
