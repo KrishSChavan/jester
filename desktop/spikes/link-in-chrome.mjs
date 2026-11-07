@@ -13,7 +13,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -107,12 +107,19 @@ async function attach(match) {
   throw new Error('target not found');
 }
 
+// Run from ~/Downloads, a relay Chrome starts never gets past macOS's loader:
+// it waits forever to open its own file, as macOS guards that folder
+// (2026-11-07). From here it runs.
+const relay = path.join(dir, path.basename(driverPath()));
+await copyFile(driverPath(), relay);
+await chmod(relay, 0o755);
+
 try {
   const { id } = await command('Extensions.loadUnpacked', { path: extension });
   await mkdir(path.join(profile, 'NativeMessagingHosts'), { recursive: true });
   await writeFile(
     path.join(profile, 'NativeMessagingHosts', `${HOST_NAME}.json`),
-    JSON.stringify(hostManifest({ relayPath: driverPath(), origins: [`chrome-extension://${id}/`] }), null, 2)
+    JSON.stringify(hostManifest({ relayPath: relay, origins: [`chrome-extension://${id}/`] }), null, 2)
   );
   const workerTarget = (t) => t.type === 'service_worker' && t.url.startsWith(`chrome-extension://${id}/`);
   let worker = await attach(workerTarget);

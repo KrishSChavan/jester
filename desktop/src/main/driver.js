@@ -15,16 +15,27 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const EXE = process.platform === 'win32' ? 'jester-driver.exe' : 'jester-driver';
+const CRATE = path.resolve(here, '../../native/jester-driver');
 
-/** The built driver: inside the app when packaged, else the newest cargo build. */
-export function driverPath({ resourcesPath = null } = {}) {
+/** When the driver's sources last changed: a build older than that is out of date. */
+function sourcesChanged(crate) {
+  const files = ['Cargo.toml', 'Cargo.lock', ...fs.readdirSync(path.join(crate, 'src')).map((name) => path.join('src', name))];
+  return Math.max(...files.map((file) => fs.statSync(path.join(crate, file), { throwIfNoEntry: false })?.mtimeMs ?? 0));
+}
+
+/**
+ * The built driver: inside the app when packaged, else the release build
+ * while it's up to date, else the newest cargo build. A debug build is
+ * unoptimized, and `cargo build` or `cargo test` leave one newer than the
+ * release build, which the app then ran.
+ */
+export function driverPath({ resourcesPath = null, crate = CRATE } = {}) {
   if (resourcesPath) return path.join(resourcesPath, EXE);
-  const builds = ['release', 'debug']
-    .map((profile) => path.resolve(here, '../../native/jester-driver/target', profile, EXE))
-    .filter((file) => fs.existsSync(file))
-    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-  if (!builds.length) throw new Error('jester-driver is not built; run: npm run driver');
-  return builds[0];
+  const [release, debug] = ['release', 'debug'].map((profile) => path.join(crate, 'target', profile, EXE)).map((file) => (fs.existsSync(file) ? file : null));
+  if (!release && !debug) throw new Error('jester-driver is not built; run: npm run driver');
+  if (!release || !debug) return release || debug;
+  const built = (file) => fs.statSync(file).mtimeMs;
+  return built(release) >= sourcesChanged(crate) || built(release) >= built(debug) ? release : debug;
 }
 
 /** Electron DIPs to the driver's coordinates. `screen` is Electron's. */

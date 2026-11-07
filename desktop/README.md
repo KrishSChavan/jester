@@ -195,10 +195,14 @@ words, never by a name inside another's ("word" in 1Password).
 Two recognizers, chosen in Settings › Speech model: **Accurate** (Parakeet
 TDT 0.6B v2, ~650 MB download: `npm run models -- parakeet-0.6b`) and
 **Light** (Parakeet 110M). Without a choice, the most accurate one downloaded
-is used. In the app, Accurate peaks near 800 MB while decoding and loads in
-~1.4 s; Light about half that, in ~0.5 s. Either loads when a command begins
-and is let go after 10 idle minutes or when voice is switched off; the audio
-waits in the speech service's queue while it loads, so nothing said is lost.
+is used. Accurate holds 1.4–1.9 GB and loads in 1.1–1.5 s; Light holds
+0.55–0.67 GB, loads in 0.4 s and decodes three to four times faster (16–93 ms
+against 50–375 ms a sentence). Those are macOS's memory footprint, with the
+voiceprint model loaded too, measured 2026-11-07 (the 800 MB given here before
+was too low). Either loads when a command begins and is let go after 10 idle
+minutes or when voice is switched off; the audio waits in the speech service's
+queue while it loads, so nothing said is lost. The continuous assistant keeps
+it loaded all the time.
 
 The mic is captured raw (no echo cancellation, noise suppression or
 auto-gain: each command opens a fresh stream, and those spend their first
@@ -783,6 +787,12 @@ models decode in under 35 ms.
   `<user-data-dir>/NativeMessagingHosts`, so the link spike never touches your
   Chrome. A host manifest can't add arguments; the relay recognises the
   `chrome-extension://` origin Chrome passes instead.
+- A relay Chrome starts from `~/Downloads`, where this repo lives on the
+  development Mac, never gets past macOS's loader: it waits forever to open
+  its own file, as macOS guards that folder (2026-11-07; the spike had passed
+  on 2026-10-21). Copied to a temp folder, the same binary passes every check,
+  so the spike runs it from there, and the link must install the relay outside
+  ~/Downloads, ~/Desktop and ~/Documents.
 - Electron has no on-device Web Speech recognizer, so the preload gives the
   engine page a `SpeechRecognition` of the same shape, and `voice.js` runs
   unchanged. A function passed through `contextBridge` twice needn't arrive

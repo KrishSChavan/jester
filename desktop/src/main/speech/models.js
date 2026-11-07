@@ -93,8 +93,8 @@ export const VAD_MODEL = path.join(MODELS_DIR, 'silero_vad.onnx');
 
 /** The models Settings offers, most accurate first: without a choice, the first one downloaded. */
 export const SPEECH_CHOICES = [
-  { id: 'parakeet-0.6b', label: 'Accurate', hint: 'Fewer mistakes. Uses up to about 800 MB of memory while in use.' },
-  { id: 'parakeet-110m', label: 'Light', hint: 'About half the memory and quicker to load, with a few more mistakes.' }
+  { id: 'parakeet-0.6b', label: 'Accurate', hint: 'Fewer mistakes. Holds about 1.5 GB of memory while in use.' },
+  { id: 'parakeet-110m', label: 'Light', hint: 'About a third of the memory, and quicker to load and to hear you, with a few more mistakes.' }
 ];
 
 /** Whether a model, and the voice-activity detector it needs, are downloaded. */

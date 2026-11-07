@@ -1,6 +1,33 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { driverPath, startDriver, toDipFrame, toOsFrame, toOsPoint } from '../desktop/src/main/driver.js';
+
+test('the release driver is used while it is up to date, even with a newer debug build beside it', () => {
+  const crate = fs.mkdtempSync(path.join(tmpdir(), 'jd-'));
+  const exe = process.platform === 'win32' ? 'jester-driver.exe' : 'jester-driver';
+  const at = (file, minutes) => {
+    fs.mkdirSync(path.dirname(path.join(crate, file)), { recursive: true });
+    fs.writeFileSync(path.join(crate, file), '');
+    const time = new Date(Date.UTC(2026, 10, 7, 12, minutes));
+    fs.utimesSync(path.join(crate, file), time, time);
+  };
+  const release = path.join(crate, 'target', 'release', exe);
+  const debug = path.join(crate, 'target', 'debug', exe);
+  at('Cargo.toml', 0);
+  at('src/main.rs', 0);
+  at(`target/debug/${exe}`, 30);
+  assert.equal(driverPath({ crate }), debug);
+  at(`target/release/${exe}`, 10);
+  assert.equal(driverPath({ crate }), release);
+  at('src/main.rs', 20);
+  assert.equal(driverPath({ crate }), debug, 'the release build is out of date: the newer one');
+  at(`target/release/${exe}`, 40);
+  assert.equal(driverPath({ crate }), release);
+  fs.rmSync(crate, { recursive: true, force: true });
+});
 
 let binary = null;
 try {

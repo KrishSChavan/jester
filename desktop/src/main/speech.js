@@ -7,9 +7,9 @@
  * begin / audio / end / abort for a numbered session and hears back
  * speech / partial / final / error for that session.
  *
- * The recognizer holds 250–800 MB depending on the model, so it is loaded
+ * The recognizer holds 0.6–1.9 GB depending on the model, so it is loaded
  * when a command begins and let go after IDLE_MS without one. Loading takes
- * 0.5–1.4 s, about what it takes to say a command; what is said meanwhile
+ * 0.4–1.5 s, about what it takes to say a command; what is said meanwhile
  * waits in the service's queue behind the load and is heard once it's done.
  *
  * The continuous assistant keeps it loaded and listening, fed by a page of its
