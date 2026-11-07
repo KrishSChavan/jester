@@ -10,6 +10,7 @@
 import { execFile } from 'node:child_process';
 import { goalWords, hasWord } from './agent/screen.js';
 import { appCatalog, findApp, installedApps } from './apps.js';
+import { gist } from './learned.js';
 import { describePlan } from './os-actions.js';
 import { asksFirst, matchApp, parseSequence } from './voice-commands.js';
 
@@ -508,13 +509,16 @@ export function createVoiceRunner({
   /**
    * The assistant, on what the matcher couldn't do; a task it got done is
    * learned, to be done without it next time. `pick`: a search is waiting for
-   * its result to be pressed, which is all that's left to do.
+   * its result to be pressed, which is all that's left to do. `said`: in
+   * conversation, the user's own words, which are the task, `text` being only
+   * how the conversation took them; it's learned only if the two say the same.
    */
-  async function assisted(text, note = '', done = [], { pick = false } = {}) {
-    const result = await assistant.run(text, { ...(note ? { note } : {}), ...(pick ? { pick } : {}) });
+  async function assisted(text, note = '', done = [], { pick = false, said = '' } = {}) {
+    const goal = said || text;
+    const result = await assistant.run(goal, { ...(note ? { note } : {}), ...(pick ? { pick } : {}), ...(gist(goal) !== gist(text) ? { meant: text } : {}) });
     if (!result) return null;
     const { trace, ...outcome } = result;
-    if (outcome.ok && trace && learned) {
+    if (outcome.ok && trace && learned && gist(goal) === gist(text)) {
       // A learned way that stopped part way: its first steps were done that way, and the assistant went on from there.
       const kept = await learned.remember(text, [...done, ...trace]).catch((err) => ({ saved: false, why: err.message }));
       log('learned:', JSON.stringify(text), kept.saved ? (kept.known ? 'updated' : 'new') : `not kept (${kept.why})`);
@@ -524,7 +528,7 @@ export function createVoiceRunner({
   }
 
   /** @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say */
-  async function runSentence(text, depth = 0, context = {}) {
+  async function runSentence(text, depth = 0, { said = '', ...context } = {}) {
     // A new command ends a task still running (the assistant hears "stop" and its answers first).
     if (depth === 0 && assistant?.running) await assistant.cancel();
     // A phrase the user taught stands for its sentence.
@@ -567,12 +571,12 @@ export function createVoiceRunner({
         note = `The way this was done before stopped at step ${replayed.step + 1}: ${replayed.detail}.`;
         done = known.steps.slice(0, replayed.step);
       }
-      if (await assistantReady()) return { steps, outcome: await assisted(text, note, done) };
+      if (await assistantReady()) return { steps, outcome: await assisted(text, note, done, { said }) };
       // The assistant could, given a model: say where to add one.
       const partly = done.length ? `The saved way did ${done.length} step${done.length > 1 ? 's' : ''}, then stopped` : 'Nothing was done';
       if (assistant) return { steps, outcome: bad(`“${unknown.text.replace(/[.!?]+$/, '')}” needs the assistant: add an AI model in Jester’s Settings › Assistant. ${partly}.`) };
-      const said = steps.length > 1 ? `Jester doesn’t know how to “${unknown.text}” yet, so it did nothing.` : `“${unknown.text}” isn’t a command Jester knows yet.`;
-      return { steps, outcome: bad(said) };
+      const unknownLine = steps.length > 1 ? `Jester doesn’t know how to “${unknown.text}” yet, so it did nothing.` : `“${unknown.text}” isn’t a command Jester knows yet.`;
+      return { steps, outcome: bad(unknownLine) };
     }
     if (steps.some(needsInput) && !canPost()) return { steps, outcome: bad('Allow Accessibility in Jester’s Settings first.') };
     // "Open Spotify and play …": Spotify, though it wasn't running when the apps were read.
@@ -584,7 +588,7 @@ export function createVoiceRunner({
     if (outcome.ok && pick) {
       if (await assistantReady()) {
         await wait(SEARCH_LOAD_MS);
-        return { steps, outcome: await assisted(text, '', [], { pick: true }) };
+        return { steps, outcome: await assisted(text, '', [], { pick: true, said }) };
       }
       if (assistant) return { steps, outcome: ok(`${outcome.text}. To have Jester press Play, add an AI model in Settings › Assistant.`) };
     }
@@ -604,7 +608,8 @@ export function createVoiceRunner({
     },
     /**
      * @param {string} text
-     * @param {{talking?:boolean}} [context]  talking: said in conversation (parseCommand)
+     * @param {{talking?:boolean, said?:string}} [context]  talking: said in conversation (parseCommand);
+     *   said: the user's own words, when `text` is the conversation's command for them
      * @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say
      */
     run: (text, context = {}) => runSentence(text, 0, context),

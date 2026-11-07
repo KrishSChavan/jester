@@ -53,6 +53,24 @@ function sensitiveKey(action, screen) {
 /** model-client.js's codes for a reply the model can be asked to redo. */
 export const UNREADABLE = new Set(['invalid_json', 'model_output_truncated']);
 
+/** Why the screen couldn't be read, when it's something the user can put right: never the driver's words, which quote window titles. */
+function unseenWhy(detail) {
+  const text = String(detail ?? '');
+  if (/Accessibility permission/i.test(text)) return 'Jester isn’t allowed Accessibility in System Settings';
+  if (/no ordinary window is on screen/i.test(text)) return 'no window is open on this screen';
+  if (/has no window/i.test(text)) return 'the app in front has no window I can read';
+  if (/timed out/i.test(text)) return 'the app in front took too long to answer';
+  if (/jester-driver (?:is not running|exited)/i.test(text)) return 'Jester’s helper had stopped';
+  return '';
+}
+
+/** The screen couldn't be read, so the task stops: said with why, when that's known. */
+export function unseen(detail, lastDone = '') {
+  const why = unseenWhy(detail);
+  const because = why ? ` (${why})` : '';
+  return lastDone ? `I did “${lastDone}”, but then couldn’t read the screen to check it${because}, so I stopped.` : `I couldn’t read what’s on screen${because}, so I stopped.`;
+}
+
 /** A model failure in words for the user. */
 export function modelTrouble(err) {
   if (/rate|429|limit/i.test(`${err?.name} ${err?.message}`)) return 'The AI models are at their limits for now. Try again in a minute.';
@@ -143,10 +161,12 @@ async function screenChars(run, rest) {
  * @param {AbortSignal} [options.signal]
  * @param {string} [options.platform]
  * @param {string} [options.note]  what the model should know first: a saved way of doing it that failed
+ * @param {string} [options.meant]  in conversation, what the goal (the user's own words) was taken to mean
  */
-export function createRun({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now, note = '' }) {
+export function createRun({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now, note = '', meant = '' }) {
   const run = {
     goal,
+    meant,
     previous,
     host,
     model,
@@ -316,7 +336,7 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
  *   stuck: it can't go on, and says why
  */
 export async function lookStep(run, { what = '', done = null, maxCalls = Infinity, info = {} } = {}) {
-  const { goal, note, previous, host, model, onStep, signal, platform, memory, limits, now, system } = run;
+  const { goal, meant, note, previous, host, model, onStep, signal, platform, memory, limits, now, system } = run;
   const doing = what ? { step: info.step, what, ...(info.text ? { text: info.text } : {}) } : null;
   const started = run.calls;
   run.failures = 0;
@@ -331,17 +351,18 @@ export async function lookStep(run, { what = '', done = null, maxCalls = Infinit
     run.next = null;
     if (!seen.ok) {
       onStep({ phase: 'unseen', detail: tidy(seen.detail, 400) });
-      return { stuck: { why: 'unseen', say: run.lastDone ? `I did “${run.lastDone}”, but then couldn’t read the screen to check it, so I stopped.` : 'I couldn’t read what’s on screen, so I stopped.' } };
+      return { stuck: { why: 'unseen', say: unseen(seen.detail, run.lastDone) } };
     }
     const rest = {
-      originalGoal: goal,
+      // Said in so many words, so a prompt already at its size needs no line to explain it.
+      originalGoal: meant ? `${goal} (taken in conversation to mean: ${meant})` : goal,
       ...(note ? { note: tidy(note, 300) } : {}),
       ...(previous.length ? { previousCommands: previous.slice(-3) } : {}),
       ...(doing ? { doing, ...(info.planned ? { planned: info.planned } : {}) } : {}),
       memory: { subgoal: memory.subgoal, constraints: memory.constraints, facts: memory.facts, ...(doing ? {} : { completed: memory.completed.slice(-4) }), recent: memory.recent },
       ...(run.lastResult ? { lastResult: run.lastResult } : {})
     };
-    const screen = screenText(seen.snapshot, { goal: what ? `${goal} ${what}` : goal, chars: await screenChars(run, rest) });
+    const screen = screenText(seen.snapshot, { goal: [goal, meant, what].filter(Boolean).join(' '), chars: await screenChars(run, rest) });
     onStep({ phase: 'seen', app: seen.snapshot.app?.name, window: seen.snapshot.window?.title, elements: seen.snapshot.elements?.length ?? 0, screen });
     const prompt = JSON.stringify({ ...rest, screen });
 

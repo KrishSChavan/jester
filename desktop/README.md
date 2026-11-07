@@ -12,6 +12,11 @@ for one spoken command, recognized on this computer; what the local matcher
 can't do goes to an AI model of the user's, which works the app in front.
 Linking the extension (phase 5) comes next. Phase 0's answers are below.
 
+The menu's Gestures switch (`gesturesEnabled`, on unless set) closes the camera
+and nothing else: voice, the continuous assistant, the watch and the talk window
+carry on, and Cursor control, which is the camera's, greys out. The engine reports
+off with "Gestures off"; it also wakes a sleeping Jester, as nothing could see ✌️.
+
 What an action means outside a browser is in `src/main/os-actions.js`: one
 play/pause key for Play, Pause and Play/pause; arrows for seeking; each OS's
 shortcuts for apps, desktops, tabs and history. Actions only Chrome can do
@@ -226,6 +231,32 @@ memory. On an M4 Pro `qwen3.5:9b` planned in about 2 to 4 s, 13 s from cold;
 `qwen3.5:2b` is quicker but chose the wrong app or step too often to use. Ollama
 refuses extension origins, so Chrome's settings don't offer it.
 
+### How it clicks
+
+Taken from [agent-desktop](https://github.com/vercel-labs/agent-desktop) (Vercel
+Labs' accessibility-tree computer use), in `act` (mac.rs, win.rs, protocol.rs):
+
+- A control that has left the screen since the snapshot (its row deleted, its
+  sheet closed) is refused with "gone from the screen", never pressed or
+  clicked where it was drawn: something else may be there now.
+- `press` tries each accessibility way of clicking in turn, without the
+  pointer: on macOS AXPress (on a row or cell, read back, as a table that isn't
+  the key view takes the press and selects nothing), selecting it in its list
+  (a row, a cell, or a label in one; never a button's row for the button), a
+  child that is the same thing (only an unnamed one or one named as the
+  element, so a row's Delete button is never pressed for it), AXConfirm; on
+  Windows Invoke, Toggle, Select, Expand, then the control's MSAA default
+  action (the only way to click some Win32 controls). agent-desktop also tries
+  AXOpen for a click; here it is a double click's (`act open`), since Finder
+  opens a file with it where a click only selects.
+- Only when all of those refuse does the pointer click, at `act point`: the
+  frame read now, scrolled into view, waited on until it stops moving, and
+  hit-tested at its middle and its four quarters. A sheet, another window or
+  another control on top of it means no click, and the model hears what's
+  there; a hit test that can't tell (a web page answering for its contents)
+  clicks the middle, as before. Double and right clicks and drags aim the same
+  way.
+
 ### The continuous assistant
 
 Settings › Assistant › Continuous assistant keeps a mic open (`src/voice/`, a
@@ -243,11 +274,44 @@ Parakeet catches about 78% in the clear and 63% in a room (Moonshine 56%), and 1
 of 140,000 ordinary sentences set it off, some of them really about Jester. That's
 synthetic, not a real voice: saying his name alone and then the rest is the other way.
 
+He looks up at his name before the sentence is over. One second and two seconds
+into speech, `service.js` decodes what's been said so far (after the voiceprint
+check, as for the rest), and `wakesEarly` sends `wake`, never the words, when it
+opens with his name. The pill or orb turns to listening then: on a synthetic
+"Jester, what time is it in Tokyo…", 1.3 s after speech began and 3.2 s before the
+whole sentence was decoded. The finished utterance still decides; if it wasn't for
+him after all, the listening face goes.
+
 What was said to him (`conversation.js`) goes to the matcher if it's a known
 command, and otherwise to an Ollama model chosen in Settings, which answers and
-can hand back a command. Results are said aloud. Commands that could do harm ask
+can hand back a command. Results are said aloud. Ollama is told to keep the model
+for 2 minutes after its last use (`LOCAL_KEEP_ALIVE`), not the 30 the extension
+asks for: the 9B is 7.7 GB of wired memory, which on a 24 GB Mac already in swap
+made everything else crawl while he talked and long after. Commands that could do harm ask
 first when overheard (`asksFirst`, fail closed: anything not listed asks), since
 anything saying his name can reach them; tasks ask for themselves.
+
+The model's command is never the whole task. On qwen3.5:9b (2026-11-07), "open up
+my canvas and tell me what assignments I have due by tomorrow night" came back as
+`open`, as a made-up `https://canvas.instructure.com`, as "open Canvas" with the
+question gone, or as a refusal ("I can't read your browser tabs"), and an example
+in the prompt that looked like the request was copied word for word. The prompt now
+says the laptop reads its own screen, so such a request is a command (talk or
+command told apart in 48 of 51 tries over 17 cases, against 41 of 51; every Canvas,
+bookmark and email request in all 3 tries), and the assistant gets the user's own words as the
+goal, with the model's command beside it as `meant` for what they leave out ("yes,
+go ahead"). A task is learned only when the two have the same words, and never one
+that asks to be told something ("…and tell me what's due"): a replay would do the
+clicking and say nothing. `qwen3.5:2b` was no use for this: it made up an assignment.
+
+The clock is on the user's line (`stamped`), not in the prompt: Ollama reuses what
+it read of a prompt that starts the same as the last, and a time near the top
+changed it every minute, so each turn read 500 tokens again (2.3 s; now 0.6 s once
+it's warm). A conversation that's over is summed up after the reply, not beside it,
+since Ollama answers one request at a time. Typing in his window loads the model
+(`warmOllama`): cold, the 9B took 10 to 13 s on a 24 GB Mac with 3 GB free and no
+swap left, about as long as typing a sentence. Saying his name doesn't load it,
+since a command the matcher knows would then load 7.6 GB for nothing.
 
 He'd otherwise hear himself, and did: through a Mac's speakers, his replies came
 back garbled as if the user had said them, and he answered them. So while he
@@ -275,11 +339,27 @@ the conversation so far, and `recollections.js` keeps it as a sentence for a wee
 Up to six of those, the ones sharing words with what's being said and then the
 latest, reach the model marked as over and separate, to use only if they matter.
 
-Menu bar › Talk to Jester opens `src/talk/`, his window: a flat disc that pulses
-with what he's doing, live captions, a light for whose voice he's listening to,
+Menu bar › Talk to Jester opens `src/talk/`, his window: an orb that shows what
+he's doing, live captions, a light for whose voice he's listening to,
 what he remembers, a box to type to him (a typed command is on purpose, so it
 doesn't ask first), and a way to stop him listening. It draws from the same frames
-as the pill, so the two can't disagree. The palette is the tokens atop `talk.css`.
+as the pill, so the two can't disagree; while it's up and not minimized, the
+conversation's frames go only to it, and the pill is left to the assistant's tasks
+(with the × beside it). What a task did is then said in his window, never on the
+pill, so the conversation going on with no task at work ends the task's pill
+(`TASK_OVER`); before that, its last step stayed up for 90 s. The palette is the tokens atop `talk.css`.
+
+The orb is [thinking-orbs](https://www.npmjs.com/package/thinking-orbs) 0.3.2 (MIT):
+only its React-free engine, vendored in `src/vendor/thinking-orbs/`, drawn by
+`src/talk/orb.js`. Resting is `breathing`, listening `listening`, thinking `working`,
+speaking `composing`, tinted `--orb`. Each frame is one to two thousand dots, each
+its own fill, so it's drawn 30 times a second, not at a 120 Hz display's rate,
+which kept the GPU process and window server busy. The pill shows a 32 px one with a word
+beside it: "Listening…" from the moment he hears his name (a `hold` frame, with no
+mic levels for the bars), "Thinking…", and "Speaking…"; a task shows its caption
+beside the thinking orb, where the spinner was. Listening for a spoken command
+(the shortcut or a gesture) keeps the bars, which follow the mic. To update it, copy the new package's `dist/index-*.js`
+chunk over `engine.js`; `orb.js` imports its short export names.
 
 His voice (`speaker.js`) is the computer's own until Puter is connected, and again
 whenever Puter fails. `puter.js` makes the call Puter's script makes, from the main
@@ -643,6 +723,14 @@ models decode in under 35 ms.
    that a turn right is right and tipping up is up (if not, "Reverse up and
    down"); that a pinch clicks and ordinary movement, typing included, doesn't;
    and that Stop, the real mouse and sleep each take the cursor back.
+
+6. **How it clicks** (the tests script the driver; no real app has been
+   clicked this way yet): `npm run driver`, then with a model saved and
+   `JESTER_LOG=1`, ask the assistant to "open the second email in Mail" (a
+   row selected), to double-click a file in Finder (`act open`), and to
+   click something in a window with a sheet open over it (it should refuse,
+   naming the sheet). On Windows: a classic Win32 dialog's buttons (the MSAA
+   step) and a button behind another window.
 
 ## Things learned the hard way
 

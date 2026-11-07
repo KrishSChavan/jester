@@ -266,7 +266,11 @@ test('clicks: no answer is never clicked again, right is the control\'s menu, do
   assert.deepEqual(await hostOn(right.driver).execute({ action: 'click', id: 1, button: 'right' }, NOTES), { ok: true, detail: '' });
   assert.deepEqual(right.calls, [['act', { snapshot: 11, element: 1, action: 'showMenu' }]]);
 
-  const double = scriptedDriver({ frontmost: inFront(50) });
+  // A double click is the element's own open where it has one; else the pointer's.
+  const opens = scriptedDriver({ act: { element: {}, via: 'AXOpen' } });
+  assert.deepEqual(await hostOn(opens.driver).execute({ action: 'click', id: 1, count: 2 }, NOTES), { ok: true, detail: 'opened it' });
+  assert.deepEqual(opens.calls, [['act', { snapshot: 11, element: 1, action: 'open' }]]);
+  const double = scriptedDriver({ frontmost: inFront(50), act: (params) => (params.action === 'open' ? Promise.reject(new Error('AXOpen didn\'t work on it')) : {}) });
   assert.equal((await hostOn(double.driver).execute({ action: 'click', id: 1, count: 2 }, NOTES)).ok, true);
   assert.deepEqual(double.calls.at(-1), ['click', { x: 150, y: 80, count: 2 }]);
 });
@@ -274,7 +278,7 @@ test('clicks: no answer is never clicked again, right is the control\'s menu, do
 test('a drag presses, moves in steps and lets go — and lets go even when a move fails', async () => {
   const { calls, driver } = scriptedDriver({ frontmost: inFront(50) });
   assert.deepEqual(await hostOn(driver).execute({ action: 'drag', from: 1, to: 2 }, NOTES), { ok: true });
-  const input = calls.filter(([cmd]) => cmd !== 'frontmost');
+  const input = calls.filter(([cmd]) => cmd !== 'frontmost' && cmd !== 'act');
   assert.deepEqual(input[0], ['move', { x: 150, y: 80 }]);
   assert.deepEqual(input[1], ['button', { x: 150, y: 80, down: true }]);
   assert.deepEqual(input.at(-2), ['move', { x: 150, y: 120 }]);
@@ -284,6 +288,45 @@ test('a drag presses, moves in steps and lets go — and lets go even when a mov
   const failing = scriptedDriver({ frontmost: inFront(50), move: () => (++moves === 3 ? Promise.reject(new Error('gone')) : {}) });
   await assert.rejects(hostOn(failing.driver).execute({ action: 'drag', from: 1, to: 2 }, NOTES));
   assert.deepEqual(failing.calls.at(-1), ['button', { x: 150, y: 120, down: false }]);
+});
+
+test('a click where it is drawn goes where the driver checked, never onto what covers it or where it was', async () => {
+  const refused = new Error('none of the accessibility ways of clicking it worked');
+  // Pressed through accessibility (here by selecting the row): no pointer at all.
+  const selected = scriptedDriver({ act: { element: {}, via: 'select', selected: true } });
+  assert.deepEqual(await hostOn(selected.driver).execute({ action: 'click', id: 1 }, NOTES), { ok: true, detail: 'selected it' });
+  assert.equal(selected.calls.some(([cmd]) => cmd === 'click'), false);
+
+  // Refused: brought to the front, then the point the driver hit-tested, not the snapshot's middle.
+  const aimed = scriptedDriver({ frontmost: inFront(50), act: (params) => (params.action === 'point' ? { x: 60, y: 70, checked: true } : Promise.reject(refused)) });
+  assert.deepEqual(await hostOn(aimed.driver).execute({ action: 'click', id: 1 }, NOTES), { ok: true, detail: 'clicked where it is drawn' });
+  assert.deepEqual(
+    aimed.calls.map(([cmd, params]) => (cmd === 'act' ? `act ${params.action}` : cmd)),
+    ['act press', 'frontmost', 'act point', 'click']
+  );
+  assert.deepEqual(aimed.calls.at(-1), ['click', { x: 60, y: 70 }]);
+
+  // Something on top of it: nothing is clicked, and the model hears what.
+  const covered = scriptedDriver({ frontmost: inFront(50), act: (params) => (params.action === 'point' ? { covered: 'the sheet “Save”' } : Promise.reject(refused)) });
+  assert.deepEqual(await hostOn(covered.driver).execute({ action: 'click', id: 1 }, NOTES), { ok: false, detail: 'It’s covered by the sheet “Save”, so it wasn’t clicked.' });
+  assert.equal(covered.calls.some(([cmd]) => cmd === 'click'), false);
+  const coveredDouble = scriptedDriver({ frontmost: inFront(50), act: (params) => (params.action === 'open' ? Promise.reject(refused) : { covered: 'the window “Inbox” of Slack' }) });
+  assert.equal((await hostOn(coveredDouble.driver).execute({ action: 'click', id: 1, count: 2 }, NOTES)).ok, false);
+  assert.equal(coveredDouble.calls.some(([cmd]) => cmd === 'click'), false);
+  const coveredDrop = scriptedDriver({ frontmost: inFront(50), act: (params) => (params.element === 2 ? { covered: 'the popover' } : { x: 1, y: 2, checked: true }) });
+  assert.equal((await hostOn(coveredDrop.driver).execute({ action: 'drag', from: 1, to: 2 }, NOTES)).detail, 'It’s covered by the popover, so it wasn’t dropped there.');
+  assert.equal(coveredDrop.calls.some(([cmd]) => cmd === 'button' || cmd === 'move'), false, 'nothing picked up');
+
+  // Gone since the screen was read: something else may be where it was drawn.
+  const gone = new Error("it's gone from the screen since it was read; read it again");
+  const left = scriptedDriver({ frontmost: inFront(50), act: gone });
+  assert.deepEqual(await hostOn(left.driver).execute({ action: 'click', id: 1 }, NOTES), { ok: false, detail: 'The screen changed before it could be pressed; nothing was done.' });
+  assert.equal((await hostOn(left.driver).execute({ action: 'click', id: 1, button: 'right' }, NOTES)).ok, false);
+  assert.equal((await hostOn(left.driver).execute({ action: 'scroll', id: 3, direction: 'down' }, NOTES)).ok, false);
+  assert.equal(left.calls.some(([cmd]) => ['click', 'scroll'].includes(cmd)), false);
+  const goneByThePoint = scriptedDriver({ frontmost: inFront(50), act: (params) => Promise.reject(params.action === 'point' ? gone : refused) });
+  assert.deepEqual(await hostOn(goneByThePoint.driver).execute({ action: 'click', id: 1 }, NOTES), { ok: false, detail: 'The screen changed before it could be clicked; nothing was done.' });
+  assert.equal(goneByThePoint.calls.some(([cmd]) => cmd === 'click'), false);
 });
 
 test('a checked step says what changed and carries the new screen; the loop uses it as the next', async () => {

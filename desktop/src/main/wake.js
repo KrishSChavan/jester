@@ -55,3 +55,16 @@ export function addressed(heard) {
   if (ending && (/,\s*\S+\s*[.?!]*$/.test(text) || ending[3].includes('?') || REQUEST.test(body))) return said(ending[1].slice(opening.length), ending[2].toLowerCase());
   return NOT_ADDRESSED;
 }
+
+/**
+ * The start of an utterance still being said, from the recognizer: whether it
+ * opens with his name, sure enough to show he's listening before it's over.
+ * Only the name first counts, since the rest isn't there yet; and his short
+ * names only with words after them, as "Jess" alone may be "Jess and I…".
+ */
+export function wakesEarly(partial) {
+  const text = String(partial ?? '').trim();
+  const { woken, word, rest } = addressed(text);
+  const first = text.slice(text.match(OPENING)?.[0].length || 0).match(FIRST_WORD)?.[1]?.toLowerCase();
+  return woken && first === word && (NAME.has(word) || !!rest);
+}

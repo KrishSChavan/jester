@@ -2916,11 +2916,15 @@ async function applySettings(next) {
     if (settings.longRange && running) ensureFaceLandmarker();
   }
 
-  if (!settings.enabled) {
+  // The desktop's Gestures switch closes the camera and leaves voice alone. It
+  // wakes a sleeping Jester too: with no camera, nothing could see ✌️.
+  const gesturesOff = settings.gesturesEnabled === false;
+  if (!settings.enabled || gesturesOff) {
     // Off is off: switched back on, Jester starts out listening, not paused.
     standby = false;
-    if (running || starting) stop(ENGINE.OFF);
-    else if (!previous) report(ENGINE.OFF);
+    const detail = settings.enabled ? 'Gestures off' : '';
+    if (running || starting) stop(ENGINE.OFF, detail);
+    else if (!previous || lastStatus?.detail !== detail) report(ENGINE.OFF, detail);
     return;
   }
 

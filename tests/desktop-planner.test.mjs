@@ -698,6 +698,22 @@ test('the small helpers: the pill’s lines, what counts as a target, and a mask
   assert.equal(untilMet({ elements: [{ id: 4, role: 'button', label: 'Pause', disabled: true }] }, 'Pause'), false);
 });
 
+test('in conversation, the planner and the eyes get the user\'s words, and what they were taken to mean', async () => {
+  const sent = [];
+  const model = async ({ schema, prompt }) => {
+    sent.push(JSON.parse(prompt));
+    if (schema === PLAN_SCHEMA) return { json: { task: 'Weather', say: 'Done.', steps: [{ label: 'Read it', action: 'look', what: 'Read the forecast' }] } };
+    return { json: { action: { action: 'finish', say: 'Sunny all day.', success: true } } };
+  };
+  const host = { observe: async () => ({ ok: true, snapshot: { app: { name: 'Safari', pid: 3 }, window: { title: 'Forecast' }, elements: [{ id: 0, role: 'button', label: 'Go' }] } }), execute: async () => ({ ok: true }) };
+  const result = await runPlannedAgent({ goal: 'yes please', meant: 'search the web for the weather and say it', host, model, confirm: noAsking, platform: 'darwin' });
+  assert.equal(result.say, 'Sunny all day.');
+  assert.deepEqual([sent[0].said, sent[0].meant], ['yes please', 'search the web for the weather and say it']);
+  assert.equal(sent[1].originalGoal, 'yes please (taken in conversation to mean: search the web for the weather and say it)');
+  assert.equal('meant' in plannerInput({ goal: 'open Notes', platform: 'darwin' }), false, 'a spoken command has only its words');
+  assert.match(plannerPrompt('darwin'), /meant, if present/);
+});
+
 test('a write at the end adds on a line of its own, and an app that lost the front gets no keys', async () => {
   const fake = fakeTextEdit({ existing: 'Milk' });
   fake.state.front = 'textedit';

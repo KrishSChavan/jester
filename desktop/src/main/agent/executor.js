@@ -13,7 +13,7 @@
  */
 
 import { taskCaption } from './actions.js';
-import { aborted, createRun, lookStep, modelTrouble, perform, tidy, UNREADABLE } from './loop.js';
+import { aborted, createRun, lookStep, modelTrouble, perform, tidy, UNREADABLE, unseen } from './loop.js';
 import { pickPlan, PLAN_SCHEMA, plannerInput, plannerPrompt, PLANNER_TOKENS, reactivePlan, shouldPlan, STUCK_WHYS, untilMet, validatePlan, writeTarget } from './plan.js';
 import { plain, screenChanges } from './screen.js';
 
@@ -75,7 +75,7 @@ async function directStep(run, step) {
   if (signal?.aborted) return { stop: run.end(false, '', { cancelled: true }) };
   if (!seen.ok) {
     onStep({ phase: 'unseen', detail: tidy(seen.detail, 400) });
-    return { stuck: { why: 'unseen', say: 'I couldn’t read what’s on screen, so I stopped.' } };
+    return { stuck: { why: 'unseen', say: unseen(seen.detail) } };
   }
   const { snapshot } = seen;
   // Keys never go to an app that took the focus. A window placed by name needs no app in front.
@@ -161,7 +161,7 @@ async function askPlanner(run, input) {
  */
 export async function runPlannedAgent({ pick = false, onPlan = () => undefined, ...options }) {
   const run = createRun(options);
-  const { goal, note, previous, host, onStep, signal, platform, limits, now } = run;
+  const { goal, meant, note, previous, host, onStep, signal, platform, limits, now } = run;
   const close = (result) => ({ ...result, calls: run.calls });
   const cancelled = () => close(run.end(false, '', { cancelled: true }));
   // What the user said stands in for the caption until the plan gives a shorter one.
@@ -172,14 +172,14 @@ export async function runPlannedAgent({ pick = false, onPlan = () => undefined, 
   if (signal?.aborted) return cancelled();
   if (!first.ok) {
     onStep({ phase: 'unseen', detail: tidy(first.detail, 400) });
-    return close(run.end(false, 'I couldn’t read what’s on screen, so I stopped.'));
+    return close(run.end(false, unseen(first.detail)));
   }
   run.next = first.snapshot;
 
   let plan = pick ? pickPlan() : reactivePlan();
   if (shouldPlan(goal, { note, pick })) {
     onStep({ phase: 'planning' });
-    const asked = await askPlanner(run, plannerInput({ goal, platform, front: first.snapshot.app?.name, previous }));
+    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: first.snapshot.app?.name, previous }));
     if (asked.stop) return close(asked.stop);
     plan = asked.plan || plan;
   }
@@ -251,7 +251,7 @@ export async function runPlannedAgent({ pick = false, onPlan = () => undefined, 
     onStep({ phase: 'replanning', attempt: replans, of: limits.replans, why });
     const front = await screenNow(run);
     if (front.ok) run.next = front.snapshot;
-    const asked = await askPlanner(run, plannerInput({ goal, platform, front: front.snapshot?.app?.name ?? first.snapshot.app?.name, previous, replan: { done, stuckOn: step.label, why, hint: hint || say } }));
+    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: front.snapshot?.app?.name ?? first.snapshot.app?.name, previous, replan: { done, stuckOn: step.label, why, hint: hint || say } }));
     if (asked.stop) return close(asked.stop);
     const fresh = asked.plan ? asked.plan.steps.filter((next) => !doneSteps.has(stepKey(next))) : [];
     // The same way again would get stuck the same way.

@@ -113,6 +113,13 @@ pub enum Command {
     /// left or right), which without an `element` scroll the window's main
     /// area. Password fields are never focused, read or filled. (`element`,
     /// not `id`: `id` is the request's.)
+    ///
+    /// After agent-desktop (github.com/vercel-labs/agent-desktop): an
+    /// element that has left the screen is refused (GONE) rather than acted
+    /// on where it used to be; `press` tries each accessibility way of
+    /// clicking in turn, and says which worked (`via`); and `point` answers
+    /// where a real click would land on the element — its frame read live,
+    /// scrolled into view, still, and hit-tested — or what covers it.
     Act {
         snapshot: u64,
         element: Option<usize>,
@@ -315,9 +322,175 @@ pub fn scroll_direction(value: Option<&str>) -> Result<(bool, bool), String> {
     }
 }
 
+/// What `act` says of an element that has left the screen since it was
+/// read: its row deleted, its sheet closed. Where it was drawn something else
+/// may be now, so it is never clicked there.
+pub const GONE: &str = "it's gone from the screen since it was read; read it again";
+
+/// A frame: (x, y, w, h).
+pub type Frame = (f64, f64, f64, f64);
+
+/// What a hit test at a point found: the element meant (or something inside
+/// it), something else on top of it (described), or no clear answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Hit {
+    Reaches,
+    Covered(String),
+    Unknown,
+}
+
+/// Where a click on a frame may land, tried in turn: its middle, then the
+/// middles of its four quarters, so a control half under a toolbar or a
+/// banner can still be reached (agent-desktop's five-point sweep).
+pub fn candidate_points((x, y, w, h): Frame) -> [(f64, f64); 5] {
+    let at = |fx: f64, fy: f64| (x + w * fx, y + h * fy);
+    [at(0.5, 0.5), at(0.25, 0.25), at(0.75, 0.25), at(0.25, 0.75), at(0.75, 0.75)]
+}
+
+/// The first point whose hit test reaches the element. With none, what
+/// covers it — unless some answer was unclear, when the middle is given
+/// unchecked: a test that can't tell never stops a click (the step's effect
+/// is read back afterwards); only something plainly on top does.
+pub fn click_point(frame: Frame, mut hit: impl FnMut(f64, f64) -> Hit) -> Value {
+    let points = candidate_points(frame);
+    let mut covered = None;
+    let mut unclear = false;
+    for (x, y) in points {
+        match hit(x, y) {
+            Hit::Reaches => return serde_json::json!({ "x": x, "y": y, "checked": true }),
+            Hit::Covered(what) => {
+                covered.get_or_insert(what);
+            }
+            Hit::Unknown => unclear = true,
+        }
+    }
+    match covered {
+        Some(what) if !unclear => serde_json::json!({ "covered": what }),
+        _ => serde_json::json!({ "x": points[0].0, "y": points[0].1, "checked": false }),
+    }
+}
+
+/// Whether two reads of a frame are the same, to half a point.
+pub fn same_frame(a: Frame, b: Frame) -> bool {
+    [(a.0, b.0), (a.1, b.1), (a.2, b.2), (a.3, b.3)].iter().all(|(a, b)| (a - b).abs() <= 0.5)
+}
+
+/// Between reads of a moving frame, and how many reads at most.
+pub const SETTLE_GAP_MS: u64 = 17;
+pub const SETTLE_READS: usize = 12;
+
+/// An element's frame once it has stopped moving (a sheet sliding in, a
+/// list still laying out): three reads alike in a row, or the last read
+/// once SETTLE_READS have been made. None when it has no frame at all.
+pub fn settled_frame(mut read: impl FnMut() -> Option<Frame>, mut pause: impl FnMut()) -> Option<Frame> {
+    let mut last: Option<Frame> = None;
+    let mut alike = 0;
+    for n in 0..SETTLE_READS {
+        if n > 0 {
+            pause();
+        }
+        let now = read();
+        alike = match (last, now) {
+            (Some(before), Some(now)) if same_frame(before, now) => alike + 1,
+            (_, Some(_)) => 1,
+            (_, None) => 0,
+        };
+        last = now;
+        if alike >= 3 {
+            break;
+        }
+    }
+    last
+}
+
+/// Whether a point is inside a frame.
+pub fn holds(frame: Frame, (x, y): (f64, f64)) -> bool {
+    x >= frame.0 && y >= frame.1 && x <= frame.0 + frame.2 && y <= frame.1 + frame.3
+}
+
+/// Which child may be pressed for an element that can't be pressed itself
+/// (a web list item wrapping its link): the only one of the first few that
+/// can be, and only if it is the same thing under another role —
+/// unnamed, or named as the element is. A row holding a Play and a Delete
+/// button is never pressed through either: the user's OK, where one was
+/// needed, was for the element's name, not a button inside it.
+// Windows has no such step: UI Automation's patterns already sit on the item.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn stand_in(label: Option<&str>, children: &[(bool, Option<String>)]) -> Option<usize> {
+    let pressable: Vec<usize> = children.iter().enumerate().filter(|(_, (can, _))| *can).map(|(i, _)| i).collect();
+    let [only] = pressable.as_slice() else { return None };
+    let same = match (&children[*only].1, label) {
+        (None, _) => true,
+        (Some(name), Some(label)) => normalized(name) == normalized(label),
+        (Some(name), None) => normalized(name).is_empty(),
+    };
+    same.then_some(*only)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_lands_where_the_element_is_not_covered() {
+        let frame = (100.0, 200.0, 80.0, 40.0);
+        assert_eq!(candidate_points(frame)[0], (140.0, 220.0), "its middle first");
+        assert_eq!(candidate_points(frame)[4], (160.0, 230.0));
+        // A banner over its middle: the next point that reaches it.
+        let mut asked = Vec::new();
+        let point = click_point(frame, |x, y| {
+            asked.push((x, y));
+            if asked.len() == 1 { Hit::Covered("banner".into()) } else { Hit::Reaches }
+        });
+        assert_eq!(point, serde_json::json!({ "x": 120.0, "y": 210.0, "checked": true }));
+        // Covered everywhere: not clicked, and what covers it is said.
+        assert_eq!(click_point(frame, |_, _| Hit::Covered("the sheet “Save”".into())), serde_json::json!({ "covered": "the sheet “Save”" }));
+        // An answer that can't tell never stops a click: the middle, unchecked.
+        let mut n = 0;
+        let unclear = click_point(frame, |_, _| {
+            n += 1;
+            if n == 2 { Hit::Unknown } else { Hit::Covered("dialog".into()) }
+        });
+        assert_eq!(unclear, serde_json::json!({ "x": 140.0, "y": 220.0, "checked": false }));
+    }
+
+    #[test]
+    fn a_moving_frame_is_read_until_it_stops() {
+        let reads = [(0.0, 0.0, 10.0, 10.0), (0.0, 40.0, 10.0, 10.0), (0.0, 80.0, 10.0, 10.0), (0.0, 80.2, 10.0, 10.0), (0.0, 80.0, 10.0, 10.0), (0.0, 999.0, 1.0, 1.0)];
+        let mut at = 0;
+        let mut pauses = 0;
+        let frame = settled_frame(
+            || {
+                at += 1;
+                Some(reads[at - 1])
+            },
+            || pauses += 1,
+        );
+        assert_eq!(frame, Some((0.0, 80.0, 10.0, 10.0)));
+        assert_eq!((at, pauses), (5, 4), "three alike in a row ends it");
+        assert_eq!(settled_frame(|| None, || ()), None);
+        let mut moving = 0.0;
+        let last = settled_frame(
+            || {
+                moving += 5.0;
+                Some((moving, 0.0, 10.0, 10.0))
+            },
+            || (),
+        );
+        assert_eq!(last, Some((5.0 * SETTLE_READS as f64, 0.0, 10.0, 10.0)), "never still: the last read");
+    }
+
+    #[test]
+    fn only_a_child_that_is_the_same_thing_stands_in() {
+        let unnamed = |can: bool| (can, None::<String>);
+        let named = |can: bool, name: &str| (can, Some(name.to_string()));
+        assert_eq!(stand_in(Some("Downloads"), &[unnamed(false), unnamed(true)]), Some(1), "Finder's row and the cell that opens it");
+        assert_eq!(stand_in(Some("Downloads"), &[named(true, "downloads")]), Some(0));
+        assert_eq!(stand_in(Some("Meeting notes"), &[named(true, "Delete")]), None, "a button inside is not the row");
+        assert_eq!(stand_in(None, &[named(true, "Delete")]), None);
+        assert_eq!(stand_in(Some("Song"), &[named(true, "Play"), unnamed(true)]), None, "two to choose from: neither");
+        assert_eq!(stand_in(Some("Song"), &[unnamed(false)]), None);
+    }
 
     #[test]
     fn titles_match_forgivingly_but_never_on_a_fragment() {

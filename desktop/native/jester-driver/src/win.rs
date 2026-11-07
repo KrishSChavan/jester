@@ -917,6 +917,126 @@ fn scroll_end(found: &IUIAutomationScrollPattern, horizontal: bool, forward: boo
     json!({ "moved": false, "position": before / 100.0, "atEnd": false })
 }
 
+// ---------------------------------------------------------------------------
+// Clicking, after agent-desktop (github.com/vercel-labs/agent-desktop): the
+// element checked before anything is done to it, and where a real click
+// would land on it
+// ---------------------------------------------------------------------------
+
+/// UIA_E_ELEMENTNOTAVAILABLE: the element has left the screen.
+const ELEMENT_GONE: i32 = 0x8004_0201_u32 as i32;
+
+/// Whether an element is still on screen. A busy app's silence isn't gone.
+fn alive(element: &IUIAutomationElement) -> bool {
+    unsafe { element.CurrentProcessId() }.map_or_else(|err| err.code().0 != ELEMENT_GONE, |_| true)
+}
+
+fn same(automation: &IUIAutomation, a: &IUIAutomationElement, b: &IUIAutomationElement) -> bool {
+    unsafe { automation.CompareElements(a, b) }.is_ok_and(|same| same.as_bool())
+}
+
+/// Whether `element` is `ancestor` or inside it.
+fn inside(automation: &IUIAutomation, walker: &IUIAutomationTreeWalker, element: &IUIAutomationElement, ancestor: &IUIAutomationElement) -> bool {
+    let mut current = Some(element.clone());
+    for _ in 0..40 {
+        let Some(node) = current else { return false };
+        if same(automation, &node, ancestor) {
+            return true;
+        }
+        current = unsafe { walker.GetParentElement(&node) }.ok();
+    }
+    false
+}
+
+/// The top-level window an element is in: the last ancestor below the desktop.
+fn top_level(automation: &IUIAutomation, walker: &IUIAutomationTreeWalker, element: &IUIAutomationElement) -> Option<IUIAutomationElement> {
+    let root = unsafe { automation.GetRootElement() }.ok()?;
+    let mut current = element.clone();
+    for _ in 0..60 {
+        let parent = unsafe { walker.GetParentElement(&current) }.ok()?;
+        if same(automation, &parent, &root) {
+            return Some(current);
+        }
+        current = parent;
+    }
+    None
+}
+
+fn name_of(element: &IUIAutomationElement) -> Option<String> {
+    unsafe { element.CurrentName() }.ok().map(|name| name.to_string()).filter(|name| !name.trim().is_empty())
+}
+
+/// Something on top of an element, in words: "the dialog “Save As”", "the window “Inbox” of OUTLOOK".
+fn covering(found: &IUIAutomationElement, target: &IUIAutomationElement) -> String {
+    let kind = unsafe { found.CurrentLocalizedControlType() }.ok().map(|kind| kind.to_string()).filter(|kind| !kind.is_empty()).unwrap_or_else(|| "something".into());
+    let mut words = match name_of(found) {
+        Some(name) => format!("the {kind} “{}”", clip(&name, 40)),
+        None => format!("the {kind}"),
+    };
+    let (pid, theirs) = (unsafe { found.CurrentProcessId() }.unwrap_or(0), unsafe { target.CurrentProcessId() }.unwrap_or(0));
+    if pid != theirs {
+        if let Some(app) = exe_stem(&exe_name(pid as u32).0) {
+            words.push_str(&format!(" of {app}"));
+        }
+    }
+    words
+}
+
+/// What a click at a point would land on. The element or anything in it
+/// reaches it. Something it is inside, Jester's overlay, or an answer that
+/// fails can't tell. Anything else covers it only when it plainly would take
+/// the click: it's in another window, or it's a control itself.
+fn hit_test(automation: &IUIAutomation, walker: &IUIAutomationTreeWalker, target: &IUIAutomationElement, x: f64, y: f64) -> crate::protocol::Hit {
+    use crate::protocol::Hit;
+    let Ok(found) = (unsafe { automation.ElementFromPoint(POINT { x: x.round() as i32, y: y.round() as i32 }) }) else { return Hit::Unknown };
+    if inside(automation, walker, &found, target) {
+        return Hit::Reaches;
+    }
+    let found_window = top_level(automation, walker, &found);
+    if inside(automation, walker, target, &found) || found_window.as_ref().and_then(name_of).as_deref() == Some("Jester overlay") {
+        return Hit::Unknown;
+    }
+    let elsewhere = match (found_window, top_level(automation, walker, target)) {
+        (Some(a), Some(b)) => !same(automation, &a, &b),
+        _ => unsafe { found.CurrentProcessId() }.ok() != unsafe { target.CurrentProcessId() }.ok(),
+    };
+    if elsewhere || pressable(&found) {
+        Hit::Covered(covering(&found, target))
+    } else {
+        Hit::Unknown
+    }
+}
+
+fn live_frame(element: &IUIAutomationElement) -> Option<crate::protocol::Frame> {
+    let rect = unsafe { element.CurrentBoundingRectangle() }.ok()?;
+    Some((rect.left as f64, rect.top as f64, (rect.right - rect.left) as f64, (rect.bottom - rect.top) as f64))
+}
+
+/// Where a real click would land on an element: its frame read now once it
+/// stops moving, scrolled into its window if it's out of it, and hit-tested
+/// at up to five points.
+fn click_point(element: &IUIAutomationElement, window: &IUIAutomationElement) -> Result<Value> {
+    let automation = automation()?;
+    let walker = unsafe { automation.RawViewWalker() }.map_err(|err| err.to_string())?;
+    let gap = std::time::Duration::from_millis(crate::protocol::SETTLE_GAP_MS);
+    let settle = || crate::protocol::settled_frame(|| live_frame(element), || std::thread::sleep(gap));
+    let mut frame = settle().ok_or("it has no place on screen to click")?;
+    if let Some(bounds) = live_frame(window) {
+        let middle = (frame.0 + frame.2 / 2.0, frame.1 + frame.3 / 2.0);
+        if !crate::protocol::holds(bounds, middle) {
+            if let Some(found) = pattern::<IUIAutomationScrollItemPattern>(element, UIA_ScrollItemPatternId) {
+                if unsafe { found.ScrollIntoView() }.is_ok() {
+                    frame = settle().ok_or("it has no place on screen to click")?;
+                }
+            }
+        }
+    }
+    if !(frame.2 > 0.0 && frame.3 > 0.0) {
+        return Err("it has no size on screen to click".into());
+    }
+    Ok(crate::protocol::click_point(frame, |x, y| hit_test(&automation, &walker, element, x, y)))
+}
+
 /// Does something to an element of the last snapshot (or, for scrolling, its window).
 pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) -> Result<Value> {
     let (element, window) = LISTED.with(|listed| {
@@ -931,11 +1051,15 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) 
             None => Err(format!("{action} needs an element")),
         }
     })?;
+    if !alive(&element) {
+        return Err(crate::protocol::GONE.into());
+    }
     let password = unsafe { element.CurrentIsPassword() }.is_ok_and(|password| password.as_bool());
     if password && matches!(action, "focus" | "setValue" | "appendValue" | "read") {
         return Err("Jester never types into password fields".into());
     }
     match action {
+        "point" => return click_point(&element, &window),
         "read" => return Ok(crate::protocol::read_reply(&current_value(&element).unwrap_or_default(), value)),
         "setValue" => return write_value(&element, value.unwrap_or("")),
         "appendValue" => return Err("text is added here by typing it".into()),
@@ -965,6 +1089,13 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) 
                 held(bounded(&found, |pattern| unsafe { pattern.Select() }))?
             } else if let Some(found) = pattern::<IUIAutomationExpandCollapsePattern>(&element, UIA_ExpandCollapsePatternId) {
                 held(bounded(&found, |pattern| unsafe { pattern.Expand() }))?
+            } else if let Some(found) = pattern::<IUIAutomationLegacyIAccessiblePattern>(&element, UIA_LegacyIAccessiblePatternId)
+                .filter(|found| unsafe { found.CurrentDefaultAction() }.is_ok_and(|action| !action.is_empty()))
+            {
+                // A Win32 control with no pattern but its MSAA default action:
+                // agent-desktop measured it as the only way to click some
+                // (probe A2-2), and that an empty one means it has none (A15-5).
+                held(bounded(&found, |pattern| unsafe { pattern.DoDefaultAction() }))?
             } else {
                 return Err("it can't be pressed this way; click it instead".into());
             };

@@ -30,6 +30,8 @@ const DEICTIC = /\b(?:this|that|these|those|here|it)\b/i;
 const QUESTION_WORDS = /^\W*(?:what|what's|whats|who|whose|when|where|why|how|which|is|are|was|were|does|did|tell me|read me)\b/i;
 /** A request put politely, which speech often writes with a question mark ("Can you make a new note?"). */
 const POLITE = /^\W*(?:(?:can|could|would|will) you|please)\b[\s,]*/i;
+/** A part of it that asks to be told something: "open Canvas and tell me what's due". A replay would do the rest, and never tell. */
+const TELLS_BACK = /\b(?:tell|read) me\b|\blet me know\b|\bfind out\b|\b(?:check|see) (?:if|whether|what|when|who|how)\b|\b(?:and|then),? (?:what|what's|whats|who|when|where|which|whether|if|how|is|are|was|were|does|did)\b/i;
 
 /** Whether what was said asks something, rather than asking for something done. */
 function asks(goal) {
@@ -76,7 +78,7 @@ function said(goal, text) {
 export function learnable(goal, trace) {
   if (!Array.isArray(trace) || !trace.length) return { ok: false, why: 'nothing was done' };
   if (DEICTIC.test(goal)) return { ok: false, why: 'it was about what was on screen then' };
-  if (asks(goal)) return { ok: false, why: 'it asked something, and the answer changes' };
+  if (asks(goal) || TELLS_BACK.test(goal)) return { ok: false, why: 'it asked something, and the answer changes' };
   if (trace.length > LEARNED_LIMITS.steps) return { ok: false, why: 'it took too many steps' };
   for (const step of trace) {
     if (step.sensitive) return { ok: false, why: 'a step needed your OK' };

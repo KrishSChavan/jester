@@ -67,6 +67,8 @@ const VISIBLE = new Set(['click', 'type', 'press', 'scroll', 'menu', 'drag']);
 const UNSEEN = new Set(['menu', 'press']);
 /** The driver's refusal when a read came between choosing an element and acting on it. */
 const STALE = /read again since/;
+/** The driver's refusal when the control has left the screen since it was read (protocol.rs GONE). */
+const GONE = /gone from the screen/;
 const SCROLL_ENDS = { up: 'the top', down: 'the bottom', left: 'the far left', right: 'the far right' };
 
 const middle = (frame) => (frame && frame.w > 0 && frame.h > 0 ? { x: frame.x + frame.w / 2, y: frame.y + frame.h / 2 } : null);
@@ -113,13 +115,45 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     return false;
   }
   const notInFront = (snapshot) => ({ ok: false, detail: `${snapshot.app?.name || 'The app'} isn’t in front any more, so nothing was typed or clicked.` });
+  /** The screen it was chosen from is gone, or the control is: the loop reads it again. */
+  const changed = (err) => STALE.test(err?.message) || GONE.test(err?.message);
 
   /**
-   * The accessibility action first: it reaches the element wherever its app
-   * is. Refused, a click where it's drawn. Two answers are never clicked
-   * again: none at all (the press may have opened a dialog that holds the app,
-   * and a click would do it twice, Atticus's lesson) and a read in between
-   * (the screen it was chosen from is gone: the loop reads it again).
+   * Where a real click lands on a control, as the driver finds it after
+   * agent-desktop: the frame read now rather than as the snapshot had it,
+   * scrolled into view, still, and hit-tested at up to five points. `covered`
+   * names what's on top of it; `stale`, that it's gone. A driver that can't
+   * say gives the middle of the frame the screen was read with. Asked with
+   * the app in front: behind another app's window, everything is covered.
+   */
+  async function aim(snapshot, element) {
+    let reply = null;
+    try {
+      reply = await act(snapshot, element, 'point');
+    } catch (err) {
+      if (changed(err)) return { stale: true };
+    }
+    if (typeof reply?.covered === 'string') return { covered: reply.covered };
+    if (Number.isFinite(reply?.x) && Number.isFinite(reply?.y)) return { at: { x: reply.x, y: reply.y } };
+    const at = middle(element?.frame);
+    return at ? { at } : {};
+  }
+  /** Why a click didn't happen, from what `aim` found. */
+  const missed = (aimed, done) =>
+    aimed.covered
+      ? { ok: false, detail: `It’s covered by ${aimed.covered}, so it wasn’t ${done}.` }
+      : aimed.stale
+        ? { ok: false, detail: `The screen changed before it could be ${done}; nothing was done.` }
+        : { ok: false, detail: 'It has no place on screen to click.' };
+
+  /**
+   * The accessibility ways of clicking first (the driver tries each in turn):
+   * they reach the element wherever its app is. All refused, a click where
+   * it's drawn — if nothing is on top of it. Two answers are never clicked
+   * again: none at all (the press may have opened a dialog that holds the
+   * app, and a click would do it twice, Atticus's lesson) and a read in
+   * between or the control gone (the screen it was chosen from is gone, and
+   * something else may be where it was: the loop reads it again).
    */
   async function press(snapshot, element) {
     let reply;
@@ -127,26 +161,39 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       reply = await act(snapshot, element, 'press');
     } catch (err) {
       if (err?.code === 'timeout') return { ok: true, busy: true, detail: 'pressed; the app is busy, perhaps with a dialog' };
-      if (STALE.test(err?.message)) return { ok: false, detail: 'The screen changed before it could be pressed; nothing was done.' };
-      const at = middle(element.frame);
-      if (!at) throw err;
+      if (changed(err)) return { ok: false, detail: 'The screen changed before it could be pressed; nothing was done.' };
+      if (!middle(element.frame)) throw err;
       if (!(await inFront(snapshot))) return notInFront(snapshot);
-      await driver.call('click', at);
+      const aimed = await aim(snapshot, element);
+      if (!aimed.at) return missed(aimed, 'clicked');
+      await driver.call('click', aimed.at);
       return { ok: true, detail: 'clicked where it is drawn' };
     }
-    return { ok: true, detail: '', ...(reply?.busy ? { busy: true } : {}) };
+    return { ok: true, detail: reply?.via === 'select' ? 'selected it' : '', ...(reply?.busy ? { busy: true } : {}) };
   }
 
   /** A click with the real pointer, for what accessibility has no action for: a double or right click. */
   async function pointer(snapshot, element, { button, count }) {
-    const at = middle(element.frame);
-    if (!at) return { ok: false, detail: 'It has no place on screen to click.' };
+    if (!middle(element.frame)) return { ok: false, detail: 'It has no place on screen to click.' };
     if (!(await inFront(snapshot))) return notInFront(snapshot);
-    await driver.call('click', { ...at, ...(button === 'left' ? {} : { button }), ...(count > 1 ? { count } : {}) });
+    const aimed = await aim(snapshot, element);
+    if (!aimed.at) return missed(aimed, 'clicked');
+    await driver.call('click', { ...aimed.at, ...(button === 'left' ? {} : { button }), ...(count > 1 ? { count } : {}) });
     return { ok: true, detail: `${count > 1 ? 'double-clicked' : 'right-clicked'} where it is drawn` };
   }
 
   async function click(snapshot, element, action) {
+    if (action.count === 2 && (action.button || 'left') === 'left') {
+      // A double click's meaning, where the element has it (Finder opens a file
+      // with AXOpen): no pointer. Busy is done, as a press is.
+      try {
+        const opened = await act(snapshot, element, 'open');
+        return { ok: true, detail: 'opened it', ...(opened?.busy ? { busy: true } : {}) };
+      } catch (err) {
+        if (err?.code === 'timeout') return { ok: true, busy: true, detail: 'opened; the app is busy' };
+        if (changed(err)) return { ok: false, detail: 'The screen changed before it could be clicked; nothing was done.' };
+      }
+    }
     if (action.count === 2) return pointer(snapshot, element, { button: action.button || 'left', count: 2 });
     if (action.button === 'right') {
       // The control's own menu, where it has one. A menu that opened keeps the
@@ -156,7 +203,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         return { ok: true, detail: '', ...(shown?.busy ? { busy: true } : {}) };
       } catch (err) {
         if (err?.code === 'timeout') return { ok: true, busy: true, detail: 'its menu is open' };
-        if (STALE.test(err?.message)) return { ok: false, detail: 'The screen changed before it could be clicked; nothing was done.' };
+        if (changed(err)) return { ok: false, detail: 'The screen changed before it could be clicked; nothing was done.' };
       }
       return pointer(snapshot, element, { button: 'right', count: 1 });
     }
@@ -167,9 +214,10 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     try {
       await act(snapshot, element, 'focus');
     } catch (err) {
-      const at = middle(element.frame);
-      if (!at || STALE.test(err?.message)) throw err;
-      await driver.call('click', at);
+      if (!middle(element.frame) || changed(err)) throw err;
+      const aimed = await aim(snapshot, element);
+      if (!aimed.at) throw new Error(missed(aimed, 'clicked').detail);
+      await driver.call('click', aimed.at);
     }
     await wait(120);
   }
@@ -316,7 +364,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
   async function scroll(snapshot, element, action) {
     const end = action.to === 'end';
     let stale = false;
-    const reply = await act(snapshot, element, end ? 'scrollEnd' : 'scrollPage', action.direction).catch((err) => ((stale = STALE.test(err?.message)), null));
+    const reply = await act(snapshot, element, end ? 'scrollEnd' : 'scrollPage', action.direction).catch((err) => ((stale = changed(err)), null));
     // Read again in between: the wheel would go where the window was.
     if (stale) return { ok: false, detail: 'The screen changed before it could be scrolled; nothing was done.' };
     if (reply?.moved === true) return { ok: true, detail: Number.isFinite(reply.position) ? `now ${Math.round(reply.position * 100)}% of the way` : '' };
@@ -387,10 +435,15 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
 
   /** Pressed on one control, moved in steps onto another, let go — always let go. */
   async function drag(snapshot, action) {
-    const from = middle(elementById(snapshot, action.from)?.frame);
-    const to = middle(elementById(snapshot, action.to)?.frame);
-    if (!from || !to) return { ok: false, detail: 'Both ends must be controls on this screen.' };
+    const pickup = elementById(snapshot, action.from);
+    const drop = elementById(snapshot, action.to);
+    if (!middle(pickup?.frame) || !middle(drop?.frame)) return { ok: false, detail: 'Both ends must be controls on this screen.' };
     if (!(await inFront(snapshot))) return notInFront(snapshot);
+    const fromAim = await aim(snapshot, pickup);
+    if (!fromAim.at) return missed(fromAim, 'picked up');
+    const toAim = await aim(snapshot, drop);
+    if (!toAim.at) return missed(toAim, 'dropped there');
+    const [from, to] = [fromAim.at, toAim.at];
     await driver.call('move', from);
     await driver.call('button', { ...from, down: true });
     try {

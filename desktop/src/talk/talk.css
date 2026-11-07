@@ -1,21 +1,15 @@
-/* Jester, with no face: a flat disc that pulses, and the words. Nothing is
-   shaded: every shape is one solid colour. The palette is these six tokens. */
+/* Jester, with no face: a thinking orb (orb.js) and the words. The palette is
+   these six tokens; the orb's dots are tinted --orb. */
 
 :root {
   color-scheme: dark;
   --ground: #08060c;
-  --disc: #4b1e8f;
+  --orb: #b69cf5;
   --ring: #8a63d8;
   --text: #efe9f7;
   --dim: #a79bbe;
   --edge: #2a2138;
 }
-
-/* How he moves, by what he's doing. */
-body[data-state='resting'] { --speed: 4.5s; --swell: 1.05; --show: 0.22; }
-body[data-state='listening'] { --speed: 2s; --swell: 1.12; --show: 0.5; }
-body[data-state='thinking'] { --speed: 1.1s; --swell: 0.94; --show: 0; }
-body[data-state='speaking'] { --speed: 0.9s; --swell: 1.2; --show: 0.75; }
 
 * {
   box-sizing: border-box;
@@ -102,7 +96,6 @@ button {
 }
 
 .presence {
-  position: relative;
   flex: none;
   display: grid;
   place-items: center;
@@ -110,50 +103,8 @@ button {
   height: min(300px, 44vh);
 }
 
-.disc {
-  width: 168px;
-  height: 168px;
-  border-radius: 50%;
-  background: var(--disc);
-  animation: pulse var(--speed) ease-in-out infinite;
-}
-
-.ring {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 168px;
-  height: 168px;
-  margin: -84px 0 0 -84px;
-  border: 2px solid var(--ring);
-  border-radius: 50%;
-  opacity: 0;
-  animation: spread calc(var(--speed) * 2) ease-out infinite;
-}
-
-.ring + .ring {
-  animation-delay: var(--speed);
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    transform: scale(1);
-  }
-  50% {
-    transform: scale(var(--swell));
-  }
-}
-
-@keyframes spread {
-  from {
-    transform: scale(0.92);
-    opacity: var(--show);
-  }
-  to {
-    transform: scale(1.7);
-    opacity: 0;
-  }
+#orb {
+  display: block;
 }
 
 .captions {
@@ -284,13 +235,6 @@ button {
   margin: 0;
   padding: 0 18px 18px;
   color: var(--dim);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .disc,
-  .ring {
-    animation: none;
-  }
 }
 
 @media (max-width: 480px) {

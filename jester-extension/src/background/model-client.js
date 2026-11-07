@@ -21,6 +21,8 @@ const GROQ_GPT_OSS_MODELS = new Set(['openai/gpt-oss-20b', 'openai/gpt-oss-120b'
 const CLAUDE_THINKING_TOKENS = 1500;
 /** How long Ollama keeps a model in memory after a request: a reload costs 5 s or more. */
 const OLLAMA_KEEP_ALIVE = '30m';
+/** A caller's own keep_alive, as Ollama writes durations. */
+const KEEP_ALIVE = /^\d{1,4}[smh]$/;
 const PROVIDER_NAMES = { google: 'Gemini', anthropic: 'Claude', openai: 'OpenAI', groq: 'Groq', ollama: 'Ollama' };
 const limits = { tokens: 0, remaining: 0 };
 export const rateLimits = () => ({ ...limits });
@@ -48,7 +50,8 @@ export function normalizeModelConfig(env = {}) {
   }
   if (!key && !(['custom', 'ollama'].includes(provider) && local)) throw new Error('Add your model API key in Settings.');
   if (/[\r\n]/.test(key)) throw new Error('The API key contains a line break.');
-  return { provider, protocol, model, key, baseUrl: url.href.replace(/\/$/, '') };
+  return { provider, protocol, model, key, baseUrl: url.href.replace(/\/$/, ''),
+    ...(provider === 'ollama' && KEEP_ALIVE.test(env.keepAlive) ? { keepAlive: env.keepAlive } : {}) };
 }
 
 function endpoint(config) {
@@ -143,7 +146,7 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
     // Thinking counts toward max_tokens: left on, a local model spends the whole
     // budget on it and returns no reply. Plain JSON mode gets half of a small
     // model's plans refused, so it's held to the schema as Gemini is.
-    if (config.provider === 'ollama') Object.assign(body, { reasoning_effort: 'none', keep_alive: OLLAMA_KEEP_ALIVE,
+    if (config.provider === 'ollama') Object.assign(body, { reasoning_effort: 'none', keep_alive: config.keepAlive || OLLAMA_KEEP_ALIVE,
       response_format: { type: 'json_schema', json_schema: { name: 'reply', schema } } });
   }
   return { url: endpoint(config), init: { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error' } };

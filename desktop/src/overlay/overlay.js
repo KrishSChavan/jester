@@ -4,6 +4,7 @@
  */
 
 import { GESTURES, MSG } from '../ext/src/common/constants.js';
+import { createOrb, ORB_STATES } from '../talk/orb.js';
 
 const display = Number(new URLSearchParams(location.search).get('display'));
 const $ = (id) => document.getElementById(id);
@@ -20,6 +21,12 @@ const BAR_MIN = 6;
 const BAR_MAX = 26;
 /** What has been heard so far, kept to its end: the pill is one line. */
 const HEARD_CHARS = 48;
+/** The library's 32 px design: its 20 px one is too faint to read in the pill. */
+const ORB_PX = 32;
+/** At 32 px, listening's and speaking's dots are too faint beside thinking's. Picked by eye from renders. */
+const ORB_TUNE = { listening: { dotSize: 1.35 }, composing: { dotSize: 1.2 } };
+/** What the pill says beside the orb. A task says what it's doing instead. */
+const LABELS = { listening: 'Listening…', thinking: 'Thinking…', speaking: 'Speaking…' };
 
 let active = false;
 let showHud = true;
@@ -29,6 +36,13 @@ let voiceTimer = null;
 let afterSpeech = null;
 /** The last place reportPill said the pill ends. */
 let pillSaid = '';
+/** Only while the pill's up: this window always is, so a running orb would never stop. */
+const orb = createOrb($('voice-orb'), {
+  size: ORB_PX,
+  preset: ORB_PX,
+  color: getComputedStyle(document.documentElement).getPropertyValue('--orb'),
+  tune: ORB_TUNE
+});
 
 /**
  * Keeps the pills inside the screen's usable area. macOS slides this window
@@ -112,16 +126,25 @@ function reportPill() {
 function hideVoice() {
   clearTimeout(voiceTimer);
   afterSpeech = null;
+  orb.show(null);
   $('voice').hidden = true;
   $('voice').style.minWidth = '';
   pillSaid = '';
   document.body.classList.remove('voice-up');
 }
 
-/** Puts the pill up with one face — listening, or an answer — and re-arms its timeout. */
-function showVoice(face, ms) {
+/**
+ * Puts the pill up with one face — listening, thinking, speaking or an
+ * answer — and re-arms its timeout. `held`: listening with no mic frames
+ * coming, as when he's waiting for what's said to him; the orb shows it.
+ */
+function showVoice(face, ms, { held = false } = {}) {
   if ($('voice').hidden) fitToScreen();
-  $('voice').className = `voice ${face}`;
+  $('voice').className = `voice ${face}${held ? ' held' : ''}`;
+  const mood = face === 'listening' && !held ? '' : face;
+  orb.show(ORB_STATES[mood] || null);
+  const working = mood === 'thinking' && !!($('voice-task').textContent || $('voice-step').textContent);
+  $('voice-label').textContent = working ? '' : LABELS[mood] || '';
   if (face !== 'thinking' && face !== 'speaking') $('voice').style.minWidth = '';
   $('voice').hidden = false;
   document.body.classList.add('voice-up');
@@ -153,16 +176,20 @@ function face() {
   return pill.hidden ? '' : ['speaking', 'listening', 'thinking', 'answer'].find((name) => pill.classList.contains(name)) || '';
 }
 
-/** Jester talking: {text?, ms?} starts or updates it, {done:true} ends it, and what waited takes over. */
-function speak({ done = false, text = '', ms = VOICE_SPEAKING_MS }) {
-  if (!done) {
-    $('voice-spoken').textContent = String(text || '');
-    return showVoice('speaking', ms);
-  }
+/** The assistant's work is over, and was said rather than shown: its pill goes, and so does one waiting behind his speech. */
+function taskOver() {
+  if (afterSpeech?.phase === 'thinking') afterSpeech = null;
+  if (face() === 'thinking') hideVoice();
+}
+
+/** Jester talking: {ms?} starts it or keeps it up, {done:true} ends it, and what waited takes over. */
+function speak({ done = false, ms = VOICE_SPEAKING_MS }) {
+  if (!done) return showVoice('speaking', ms);
   if (face() !== 'speaking') return;
   const next = afterSpeech;
   afterSpeech = null;
   $('voice').classList.remove('speaking');
+  orb.show(null);
   if (next) drawVoice(next);
   else hideVoice();
 }
@@ -176,6 +203,7 @@ function speak({ done = false, text = '', ms = VOICE_SPEAKING_MS }) {
 function drawVoice(voice) {
   const showing = face();
   if (voice.phase === 'speaking') return speak(voice);
+  if (voice.phase === 'thinking' && voice.done) return taskOver();
   if (showing === 'speaking') {
     // Only the end of speech, or a deliberate new command, takes the pill from him.
     if (voice.phase === 'thinking' || voice.phase === 'answer' || voice.hold) afterSpeech = voice;
@@ -204,7 +232,7 @@ function drawVoice(voice) {
   if (showing === 'thinking' && !voice.start) return;
   if (voice.start) $('voice-heard').textContent = '';
   // `hold`: Jester waiting for more, with no mic frames to keep the pill up.
-  showVoice('listening', voice.hold || VOICE_IDLE_MS);
+  showVoice('listening', voice.hold || VOICE_IDLE_MS, { held: !!voice.hold });
   drawLevels(voice.levels);
 }
 
@@ -241,8 +269,8 @@ chrome.runtime.onMessage.addListener((message) => {
       toast(message.text, message.tone, message.detail);
       break;
     case MSG.VOICE:
-      // The end of speech reaches a display the pointer has left, or its pill would stay up.
-      if (active || (message.voice?.phase === 'speaking' && message.voice.done)) drawVoice(message.voice || {});
+      // An ending reaches a display the pointer has left, or its pill would stay up.
+      if (active || message.voice?.done) drawVoice(message.voice || {});
       break;
     default:
       break;

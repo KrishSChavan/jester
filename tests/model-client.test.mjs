@@ -414,6 +414,14 @@ test('Ollama needs no key, turns thinking off and keeps its model loaded', () =>
   assert.equal(Object.hasOwn(JSON.parse(buildModelRequest(custom, { system: 'JSON', prompt: 'Play.' }).init.body), 'keep_alive'), false);
 });
 
+test('a caller can let Ollama free its model sooner, in Ollama\'s own durations only', () => {
+  const body = (env) => JSON.parse(buildModelRequest(normalizeModelConfig({ provider: 'ollama', model: 'qwen3.5:9b', ...env }), { system: 'JSON', prompt: 'Hi.' }).init.body);
+  assert.equal(body({ keepAlive: '2m' }).keep_alive, '2m');
+  assert.equal(body({ keepAlive: '-1' }).keep_alive, '30m');
+  assert.equal(body({ keepAlive: '2m; rm' }).keep_alive, '30m');
+  assert.equal(Object.hasOwn(normalizeModelConfig({ provider: 'groq', model: 'x', key: 'k', keepAlive: '2m' }), 'keepAlive'), false);
+});
+
 test('Ollama not running says so', async () => {
   await assert.rejects(requestModel({ env: { provider: 'ollama', model: 'qwen3.5:9b' }, system: 'JSON', prompt: 'Play.',
     fetchImpl: async () => { throw new TypeError('fetch failed'); } }), /Ollama isn’t running/);

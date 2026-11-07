@@ -79,6 +79,12 @@ test('a question is never learned: its answer was that day\'s screen', () => {
   assert.equal(learnable('what is on my calendar today', steps).ok, false);
   assert.equal(learnable('Is my build passing?', steps).ok, false);
   assert.equal(learnable('open my calendar', steps).ok, true);
+  // Asking to be told something part way through is a question too: a replay would open it and say nothing.
+  const click = [{ action: { action: 'click' }, app: 'Google Chrome', target: { role: 'button', label: 'Canvas' } }];
+  assert.equal(learnable('Can you open up my canvas and tell me what assignments I have due by tomorrow night', click).why, 'it asked something, and the answer changes');
+  assert.equal(learnable('open Mail and check if Sarah replied', click).ok, false);
+  assert.equal(learnable('open my Canvas bookmark, then which classes have homework', click).ok, false);
+  assert.equal(learnable('open my Canvas bookmark', click).ok, true);
 });
 
 test('a polite request is learned though speech wrote it as a question; a real question isn\'t', () => {

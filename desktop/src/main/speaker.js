@@ -20,7 +20,7 @@ const MAC_VOICE = 'Daniel';
 export function spokenLine(text) {
   const line = String(text ?? '')
     .replace(/\s*\([^)]*[⌘⌥⌃⇧][^)]*\)/g, '')
-    .replace(/\s+·\s+/g, '. ')
+    .replace(/([.!?…])?\s+·\s+/g, (_, end) => `${end || '.'} `)
     .replace(/[*_#`~]/g, '')
     .replace(/\s+/g, ' ')
     .trim();

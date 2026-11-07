@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { addressed } from '../desktop/src/main/wake.js';
+import { addressed, wakesEarly } from '../desktop/src/main/wake.js';
 import { asksFirst, parseCommand, parseSequence } from '../desktop/src/main/voice-commands.js';
 import { createConversationLog, EMPTIED_EVERY_MS } from '../desktop/src/main/conversation-log.js';
-import { askOllama, createConversation, personaPrompt, pickModel, summarize } from '../desktop/src/main/conversation.js';
+import { askOllama, createConversation, LOCAL_KEEP_ALIVE, personaPrompt, pickModel, stamped, summarize, warmOllama } from '../desktop/src/main/conversation.js';
 import { createRecollections, KEPT_MS } from '../desktop/src/main/recollections.js';
 import { averageVoice, likeness, sounds, TEACHING_LINES } from '../desktop/src/main/voiceprint.js';
 import { createSpeaker, spokenLine, SPOKEN_CHARS } from '../desktop/src/main/speaker.js';
@@ -91,6 +91,7 @@ function jester({ knows = () => false, risky = () => false, reply = { say: 'Hell
   const entries = [];
   const said = [];
   const ran = [];
+  const runWith = [];
   const shown = [];
   const questions = [];
   const assistant = {
@@ -109,12 +110,12 @@ function jester({ knows = () => false, risky = () => false, reply = { say: 'Hell
     memory: { add: (who, text) => entries.push({ who, text }), current: () => [...entries], idleFor: () => null, startNew: () => [] },
     recollections: { keep: async () => undefined, relevant: () => [] },
     knowsYou: () => knowsYou,
-    commands: { knows: async (text) => knows(text), risky: async (text) => risky(text), run: async (text) => (ran.push(text), { outcome: { ok: true, text: `Did ${text}` } }) },
+    commands: { knows: async (text) => knows(text), risky: async (text) => risky(text), run: async (text, said) => (ran.push(text), runWith.push(said), { outcome: { ok: true, text: `Did ${text}` } }) },
     assistant,
     show: (voice) => shown.push(voice),
     now: () => time
   });
-  return { conversation, entries, said, ran, shown, questions, assistant, speaker, pass: (ms) => (time += ms) };
+  return { conversation, entries, said, ran, runWith, shown, questions, assistant, speaker, pass: (ms) => (time += ms) };
 }
 
 test('what is not said to him is dropped, and not kept', async () => {
@@ -149,6 +150,51 @@ test('the model can hand back a command: it goes through the same doors', async 
   await j.conversation.heard('Jester, I want to take some notes');
   assert.deepEqual(j.ran, ['open Notes']);
   assert.deepEqual(j.said, ['On it.', 'Did open Notes']);
+});
+
+test('a command the model hands back goes with what the user said, which it may have changed', async () => {
+  // qwen3.5:9b, 2026-11-07: "open up my canvas and tell me what's due by tomorrow night" came back as "open Canvas".
+  const j = jester({ reply: { say: 'On it.', do: 'open Canvas' } });
+  await j.conversation.heard('Jester, open up my Canvas bookmark and tell me what is due by tomorrow night');
+  assert.deepEqual(j.ran, ['open Canvas']);
+  assert.deepEqual(j.runWith, ['open up my Canvas bookmark and tell me what is due by tomorrow night']);
+  // A command the matcher knows was the user's words already.
+  const known = jester({ knows: () => true });
+  await known.conversation.heard('Jester, volume 30');
+  assert.deepEqual(known.runWith, [undefined]);
+});
+
+test('a conversation that ended is summed up once he has answered, not while his answer waits on the model', async () => {
+  const order = [];
+  const conversation = createConversation({
+    chat: async () => (order.push('chat'), { say: 'Hi.', do: '', new: false }),
+    speaker: { say: async () => void order.push('said'), stop: () => undefined },
+    memory: { add: () => undefined, current: () => [], idleFor: () => 10 * 60 * 1000, startNew: () => [{ who: 'you', text: 'an hour ago' }] },
+    recollections: { keep: async (entries) => void order.push(`keep ${entries[0].text}`), relevant: () => [] },
+    commands: { knows: async () => false, risky: async () => false, run: async () => ({ outcome: null }) },
+    assistant: { asking: false, running: false },
+    show: () => undefined
+  });
+  await conversation.heard('Jester, hello');
+  assert.deepEqual(order, ['chat', 'said', 'keep an hour ago']);
+});
+
+test('when listening ends his pill goes, but a task at work keeps its own', () => {
+  const j = jester();
+  j.conversation.reset();
+  assert.deepEqual(j.shown.at(-1), { active: false });
+  const busy = jester();
+  busy.assistant.running = true;
+  busy.conversation.reset();
+  assert.equal(busy.shown.some((voice) => voice.active === false), false);
+});
+
+test('typing to him loads his model meanwhile, and a closed Ollama is no trouble', async () => {
+  const asked = [];
+  await warmOllama({ model: 'qwen3.5:9b', fetchImpl: async (url, init) => (asked.push({ url, method: init.method, body: JSON.parse(init.body) }), { arrayBuffer: async () => new ArrayBuffer(0) }) });
+  assert.deepEqual(asked, [{ url: 'http://127.0.0.1:11434/api/generate', method: 'POST', body: { model: 'qwen3.5:9b', keep_alive: LOCAL_KEEP_ALIVE } }]);
+  await warmOllama({ model: 'qwen3.5:9b', fetchImpl: async () => { throw new TypeError('fetch failed'); } });
+  await warmOllama({ model: '', fetchImpl: async () => assert.fail('no model, nothing to load') });
 });
 
 test('overheard and risky, it asks; refused, nothing is done', async () => {
@@ -220,6 +266,49 @@ test('his name alone waits for the rest, for a while', async () => {
   j.pass(60000);
   await j.conversation.heard('Nice weather today.');
   assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 1);
+});
+
+test('the start of what is still being said wakes him only when it opens with his name', () => {
+  for (const partial of ['Jester', 'Hey Jester what', 'Jester, open', 'Jay what time', 'Just open Spotify']) assert.equal(wakesEarly(partial), true, partial);
+  for (const partial of ['', 'Jess', 'Jay', 'I told Jester', 'Tell me Jester', 'Just kidding', 'Chester is', 'What time is it']) assert.equal(wakesEarly(partial), false, partial);
+});
+
+test('his name heard mid-sentence puts him to listening, and he lets it go if it was not for him', async () => {
+  const j = jester();
+  j.conversation.woken();
+  assert.equal(j.shown.at(-1).active, true);
+  assert.equal(j.shown.at(-1).start, true);
+  await j.conversation.heard('Jester, how are you?');
+  assert.deepEqual(j.said, ['Hello there.']);
+  assert.equal(j.shown.some((voice) => voice.active === false), false);
+  j.pass(5000);
+  j.conversation.woken();
+  await j.conversation.heard('Jessica and I went out.');
+  assert.deepEqual(j.shown.at(-1), { active: false });
+});
+
+test('his name mid-sentence changes nothing while he talks, asks or works', async () => {
+  const j = jester();
+  j.speaker.hold = new Promise(() => undefined);
+  j.conversation.heard('Jester, tell me something');
+  await new Promise((resolve) => setImmediate(resolve));
+  const before = j.shown.length;
+  j.conversation.woken();
+  assert.equal(j.shown.length, before);
+  const busy = jester();
+  busy.assistant.running = true;
+  busy.conversation.woken();
+  busy.assistant.running = false;
+  busy.assistant.asking = true;
+  busy.conversation.woken();
+  assert.deepEqual(busy.shown, []);
+});
+
+test('Ollama lets his model go two minutes after he last used it', async () => {
+  let env = null;
+  await askOllama({ model: 'qwen3.5:9b', text: 'hi', history: [], request: async (options) => ((env = options.env), { json: { say: 'Hi.', do: '', new: false } }) });
+  assert.equal(env.keepAlive, LOCAL_KEEP_ALIVE);
+  assert.equal(LOCAL_KEEP_ALIVE, '2m');
 });
 
 test('a newer turn silences an older one, and a turned-off Jester stays quiet', async () => {
@@ -378,11 +467,16 @@ test('a voiceprint: takes averaged, voices compared, and short clips given a low
   assert.equal(TEACHING_LINES.length, 5);
 });
 
-test('the prompt says who he is, and what he cannot know', () => {
+test('the prompt says who he is, what the laptop can do for him and what he cannot know; the clock is on what was said', () => {
   const prompt = personaPrompt(new Date('2026-11-06T17:40:00'));
   assert.match(prompt, /Your name is Jester\. You are a helpful AI assistant that can take control of the user's laptop and search the internet\./);
-  assert.match(prompt, /November 6, 2026/);
+  assert.match(prompt, /The laptop sees its own screen and does all of that, so never say you can't/);
+  assert.match(prompt, /never a web address they didn't say/);
   assert.match(prompt, /never give weather, news, prices/);
+  // Ollama reuses what it read of a prompt the same as the last: with the time in it, that was every minute.
+  assert.equal(personaPrompt(new Date('2026-11-06T17:41:00')), prompt);
+  assert.doesNotMatch(prompt, /November 6, 2026/);
+  assert.match(stamped('what time is it?', new Date('2026-11-06T17:40:00')), /^\[Friday, November 6, 2026 at 5:40.PM\] what time is it\?$/);
 });
 
 test('the conversation so far reaches the model as turns, and none without Ollama', async () => {
@@ -390,6 +484,7 @@ test('the conversation so far reaches the model as turns, and none without Ollam
   const reply = await askOllama({ model: 'm', text: 'and you?', history: [{ who: 'you', text: 'hi' }, { who: 'jester', text: 'hey' }], request: async (request) => ((sent = request), { json: { say: ' fine ', do: '' } }) });
   assert.deepEqual(reply, { say: 'fine', do: '', new: false });
   assert.deepEqual(sent.history, [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hey' }]);
+  assert.match(sent.prompt, /^\[.+\] and you\?$/);
   assert.equal(sent.env.provider, 'ollama');
   await assert.rejects(askOllama({ model: '', text: 'hi', history: [] }), /can’t reach Ollama/);
 });
@@ -415,6 +510,7 @@ test('with no model chosen, the biggest that leaves the computer room', () => {
 
 test('what is spoken is made for the ear, and kept short', () => {
   assert.equal(spokenLine('Undo (⌘Z) · Done'), 'Undo. Done');
+  assert.equal(spokenLine('Canvas is open. · Next time, no AI needed.'), 'Canvas is open. Next time, no AI needed.');
   const long = spokenLine(`${'One sentence here. '.repeat(40)}`);
   assert.ok(long.length <= SPOKEN_CHARS && long.endsWith('.'));
 });

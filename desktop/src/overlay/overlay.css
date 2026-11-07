@@ -6,6 +6,8 @@
   --pill-muted: rgba(245, 245, 247, 0.7);
   --warn: #ffb340;
   --fill: #4cc26b;
+  /* Jester's orb, as in the talk window (src/talk/talk.css). */
+  --orb: #b69cf5;
 }
 
 html,
@@ -116,9 +118,8 @@ body {
   color: #fca5a5;
 }
 
-/* The assistant at work: a spinner, the task in a few words, and under it,
-   smaller, the step it's on. */
-.voice .spin,
+/* The assistant at work: his orb, thinking, and the task in a few words with,
+   under it and smaller, the step it's on; or with no task, "Thinking…". */
 .voice .work {
   display: none;
 }
@@ -126,18 +127,6 @@ body {
 .voice.thinking .bars,
 .voice.thinking .heard {
   display: none;
-}
-
-.voice.thinking .spin {
-  display: block;
-  flex: none;
-  box-sizing: border-box;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  border: 2px solid rgba(255, 255, 255, 0.22);
-  border-top-color: #fff;
-  animation: jester-spin 0.7s linear infinite;
 }
 
 .voice.thinking .work:has(> :not(:empty)) {
@@ -173,58 +162,39 @@ body {
   display: none;
 }
 
-/* Jester talking: a squiggle that waves, and what he's saying. Only transform
-   moves, so the pill keeps its size and the x beside it stays put. */
-.voice .wave,
-.voice .spoken {
+/* His orb (src/talk/orb.js) and a word for what he's doing: listening when
+   he's waiting on the user (`held`: no mic frames to move the bars), thinking,
+   and speaking. It's drawn on a canvas of a fixed size, so the pill keeps its
+   size and the x beside it stays put. */
+.voice .orb,
+.voice .label {
   display: none;
 }
 
+.voice.held .bars,
+.voice.held .heard,
 .voice.speaking .bars,
 .voice.speaking .heard {
   display: none;
 }
 
-.voice.speaking .wave {
+.voice.held .orb,
+.voice.thinking .orb,
+.voice.speaking .orb {
   display: block;
   flex: none;
-  overflow: hidden;
 }
 
-.voice.speaking .spoken {
+.voice.held .label,
+.voice.thinking .label,
+.voice.speaking .label {
   display: block;
-  max-width: 380px;
+  font-size: 14px;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 13px;
 }
 
-.voice.speaking .spoken:empty {
+.voice .label:empty {
   display: none;
-}
-
-.voice .wave path {
-  fill: none;
-  stroke: #e8ecf2;
-  stroke-width: 3;
-  stroke-linecap: round;
-}
-
-.voice.speaking:not([hidden]) .wave path {
-  animation: jester-wave 0.9s linear infinite;
-}
-
-@keyframes jester-wave {
-  to {
-    transform: translateX(-40px);
-  }
-}
-
-@keyframes jester-spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .pill {
@@ -395,9 +365,5 @@ body {
 
   .ripple.go {
     animation-duration: 1ms;
-  }
-
-  .voice.speaking:not([hidden]) .wave path {
-    animation: none;
   }
 }

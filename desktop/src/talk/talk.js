@@ -5,22 +5,46 @@
  */
 
 import { MSG } from '../ext/src/common/constants.js';
+import { createOrb, ORB_STATES } from './orb.js';
 
 const $ = (id) => document.getElementById(id);
 /** He ends his own thinking; this only catches a task that died. */
 const THINKING_MS = 90000;
 /** How long the light says it was your voice. */
 const MATCHED_MS = 2500;
+/** Typing says so this often at most: his model, loading meanwhile, stays loaded a while (conversation.js). */
+const TYPING_MS = 30000;
+/** The orb's size when the window has room for it. */
+const ORB_PX = 220;
+/**
+ * The library's designs are tuned at 64 px; this big, they want about twice
+ * the dots, and working's a little larger. Picked by eye from renders.
+ */
+const ORB_TUNE = {
+  breathing: { dots: 2 },
+  listening: { dots: 1.7 },
+  working: { dots: 2, dotSize: 1.2 },
+  composing: { dots: 2, dotSize: 1.08 }
+};
 
 /** What the main process says of listening. */
 let continuous = {};
 let moodTimer = null;
 let matchedTimer = null;
 let matched = false;
+let typedAt = -Infinity;
+
+const orbSize = () => Math.min(ORB_PX, Math.floor($('presence').clientHeight));
+const orb = createOrb($('orb'), {
+  size: orbSize(),
+  color: getComputedStyle(document.documentElement).getPropertyValue('--orb'),
+  tune: ORB_TUNE
+});
 
 function mood(state, ms = 0) {
   clearTimeout(moodTimer);
   document.body.dataset.state = state;
+  orb.show(ORB_STATES[state]);
   if (ms) moodTimer = setTimeout(() => mood('resting'), ms);
 }
 
@@ -118,6 +142,11 @@ $('type').addEventListener('submit', (event) => {
   $('text').value = '';
   chrome.runtime.sendMessage({ type: 'jester/talk-type', text });
 });
+$('text').addEventListener('input', () => {
+  if (Date.now() - typedAt < TYPING_MS) return;
+  typedAt = Date.now();
+  chrome.runtime.sendMessage({ type: 'jester/talk-typing' });
+});
 $('listen').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/talk-listen', on: !continuous.wanted }));
 $('earlier').addEventListener('click', () => openDrawer(true));
 $('close').addEventListener('click', () => openDrawer(false));
@@ -129,5 +158,7 @@ chrome.runtime.onMessage.addListener((message) => {
   else if (message?.type === 'jester/desktop-state') drawContinuous(message.continuous);
 });
 
+new ResizeObserver(() => orb.resize(orbSize())).observe($('presence'));
+mood(document.body.dataset.state);
 chrome.runtime.sendMessage({ type: 'jester/desktop-state' }).then((state) => drawContinuous(state?.continuous));
 drawEarlier();

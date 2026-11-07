@@ -60,7 +60,7 @@ function settingsChanged(before) {
 
 function renderStatus() {
   const engine = desktop?.engine || { state: ENGINE.OFF };
-  const [text, tone] = settings && !settings.enabled ? ['Jester is off', 'idle'] : STATUS[engine.state] || [engine.state, 'idle'];
+  const [text, tone] = settings && !settings.enabled ? ['Jester is off', 'idle'] : settings?.gesturesEnabled === false ? ['Gestures off', 'idle'] : STATUS[engine.state] || [engine.state, 'idle'];
   if (engine.state === ENGINE.ERROR && engine.detail) $('status-text').textContent = `${text}: ${engine.detail}`;
   else if (engine.state === ENGINE.SLEEPING && settings?.enabled) $('status-text').textContent = `${text} — ${wakeHint(resumeGlyphs(settings), platform())}`;
   else $('status-text').textContent = text;

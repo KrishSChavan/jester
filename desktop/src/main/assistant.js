@@ -19,6 +19,7 @@ import { createDesktopHost } from './agent/host.js';
 import { planSummary, stepLine } from './agent/plan.js';
 import { replaySteps } from './agent/replay.js';
 import { post } from './chrome-bridge.js';
+import { LOCAL_KEEP_ALIVE } from './conversation.js';
 
 /** A question nobody answers is a no. */
 const APPROVAL_MS = 60000;
@@ -63,7 +64,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
   const connections = async () => {
     const saved = await loadConnections();
     const local = saved.length ? '' : await localModel();
-    return local ? [{ id: 'ollama-local', ...normaliseConnection({ provider: 'ollama', model: local }), cooldownUntil: 0 }] : saved;
+    return local ? [{ id: 'ollama-local', ...normaliseConnection({ provider: 'ollama', model: local }), keepAlive: LOCAL_KEEP_ALIVE, cooldownUntil: 0 }] : saved;
   };
   const model = createPooledModelClient({
     load: connections,
@@ -159,13 +160,13 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     },
 
     /**
-     * @param {string} goal
-     * @param {{note?:string, pick?:boolean}} [options]  note: a learned way of doing it that failed, and
-     *   where; pick: a search is waiting for its result to be pressed
+     * @param {string} goal  what the user said
+     * @param {{note?:string, pick?:boolean, meant?:string}} [options]  note: a learned way of doing it that failed, and
+     *   where; pick: a search is waiting for its result to be pressed; meant: in conversation, what the goal was taken to mean
      * @returns {Promise<{ok:boolean, text:string, trace?:object[]}|null>} null: cancelled, nothing to say;
      *   trace (when done): the steps, for learned.js
      */
-    async run(goal, { note = '', pick = false } = {}) {
+    async run(goal, { note = '', pick = false, meant = '' } = {}) {
       // A new command replaces one still running.
       const task = await begin('');
       working();
@@ -175,6 +176,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
       try {
         const result = await runPlannedAgent({
           goal,
+          meant,
           note,
           pick,
           previous,

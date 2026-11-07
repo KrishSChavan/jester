@@ -45,6 +45,8 @@ export function startSpeech({ log = () => undefined } = {}) {
   let current = null;
   /** Called with everything overheard, while the continuous assistant is on. */
   let listener = null;
+  /** Called when his name starts something still being said. */
+  let waker = null;
   /** The user's voice, sent to each service as it starts. */
   let voiceprint = null;
   let teaching = false;
@@ -87,6 +89,7 @@ export function startSpeech({ log = () => undefined } = {}) {
         if (message.score !== null) log(`speech: your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
         return void listener?.(message.text, message);
       }
+      if (message?.type === 'wake') return void waker?.();
       if (message?.type === 'stranger') return log(`speech: not your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
       if (message?.type === 'error') log('speech error:', message.detail);
       if (message?.type === 'final' && current) {
@@ -202,9 +205,10 @@ export function startSpeech({ log = () => undefined } = {}) {
         resume();
       }
     },
-    /** Every utterance from now on goes to `onHeard`, until stopListening. */
-    listen(onHeard) {
+    /** Every utterance from now on goes to `onHeard`, until stopListening; `onWake` hears his name as it's said. */
+    listen(onHeard, onWake = () => undefined) {
       listener = onHeard;
+      waker = onWake;
       clearTimeout(idleTimer);
       resume();
     },
@@ -223,6 +227,7 @@ export function startSpeech({ log = () => undefined } = {}) {
     stopListening() {
       if (!listener) return;
       listener = null;
+      waker = null;
       if (!current) service?.postMessage({ type: 'abort' });
       rest();
     }

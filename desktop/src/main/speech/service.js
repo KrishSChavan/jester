@@ -7,11 +7,13 @@
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
  * Messages in:  start {model} · begin · listen · voiceprint {print} · teaching {on} · audio {samples} · end · abort · transcribe {samples}
- * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · heard {text, decodeMs, score, seconds, voice?} · stranger {score, seconds} · error {detail}
+ * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, score, seconds, voice?} · stranger {score, seconds} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
- * between. Nothing heard this way is saved, whatever JESTER_SAVE_SPEECH says.
+ * between. While someone's still talking, the start of it is read twice for
+ * his name, and `wake` says it's there: only that, never the words.
+ * Nothing heard this way is saved, whatever JESTER_SAVE_SPEECH says.
  * With a voiceprint set, a voice that isn't the user's is never even decoded:
  * no text of what anyone else says exists, here or anywhere.
  *
@@ -23,6 +25,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { sounds, likeness } from '../voiceprint.js';
+import { wakesEarly } from '../wake.js';
 import { modelDir, SPEECH_MODELS, VAD_MODEL, VOICE_MODEL } from './models.js';
 
 const require = createRequire(import.meta.url);
@@ -42,6 +45,8 @@ const PARTIAL_EVERY_MS = 500;
 const PREROLL_S = 1;
 /** voice.js gives up on a capture after 30 s; so does this. */
 const MAX_CAPTURE_S = 30;
+/** This far into speech, what's been said so far is read for his name. Two reads at most: it comes first. */
+const PEEK_AT_S = [1, 2];
 /** All that's kept before speech while listening: the preroll, and a little. */
 const KEPT_WINDOWS = Math.ceil((PREROLL_S * SAMPLE_RATE) / WINDOW) + 2;
 /** The detector counts samples in 32 bits and finds nothing past 37 hours of them (measured), so it starts over. */
@@ -69,7 +74,7 @@ let teaching = false;
 
 function freshState(listening = false) {
   // `windows` is everything since `begin`; `speechAt` the window where speech was first detected.
-  return { carry: new Float32Array(0), windows: [], speechAt: -1, lastPartialAt: 0, partialBusy: false, done: false, listening };
+  return { carry: new Float32Array(0), windows: [], speechAt: -1, lastPartialAt: 0, partialBusy: false, done: false, listening, peeks: 0, peeking: false };
 }
 
 /** The utterance: from just before speech was detected to now. */
@@ -183,11 +188,39 @@ function endOverheard() {
   if (samples.length) overheard(samples).catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
 }
 
+/**
+ * Whether what's being said so far starts with his name. Not while teaching,
+ * nor while the last utterance is still decoding; and a voiceprint keeps
+ * everyone else's words from being decoded here too.
+ */
+async function peek() {
+  const during = state;
+  during.peeks += 1;
+  during.peeking = true;
+  try {
+    const samples = utterance();
+    if (voiceprint) {
+      const voice = voiceOf(samples);
+      if (!sounds(voice ? likeness(voice, voiceprint) : 0, samples.length / SAMPLE_RATE)) return;
+    }
+    const { text } = await decode(samples);
+    if (state !== during || !wakesEarly(text)) return;
+    during.peeks = PEEK_AT_S.length;
+    send({ type: 'wake' });
+  } finally {
+    during.peeking = false;
+  }
+}
+
 /** One more window of listening: quiet ones aren't kept. */
 function keepListening() {
   sinceRestart += 1;
   if (state.speechAt >= 0) {
-    if ((state.windows.length - state.speechAt) * WINDOW >= MAX_CAPTURE_S * SAMPLE_RATE) endOverheard();
+    const said = (state.windows.length - state.speechAt) * WINDOW;
+    if (said >= MAX_CAPTURE_S * SAMPLE_RATE) return endOverheard();
+    if (!teaching && !decoding && !state.peeking && said >= PEEK_AT_S[state.peeks] * SAMPLE_RATE) {
+      peek().catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
+    }
     return;
   }
   if (state.windows.length > KEPT_WINDOWS) state.windows.shift();

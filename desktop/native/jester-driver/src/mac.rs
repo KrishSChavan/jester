@@ -1326,6 +1326,258 @@ fn scroll_end(area: &AXUIElement, horizontal: bool, forward: bool) -> Value {
     last
 }
 
+// ---------------------------------------------------------------------------
+// Clicking, after agent-desktop (github.com/vercel-labs/agent-desktop): the
+// element checked before anything is done to it, each accessibility way of
+// clicking it tried in turn, and where a real click would land on it
+// ---------------------------------------------------------------------------
+
+/// Whether an element is still on screen. Asked anything, a removed one
+/// answers kAXErrorInvalidUIElement, and never as a look-alike that took its
+/// place (agent-desktop's probe M1-3). A busy app's silence isn't gone.
+fn alive(element: &AXUIElement) -> bool {
+    let key = CFString::from_static_str("AXRole");
+    let mut value: *const CFType = std::ptr::null();
+    let error = unsafe { element.copy_attribute_value(&key, NonNull::from(&mut value)) };
+    if !value.is_null() {
+        drop(unsafe { CFRetained::from_raw(NonNull::new_unchecked(value as *mut CFType)) });
+    }
+    error != AXError::InvalidUIElement
+}
+
+/// Roles whose press means "select me". A table that isn't the key view
+/// takes the press, answers success and selects nothing, so for these the
+/// selection is read back before the press counts.
+const SELECTED_BY_PRESS: &[&str] = &["AXRow", "AXCell"];
+/// A selection shows a moment after the press or the write that made it.
+const SELECTION_SETTLE: Duration = Duration::from_millis(300);
+const SELECTION_POLL: Duration = Duration::from_millis(25);
+/// Where a container keeps its selection: a table's or an outline's rows, a
+/// list's or a browser column's children, a grid's cells. Most list several
+/// and take a write to one, so each write is read back.
+const SELECTION_ATTRIBUTES: [&str; 3] = ["AXSelectedRows", "AXSelectedChildren", "AXSelectedCells"];
+/// How far above an element the container that selects it may be.
+const SELECTION_CLIMB: usize = 6;
+/// How many of an element's children may stand in for it.
+const STAND_IN_CHILDREN: usize = 4;
+
+/// Waits out SELECTION_SETTLE for `look` to come true.
+fn settles(look: impl Fn() -> bool) -> bool {
+    let until = Instant::now() + SELECTION_SETTLE;
+    loop {
+        if look() {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(SELECTION_POLL);
+    }
+}
+
+fn same(a: &AXUIElement, b: &AXUIElement) -> bool {
+    let (a, b): (&CFType, &CFType) = (a, b);
+    a == b
+}
+
+/// Whether an element is selected after a press: None when it doesn't say.
+fn selected_after_press(element: &AXUIElement) -> Option<bool> {
+    bool_attribute(element, "AXSelected")?;
+    Some(settles(|| bool_attribute(element, "AXSelected") == Some(true)))
+}
+
+/// A row or a cell selected by its own AXSelected, read back.
+fn select_directly(member: &AXUIElement) -> bool {
+    settable(member, "AXSelected")
+        && matches!(set_attribute(member, "AXSelected", CFBoolean::new(true)), AXError::Success | AXError::CannotComplete)
+        && settles(|| bool_attribute(member, "AXSelected") == Some(true))
+}
+
+/// A member selected through its container's selection, read back.
+fn select_in(container: &AXUIElement, member: &AXUIElement) -> bool {
+    for name in SELECTION_ATTRIBUTES {
+        if !settable(container, name) {
+            continue;
+        }
+        let only = CFArray::from_retained_objects(&[member.retain()]);
+        if !matches!(set_attribute(container, name, &only), AXError::Success | AXError::CannotComplete) {
+            continue;
+        }
+        let holds = || {
+            attribute(container, name)
+                .and_then(|value| value.downcast::<CFArray>().ok())
+                .is_some_and(|array| {
+                    let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
+                    (0..array.len()).filter_map(|i| array.get(i)).any(|selected| same(&selected, member))
+                })
+        };
+        if settles(holds) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Roles that only label what they're in: a click on one is a click on its row.
+const LABEL_ROLES: &[&str] = &["AXStaticText", "AXImage", "AXGroup", "AXHeading"];
+
+/// What a click on a row, a cell, or a label in one does: selects the row.
+/// A row or a cell is found in the container that owns its selection; a
+/// label stands for the row around it. Only rows and cells (and a list's
+/// own items) are ever selected, each write is read back, and a control
+/// (a button in a row) is never stood in for by its row: its click is its own.
+fn select_for_click(element: &AXUIElement) -> bool {
+    let is_member = |node: &AXUIElement| string_attribute(node, "AXRole").is_some_and(|role| SELECTED_BY_PRESS.contains(&role.as_str()));
+    let is_label = string_attribute(element, "AXRole").is_some_and(|role| LABEL_ROLES.contains(&role.as_str()));
+    if !is_member(element) && !is_label {
+        return false;
+    }
+    if is_member(element) && select_directly(element) {
+        return true;
+    }
+    let mut member = element.retain();
+    for _ in 0..SELECTION_CLIMB {
+        let Some(container) = parent(&member) else { return false };
+        let list = string_attribute(&container, "AXRole").as_deref() == Some("AXList");
+        if (is_member(&member) || list) && select_in(&container, &member) {
+            return true;
+        }
+        if is_member(element) {
+            // Its container is further up, but it stays what's selected.
+            if select_in(&container, element) {
+                return true;
+            }
+        } else if is_member(&container) && select_directly(&container) {
+            return true;
+        }
+        member = container;
+    }
+    false
+}
+
+/// A click by accessibility, each way in turn (after agent-desktop's click
+/// chain): AXPress (read back on a row or cell, which may take it and select
+/// nothing); selecting it in its list (a row, a cell, or a label in one);
+/// pressing a child that is the same thing under another role; AXConfirm.
+/// The first that reaches the app ends it — a busy app included, as the
+/// press may have opened a dialog, and doing it again would do it twice.
+/// None working, an error, and the caller may click where it's drawn.
+///
+/// agent-desktop also tries AXOpen here. It isn't a click but a double click
+/// (Finder opens a file with it where a click only selects it), so here it's
+/// `open`'s alone.
+fn press(element: &AXUIElement) -> Result<Value> {
+    let role = string_attribute(element, "AXRole").unwrap_or_default();
+    let done = |via: &str| json!({ "element": describe(element), "via": via });
+    let busy = |via: &str| json!({ "element": null, "busy": true, "via": via });
+    match perform(element, "AXPress") {
+        AXError::Success if !SELECTED_BY_PRESS.contains(&role.as_str()) || selected_after_press(element) != Some(false) => return Ok(done("AXPress")),
+        // Taken, and nothing selected: on to the other ways.
+        AXError::Success => {}
+        AXError::CannotComplete => return Ok(busy("AXPress")),
+        // Gone the moment it was pressed: the press closed what it was in.
+        AXError::InvalidUIElement => return Ok(json!({ "element": null, "via": "AXPress" })),
+        _ => {}
+    }
+    if select_for_click(element) {
+        return Ok(json!({ "element": describe(element), "via": "select", "selected": true }));
+    }
+    let label = string_attribute(element, "AXTitle").or_else(|| string_attribute(element, "AXDescription"));
+    let kids: Vec<_> = children(element).into_iter().take(STAND_IN_CHILDREN).collect();
+    let described: Vec<(bool, Option<String>)> = kids
+        .iter()
+        .map(|kid| (actions(kid).iter().any(|name| name == "AXPress"), string_attribute(kid, "AXTitle").or_else(|| string_attribute(kid, "AXDescription"))))
+        .collect();
+    if let Some(i) = crate::protocol::stand_in(label.as_deref(), &described) {
+        match perform(&kids[i], "AXPress") {
+            AXError::Success => return Ok(done("child")),
+            AXError::CannotComplete => return Ok(busy("child")),
+            _ => {}
+        }
+    }
+    if actions(element).iter().any(|name| name == "AXConfirm") {
+        match perform(element, "AXConfirm") {
+            AXError::Success => return Ok(done("AXConfirm")),
+            AXError::CannotComplete => return Ok(busy("AXConfirm")),
+            _ => {}
+        }
+    }
+    Err("none of the accessibility ways of clicking it worked".into())
+}
+
+/// Whether `element` is `ancestor` or inside it.
+fn inside(element: &AXUIElement, ancestor: &AXUIElement) -> bool {
+    let mut current = Some(element.retain());
+    for _ in 0..40 {
+        let Some(node) = current else { return false };
+        if same(&node, ancestor) {
+            return true;
+        }
+        current = parent(&node);
+    }
+    false
+}
+
+/// Something on top of an element, in words: "the sheet “Save”", "the window “Notes” of Slack".
+fn covering(found: &AXUIElement, target: &AXUIElement) -> String {
+    let kind = string_attribute(found, "AXRoleDescription").unwrap_or_else(|| "something".into());
+    let mut words = match string_attribute(found, "AXTitle").or_else(|| string_attribute(found, "AXDescription")) {
+        Some(name) => format!("the {kind} “{}”", clip(&name, 40)),
+        None => format!("the {kind}"),
+    };
+    if let Some(app) = pid(found).filter(|&found| Some(found) != pid(target)).and_then(|found| app_info(found)["name"].as_str().map(String::from)) {
+        words.push_str(&format!(" of {app}"));
+    }
+    words
+}
+
+/// What a click at a point would land on, as the window server answers it.
+/// The element or anything in it reaches it. Something it is inside (a web
+/// page answering for its contents), Jester's overlay, or an answer that
+/// fails can't tell. Anything else covers it only when it plainly would
+/// take the click: it's in another window, or it's a control itself — a
+/// label drawn over a checkbox is clicked through as a hand would.
+fn hit_test(target: &AXUIElement, x: f64, y: f64) -> crate::protocol::Hit {
+    use crate::protocol::Hit;
+    let system = with_timeout(unsafe { AXUIElement::new_system_wide() });
+    let Ok(found) = hit(&system, x, y) else { return Hit::Unknown };
+    if inside(&found, target) {
+        return Hit::Reaches;
+    }
+    if inside(target, &found) || window_title(&found).as_deref() == Some(JESTER_OVERLAY) {
+        return Hit::Unknown;
+    }
+    let window_of = |element: &AXUIElement| attribute(element, "AXWindow").and_then(|window| window.downcast::<AXUIElement>().ok());
+    let elsewhere = match (window_of(&found), window_of(target)) {
+        (Some(a), Some(b)) => !same(&a, &b),
+        _ => pid(&found) != pid(target),
+    };
+    if elsewhere || pressable(&found) {
+        Hit::Covered(covering(&found, target))
+    } else {
+        Hit::Unknown
+    }
+}
+
+/// Where a real click would land on an element: its frame read now (not
+/// as the snapshot had it) once it stops moving, scrolled into its window
+/// if it's out of it, and hit-tested at up to five points.
+fn click_point(element: &AXUIElement, window: &AXUIElement) -> Result<Value> {
+    let gap = Duration::from_millis(crate::protocol::SETTLE_GAP_MS);
+    let settle = || crate::protocol::settled_frame(|| frame_rect(element), || std::thread::sleep(gap));
+    let mut frame = settle().ok_or("it has no place on screen to click")?;
+    if let Some(bounds) = frame_rect(window) {
+        let middle = (frame.0 + frame.2 / 2.0, frame.1 + frame.3 / 2.0);
+        if !crate::protocol::holds(bounds, middle) && perform(element, "AXScrollToVisible") == AXError::Success {
+            frame = settle().ok_or("it has no place on screen to click")?;
+        }
+    }
+    if !(frame.2 > 0.0 && frame.3 > 0.0) {
+        return Err("it has no size on screen to click".into());
+    }
+    Ok(crate::protocol::click_point(frame, |x, y| hit_test(element, x, y)))
+}
+
 /// Does something to an element of the last snapshot (or, for scrolling, its window).
 pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) -> Result<Value> {
     let (element, window) = LISTED.with(|listed| {
@@ -1340,6 +1592,9 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) 
             None => Err(format!("{action} needs an element")),
         }
     })?;
+    if !alive(&element) {
+        return Err(crate::protocol::GONE.into());
+    }
     if is_secure(&element) && matches!(action, "focus" | "setValue" | "appendValue" | "read") {
         return Err("Jester never types into password fields".into());
     }
@@ -1350,11 +1605,14 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) 
         // closes): it was done, and doing it again (say, by clicking) would
         // do it twice. Asking about the element now would only wait out the
         // timeout.
-        AXError::CannotComplete if matches!(name, "AXPress" | "AXShowMenu") => Ok(json!({ "element": null, "busy": true })),
+        AXError::CannotComplete if matches!(name, "AXPress" | "AXShowMenu" | "AXOpen") => Ok(json!({ "element": null, "busy": true })),
         error => Err(format!("{name} didn't work on it (AXError {})", error.0)),
     };
     match action {
-        "press" => done("AXPress"),
+        "press" => press(&element),
+        // A double click's meaning (Finder opens a file with it), where the element has it.
+        "open" => done("AXOpen"),
+        "point" => click_point(&element, &window),
         "showMenu" => done("AXShowMenu"),
         "increment" => done("AXIncrement"),
         "decrement" => done("AXDecrement"),

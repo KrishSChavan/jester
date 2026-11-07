@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { CAPTION_CHARS, classify, describeAction, taskCaption, validateTurn } from '../desktop/src/main/agent/actions.js';
 import { createDesktopHost } from '../desktop/src/main/agent/host.js';
-import { runDesktopAgent } from '../desktop/src/main/agent/loop.js';
+import { runDesktopAgent, unseen } from '../desktop/src/main/agent/loop.js';
 import { findElements, screenText } from '../desktop/src/main/agent/screen.js';
 
 const frame = (x, y) => ({ x, y, w: 80, h: 30 });
@@ -252,7 +252,13 @@ test('the host presses through accessibility, clicks where drawn if refused, and
   const { calls } = fake;
   const host = hostWith(fake);
   assert.deepEqual(await host.execute({ action: 'click', id: 2 }, SPOTIFY), { ok: true, detail: 'clicked where it is drawn' });
-  assert.deepEqual(calls.slice(0, 3), [['act', { snapshot: 7, element: 2, action: 'press' }], ['frontmost', undefined], ['click', { x: 440, y: 215 }]]);
+  // An older driver with no `point`: the middle of the frame the screen was read with.
+  assert.deepEqual(calls.slice(0, 4), [
+    ['act', { snapshot: 7, element: 2, action: 'press' }],
+    ['frontmost', undefined],
+    ['act', { snapshot: 7, element: 2, action: 'point' }],
+    ['click', { x: 440, y: 215 }]
+  ]);
 
   calls.length = 0;
   // A search field's text is replaced: the app and its focus checked before anything's written
@@ -340,7 +346,7 @@ test('a screen that won\'t read is tried once more, then the user gets a plain m
   const steps = [];
   const result = await runDesktopAgent({ goal: 'text Trisha hello', host: flaky(2), model: scripted().model, confirm: async () => true, onStep: (step) => steps.push(step) });
   assert.equal(reads, 2, 'read twice, then gave up');
-  assert.equal(result.say, 'I couldn’t read what’s on screen, so I stopped.');
+  assert.equal(result.say, 'I couldn’t read what’s on screen (the app in front has no window I can read), so I stopped.');
   assert.deepEqual(steps.at(-1), { phase: 'unseen', detail: 'the app has no window on screen to read' });
 
   // After a step that did something, the user hears what was done.
@@ -349,4 +355,11 @@ test('a screen that won\'t read is tried once more, then the user gets a plain m
   host.observe = async () => (looks++ === 0 ? { ok: true, snapshot: MESSAGES } : { ok: false, detail: 'gone' });
   const sent = await runDesktopAgent({ goal: 'text Trisha hello', host, model: scripted({ action: { action: 'type', id: 0, text: 'hello', enter: true } }).model, confirm: async () => true, platform: 'darwin' });
   assert.equal(sent.say, 'I did “Type “hello” in “Message”, then Enter”, but then couldn’t read the screen to check it, so I stopped.');
+
+  // Why, when it's something the user can put right; never the driver's words, which name windows.
+  assert.equal(unseen('Accessibility permission has not been granted'), 'I couldn’t read what’s on screen (Jester isn’t allowed Accessibility in System Settings), so I stopped.');
+  assert.equal(unseen('no ordinary window is on screen', 'Open Google Chrome'), 'I did “Open Google Chrome”, but then couldn’t read the screen to check it (no window is open on this screen), so I stopped.');
+  const titled = unseen('the app has no window to read (on screen: []; its windows: [(Some("AXWindow"), None, Some("Bank statement"), None)])');
+  assert.equal(titled, 'I couldn’t read what’s on screen (the app in front has no window I can read), so I stopped.');
+  assert.equal(unseen('jester-driver: "snapshot" timed out'), 'I couldn’t read what’s on screen (the app in front took too long to answer), so I stopped.');
 });

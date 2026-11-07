@@ -447,6 +447,28 @@ test('a task done before is done again its way first; the assistant takes over, 
   assert.deepEqual(runs[1], ['make a fresh note in notes', { note: 'The way this was done before stopped at step 1: there was no “New Note” on screen.' }]);
 });
 
+test('in conversation the user\'s own words are the task, the model\'s command how they were taken; only the same words are learned', async () => {
+  const learned = await learnedStore();
+  const runs = [];
+  const assistant = {
+    ready: async () => true,
+    running: false,
+    cancel() {},
+    run: async (goal, options) => (runs.push([goal, options]), { ok: true, text: 'It’s open.', trace: [{ action: { action: 'click' }, app: 'Google Chrome', target: { role: 'button', label: 'Canvas' } }] })
+  };
+  const { runner } = rig({ assistant, learned });
+  // A follow-up: what it agrees to is the model's to say, and the model's words aren't kept.
+  const followed = await runner.run('open my Canvas bookmark', { talking: true, said: 'Sure, go ahead' });
+  assert.deepEqual(runs[0], ['Sure, go ahead', { meant: 'open my Canvas bookmark' }]);
+  assert.deepEqual(followed.outcome, { ok: true, text: 'It’s open.' });
+  assert.equal(await learned.find('open my Canvas bookmark'), null);
+  assert.equal(await learned.find('Sure, go ahead'), null);
+  // The same command both ways: learned, as a spoken one is.
+  const same = await runner.run('open my Canvas bookmark', { talking: true, said: 'Open my Canvas bookmark.' });
+  assert.deepEqual(runs[1], ['Open my Canvas bookmark.', {}]);
+  assert.deepEqual(same.outcome, { ok: true, text: 'It’s open. · Next time, no AI needed.' });
+});
+
 test('a new command ends a task still running, and typing never goes into a password field', async () => {
   let cancelled = 0;
   const assistant = { ready: async () => true, run: async () => ({ ok: true, text: '' }), running: true, cancel: () => (cancelled += 1) };

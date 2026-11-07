@@ -34,8 +34,8 @@ import { runDesktopAgent } from './agent/loop.js';
 import { screenText } from './agent/screen.js';
 import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
-import { installBridge, onMessage, onStorageChanged, post, storage } from './chrome-bridge.js';
-import { askOllama, createConversation, ollamaModels, pickModel, summarize } from './conversation.js';
+import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
+import { askOllama, createConversation, ollamaModels, pickModel, summarize, warmOllama } from './conversation.js';
 import { createConversationLog } from './conversation-log.js';
 import { createDispatcher } from './dispatch.js';
 import { startDriver, toDipFrame, toOsFrame } from './driver.js';
@@ -59,7 +59,7 @@ import { trayModel } from './tray-menu.js';
 import { createVoicePage } from './voice-page.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
-import { closeSafely, createEngineWindow, showCalibration, showSettings, showTalk } from './windows.js';
+import { closeSafely, createEngineWindow, showCalibration, showSettings, showTalk, talkWindow } from './windows.js';
 
 const env = process.env;
 /** Permissions change in System Settings, behind the app's back. */
@@ -251,7 +251,10 @@ function updateListening() {
   log(on ? 'continuous assistant: listening' : 'continuous assistant: stopped');
   if (on) {
     voicePage.open();
-    speech.listen((text, heard) => (teaching ? tookLine(heard) : conversation.heard(text)));
+    speech.listen(
+      (text, heard) => (teaching ? tookLine(heard) : conversation.heard(text)),
+      () => !teaching && conversation.woken()
+    );
   } else {
     speech.stopListening();
     conversation.reset();
@@ -286,6 +289,24 @@ function tookLine({ voice, seconds, score }) {
   teaching.takes.push(voice);
   if (teaching.takes.length >= TEACHING_LINES.length) stopTeaching(teaching.takes);
   else post(desktopState());
+}
+
+/** What ends a task's pill: its last step, left up once the task is over. */
+const TASK_OVER = { type: MSG.VOICE, voice: { phase: 'thinking', done: true } };
+
+/**
+ * The conversation, on the pill: or, with his own window up, only there, where
+ * the orb shows it. Endings go to both, so neither is left showing one. The
+ * assistant's work isn't the conversation's: its pill, and the × beside it,
+ * stay while it works. Its end never reaches the pill, though, for what it did
+ * is said in his window: so the conversation going on after it ends it there.
+ */
+function showConversation(voice) {
+  const message = { type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } };
+  const talk = talkWindow();
+  if (!talk || voice.active === false || voice.done) return post(message);
+  postTo(talk.webContents, message);
+  if (!assistant.running) for (const win of overlays.windows()) postTo(win.webContents, TASK_OVER);
 }
 
 /** Which Ollama model he talks through: the one chosen, or the best that's there. */
@@ -457,6 +478,8 @@ async function onTrayAction(id, checked) {
   switch (id) {
     case 'enabled':
       return saveSettings({ enabled: checked });
+    case 'gestures':
+      return saveSettings({ gesturesEnabled: checked });
     case 'pointer':
       return saveSettings({ pointerEnabled: checked });
     case 'voice':
@@ -535,6 +558,10 @@ function listenToPages() {
       // The window for talking to him. A sentence typed is a command given on purpose.
       case 'jester/talk-type':
         conversation.told(String(message.text).slice(0, 2000));
+        return { ok: true };
+      // Typing to him: his model loads meanwhile, rather than after they press Return.
+      case 'jester/talk-typing':
+        chatModel().then((model) => warmOllama({ model }));
         return { ok: true };
       case 'jester/talk-listen':
         await saveSettings({ continuousAssistant: message.on === true });
@@ -627,6 +654,12 @@ function selfTest(capture) {
     log('selftest: switched off —', (await reach('off')) ? 'engine off' : `engine still ${engine.state}`, '|', await shows());
     await page(`document.getElementById('enabled').click()`);
     log('selftest: switched on —', (await reach('running')) ? 'engine running' : `engine still ${engine.state}`, '|', await shows());
+    // Gestures off closes the camera and leaves voice as it was.
+    const voiceBefore = voiceProblem({ mic: false });
+    await onTrayAction('gestures', false);
+    log('selftest: gestures off —', (await reach('off')) ? `engine off (${engine.detail})` : `engine still ${engine.state}`, '| voice:', voiceProblem({ mic: false }) === voiceBefore ? 'unchanged' : voiceProblem({ mic: false }), '|', await shows());
+    await onTrayAction('gestures', true);
+    log('selftest: gestures on —', (await reach('running')) ? 'engine running' : `engine still ${engine.state}`, '|', await shows());
 
     // Gestures' actions, as far as the driver — and only a dry-run driver,
     // which describes input instead of sending it: never press real keys here.
@@ -976,10 +1009,10 @@ async function start() {
     commands: {
       knows: (text) => voiceRunner.knows(text),
       risky: (text) => voiceRunner.risky(text),
-      run: (text) => voiceRunner.run(text, { talking: true })
+      run: (text, said) => voiceRunner.run(text, { talking: true, said })
     },
     assistant,
-    show: (voice) => post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } }),
+    show: showConversation,
     log
   });
   for (const [event, reason, on] of [['lock-screen', 'locked', true], ['unlock-screen', 'locked', false], ['suspend', 'suspended', true], ['resume', 'suspended', false]]) {

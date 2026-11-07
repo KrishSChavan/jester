@@ -19,6 +19,21 @@ test('the menu says what the engine is doing and offers the switches', () => {
   assert.equal(items.permissions, undefined);
 });
 
+test('gestures switch off on their own, with the camera\'s cursor, and voice carries on', () => {
+  assert.equal(byId(trayModel({ engine: { state: 'running' }, settings: on })).gestures.checked, true);
+  const off = mergeSettings({ enabled: true, pointerEnabled: true, voiceEnabled: true, gesturesEnabled: false });
+  const model = trayModel({ engine: { state: 'off', detail: 'Gestures off' }, settings: off, voice: 'ready' });
+  const items = byId(model);
+  assert.equal(items.gestures.checked, false);
+  assert.equal(items.gestures.enabled, true);
+  assert.equal(items.status.label, 'Gestures off');
+  assert.equal(model.tooltip, 'Jester — Gestures off');
+  assert.equal(items.pointer.enabled, false);
+  assert.equal(items.voice.enabled, true);
+  assert.equal(items.sleep, undefined);
+  assert.equal(byId(trayModel({ engine: { state: 'off' }, settings: { ...off, enabled: false } })).gestures.enabled, false);
+});
+
 test('awake, it offers sleep; asleep, it shows, says how to wake, and offers that', () => {
   assert.equal(byId(trayModel({ engine: { state: 'running' }, settings: on })).sleep.label, 'Put Jester to sleep');
   assert.equal(byId(trayModel({ engine: { state: 'running' }, settings: on })).wake, undefined);

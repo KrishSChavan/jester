@@ -29,13 +29,19 @@ export const STATUS_TEXT = {
  */
 export function trayModel({ engine, settings, missing = [], voice = 'missing', watch = null, platform = process.platform }) {
   const on = !!settings?.enabled;
+  // Off, the camera's closed and voice, the watch and talking to him carry on.
+  const gestures = settings?.gesturesEnabled !== false;
   const asleep = on && engine?.state === ENGINE.SLEEPING;
-  const status = asleep ? `${STATUS_TEXT[ENGINE.SLEEPING]} — ${wakeHint(resumeGlyphs(settings), platform)}` : STATUS_TEXT[engine?.state] || engine?.state || STATUS_TEXT[ENGINE.OFF];
+  const status = asleep
+    ? `${STATUS_TEXT[ENGINE.SLEEPING]} — ${wakeHint(resumeGlyphs(settings), platform)}`
+    : !gestures ? 'Gestures off' : STATUS_TEXT[engine?.state] || engine?.state || STATUS_TEXT[ENGINE.OFF];
   const items = [
     { id: 'status', label: on ? status : 'Jester is off', enabled: false },
     { type: 'separator' },
     { id: 'enabled', label: 'Jester on', type: 'checkbox', checked: on },
-    { id: 'pointer', label: 'Cursor control', type: 'checkbox', checked: !!settings?.pointerEnabled, enabled: on }
+    { id: 'gestures', label: 'Gestures', type: 'checkbox', checked: gestures, enabled: on },
+    // It's the camera's: the watch has its own.
+    { id: 'pointer', label: 'Cursor control', type: 'checkbox', checked: !!settings?.pointerEnabled, enabled: on && gestures }
   ];
   // A quick way to take the watch off the cursor.
   if (watch?.paired) items.push({ id: 'watch', label: 'Steer with Apple Watch', type: 'checkbox', checked: !!settings?.watchEnabled, enabled: on });

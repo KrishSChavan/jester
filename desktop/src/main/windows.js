@@ -134,6 +134,11 @@ export function settingsWindow() {
   return settings && !settings.isDestroyed() ? settings : null;
 }
 
+/** The talk window, if it's up where the user can see it. */
+export function talkWindow() {
+  return talk && !talk.isDestroyed() && talk.isVisible() && !talk.isMinimized() ? talk : null;
+}
+
 let calibration = null;
 const CALIBRATION_PAGE = 'jester://ext/src/calibration/calibration.html';
 
