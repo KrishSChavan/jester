@@ -60,8 +60,10 @@ const HOLD_MS = 300;
  * @param {(text:string, options?:object) => void} deps.toast
  * @param {(...parts:any[]) => void} [deps.log]
  * @param {boolean} [deps.dryRun]  the driver only describes input: the real cursor never moves
+ * @param {(request:{x:number, y:number, radius:number}) => Promise<{x:number, y:number, w:number, h:number}|null>|null} [deps.aimInBrowser]
+ *   the link or button nearest a point, from the linked Chrome extension while its browser is in front (chrome-link.js)
  */
-export function createPointer({ driver, overlays, display, toast, log = () => undefined, dryRun = false }) {
+export function createPointer({ driver, overlays, display, toast, log = () => undefined, dryRun = false, aimInBrowser = () => null }) {
   // With a dry-run driver the real cursor stays put, which would look like a hand on the mouse.
   const whereIsIt = () => (dryRun ? lastSet : screen.getCursorScreenPoint());
   let active = false;
@@ -176,6 +178,11 @@ export function createPointer({ driver, overlays, display, toast, log = () => un
   /** What the click was for: the pressable thing under the aim, or the nearest one around it. */
   async function aim(at, errorPx) {
     const radius = Math.min(MAX_ASSIST_PX, Math.max(MIN_ASSIST_PX, Number(errorPx) || 0));
+    // On a page in the linked Chrome, the extension knows its links better than the accessibility
+    // tree does. Off the page (its tabs, its toolbar), or where Jester doesn't run, the tree it is.
+    const near = await Promise.resolve(aimInBrowser({ x: at.x, y: at.y, radius })).catch(() => null);
+    const snapped = near && chooseTarget([near], at, radius);
+    if (snapped) return snapped;
     const frames = [];
     for (const [i, point] of probePoints(at.x, at.y, radius).entries()) {
       const os = toOsPoint(screen, point);

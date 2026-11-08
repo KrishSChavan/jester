@@ -10,7 +10,9 @@ and with Cursor control on, an open palm raises the real cursor: your eyes or
 head aim it, closing the hand clicks. ☝️ (or ⌥⇧J, or the menu) opens the mic
 for one spoken command, recognized on this computer; what the local matcher
 can't do goes to an AI model of the user's, which works the app in front.
-Linking the extension (phase 5) comes next. Phase 0's answers are below.
+The extension links to it (phase 5, [Chrome](#chrome-the-link)): one camera and
+mic, the extension's gestures with Chrome in front, browser commands done in
+Chrome, and clicks that land on the link aimed at. Phase 0's answers are below.
 
 The menu's Gestures switch (`gesturesEnabled`, on unless set) closes the camera
 and nothing else: voice, the continuous assistant, the watch and the talk window
@@ -46,8 +48,10 @@ front window fills its display.
 | `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it, and what a step changed (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`), the hands (`host.js`) and learned tasks done again (`replay.js`). |
 | `src/main/driver.js`, `native/jester-driver/` | Rust helper for OS input and the accessibility tree, JSON lines over stdio. Also Chrome's native-messaging relay. |
 | `src/main/watch.js`, `watch-status.js`, `native/jester-watch/` | The Apple Watch: its app, the Mac's Swift Bluetooth helper, and steering the cursor with them (Mac only). |
-| `src/main/link.js` | The app's end of the link to the extension. |
-| `spikes/` | Phase 0 experiments. |
+| `src/main/link.js`, `link-host.js`, `chrome-link.js` | The link to the extension: the socket the relay reaches, putting the relay where Chrome can start it, and what's said over it. The extension's half is `../jester-extension/src/background/desktop-link.js`. |
+| `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models). |
+| `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
+| `spikes/` | Phase 0 experiments, and `link-live.mjs`, the link end to end in a throwaway Chrome. |
 
 Tests live with the extension's, in `../tests/desktop-*.test.mjs`, and run with
 `npm test` from the repository root.
@@ -192,10 +196,16 @@ one counts as in front by its program's name (a few that don't say the
 app's are known: PowerPoint is POWERPNT) or by its window's title in whole
 words, never by a name inside another's ("word" in 1Password).
 
-Two recognizers, chosen in Settings › Speech model: **Accurate** (Parakeet
-TDT 0.6B v2, ~650 MB download: `npm run models -- parakeet-0.6b`) and
-**Light** (Parakeet 110M). Without a choice, the most accurate one downloaded
-is used. Accurate holds 1.4–1.9 GB and loads in 1.1–1.5 s; Light holds
+Two recognizers, chosen in Settings › Speech model: **Light** (Parakeet
+110M) and **Accurate** (Parakeet TDT 0.6B v2, ~650 MB download: `npm run
+models -- parakeet-0.6b`). Without a choice, Light is used if it's downloaded.
+On the wake test's 7,920 recordings (twelve `say` voices, his name in 62
+phrases, clean, quiet, noisy and in a room; 2026-11-07), Light heard "Jester"
+78% of the time clean and 67% in the room, against Accurate's 82% and 71%, got
+the request after it word for word 85% and 81% of the time against 88% and
+80%, and fired on other people's sentences no more often. It does worse with
+two British women's voices (45% against 65–68%) and as well or better with the
+rest. Accurate holds 1.4–1.9 GB and loads in 1.1–1.5 s; Light holds
 0.55–0.67 GB, loads in 0.4 s and decodes three to four times faster (16–93 ms
 against 50–375 ms a sentence). Those are macOS's memory footprint, with the
 voiceprint model loaded too, measured 2026-11-07 (the 800 MB given here before
@@ -219,7 +229,7 @@ scripts/speech-bench.mjs` runs a folder of them through any model.
 
 A command the matcher doesn't know ("reply to Sam on Slack", "play Gunna" —
 where the matcher only gets as far as Spotify's search) goes to an AI model
-from Settings › Assistant: the user's own Gemini, Groq, OpenAI, Anthropic or
+ticked for Actions in Settings › Models: the user's own Gemini, Groq, OpenAI, Anthropic or
 OpenAI-compatible key, saved through the extension's `credentials.js` and paced
 through its model pool, as in Chrome. Keys are sealed on disk with the OS
 keychain (macOS) or DPAPI (Windows) via `safeStorage`, and pages never see them
@@ -229,9 +239,9 @@ Ollama is the free choice, and nothing leaves the computer: install it, `ollama
 pull` a model, and pick "Ollama (on this computer)" with the model's name, no
 key. Thinking is turned off for it (left on, it spends the whole output budget
 and returns no reply), replies are held to the schema (plain JSON mode had half
-the plans refused), the model stays loaded for 30 minutes after each request,
-and it gets 30 s where cloud models get 10, since a first request loads it into
-memory. On an M4 Pro `qwen3.5:9b` planned in about 2 to 4 s, 13 s from cold;
+the plans refused), the model stays loaded for 2 minutes after each request (see
+below), and it gets 30 s where cloud models get 10, since a first request loads it
+into memory. On an M4 Pro `qwen3.5:9b` planned in about 2 to 4 s, 13 s from cold;
 `qwen3.5:2b` is quicker but chose the wrong app or step too often to use. Ollama
 refuses extension origins, so Chrome's settings don't offer it.
 
@@ -261,6 +271,42 @@ Labs' accessibility-tree computer use), in `act` (mac.rs, win.rs, protocol.rs):
   clicks the middle, as before. Double and right clicks and drags aim the same
   way.
 
+### Models: talking and actions
+
+Settings › Models gives each saved model two boxes, Talking and Actions, and
+`model-jobs.js` keeps a job to the models ticked for it, in the order saved, so
+one model can talk and another act without using up each other's free requests
+(Gemini's free plan allows a few hundred requests a day, and a chatty evening
+would leave none for the tasks). A model saved before this was a choice acts and
+doesn't talk; a new one acts, and talks only if ticked, since talking sends what
+the user says to its provider. Changing the boxes needs no key typed again
+(`setConnectionUses` in `credentials.js`).
+
+This computer's model (Ollama, the model picked in its row) has the same two
+boxes, both ticked to start with, and takes a job only when no saved model can:
+none is ticked for it, or every one is out of requests for longer than the pool
+will wait (`all_models_rate_limited`). It isn't simply last in line: the pool
+skips a model that's waiting out a free plan's minute, and the next in line would
+then be 7.6 GB of local model loaded to save three seconds. A failure that isn't
+a limit (a refused key) is the user's to see, not covered for.
+
+Talking through a cloud model needed the conversation's earlier turns sent to
+every provider, not only the OpenAI-compatible ones: `model-client.js` now gives
+them to Anthropic, Gemini and OpenAI's Responses API too, alternating and starting
+with the user, as those want, with an unanswered turn of the user's folded into the
+new one. The pool's token estimate counts them. A reply gets 600 tokens (300
+before): Gemini's thinking counts against it, though a reply is a sentence or two.
+
+`npm run talk-check` puts nineteen things people say to him (a joke, "what's
+15 percent of 80", "open my Canvas bookmark and tell me what's due") to each
+model ticked for talking and this computer's, three times each, with the app's
+own prompt and request, and says how often it handed over a command when it
+should have and only then, and how long a turn took. Keys stay sealed: it runs as
+Jester in Electron, so macOS may ask to let it use "Jester Safe Storage", and it
+never prints them. `-- ollama:qwen3.5:9b` checks one local model; `-- saved-all`
+every saved one, ticked or not. On qwen3.5:2b (2026-11-07, one try each): 16 of 19,
+a median turn of 0.4 s.
+
 ### The continuous assistant
 
 Settings › Assistant › Continuous assistant keeps a mic open (`src/voice/`, a
@@ -287,8 +333,9 @@ whole sentence was decoded. The finished utterance still decides; if it wasn't f
 him after all, the listening face goes.
 
 What was said to him (`conversation.js`) goes to the matcher if it's a known
-command, and otherwise to an Ollama model chosen in Settings, which answers and
-can hand back a command. Results are said aloud. Ollama is told to keep the model
+command, and otherwise to the model he talks through (above: this computer's
+Ollama model unless a saved one is ticked for Talking), which answers and can
+hand back a command. Results are said aloud. Ollama is told to keep the model
 for 2 minutes after its last use (`LOCAL_KEEP_ALIVE`), not the 30 the extension
 asks for: the 9B is 7.7 GB of wired memory, which on a 24 GB Mac already in swap
 made everything else crawl while he talked and long after. Commands that could do harm ask
@@ -677,6 +724,62 @@ How it works, and why:
 (`Tests/main.swift`) and steers the real pointer code with a stand-in helper. No
 test reaches a real radio or a real wrist; see check 5 below.
 
+## Chrome: the link
+
+The extension and the app talk through Chrome's native messaging. The user turns
+it on in the extension's Settings › Jester Desktop, whose Link button asks Chrome
+for the optional `nativeMessaging` permission; holding it is the switch. Chrome
+then starts the relay (`jester-driver`, which acts as one when started with an
+extension's origin), the relay reaches the app's socket (`link.js`, a folder only
+this user can open, extensions not named turned away), and the extension says
+hello with what its gestures do. The app answers, and they're linked. If the app
+isn't running, the relay says so and exits, and the extension tries again every
+half minute (`chrome.alarms`): an app can't reach an extension by itself. While
+linked, the open port keeps its service worker awake. Messages are listed at the
+top of `chrome-link.js`.
+
+Linked:
+
+- **One camera and mic.** The extension's engine closes (`ENGINE.LINKED`: a
+  purple ● on its toolbar button, "Jester Desktop is watching and listening" in
+  its popup) and opens again when the link goes. So with Gestures off in the app,
+  there are none in Chrome either.
+- **Chrome's gestures with Chrome in front.** The relay names the browser that
+  started it (its parent process), and while that app is in front the engine goes
+  by the extension's bindings (`engine-host.js`'s `useBindings`), and what they
+  trigger on a page, a tab or a video the extension does (`act`). Sleep, voice and
+  calibration stay the app's.
+- **Browser commands done in Chrome.** A command the matcher doesn't know goes to
+  the extension, rather than to the app's assistant, when Chrome is in front, when
+  its words are the browser's (a bookmark, a tab, a site's address), or when the
+  extension knows the name in "open my …" as a bookmark (`knows`). There it runs
+  as a spoken command would, with its own model, its bookmarks, tabs and pages; its
+  steps show on the app's pill, a step needing an OK is asked by the app (👍, Allow
+  or a spoken yes), and the outcome comes back to be shown or said. The × and
+  "stop" stop it. With no Chrome window in view, the last one used comes forward.
+- **One shortcut, one pill.** ⌥⇧J is the app's; pressed in Chrome under another
+  binding it opens the app's mic too. The extension's pill stays down.
+- **Clicks land on the link aimed at.** A click with Chrome in front asks the
+  extension for the link or button nearest the aim (`link-aim` in `content.js`, its
+  own cursor's `nearestTarget`, in screen points) before trying the accessibility
+  tree. It needs Jester running on the page: the listed sites, or every site with
+  "Also run on every other site".
+
+At each launch the app copies the relay to `~/Library/Application
+Support/Jester/jester-link-relay` and writes `com.jester.desktop.json` into the
+`NativeMessagingHosts` folder of each Chromium browser that's there (Chrome,
+Beta, Canary, Chromium, Brave, Edge, Arc, Vivaldi; `link-host.js`), naming the Web
+Store's Jester and the development copy; `JESTER_LINK_EXTENSIONS` adds more ids.
+Nothing is rewritten unless it changed. A Jester with its own `JESTER_DATA_DIR`
+leaves all of that alone and listens only on a `JESTER_LINK_SOCKET` it's given.
+Windows needs the relay's named pipe and a registry entry: not built yet.
+
+`node spikes/link-live.mjs` checks it end to end in a throwaway headless Chrome
+with the real extension, the real relay and `chrome-link.js`, Chrome's fake camera,
+and nothing installed outside a temp folder: 10 of 10 on 2026-11-07, in 2 s. The
+whole app was also run against it (a scratch harness): "open my canvas course",
+with a bookmark of that name, went to Chrome as its own.
+
 ## Phase 0 results (MacBook Pro, Apple silicon, macOS 26)
 
 | Question | Answer |
@@ -735,6 +838,17 @@ models decode in under 35 ms.
    click something in a window with a sheet open over it (it should refuse,
    naming the sheet). On Windows: a classic Win32 dialog's buttons (the MSAA
    step) and a button behind another window.
+
+7. **The link** (the live check uses a throwaway headless Chrome): in your
+   Chrome, open Jester's Settings › Jester Desktop and click Link; Jester's toolbar
+   button should turn to a purple ● and Jester's Settings › Chrome say Linked. With
+   Chrome in front and Gestures on, a swipe should do what Chrome's Swipes say; "open
+   my Canvas" should open the bookmark, with the steps on the app's pill; and a
+   cursor click near a link should land on it.
+
+8. **Talking through a cloud model**: tick Talking on a saved model in Settings ›
+   Models, then `npm run talk-check` to compare it with this computer's on the same
+   nineteen cases, and talk to him.
 
 ## Things learned the hard way
 

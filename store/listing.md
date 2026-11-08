@@ -152,6 +152,18 @@ On pages where Jester can't show its on-page voice pill, such as Chrome's own pa
 Runs the web searches the user asks for ("search for a USB hub") with their default search engine through chrome.search.query, as if they had typed the query in the address bar.
 ```
 
+`alarms`
+
+```text
+Only while the user has linked Jester to the Jester Desktop app and the app isn't running: an alarm every half minute tries the link again, because an app can't reach an extension by itself. With the link off, or the app running, no alarm is set.
+```
+
+`nativeMessaging` (optional permission)
+
+```text
+Requested only when the user clicks "Link with Jester Desktop" in Settings, and removed by Unlink. It lets the extension exchange messages with the Jester Desktop app on the same computer through its native-messaging host, com.jester.desktop. While linked, the app watches the camera and listens, so the extension's own camera and microphone stay off; the extension tells the app what its gestures are set to do, carries out the browser commands the app hands it (tabs, bookmarks, pages) with the user's own AI provider, and when the app's cursor clicks in Chrome, gives it the position of the nearest link or button on the page in front. The messages stay on the computer.
+```
+
 Host permissions
 
 ```text
@@ -178,6 +190,15 @@ only for that bundled WASM.)
 Leave the rest unticked: personally identifiable, health, financial and
 payment information, personal communications, location.
 
+Linking Jester Desktop (0.2.0) adds no category: its messages go to an app on the
+user's own computer, not off the device.
+
+**What's new in 0.2.0** (for the update's notes): Jester links to Jester Desktop,
+the app for the whole computer. Linked, the app does the watching and listening,
+your Chrome gestures still work with Chrome in front, what you ask the app about
+your browser is done in Chrome, and the app's cursor clicks the link you aimed at.
+Linking is off until you click Link in Settings.
+
 Tick all three certifications. Each is true: data goes only to the AI provider
 the user configures, solely to carry out their commands. It is never sold,
 never used for anything else, and never used for credit or lending.
@@ -196,6 +217,8 @@ Voice: open Settings (toolbar button > "Settings & gestures"), allow the microph
 AI voice tasks need the reviewer's own API key: under "AI assistant" choose Google (Gemini), enter gemini-3.5-flash-lite, paste a free key from https://aistudio.google.com/apikey and click "Add model". Then, on YouTube, press Alt+Shift+J and say "search for lofi music and play the first video".
 
 During a voice task Chrome shows a "started debugging this browser" bar. That's Jester's real mouse and keyboard input, described in the debugger justification.
+
+Settings > Jester Desktop links the extension to Jester Desktop, a separate app; without the app installed, Link asks for the optional native messaging permission and then says the app isn't installed. Nothing else depends on it.
 ```
 
 ## Distribution

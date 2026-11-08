@@ -10,9 +10,8 @@
  */
 
 import { approvalAnswer } from '../../../jester-extension/src/background/browser-intent.js';
-import { createPooledModelClient } from '../../../jester-extension/src/background/model-pool.js';
 import { MSG } from '../../../jester-extension/src/common/constants.js';
-import { clearConnection, connectionSummary, loadConnections, normaliseConnection, saveConnection } from '../../../jester-extension/src/common/credentials.js';
+import { clearConnection, connectionSummary, saveConnection, setConnectionUses } from '../../../jester-extension/src/common/credentials.js';
 import { taskCaption } from './agent/actions.js';
 import { runPlannedAgent } from './agent/executor.js';
 import { createDesktopHost } from './agent/host.js';
@@ -20,6 +19,7 @@ import { planSummary, stepLine } from './agent/plan.js';
 import { replaySteps } from './agent/replay.js';
 import { post } from './chrome-bridge.js';
 import { LOCAL_KEEP_ALIVE } from './conversation.js';
+import { createModelJob } from './model-jobs.js';
 
 /** A question nobody answers is a no. */
 const APPROVAL_MS = 60000;
@@ -56,18 +56,16 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {boolean} [deps.logScreens]  log the screen the model is shown each step: your own
  *   content, so only for debugging (JESTER_LOG_SCREENS)
  * @param {string} [deps.platform]
- * @param {() => Promise<string>} [deps.localModel]  an Ollama model to work with when no model is saved
+ * @param {() => Promise<{model:string, uses:string[]}>} [deps.localModel]  this computer's model, and what it may do (model-jobs.js)
  */
-export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => '' }) {
+export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }) }) {
   const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, quietly, exclude, platform });
-  /** The models saved in Settings, or with none, the one the continuous assistant talks through. */
-  const connections = async () => {
-    const saved = await loadConnections();
-    const local = saved.length ? '' : await localModel();
-    return local ? [{ id: 'ollama-local', ...normaliseConnection({ provider: 'ollama', model: local }), keepAlive: LOCAL_KEEP_ALIVE, cooldownUntil: 0 }] : saved;
-  };
-  const model = createPooledModelClient({
-    load: connections,
+  /** The models set for actions in Settings, and this computer's for when they can't. */
+  const model = createModelJob({
+    job: 'act',
+    local: localModel,
+    keepAlive: LOCAL_KEEP_ALIVE,
+    log,
     onSelected: ({ provider, model: id }) => log('assistant model:', provider, id),
     onLimited: ({ provider, model: id, readyAt }) => log('assistant model limited:', provider, id, 'until', new Date(readyAt).toLocaleTimeString()),
     onPacing: ({ waitMs }) => working(`Waiting ${Math.ceil(waitMs / 1000)} s for the model’s per-minute limit`)
@@ -137,9 +135,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
 
   return {
     /** Whether a model is set up to take commands. */
-    async ready() {
-      return (await connections()).length > 0;
-    },
+    ready: () => model.ready(),
 
     /** Whether a question is waiting on the user. */
     get asking() {
@@ -247,6 +243,31 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
       }
     },
 
+    /**
+     * A task done somewhere else (the linked Chrome extension's, chrome-link.js),
+     * on this pill, stopped like any other: `start` gets the signal that stops it.
+     * @returns {Promise<{ok:boolean, text:string}|null>} null: cancelled
+     */
+    async elsewhere(goal, start) {
+      const task = await begin(taskCaption(goal));
+      working();
+      try {
+        return await start(task.controller.signal);
+      } finally {
+        end(task);
+      }
+    },
+
+    /** What the task done elsewhere is doing now, for the pill. */
+    step(label) {
+      if (current) working(String(label || ''));
+    },
+
+    /** That task's question for the user: 👍, Allow or a spoken yes, as for the assistant's own. */
+    question(label) {
+      return current ? ask(String(label).replace(/[.?!]+$/, ''), current.controller.signal) : Promise.resolve(false);
+    },
+
     get running() {
       return !!current;
     },
@@ -299,7 +320,8 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     connections: {
       list: () => connectionSummary(),
       save: (input) => saveConnection(input),
-      remove: (id) => clearConnection(id)
+      remove: (id) => clearConnection(id),
+      uses: (id, uses) => setConnectionUses(id, uses)
     }
   };
 }

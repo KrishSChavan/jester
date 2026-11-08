@@ -426,3 +426,17 @@ test('Ollama not running says so', async () => {
   await assert.rejects(requestModel({ env: { provider: 'ollama', model: 'qwen3.5:9b' }, system: 'JSON', prompt: 'Play.',
     fetchImpl: async () => { throw new TypeError('fetch failed'); } }), /Ollama isn’t running/);
 });
+
+test('a conversation’s earlier turns reach every provider, alternating and starting with the user', () => {
+  const history = [{ role: 'assistant', content: 'Hello.' }, { role: 'user', content: 'hi' }, { role: 'assistant', content: 'hey' },
+    { role: 'assistant', content: 'how can I help?' }, { role: 'user', content: 'wait' }];
+  const anthropic = JSON.parse(buildModelRequest(config({ provider: 'anthropic', model: 'claude-haiku-5-5' }), { system: 'JSON', prompt: 'and you?', history }).init.body);
+  assert.deepEqual(anthropic.messages, [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hey\nhow can I help?' }, { role: 'user', content: 'wait\nand you?' }]);
+  const gemini = JSON.parse(buildModelRequest(config({ provider: 'google' }), { system: 'JSON', prompt: 'and you?', history }).init.body);
+  assert.deepEqual(gemini.contents.map((turn) => [turn.role, turn.parts[0].text]), [['user', 'hi'], ['model', 'hey\nhow can I help?'], ['user', 'wait\nand you?']]);
+  const openai = JSON.parse(buildModelRequest(config({ provider: 'openai' }), { system: 'JSON', prompt: 'and you?', history }).init.body);
+  assert.deepEqual(openai.input, [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hey\nhow can I help?' }, { role: 'user', content: 'wait\nand you?' }]);
+  // Without any, the request is as it always was.
+  assert.equal(JSON.parse(buildModelRequest(config({ provider: 'openai' }), { system: 'JSON', prompt: 'Task' }).init.body).input, 'Task');
+  assert.equal(JSON.parse(buildModelRequest(config({ provider: 'anthropic', model: 'claude-haiku-5-5' }), { system: 'JSON', prompt: 'Task' }).init.body).messages.length, 1);
+});

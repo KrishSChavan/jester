@@ -232,11 +232,11 @@ test('with the assistant but no model saved, the pill says where to add one', as
   });
   assert.deepEqual((await runner.run('Open system settings and turn on dark mode.')).outcome, {
     ok: false,
-    text: '“turn on dark mode” needs the assistant: add an AI model in Jester’s Settings › Assistant. Nothing was done.'
+    text: '“turn on dark mode” needs a model for actions: choose one in Jester’s Settings › Models. Nothing was done.'
   });
   assert.deepEqual((await runner.run('Open Spotify and play Gunna')).outcome, {
     ok: true,
-    text: 'Switched to Spotify · Searching Spotify for “gunna”: pick one to play. To have Jester press Play, add an AI model in Settings › Assistant.'
+    text: 'Switched to Spotify · Searching Spotify for “gunna”: pick one to play. To have Jester press Play, choose a model for actions in Settings › Models.'
   });
 
   let asked = null;

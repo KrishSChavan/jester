@@ -102,10 +102,6 @@
             <button id="voice-print-forget" type="button" hidden>Forget</button>
           </span>
         </div>
-        <label class="row">
-          <span><strong>Talks through</strong><small id="chat-model-hint"></small></span>
-          <select id="assistantModel"></select>
-        </label>
         <div class="row">
           <span><strong>Jester’s voice</strong><small id="puter-hint"></small><small id="puter-error" class="error" role="alert"></small></span>
           <button id="puter-connect" type="button"></button>
@@ -115,8 +111,27 @@
           <button id="forget-conversations" type="button">Forget it all</button>
         </div>
       </div>
-      <p class="intro">Commands Jester doesn’t know (“play Gunna”, “reply to Sam on Slack”) go to an AI model of yours, which works the app in front step by step. To do that, the names and text of that window’s controls go to the model’s provider. It asks you first before anything that sends, buys, deletes or changes settings — answer with 👍, the pill’s Allow, or by saying yes — and never types into password fields.</p>
+    </section>
+
+    <section aria-labelledby="models-heading">
+      <h2 id="models-heading">Models</h2>
+      <p class="intro">A model does two jobs for Jester: <strong>talking</strong> with you, and <strong>actions</strong>, working the app in front step by step on commands he doesn’t know (“play Gunna”, “reply to Sam on Slack”), so the names and text of that window’s controls go to it. Tick what each model does, so one can talk and another act without using up each other’s free requests. A job tries its models in order, then this computer’s when none of them can.</p>
+      <div class="cards" id="model-jobs">
+        <div class="row"><span><strong>Talking</strong><small id="job-talk"></small></span></div>
+        <div class="row"><span><strong>Actions</strong><small id="job-act"></small></span></div>
+      </div>
       <div class="cards" id="connections"></div>
+      <div class="cards" id="local-model">
+        <div class="row model">
+          <span><strong>This computer (Ollama)</strong><small id="chat-model-hint"></small></span>
+          <span class="controls">
+            <select id="assistantModel" aria-label="This computer’s model"></select>
+            <label class="use"><input type="checkbox" id="local-talk" />Talking</label>
+            <label class="use"><input type="checkbox" id="local-act" />Actions</label>
+          </span>
+        </div>
+      </div>
+      <p class="intro">For actions, Jester asks you first before anything that sends, buys, deletes or changes settings — answer with 👍, the pill’s Allow, or by saying yes — and never types into password fields.</p>
       <form id="connection-form" class="cards">
         <label class="row">
           <span><strong>Provider</strong></span>
@@ -142,10 +157,27 @@
           </select>
         </label>
         <div class="row">
+          <span><strong>Use for</strong><small id="connection-uses-hint">A model that talks hears what you say to him, so it goes to its provider.</small></span>
+          <span class="controls">
+            <label class="use"><input type="checkbox" id="connection-talk" />Talking</label>
+            <label class="use"><input type="checkbox" id="connection-act" checked />Actions</label>
+          </span>
+        </div>
+        <div class="row">
           <span id="connection-error" class="error" role="alert"></span>
           <button id="connection-add" type="submit" class="primary">Add model</button>
         </div>
       </form>
+    </section>
+
+    <section aria-labelledby="chrome-heading">
+      <h2 id="chrome-heading">Chrome</h2>
+      <div class="cards">
+        <div class="row">
+          <span><strong id="chrome-link-title">Jester in Chrome</strong><small id="chrome-link-hint"></small></span>
+          <span id="chrome-link-state" class="value"></span>
+        </div>
+      </div>
     </section>
 
     <section aria-labelledby="gestures-heading">

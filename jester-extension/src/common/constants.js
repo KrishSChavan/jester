@@ -276,7 +276,9 @@ export const ENGINE = {
   // Watching for exactly one gesture — the one that put it here. @see ACTIONS.SLEEP
   SLEEPING: 'sleeping',
   NO_PERMISSION: 'no-permission',
-  ERROR: 'error'
+  ERROR: 'error',
+  // Jester Desktop has the camera and mic: this engine stays shut while it does. @see desktop-link.js
+  LINKED: 'linked'
 };
 
 export const POINTER_AIMS = {

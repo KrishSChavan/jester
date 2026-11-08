@@ -764,6 +764,8 @@ const electron = `data:text/javascript,
 const pool = `data:text/javascript,
   export const createPooledModelClient = () => (request) => globalThis.jesterModel(request);`;
 globalThis.jesterPages = [overlay];
+// One saved model for actions (model-jobs.js): which, doesn't matter, as the pool above answers.
+globalThis.chrome = { storage: { local: { get: async () => ({ modelConnections: [{ id: 'm', provider: 'groq', model: 'any', key: 'k', uses: ['act'] }] }), set: async () => undefined, remove: async () => undefined } } };
 registerHooks({
   resolve: (specifier, context, next) => {
     if (specifier === 'electron') return { url: electron, shortCircuit: true };

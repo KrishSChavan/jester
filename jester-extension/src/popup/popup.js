@@ -33,7 +33,8 @@ const STATUS_TEXT = {
   [ENGINE.SUSPENDED]: 'Paused — no video tab',
   [ENGINE.SLEEPING]: 'Asleep',
   [ENGINE.NO_PERMISSION]: 'Camera access needed',
-  [ENGINE.ERROR]: 'Something went wrong'
+  [ENGINE.ERROR]: 'Something went wrong',
+  [ENGINE.LINKED]: 'Jester Desktop is watching and listening'
 };
 
 const DOT_CLASS = {
@@ -42,7 +43,8 @@ const DOT_CLASS = {
   [ENGINE.SUSPENDED]: 'starting',
   [ENGINE.SLEEPING]: 'starting',
   [ENGINE.NO_PERMISSION]: 'error',
-  [ENGINE.ERROR]: 'error'
+  [ENGINE.ERROR]: 'error',
+  [ENGINE.LINKED]: 'running'
 };
 
 let previewSeenAt = 0;

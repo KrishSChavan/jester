@@ -659,6 +659,43 @@ fullscreenMode.addEventListener('change', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// Jester Desktop: the link is the nativeMessaging permission, asked for here
+// (a user's click) and dropped by unlinking. The worker connects.
+// ---------------------------------------------------------------------------
+
+const NATIVE = { permissions: ['nativeMessaging'] };
+const desktopText = document.getElementById('desktopText');
+const desktopDot = document.getElementById('desktopDot');
+const desktopLinkBtn = document.getElementById('desktopLinkBtn');
+const LINK_TEXT = {
+  off: 'Not linked.',
+  missing: 'Jester Desktop isn’t installed here, or hasn’t been opened since it was.',
+  waiting: 'Linked: waiting for Jester Desktop to start.',
+  linked: 'Linked: Jester Desktop is watching and listening.'
+};
+
+function renderDesktop({ state = 'off', detail = '' } = {}) {
+  desktopText.textContent = state === 'missing' ? LINK_TEXT.missing : LINK_TEXT[state] || detail || LINK_TEXT.off;
+  desktopDot.className = `dot${state === 'linked' ? ' running' : state === 'off' ? '' : ' starting'}`;
+  desktopLinkBtn.textContent = state === 'off' ? 'Link with Jester Desktop' : 'Unlink';
+  desktopLinkBtn.classList.toggle('primary', state === 'off');
+}
+
+async function refreshDesktop() {
+  renderDesktop(await chrome.runtime.sendMessage({ type: 'jester/desktop-link', op: 'state' }).catch(() => ({})));
+}
+
+desktopLinkBtn.addEventListener('click', async () => {
+  if (await chrome.permissions.contains(NATIVE)) await chrome.permissions.remove(NATIVE);
+  else if (await chrome.permissions.request(NATIVE)) await chrome.runtime.sendMessage({ type: 'jester/desktop-link', op: 'connect' }).catch(() => undefined);
+  refreshDesktop();
+});
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'jester/desktop-link') renderDesktop(message);
+});
+refreshDesktop();
+
+// ---------------------------------------------------------------------------
 // Optional "run everywhere" permission
 // ---------------------------------------------------------------------------
 

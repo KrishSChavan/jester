@@ -17,7 +17,8 @@ import { abortableDelay, supportsImages } from './model-client.js';
 import { webPage, requiresConfirmation } from '../common/agent-permissions.js';
 import { BROWSER_READS } from '../common/agent-actions.js';
 import { createBrowserTools, publicAddress } from './browser-tools.js';
-import { approvalAnswer } from './browser-intent.js';
+import { approvalAnswer, parseBrowserIntent, quickBrowserAction, spokenCommand } from './browser-intent.js';
+import { createDesktopLink, desktopBindings } from './desktop-link.js';
 import { siteOf } from '../common/sites.js';
 import { loadCalibration, clearCalibration } from '../common/gaze-store.js';
 import { fromJester, fromEngine, fromPage } from '../common/senders.js';
@@ -117,6 +118,13 @@ async function runSync() {
     await closeOffscreen();
     return;
   }
+  // Jester Desktop has the camera and mic while it's linked: this engine stays shut.
+  await desktop.ready();
+  if (desktop.linked) {
+    if (await hasOffscreen()) await closeOffscreen();
+    setStatus({ state: ENGINE.LINKED, detail: '' });
+    return;
+  }
   const alreadyRunning = await hasOffscreen();
   await ensureOffscreen();
   if (!alreadyRunning) armWatchdog();
@@ -153,7 +161,8 @@ const BADGE = {
   [ENGINE.SUSPENDED]: { text: '❙❙', color: '#64748b' },
   [ENGINE.SLEEPING]: { text: 'Zz', color: '#64748b' },
   [ENGINE.NO_PERMISSION]: { text: '!', color: '#ef4444' },
-  [ENGINE.ERROR]: { text: '!', color: '#ef4444' }
+  [ENGINE.ERROR]: { text: '!', color: '#ef4444' },
+  [ENGINE.LINKED]: { text: '●', color: '#8b5cf6' }
 };
 
 function setStatus(status) {
@@ -831,6 +840,8 @@ async function dispatchAction(action, meta) {
 
   if (scope === 'system') {
     if (action === 'VOICE_CAPTURE_TOGGLE') {
+      // Linked, Jester Desktop's mic is the one: it hears the command, and hands back what's Chrome's.
+      if (desktop.voice()) return {ok:true,detail:'Jester Desktop is listening'};
       // Any page you're looking at, Chrome's own included: tab commands work everywhere.
       if (!(await visibleTab())) return {ok:false,detail:'Bring a Chrome window to the front to use voice.'};
       const settings = await getSettings();
@@ -1259,6 +1270,8 @@ function setPill(tabId, voice) {
     voice.phase === 'answer'
       ? Date.now() + ANSWER_MS + (voice.ok === false ? ANSWER_ERROR_EXTRA_MS : 0)
       : 0;
+  // Linked, Jester Desktop's pill is the one, wherever the task's tab is.
+  if (desktop.linked) return Promise.resolve({ok:desktop.pill(voice)});
   if (tabId === null) return Promise.resolve();
   return sendToFrame({ tabId, frameId: 0 }, { type: MSG.VOICE, voice });
 }
@@ -1337,6 +1350,14 @@ function clearApproval(approved = false) {
 
 async function requestApproval(run, label) {
   if (run.signal.aborted) return false;
+  // Linked, Jester Desktop asks, and hears the yes or no; the popup can still answer.
+  if (desktop.linked) return new Promise(resolve => {
+    const id = crypto.randomUUID();
+    approval = {id,label:String(label).slice(0,400),resolve,timer:setTimeout(() => clearApproval(false),60000)};
+    run.signal.addEventListener('abort',() => clearApproval(false),{once:true});
+    publishApproval();
+    desktop.ask(label,run.signal).then(yes => { if (approval?.id === id) clearApproval(yes); });
+  });
   const action = String(label).replace(/\s+/g, ' ').trim().slice(0, 80);
   await showPill(run,{phase:'thinking',step:`Allow “${action}”? Say yes or no.`},{notify:true});
   if (run.signal.aborted || assistantRun !== run) return false;
@@ -1658,33 +1679,41 @@ async function executeReal(run,action,options) {
     return fallBack();
   }
 }
-async function handleVoiceCommand(text, explicitResume = false) {
+/**
+ * `fromDesktop`: Jester Desktop heard it and hands it over (desktop-link.js); its pill
+ * shows the task, and it says the outcome, which this returns: {ok, say}, or null.
+ */
+async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = false} = {}) {
   const command = String(text || '').trim().slice(0,2000);
-  if (!command && !explicitResume) return;
+  if (!command && !explicitResume) return null;
   // The answer to "Allow …? Say yes or no." Anything else is a new request, and not a yes.
   if (approval && !explicitResume) {
     const answer = approvalAnswer(command);
     if (assistantRun && answer !== 'yes') assistantRun.declined = true;
     clearApproval(answer === 'yes');
-    if (answer) return;
+    if (answer) return null;
   }
   await taskReady;
   const settings = await getSettings();
-  if (!settings.enabled || !settings.voiceEnabled) return;
+  // Jester Desktop's mic heard it, whatever this one's voice switch says.
+  if (!settings.enabled) return fromDesktop ? {ok:false,say:'Jester is off in Chrome: turn it on from its toolbar button.'} : null;
+  if (!settings.voiceEnabled && !fromDesktop) return null;
   cancelAssistant();
   // Whatever tab you're looking at, Chrome's own pages included: browser commands work there.
   const tab = await visibleTab();
   const tabId = tab?.id ?? null;
   const resume = explicitResume ? pausedTask() : continuation(command,tabId);
   if ((explicitResume || CONTINUE.test(command)) && (!resume || resume.tabId !== tabId)) {
-    await reply(tabId,{phase:'answer',text:'There is no task to resume on this tab.',ok:false}); return;
+    const say = 'There is no task to resume on this tab.';
+    if (!fromDesktop) await reply(tabId,{phase:'answer',text:say,ok:false});
+    return {ok:false,say};
   }
   // A new request replaces whatever was paused; its goal is the only one now.
   if (!resume) await dropTask();
-  if (!tab) return;
+  if (!tab) return fromDesktop ? {ok:false,say:'No Chrome window is open.'} : null;
   const controller = new AbortController();
   // `tabId` changes as the task opens and switches tabs.
-  const run = {tabId,goal:resume?.goal || command,signal:controller.signal,abort:() => controller.abort()};
+  const run = {tabId,goal:resume?.goal || command,signal:controller.signal,abort:() => controller.abort(),fromDesktop};
   assistantRun = run;
   // `resumableAt` is when the task can next make progress; its minute starts then.
   const persist = async (snapshot, resumableAt = 0) => {
@@ -1738,7 +1767,7 @@ async function handleVoiceCommand(text, explicitResume = false) {
       }});
     }
   } catch (err) { result = {ok:false,say:String(err?.message || err).slice(0,350)}; }
-  if (assistantRun !== run) return;
+  if (assistantRun !== run) return null;
   // The debugging bar is only for the length of a task.
   await realInput.release(run.tabId);
   await rememberCommand(resume?.goal || command,result);
@@ -1751,8 +1780,11 @@ async function handleVoiceCommand(text, explicitResume = false) {
   assistantRun = null;
   clearApproval(false);
   const said = result.say || (run.declined ? 'Okay, I didn’t do that.' : result.ok ? 'Done.' : 'The task stopped.');
-  await reply(run.tabId,{phase:'answer',text:said,ok:!!result.ok});
+  // Jester Desktop says how it went, on its own pill.
+  if (!fromDesktop) await reply(run.tabId,{phase:'answer',text:said,ok:!!result.ok});
+  else releaseBadge();
   await recordAction({source:'voice',action:'ASSISTANT',label:`Voice: ${(resume?.goal || command).slice(0,70)}`,ok:!!result.ok,detail:said});
+  return {ok:!!result.ok,say:said};
 }
 
 // ---------------------------------------------------------------------------
@@ -1910,6 +1942,71 @@ function allowed(type,sender) {
 }
 
 // ---------------------------------------------------------------------------
+// Jester Desktop, linked (desktop-link.js). It has the camera and mic; this
+// carries out what's Chrome's: the commands it hands over, a gesture's action
+// with Chrome in front, and finding the link a click was aimed at.
+// ---------------------------------------------------------------------------
+
+/** Whether a command is Chrome's to do: a tab or page command, a site, or a bookmark by its name. */
+async function browserKnows(text) {
+  const command = spokenCommand(text);
+  if (!command) return false;
+  if (quickBrowserAction(command)) return true;
+  const intent = parseBrowserIntent(command);
+  if (!intent) return false;
+  if (intent.kind !== 'open' || intent.url) return true;
+  const named = String(intent.name || '').replace(/\s+bookmark$/i, '');
+  const found = named ? await chrome.bookmarks.search(named).catch(() => []) : [];
+  return found.some(node => !!node.url);
+}
+
+/** The link or button nearest a point on the screen, as the page in front finds it, in screen points. */
+async function aimAt({x, y, radius}) {
+  const tab = await visibleTab();
+  if (!tab || !injectable(tab.url) || ![x, y, radius].every(Number.isFinite)) return null;
+  const zoom = await chrome.tabs.getZoom(tab.id).catch(() => 1);
+  const found = await chrome.tabs.sendMessage(tab.id,{type:'jester/link-aim',x,y,radius,zoom},{frameId:0}).catch(() => null);
+  return found?.frame || null;
+}
+
+/** The app's command is about Chrome: with no window of it in view, the last one used comes forward. */
+async function bringChromeForward() {
+  if (await visibleTab()) return;
+  const last = await chrome.windows.getLastFocused({windowTypes:['normal']}).catch(() => null);
+  if (last?.id === undefined) return;
+  await chrome.windows.update(last.id,{focused:true,...(last.state === 'minimized' ? {state:'normal'} : {})}).catch(() => undefined);
+  invalidateActiveTab();
+}
+
+const desktop = createDesktopLink({
+  version: chrome.runtime.getManifest?.().version || '',
+  settings: getSettings,
+  task: async (_id, text) => {
+    await bringChromeForward();
+    return handleVoiceCommand(text,false,{fromDesktop:true});
+  },
+  cancel: () => cancelAssistant(),
+  request: async (op, args) => {
+    if (op === 'knows') return browserKnows(args.text);
+    if (op === 'aim') return aimAt(args);
+    if (op === 'act') {
+      // What Chrome does: Jester Desktop does sleep, voice and calibration itself.
+      const scope = ACTIONS[args.action]?.scope;
+      if (!scope || scope === 'os' || scope === 'system') return {ok:false,detail:'Not an action for Chrome'};
+      return dispatchAction(String(args.action),{source:String(args.source || 'pose'),gesture:String(args.gesture || '')});
+    }
+    return null;
+  },
+  onChange: (state) => {
+    post({type:'jester/desktop-link',state,detail:desktop.detail});
+    // The camera and mic change hands.
+    syncEngine();
+    // A task Jester Desktop handed over ends with the link: it was waiting for the outcome.
+    if (state !== 'linked' && assistantRun?.fromDesktop) cancelAssistant();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -1937,6 +2034,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'jester/resume-task':
       handleVoiceCommand('keep going',true).catch(err => console.warn('[jester] resume failed',err));
       sendResponse({ok:true}); return false;
+    case 'jester/desktop-link':
+      if (message.op === 'connect') desktop.start();
+      sendResponse({ok:true,state:desktop.state,detail:desktop.detail}); return false;
     case MSG.VOICE_CONTROL:
       // Offscreen receives extension messages directly; never relay twice.
       sendResponse({ok:true}); return false;
@@ -2107,6 +2207,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.gazeCalibration) loadCalibration().then(calibration => post({type:MSG.CALIBRATION_MODEL,calibration}));
   if (!changes.settings) return;
   settingsCache = mergeSettings(changes.settings.newValue);
+  // What gestures do in Chrome, for Jester Desktop to do the same.
+  if (JSON.stringify(desktopBindings(mergeSettings(changes.settings.oldValue))) !== JSON.stringify(desktopBindings(settingsCache))) desktop.settingsChanged(settingsCache);
   if (changes.settings.oldValue?.agentPermissionBoundary !== settingsCache.agentPermissionBoundary || !settingsCache.voiceEnabled) cancelAssistant();
   // The offscreen document has no storage listener of its own — push to it.
   // If it isn't up yet, syncEngine() below starts it and it asks us directly.
@@ -2185,7 +2287,10 @@ chrome.windows.onBoundsChanged.addListener(() => {
 
 chrome.windows.onRemoved.addListener((windowId) => restoreWindowState.delete(windowId));
 
-chrome.runtime.onStartup.addListener(() => syncEngine());
+chrome.runtime.onStartup.addListener(() => {
+  desktop.start();
+  syncEngine();
+});
 
 // The keyboard shortcut (Alt+Shift+J by default; chrome://extensions/shortcuts changes it).
 chrome.commands?.onCommand?.addListener((command) => {
@@ -2204,6 +2309,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 chrome.storage.local.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'}).catch(() => undefined);
 chrome.storage.session.setAccessLevel?.({accessLevel:'TRUSTED_CONTEXTS'}).catch(() => undefined);
 
-// A cold worker start (e.g. after idle eviction) should re-assert the engine.
+// A cold worker start (e.g. after idle eviction) should re-assert the engine,
+// once it's known whether Jester Desktop has the camera.
+desktop.start();
 syncEngine();
 refreshContext();

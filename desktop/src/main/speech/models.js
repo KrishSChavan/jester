@@ -91,10 +91,15 @@ export const SPEECH_MODELS = {
 export const VOICE_MODEL = path.join(MODELS_DIR, 'nemo_en_titanet_small.onnx');
 export const VAD_MODEL = path.join(MODELS_DIR, 'silero_vad.onnx');
 
-/** The models Settings offers, most accurate first: without a choice, the first one downloaded. */
+/**
+ * The models Settings offers: without a choice, the first one downloaded. Light
+ * first: over 7,920 recordings of twelve voices it heard his name within a few
+ * points of Accurate, and what followed it as well, for a third of the memory
+ * (README, 2026-11-07).
+ */
 export const SPEECH_CHOICES = [
-  { id: 'parakeet-0.6b', label: 'Accurate', hint: 'Fewer mistakes. Holds about 1.5 GB of memory while in use.' },
-  { id: 'parakeet-110m', label: 'Light', hint: 'About a third of the memory, and quicker to load and to hear you, with a few more mistakes.' }
+  { id: 'parakeet-110m', label: 'Light', hint: 'Hears you about as well as Accurate, quicker, with a third of the memory (about 0.6 GB).' },
+  { id: 'parakeet-0.6b', label: 'Accurate', hint: 'A few more of your words right, for about 1.5 GB of memory while in use.' }
 ];
 
 /** Whether a model, and the voice-activity detector it needs, are downloaded. */

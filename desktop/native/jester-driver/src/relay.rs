@@ -6,10 +6,12 @@
 //! lines. This just carries messages across, both ways, until either side
 //! goes away.
 //!
-//! The first line the app sees is `{"type":"jester/relay-hello","origin":...}`,
+//! The first line the app sees is `{"type":"jester/relay-hello","origin":...,"browser":...}`,
 //! with the calling extension's origin as Chrome gave it, so the app can
-//! refuse an extension it doesn't know. If the app isn't running, the
-//! extension gets one `jester/link-error` message and the port closes.
+//! refuse an extension it doesn't know, and the browser's process (the one
+//! that started this), so the app knows which app in front is the linked one.
+//! If the app isn't running, the extension gets one `jester/link-error` message
+//! and the port closes.
 
 use serde_json::json;
 use std::io::Write;
@@ -66,7 +68,8 @@ pub fn run(origin: Option<String>) -> i32 {
         Ok(stream) => stream,
         Err(_) => return 1,
     };
-    if writeln!(to_app, "{}", json!({ "type": "jester/relay-hello", "origin": origin })).is_err() {
+    let browser = std::os::unix::process::parent_id();
+    if writeln!(to_app, "{}", json!({ "type": "jester/relay-hello", "origin": origin, "browser": browser })).is_err() {
         return 1;
     }
 

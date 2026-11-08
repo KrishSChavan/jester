@@ -39,7 +39,7 @@ export function hostManifest({ relayPath, origins }) {
  * @param {string} [options.socketPath]
  * @param {string[]|null} [options.allowedOrigins]  null: any extension (tests only)
  * @param {(message:object, origin:string) => void} [options.onMessage]
- * @param {(origin:string) => void} [options.onConnect]
+ * @param {(origin:string, hello:{browser?:number}) => void} [options.onConnect]  hello: the relay's, with the browser's process
  * @param {() => void} [options.onDisconnect]
  */
 export function startLink({ socketPath = defaultSocketPath(), allowedOrigins = null, onMessage, onConnect, onDisconnect } = {}) {
@@ -68,7 +68,7 @@ export function startLink({ socketPath = defaultSocketPath(), allowedOrigins = n
         origin = String(message.origin);
         current?.destroy();
         current = socket;
-        onConnect?.(origin);
+        onConnect?.(origin, { browser: Number.isInteger(message.browser) ? message.browser : null });
         return;
       }
       if (socket === current) onMessage?.(message, origin);

@@ -3158,6 +3158,18 @@
         sendResponse(result || {ok:false,native:false,detail:'Real input is unavailable on this page.'});
         return false;
       }
+      case 'jester/link-aim': {
+        // Jester Desktop's cursor, clicking: the link or button its aim was nearest,
+        // found as this page's own cursor finds it, given back in screen points.
+        if (Number.isFinite(message.zoom) && message.zoom > 0) pageZoom = message.zoom;
+        const page = pageOrigin(true);
+        const px = page ? (message.x - page.x) / pageZoom : -1;
+        const py = page ? (message.y - page.y) / pageZoom : -1;
+        if (!page || px < 0 || py < 0 || px >= window.innerWidth || py >= window.innerHeight) { sendResponse({ok:true,frame:null}); return false; }
+        const rect = nearestTarget(px, py, message.radius / pageZoom).best?.el.getBoundingClientRect();
+        sendResponse({ok:true,frame:rect ? {x:page.x + rect.left * pageZoom,y:page.y + rect.top * pageZoom,w:rect.width * pageZoom,h:rect.height * pageZoom} : null});
+        return false;
+      }
       case 'jester/cursor-target': {
         if (!cursorVisible) { sendResponse({ok:false,detail:'Raise your palm to show the eye/head cursor first.'}); return false; }
         const rect = aimed?.el?.getBoundingClientRect();

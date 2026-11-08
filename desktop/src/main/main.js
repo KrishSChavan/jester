@@ -23,24 +23,30 @@
  *                             launching through `open` for Accessibility: dev:mac)
  *   JESTER_CAPTURE=file.png   with SELFTEST: save a picture of the whole page
  *   JESTER_THEME=light|dark   override the system's appearance
+ *   JESTER_LINK_SOCKET=path   listen for the Chrome extension here (with DATA_DIR, the only way it listens)
+ *   JESTER_NO_LINK=1          no link to the Chrome extension
  */
 
 import { app, BrowserWindow, globalShortcut, nativeTheme, powerMonitor, safeStorage, screen, session, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
+import { ACTIONS, ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
 import { createDesktopHost } from './agent/host.js';
 import { runDesktopAgent } from './agent/loop.js';
 import { screenText } from './agent/screen.js';
 import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
-import { askOllama, createConversation, ollamaModels, pickModel, summarize, warmOllama } from './conversation.js';
+import { createChromeLink } from './chrome-link.js';
+import { askModel, createConversation, LOCAL_KEEP_ALIVE, ollamaModels, pickModel, summarize, warmOllama } from './conversation.js';
 import { createConversationLog } from './conversation-log.js';
 import { createDispatcher } from './dispatch.js';
-import { startDriver, toDipFrame, toOsFrame } from './driver.js';
+import { driverPath, startDriver, toDipFrame, toOsFrame } from './driver.js';
 import { desktopSettings, loadSettings, startEngineHost } from './engine-host.js';
 import { createLearned } from './learned.js';
+import { startLink } from './link.js';
+import { installLinkHost, linkOrigins } from './link-host.js';
+import { createModelJob, localUses } from './model-jobs.js';
 import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
@@ -114,6 +120,16 @@ let conversation = null;
 let recollections = null;
 let speaker = null;
 let voicePage = null;
+/** The model he talks through (model-jobs.js). */
+let talking = null;
+/** The Chrome extension, linked (chrome-link.js), and where Chrome finds the relay to it. */
+let chromeLink = null;
+let linkHost = null;
+let linkTransport = null;
+/** The linked browser is in front: gestures do what the extension's settings say, and it does them. */
+let browserMode = false;
+/** What a gesture does with Chrome in front that the extension does, rather than the app. */
+const CHROME_SCOPES = new Set(['video', 'page', 'browser', 'window']);
 /** Whether the always-on mic is open. */
 let listening = false;
 /** Why it's closed for the moment, whatever the setting says: 'locked', 'suspended'. */
@@ -202,6 +218,12 @@ function desktopState() {
       puterTrouble,
       knowsYou: !!voiceprint,
       teaching: teaching ? { line: TEACHING_LINES[teaching.takes.length], done: teaching.takes.length, of: TEACHING_LINES.length } : null
+    },
+    chrome: {
+      linked: !!chromeLink?.linked,
+      version: chromeLink?.version || '',
+      browsers: linkHost?.browsers || [],
+      why: linkHost?.why || ''
     },
     fakeMedia: !!env.JESTER_FAKE_MEDIA
   };
@@ -309,9 +331,63 @@ function showConversation(voice) {
   if (!assistant.running) for (const win of overlays.windows()) postTo(win.webContents, TASK_OVER);
 }
 
-/** Which Ollama model he talks through: the one chosen, or the best that's there. */
+/** This computer's model (Ollama): the one chosen, or the best that's there. */
 async function chatModel() {
   return settings?.assistantModel || pickModel((await ollamaModels()).models);
+}
+
+/** This computer's model, and the jobs Settings › Models lets it do. */
+const localModel = async () => ({ model: await chatModel(), uses: localUses(settings) });
+
+/**
+ * The link to the Chrome extension: the relay put where Chrome can start it,
+ * then the app listening for it. A Jester with its own JESTER_DATA_DIR (a test)
+ * leaves the user's browsers and the real Jester's socket alone: it listens
+ * only on a JESTER_LINK_SOCKET it's given. JESTER_NO_LINK: no link at all.
+ */
+function startChromeLink() {
+  const testing = !!env.JESTER_DATA_DIR;
+  if (env.JESTER_NO_LINK || (testing && !env.JESTER_LINK_SOCKET)) return;
+  if (!testing) {
+    try {
+      linkHost = installLinkHost({ relaySource: driverPath() });
+      log('chrome link:', linkHost.why || `relay for ${linkHost.browsers.join(', ') || 'no browser yet'}${linkHost.changed ? ' (updated)' : ''}`);
+    } catch (err) {
+      linkHost = { browsers: [], why: err.message };
+      log('chrome link: not installed:', err.message);
+    }
+  }
+  chromeLink = createChromeLink({
+    send: (message) => !!linkTransport?.send(message),
+    version: app.getVersion(),
+    onChange: () => {
+      useBrowserBindings();
+      refresh();
+    },
+    // The extension's task, on this pill: the steps of one handed to it, as the assistant's own
+    // are; one it began itself (its popup's "keep going") shows as it would have in Chrome.
+    onPill: (voice) => {
+      if (!assistant.running) post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } });
+      else if (voice.phase === 'thinking') assistant.step(voice.step);
+    },
+    onAsk: (label) => assistant.question(label),
+    onVoice: () => onJester('voice'),
+    log
+  });
+  linkTransport = startLink({
+    ...(env.JESTER_LINK_SOCKET ? { socketPath: env.JESTER_LINK_SOCKET } : {}),
+    allowedOrigins: linkOrigins(),
+    onConnect: (origin, hello) => chromeLink.connected(origin, hello),
+    onMessage: (message) => chromeLink.message(message),
+    onDisconnect: () => chromeLink.disconnected()
+  });
+  linkTransport.ready.catch((err) => log('chrome link: can’t listen:', err.message));
+}
+
+/** With the linked browser in front, the engine goes by the extension's gestures; otherwise, the app's. */
+function useBrowserBindings() {
+  const using = browserMode && !!chromeLink?.linked;
+  engineHost?.useBindings(using ? chromeLink.bindings() : null);
 }
 
 /** jester-driver, restarted if it dies. JESTER_DRIVER_DRY=1: it describes input instead of sending it. */
@@ -443,6 +519,12 @@ function watchFront() {
       // Not Jester itself: its own windows have nothing to aim at.
       if (settings?.pointerEnabled && front.app?.pid && front.app.pid !== frontPid && front.app.pid !== process.pid) driver.call('wake', { pid: front.app.pid }).catch(() => undefined);
       frontPid = front.app?.pid ?? frontPid;
+      const inBrowser = !!chromeLink?.inFront(front.app?.pid);
+      if (inBrowser !== browserMode) {
+        browserMode = inBrowser;
+        log('chrome link:', inBrowser ? 'Chrome in front, its gestures' : 'the app’s gestures');
+        useBrowserBindings();
+      }
       let bounds = front.window?.bounds;
       // The driver speaks physical pixels on Windows; displays are in DIPs.
       if (bounds && process.platform === 'win32') {
@@ -539,11 +621,12 @@ function listenToPages() {
         try {
           if (message.op === 'save') await assistant.connections.save(message.input || {});
           else if (message.op === 'remove') await assistant.connections.remove(String(message.id));
+          else if (message.op === 'uses') await assistant.connections.uses(String(message.id), message.uses);
           return { ok: true, ...(await assistant.connections.list()) };
         } catch (err) {
           return { ok: false, error: err.message, ...(await assistant.connections.list()) };
         }
-      // Settings' continuous assistant: the models there are, and signing in to Puter for his voice.
+      // Settings' models: what Ollama has, and which one is this computer's.
       case 'jester/desktop-ollama':
         return { ...(await ollamaModels()), chosen: await chatModel() };
       case 'jester/desktop-voiceprint':
@@ -559,9 +642,9 @@ function listenToPages() {
       case 'jester/talk-type':
         conversation.told(String(message.text).slice(0, 2000));
         return { ok: true };
-      // Typing to him: his model loads meanwhile, rather than after they press Return.
+      // Typing to him: his model loads meanwhile, rather than after they press Return. Only this computer's needs it.
       case 'jester/talk-typing':
-        chatModel().then((model) => warmOllama({ model }));
+        talking.savedOnes().then(async (saved) => !saved.length && warmOllama({ model: (await talking.localOne())?.model }));
         return { ok: true };
       case 'jester/talk-listen':
         await saveSettings({ continuousAssistant: message.on === true });
@@ -630,7 +713,7 @@ function selfTest(capture) {
       fs.writeFileSync(capture, (await win.webContents.capturePage()).toPNG());
       log('selftest: captured', capture);
       // The page outgrows the screen: each later section scrolled into view too.
-      for (const section of ['gestures', 'shortcuts']) {
+      for (const section of ['models', 'gestures', 'shortcuts']) {
         await page(`document.getElementById('${section}-heading').scrollIntoView()`);
         await pause(300);
         const file = capture.replace(/\.png$/, `-${section}.png`);
@@ -905,6 +988,7 @@ async function start() {
     ? { track() {}, toast() {}, cursor() {}, ripple() {}, whileHidden: (task) => task(), toScreen: () => null, windows: () => [], activeWindow: () => null, destroy() {} }
     : createOverlays();
   startInput();
+  startChromeLink();
   pointer = createPointer({
     driver: {
       call: (...args) => {
@@ -916,7 +1000,9 @@ async function start() {
     display: pointerDisplay,
     toast: (text, options) => overlays.toast(text, options),
     log,
-    dryRun: !!env.JESTER_DRIVER_DRY
+    dryRun: !!env.JESTER_DRIVER_DRY,
+    // A click on a page in the linked Chrome lands on the link the extension finds nearest.
+    aimInBrowser: (request) => (browserMode && chromeLink?.linked ? chromeLink.aim(request) : null)
   });
   watch = createWatch({
     loadKey: async () => (await storage.local.get('watchKey')).watchKey,
@@ -952,8 +1038,8 @@ async function start() {
     onBusy: (busy) => (busy ? stopButton.show() : stopButton.hide()),
     log,
     logScreens: !!env.JESTER_LOG_SCREENS,
-    // With no model saved, tasks go to the one he talks through.
-    localModel: chatModel
+    // Tasks go to this computer's model when no saved one can take them.
+    localModel
   });
   voiceRunner = createVoiceRunner({
     driver: input,
@@ -971,7 +1057,12 @@ async function start() {
     },
     toOsFrame: (frame) => toOsFrame(screen, frame),
     toDipFrame: (frame) => toDipFrame(screen, frame),
-    quietly: (task) => overlays.whileHidden(task)
+    quietly: (task) => overlays.whileHidden(task),
+    // What's the browser's (its bookmarks, tabs and pages) the linked extension does.
+    browser: {
+      claims: (text) => chromeLink?.claims(text, { browserInFront: browserMode }) ?? false,
+      run: (text) => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal }))
+    }
   });
   voicePage = createVoicePage({ log });
   speaker = createSpeaker({
@@ -988,9 +1079,10 @@ async function start() {
     },
     log
   });
+  talking = createModelJob({ job: 'talk', local: localModel, keepAlive: LOCAL_KEEP_ALIVE, log, onSelected: ({ provider, model }) => log('talking through:', provider, model) });
   recollections = createRecollections({
     file: path.join(app.getPath('userData'), 'recollections.json'),
-    summarize: async (entries) => summarize({ model: await chatModel(), entries }),
+    summarize: (entries) => summarize({ request: talking, entries }),
     log
   });
   const memory = createConversationLog({
@@ -999,7 +1091,7 @@ async function start() {
   });
   setInterval(memory.expire, LOG_CHECK_MS);
   conversation = createConversation({
-    chat: async (request) => askOllama({ ...request, model: await chatModel() }),
+    chat: (request) => askModel({ ...request, request: talking }),
     speaker,
     memory,
     recollections,
@@ -1055,6 +1147,11 @@ async function start() {
         return;
       }
       if (toggledSleep && message.sleeping) assistant.cancel();
+      // With the linked Chrome in front, the extension does what's Chrome's, on the page.
+      if (browserMode && chromeLink?.linked && CHROME_SCOPES.has(ACTIONS[message.action]?.scope)) {
+        chromeLink.act(message.action, { source: message.source, gesture: message.gesture }).then((result) => !result?.ok && log('chrome action', message.action, 'not done:', result?.detail));
+        return;
+      }
       dispatch(message.action, { source: message.source, gesture: message.gesture });
     },
     // The mic, opened for an answer to the assistant, may stop with none.
@@ -1113,5 +1210,6 @@ if (!app.requestSingleInstanceLock()) {
     globalShortcut.unregisterAll();
     driver?.close();
     watch?.close();
+    linkTransport?.close();
   });
 }

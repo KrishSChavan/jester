@@ -7,6 +7,13 @@ export const PROVIDERS = {
   ollama: { label: 'Ollama (on this computer)', protocol: 'openai-compatible', baseUrl: 'http://localhost:11434/v1' },
   custom: { label: 'Custom OpenAI-compatible API', protocol: 'openai-compatible', baseUrl: '' }
 };
+/**
+ * What Jester Desktop has a model do: talk with the user, and act (work their
+ * apps). Each saved model does what it's set to; one saved before this was a
+ * choice does what it did then, act. The extension only acts.
+ */
+export const MODEL_USES = Object.freeze(['talk', 'act']);
+const usesOf = (uses) => (Array.isArray(uses) ? MODEL_USES.filter((use) => uses.includes(use)) : ['act']);
 const STORE_KEY = 'modelConnections';
 const LEGACY_STORE_KEY = 'modelConnection';
 const MAX_CONNECTIONS = 20;
@@ -86,7 +93,7 @@ export function normaliseConnection(input) {
   // Free-tier connections are paced to conservative published limits until the
   // provider reports its own; Gemini reports none until a request is refused.
   const plan = ['free', 'paid'].includes(input.plan) ? input.plan : FREE_TIER_PROVIDERS.has(input.provider) ? 'free' : 'paid';
-  return { provider: input.provider, protocol: preset.protocol, baseUrl: url.href.replace(/\/$/, ''), model, key, plan };
+  return { provider: input.provider, protocol: preset.protocol, baseUrl: url.href.replace(/\/$/, ''), model, key, plan, uses: usesOf(input.uses) };
 }
 const FREE_TIER_PROVIDERS = new Set(['google', 'groq']);
 export function connectionOrigin(input) {
@@ -124,6 +131,12 @@ export async function saveConnection(input) {
     const duplicate = connections.findIndex((entry) => sameConnection(entry, config));
     if (duplicate >= 0 && duplicate !== existing) {
       if (existing >= 0) throw new Error('This model connection is already saved.');
+      // Saved again for something more: it does that too.
+      const kept = connections[duplicate];
+      if (input.uses !== undefined && config.uses.some((use) => !kept.uses.includes(use))) {
+        kept.uses = MODEL_USES.filter((use) => kept.uses.includes(use) || config.uses.includes(use));
+        await persistConnections(connections);
+      }
       return publicSummary(connections);
     }
     if (existing >= 0) {
@@ -165,6 +178,18 @@ export function reorderConnections(ids) {
     const reordered = ids.map((id) => connections.find((entry) => entry.id === id));
     await persistConnections(reordered);
     return publicSummary(reordered);
+  });
+}
+
+/** What a saved model is used for (MODEL_USES), changed without its key having to be typed again. */
+export function setConnectionUses(id, uses) {
+  return withConnections(async () => {
+    const connections = await readConnections();
+    const connection = connections.find((entry) => entry.id === id);
+    if (!connection) throw new Error('This model connection is no longer saved.');
+    connection.uses = usesOf(uses);
+    await persistConnections(connections);
+    return publicSummary(connections);
   });
 }
 

@@ -56,6 +56,7 @@ function settingsChanged(before) {
   if (JSON.stringify(before?.desktopShortcuts || {}) !== JSON.stringify(settings.desktopShortcuts || {})) buildBindings();
   renderControls();
   renderBindings();
+  renderJobs();
 }
 
 function renderStatus() {
@@ -233,19 +234,46 @@ function renderContinuous() {
       : 'This computer’s voice, for now. Connect a free Puter account for a better one. What he says then goes to Puter.';
 }
 
+/** What Ollama said it has, the last time it was asked. */
+let ollama = null;
+
 /** The models Ollama has, asked when Settings opens and whenever it's come back to. */
 async function renderChatModels() {
-  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-ollama' }).catch(() => null);
+  ollama = await chrome.runtime.sendMessage({ type: 'jester/desktop-ollama' }).catch(() => null);
   const select = $('assistantModel');
-  const models = reply?.models || [];
+  const models = ollama?.models || [];
   select.replaceChildren(...models.map(({ name, size }) => new Option(`${name} (${Math.round(size / 1e9)} GB)`, name)));
-  select.value = settings?.assistantModel && models.some((model) => model.name === settings.assistantModel) ? settings.assistantModel : reply?.chosen || '';
+  select.value = settings?.assistantModel && models.some((model) => model.name === settings.assistantModel) ? settings.assistantModel : ollama?.chosen || '';
   select.disabled = !models.length;
-  $('chat-model-hint').textContent = !reply?.running
+  $('chat-model-hint').textContent = !ollama?.running
     ? 'Ollama isn’t running. Open it, then come back here.'
     : models.length
-      ? 'An Ollama model on this computer. What you say to him stays here.'
+      ? 'Runs here: what it hears and reads stays on this computer.'
       : 'Ollama has no models yet. In a terminal, run: ollama pull qwen3.5:9b';
+  renderJobs();
+}
+
+/** This computer's model's jobs, from the settings: both until unticked. */
+const localUses = () => (Array.isArray(settings?.localModelUses) ? settings.localModelUses : ['talk', 'act']);
+
+/** The saved models, as last listed: for saying who does each job. */
+let savedModels = [];
+
+const modelName = (connection) => `${PROVIDERS[connection.provider]?.label || connection.provider} · ${connection.model}`;
+
+/** Who does each job, in the order they're tried. */
+function renderJobs() {
+  const local = localUses();
+  $('local-talk').checked = local.includes('talk');
+  $('local-act').checked = local.includes('act');
+  const here = ollama?.chosen ? `this computer’s ${ollama.chosen}` : 'this computer’s, once Ollama is running';
+  const first = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+  for (const job of ['talk', 'act']) {
+    const saved = savedModels.filter((connection) => connection.uses?.includes(job)).map(modelName);
+    const parts = saved.length ? [saved.join(', then ')] : [];
+    if (local.includes(job)) parts.push(saved.length ? `${here} when ${saved.length > 1 ? 'they’re' : 'it’s'} out of requests` : here);
+    $(`job-${job}`).textContent = parts.length ? first(parts.join('; ')) : job === 'talk' ? 'Nothing: he can’t talk. Tick Talking on a model below.' : 'Nothing: commands Jester doesn’t know won’t work. Tick Actions on a model below.';
+  }
 }
 
 /** Which recognizer hears commands; one not downloaded yet is listed, and says how to get it. */
@@ -294,33 +322,50 @@ async function connections(op, extra = {}) {
   return reply;
 }
 
+/** A tick box for one of a model's jobs. */
+function useBox(label, checked, onChange) {
+  const wrap = document.createElement('label');
+  wrap.className = 'use';
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = checked;
+  box.addEventListener('change', () => onChange(box.checked));
+  wrap.append(box, document.createTextNode(label));
+  return wrap;
+}
+
 function renderConnections(reply) {
   const saved = reply?.connections || [];
+  savedModels = saved;
   $('connection-error').textContent = reply?.ok === false ? reply.error : '';
-  if (!saved.length) {
-    const empty = document.createElement('div');
-    empty.className = 'row';
-    empty.innerHTML = '<span><strong>No model yet</strong><small>Add one below to let the assistant take commands Jester doesn’t know.</small></span>';
-    $('connections').replaceChildren(empty);
-    return;
-  }
+  renderJobs();
+  $('connections').hidden = !saved.length;
   $('connections').replaceChildren(
-    ...saved.map((connection, i) => {
+    ...saved.map((connection) => {
       const row = document.createElement('div');
-      row.className = 'row';
+      row.className = 'row model';
       const text = document.createElement('span');
       const name = document.createElement('strong');
-      name.textContent = `${PROVIDERS[connection.provider]?.label || connection.provider} · ${connection.model}`;
+      name.textContent = modelName(connection);
       const detail = document.createElement('small');
       const resting = connection.cooldownUntil > Date.now() ? ` · resting until ${new Date(connection.cooldownUntil).toLocaleTimeString()}` : '';
       const plan = connection.provider === 'ollama' ? '' : ` · ${connection.plan === 'free' ? 'Free' : 'Paid'}`;
-      detail.textContent = `${connection.masked}${plan}${saved.length > 1 && i === 0 ? ' · tried first' : ''}${resting}`;
+      detail.textContent = `${connection.masked}${plan}${resting}`;
       text.append(name, detail);
+      const controls = document.createElement('span');
+      controls.className = 'controls';
+      const uses = new Set(connection.uses || ['act']);
+      const set = (use) => (on) => {
+        if (on) uses.add(use);
+        else uses.delete(use);
+        connections('uses', { id: connection.id, uses: [...uses] });
+      };
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.textContent = 'Remove';
       remove.addEventListener('click', () => connections('remove', { id: connection.id }));
-      row.append(text, remove);
+      controls.append(useBox('Talking', uses.has('talk'), set('talk')), useBox('Actions', uses.has('act'), set('act')), remove);
+      row.append(text, controls);
       return row;
     })
   );
@@ -334,14 +379,20 @@ function buildConnectionForm() {
     $('connection-url-row').hidden = provider.value !== 'custom';
     $('connection-key-row').hidden = $('connection-plan-row').hidden = provider.value === 'ollama';
     $('connection-plan').value = ['google', 'groq'].includes(provider.value) ? 'free' : 'paid';
+    // Talking is the user's words: ticked by default only where they stay on this computer.
+    $('connection-talk').checked = provider.value === 'ollama';
+    $('connection-uses-hint').textContent = provider.value === 'ollama'
+      ? 'Runs on this computer: nothing it hears or reads leaves it.'
+      : `A model that talks hears what you say to him, so that goes to ${PROVIDERS[provider.value]?.label || 'its provider'} too.`;
   };
   provider.addEventListener('change', fit);
   fit();
   $('connection-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     $('connection-add').disabled = true;
+    const uses = [$('connection-talk').checked && 'talk', $('connection-act').checked && 'act'].filter(Boolean);
     const reply = await connections('save', {
-      input: { provider: provider.value, model: $('connection-model').value, key: provider.value === 'ollama' ? '' : $('connection-key').value, plan: $('connection-plan').value, baseUrl: $('connection-url').value }
+      input: { provider: provider.value, model: $('connection-model').value, key: provider.value === 'ollama' ? '' : $('connection-key').value, plan: $('connection-plan').value, baseUrl: $('connection-url').value, uses }
     });
     $('connection-add').disabled = false;
     // The key isn't kept in the page once it's saved.
@@ -509,8 +560,20 @@ function buildShortcuts() {
   );
 }
 
+/** The link to Jester's Chrome extension (chrome-link.js): what it does while it's there, and how to make it. */
+function renderChrome() {
+  const chrome = desktop?.chrome || {};
+  $('chrome-link-state').textContent = chrome.linked ? `Linked (Jester ${chrome.version})` : 'Not linked';
+  $('chrome-link-hint').textContent = chrome.linked
+    ? 'Jester watches and listens for both, so Chrome’s own camera and mic stay off. With Chrome in front, gestures do what Jester’s Chrome settings say; what you ask about Chrome (a bookmark, a tab, a page) is done there, on this pill; and the cursor clicks the link you aimed at.'
+    : chrome.why
+      ? `${chrome.why} Until it is, Jester works Chrome like any other app.`
+      : `In Chrome, open Jester’s settings and click Link with Jester Desktop. It then has your bookmarks, tabs and pages for what you ask, and one camera and mic for both.${chrome.browsers?.length ? ` Ready for ${chrome.browsers.join(', ')}.` : ''}`;
+}
+
 function render() {
   renderStatus();
+  renderChrome();
   renderPermissions();
   renderControls();
   renderBindings();
@@ -571,7 +634,18 @@ $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled:
 $('voiceEnabled').addEventListener('change', (event) => save({ voiceEnabled: event.target.checked }));
 $('speechModel').addEventListener('change', (event) => save({ speechModel: event.target.value }));
 $('continuousAssistant').addEventListener('change', (event) => save({ continuousAssistant: event.target.checked }));
-$('assistantModel').addEventListener('change', (event) => save({ assistantModel: event.target.value }));
+$('assistantModel').addEventListener('change', async (event) => {
+  await save({ assistantModel: event.target.value });
+  renderChatModels();
+});
+for (const use of ['talk', 'act']) {
+  $(`local-${use}`).addEventListener('change', (event) => {
+    const uses = new Set(localUses());
+    if (event.target.checked) uses.add(use);
+    else uses.delete(use);
+    save({ localModelUses: ['talk', 'act'].filter((job) => uses.has(job)) });
+  });
+}
 $('puter-connect').addEventListener('click', async () => {
   const button = $('puter-connect');
   const op = desktop?.continuous?.puter ? 'disconnect' : 'connect';

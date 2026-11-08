@@ -91,6 +91,26 @@ export function claudeThinksByDefault(model) {
 
 const dataUrl = (image) => `data:${image.mimeType};base64,${image.data}`;
 
+/**
+ * Earlier turns of a conversation ({role: 'user'|'assistant', content}), as
+ * the APIs that want them to alternate and start with the user take them: two
+ * in a row from one side are one, anything before the user's first is
+ * dropped, and the user's last, if nobody answered it, goes before the prompt.
+ * @returns {{turns:{role:string, content:string}[], prompt:string}}
+ */
+function alternating(history, prompt) {
+  const turns = [];
+  for (const { role, content } of Array.isArray(history) ? history : []) {
+    const side = role === 'assistant' ? 'assistant' : 'user';
+    const text = String(content ?? '').trim();
+    if (!text || (!turns.length && side !== 'user')) continue;
+    if (turns.at(-1)?.role === side) turns.at(-1).content += `\n${text}`;
+    else turns.push({ role: side, content: text });
+  }
+  const unanswered = turns.at(-1)?.role === 'user' ? turns.pop().content : '';
+  return { turns, prompt: unanswered ? `${unanswered}\n${prompt}` : prompt };
+}
+
 /** `schema`: the reply's shape for Gemini's structured output — the browser agent's unless
  * a caller with other actions (Jester Desktop) passes its own. */
 export function buildModelRequest(config, { system, prompt, images = [], maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens,
@@ -108,16 +128,19 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
     // Required by Anthropic for intentional direct browser use with the user's key.
     headers['anthropic-dangerous-direct-browser-access'] = 'true';
     const thinks = claudeThinksByDefault(config.model);
+    const earlier = alternating(history, prompt);
     body = { model: config.model, max_tokens: maxOutputTokens + (thinks ? CLAUDE_THINKING_TOKENS : 0), system,
-      messages: [{ role: 'user', content: pictures.length ? [...pictures.map((image) =>
+      messages: [...earlier.turns, { role: 'user', content: pictures.length ? [...pictures.map((image) =>
         ({ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } })),
-      { type: 'text', text: prompt }] : prompt }],
+      { type: 'text', text: earlier.prompt }] : earlier.prompt }],
       // Low effort keeps each step quick and cheap: a step picks one control, not a plan.
       ...(thinks ? { output_config: { effort: 'low' } } : {}) };
   } else if (config.protocol === 'gemini') {
     headers['x-goog-api-key'] = config.key;
+    const earlier = alternating(history, prompt);
     body = { systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: 'user', parts: [{ text: prompt },
+      contents: [...earlier.turns.map(({ role, content }) => ({ role: role === 'assistant' ? 'model' : 'user', parts: [{ text: content }] })),
+        { role: 'user', parts: [{ text: earlier.prompt },
         ...pictures.map((image) => ({ inlineData: { mimeType: image.mimeType, data: image.data } }))] }],
       generationConfig: { responseMimeType: 'application/json', maxOutputTokens,
         // Medium keeps numbered labels legible at a fraction of the default image cost.
@@ -125,9 +148,11 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
         ...(config.provider === 'google' && schema ? { responseJsonSchema: schema } : {}) } };
   } else if (config.protocol === 'openai-responses') {
     if (config.key) headers.authorization = `Bearer ${config.key}`;
+    const earlier = alternating(history, prompt);
     body = { model: config.model, instructions: system,
-      input: pictures.length ? [{ role: 'user', content: [{ type: 'input_text', text: prompt },
-        ...pictures.map((image) => ({ type: 'input_image', image_url: dataUrl(image) }))] }] : prompt,
+      input: pictures.length ? [...earlier.turns, { role: 'user', content: [{ type: 'input_text', text: earlier.prompt },
+        ...pictures.map((image) => ({ type: 'input_image', image_url: dataUrl(image) }))] }]
+        : earlier.turns.length ? [...earlier.turns, { role: 'user', content: earlier.prompt }] : earlier.prompt,
       max_output_tokens: maxOutputTokens, store: false, text: { format: { type: 'json_object' } } };
   } else {
     if (config.key) headers.authorization = `Bearer ${config.key}`;

@@ -106,7 +106,8 @@ try {
 test('the relay carries Chrome\'s framed messages to the app and back', { skip: !relayBinary && 'jester-driver is not built (npm run driver in desktop/)' }, async () => {
   const path = await socketPath();
   const heard = [];
-  const link = startLink({ socketPath: path, allowedOrigins: [ORIGIN], onMessage: (message) => heard.push(message) });
+  let hello = null;
+  const link = startLink({ socketPath: path, allowedOrigins: [ORIGIN], onMessage: (message) => heard.push(message), onConnect: (_origin, said) => (hello = said) });
   await link.ready;
   // Started the way Chrome starts a host: the caller's origin as the argument.
   const relay = spawn(relayBinary, [ORIGIN], { env: { ...process.env, JESTER_LINK_SOCKET: path } });
@@ -128,6 +129,8 @@ test('the relay carries Chrome\'s framed messages to the app and back', { skip: 
   };
   try {
     await until(() => link.connected);
+    // The process that started it, as Chrome would have: which app in front is the linked browser.
+    assert.deepEqual(hello, { browser: process.pid });
     relay.stdin.write(frame({ type: 'jester/ping', text: 'héllo ✓' }));
     await until(() => heard.length === 1);
     assert.deepEqual(heard, [{ type: 'jester/ping', text: 'héllo ✓' }]);

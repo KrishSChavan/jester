@@ -2,14 +2,15 @@
  * Jester, talking. With the continuous assistant on, everything the mic hears
  * comes here. What wasn't said to him is dropped on the spot. What was is either
  * a command the matcher already knows, done as a spoken command is and its result
- * said aloud; or goes to a local Ollama model, which answers, and can hand back
- * a command of its own. No screen goes to that model: its work ends at a sentence.
+ * said aloud; or goes to the model he talks through (model-jobs.js: Ollama on this
+ * computer, unless Settings › Models has one of the user's own models talk), which
+ * answers, and can hand back a command of its own. No screen goes to that model:
+ * its work ends at a sentence.
  *
  * Anyone in the room can say his name, so a command that could do harm asks first
  * (voice-commands.js, asksFirst), through the assistant's usual question.
  */
 
-import { MODEL_REQUEST_LIMITS, requestModel } from '../../../jester-extension/src/background/model-client.js';
 import { spokenLine } from './speaker.js';
 import { addressed } from './wake.js';
 
@@ -21,8 +22,9 @@ const WOKEN_MS = 12000;
 const QUIET_MS = 1200;
 /** How much of the conversation the model is given. */
 const HISTORY = 20;
-const REPLY_TOKENS = 300;
-const SUMMARY_TOKENS = 120;
+/** Room for a cloud model's thinking (Gemini's counts against it), though a reply is a sentence or two. */
+const REPLY_TOKENS = 600;
+const SUMMARY_TOKENS = 400;
 /** This long with nothing said, and whatever comes next is a new conversation. */
 const NEW_AFTER_MS = 5 * 60 * 1000;
 /** His voice dies away in the room for about this long after the audio ends. */
@@ -111,36 +113,31 @@ export function pickModel(models) {
 }
 
 /**
- * Asks Ollama for his next line.
- * @returns {Promise<{say:string, do:string}>}
+ * Asks the model he talks through for his next line. How long it may take is
+ * the pool's to say: a cloud model's 10 s, or the time a local one needs to load.
+ * @param {object} options
+ * @param {Function} options.request  the talking job (model-jobs.js)
+ * @returns {Promise<{say:string, do:string, new:boolean}>}
  */
-export async function askOllama({ model, text, history, earlier = [], signal, request = requestModel, date = new Date() }) {
-  if (!model) throw new Error('I can’t reach Ollama. Open it, and I’ll be able to talk.');
+export async function askModel({ request, text, history, earlier = [], signal, date = new Date() }) {
   const { json } = await request({
-    env: { provider: 'ollama', model, keepAlive: LOCAL_KEEP_ALIVE },
     system: personaPrompt(date, earlier),
     prompt: stamped(text, date),
     history: history.map((entry) => ({ role: entry.who === 'you' ? 'user' : 'assistant', content: entry.text })),
     schema: REPLY_SCHEMA,
     maxOutputTokens: REPLY_TOKENS,
-    maxElapsedMs: MODEL_REQUEST_LIMITS.localElapsedMs,
-    timeoutMs: MODEL_REQUEST_LIMITS.localElapsedMs,
     signal
   });
   return { say: String(json?.say ?? '').trim(), do: String(json?.do ?? '').trim(), new: json?.new === true };
 }
 
-/** A finished conversation, in the sentence recollections.js keeps. */
-export async function summarize({ model, entries, request = requestModel }) {
-  if (!model) throw new Error('no model');
+/** A finished conversation, in the sentence recollections.js keeps, by the model he talks through. */
+export async function summarize({ request, entries }) {
   const { json } = await request({
-    env: { provider: 'ollama', model, keepAlive: LOCAL_KEEP_ALIVE },
     system: 'Sum up this spoken conversation between a user and their assistant Jester in one sentence of at most 25 words. Keep anything the user said about themselves, and any names, plans or decisions. Reply with JSON: {"summary":"..."}',
     prompt: entries.map((entry) => `${entry.who === 'you' ? 'User' : 'Jester'}: ${entry.text}`).join('\n'),
     schema: SUMMARY_SCHEMA,
-    maxOutputTokens: SUMMARY_TOKENS,
-    maxElapsedMs: MODEL_REQUEST_LIMITS.localElapsedMs,
-    timeoutMs: MODEL_REQUEST_LIMITS.localElapsedMs
+    maxOutputTokens: SUMMARY_TOKENS
   });
   return String(json?.summary ?? '').trim();
 }

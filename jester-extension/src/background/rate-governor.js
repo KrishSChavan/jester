@@ -21,8 +21,9 @@ export const FREE_TIER_LIMITS = Object.freeze({
 export const IMAGE_TOKENS = 1120;
 
 /** A conservative input-token estimate for a request that has not been sent. */
-export function estimateTokens({ system = '', prompt = '', images = [] } = {}) {
-  return Math.ceil((String(system).length + String(prompt).length) / 3.5) +
+export function estimateTokens({ system = '', prompt = '', images = [], history = [] } = {}) {
+  const earlier = (Array.isArray(history) ? history : []).reduce((sum, message) => sum + String(message?.content ?? '').length, 0);
+  return Math.ceil((String(system).length + String(prompt).length + earlier) / 3.5) +
     (Array.isArray(images) ? images.length : 0) * IMAGE_TOKENS;
 }
 

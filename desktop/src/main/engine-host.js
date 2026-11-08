@@ -39,13 +39,16 @@ export async function loadSettings() {
  */
 export function startEngineHost(hooks) {
   const fromEngine = (sender) => String(sender?.url || '').startsWith(ENGINE_PAGE);
+  /** What gestures do for now, when not the app's own: the linked extension's, with Chrome in front. */
+  let bindings = null;
+  const forEngine = (stored) => ({ ...desktopSettings(stored), ...(bindings || {}) });
 
   onMessage(async (message, sender) => {
     if (!fromEngine(sender)) return undefined;
     switch (message?.type) {
       case MSG.SETTINGS_REQUEST:
         return {
-          settings: await loadSettings(),
+          settings: forEngine((await storage.local.get('settings')).settings),
           suspend: false,
           context: hooks.context?.() || 'windowed',
           screen: hooks.screen?.() || null,
@@ -77,7 +80,7 @@ export function startEngineHost(hooks) {
   // service-worker.js pushes the same two things when storage changes.
   onStorageChanged((changes, area) => {
     if (area !== 'local') return;
-    if (changes.settings) post({ type: MSG.ENGINE_SETTINGS, settings: desktopSettings(changes.settings.newValue) });
+    if (changes.settings) post({ type: MSG.ENGINE_SETTINGS, settings: forEngine(changes.settings.newValue) });
     if (changes.gazeCalibration) post({ type: MSG.CALIBRATION_MODEL, calibration: changes.gazeCalibration.newValue || null });
   });
 
@@ -89,6 +92,11 @@ export function startEngineHost(hooks) {
     /** Which binding set is live: 'fullscreen' while the front window fills its display. */
     setContext(context) {
       post({ type: MSG.ENGINE_CONFIG, context });
+    },
+    /** Gestures do what these settings say (the linked extension's), or with null, what the app's do. */
+    async useBindings(next) {
+      bindings = next || null;
+      post({ type: MSG.ENGINE_SETTINGS, settings: forEngine((await storage.local.get('settings')).settings) });
     },
     suspend(suspend) {
       post({ type: MSG.ENGINE_CONFIG, suspend: !!suspend });

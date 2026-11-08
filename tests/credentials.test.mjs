@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PROVIDERS, normaliseConnection, connectionOrigin, saveConnection, loadConnection,
   loadConnections, connectionSummary, clearConnection, listConnectionModels,
-  reorderConnections, coolDownConnection } from '../jester-extension/src/common/credentials.js';
+  reorderConnections, coolDownConnection, setConnectionUses } from '../jester-extension/src/common/credentials.js';
 
 const secret = 'private-provider-secret-1234567890';
 function mockChrome(t, { stored = {}, permitted = [] } = {}) {
@@ -336,4 +336,21 @@ test('a rejected storage write does not block subsequent connection operations',
   await assert.rejects(saveConnection({ provider: 'groq', model: 'failed', key: secret }), /Temporary storage error/);
   await saveConnection({ provider: 'groq', model: 'saved', key: secret });
   assert.deepEqual((await loadConnections()).map((entry) => entry.model), ['saved']);
+});
+
+test('a saved model does what it is set to in Jester Desktop, and one saved before that was a choice acts', async (t) => {
+  const { values } = mockChrome(t, { permitted: ['https://api.groq.com/*'], stored: { modelConnections: [{ id: 'old', ...normaliseConnection({ provider: 'groq', model: 'first', key: secret }) }] } });
+  delete values.modelConnections[0].uses;
+  assert.deepEqual((await loadConnections())[0].uses, ['act']);
+  const summary = await saveConnection({ provider: 'groq', model: 'second', key: 'second-secret', uses: ['talk', 'bogus'] });
+  assert.deepEqual(summary.connections.map((entry) => entry.uses), [['act'], ['talk']]);
+  assert.equal(JSON.stringify(summary).includes('second-secret'), false);
+  const changed = await setConnectionUses('old', ['talk', 'act']);
+  assert.deepEqual(changed.connections[0].uses, ['talk', 'act']);
+  assert.equal(values.modelConnections[0].key, secret, 'the key stays as it was');
+  await assert.rejects(setConnectionUses('gone', ['talk']), /no longer saved/);
+  // Saved again with another use ticked: the same model does that too.
+  const again = await saveConnection({ provider: 'groq', model: 'second', key: 'second-secret', uses: ['act'] });
+  assert.deepEqual(again.connections.map((entry) => entry.uses), [['talk', 'act'], ['talk', 'act']]);
+  assert.equal(again.connections.length, 2);
 });

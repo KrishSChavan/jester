@@ -273,12 +273,30 @@ footer {
   font-size: 12px;
 }
 
-/* The assistant's models. */
+/* The models, and what each does. */
+#connections,
+#local-model,
 #connection-form {
   margin-top: 10px;
 }
 
-#connection-form input {
+.row.model .controls,
+#connection-form .controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.use {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#connection-form input:not([type='checkbox']) {
   font: inherit;
   width: 220px;
   padding: 3px 6px;

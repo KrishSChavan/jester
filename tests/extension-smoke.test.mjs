@@ -100,8 +100,9 @@ test('gesture voice action sends one toggle and does not start a second capture'
   const { ACTIONS } = await import('../jester-extension/src/common/constants.js');
   let front = { id: 7, url: 'https://www.youtube.com/' };
   let settings = { enabled: true, voiceEnabled: true };
+  let linked = false;
   const sandbox = vm.createContext({ ACTIONS, MSG, visibleTab: async () => front, getSettings: async () => settings,
-    notify: (text) => notices.push(text), post: (message) => sent.push(message) });
+    notify: (text) => notices.push(text), post: (message) => sent.push(message), desktop: { voice: () => linked } });
   const dispatch = vm.runInContext(`(${source.slice(start, end)})`, sandbox);
   const result = await dispatch('VOICE_CAPTURE_TOGGLE', { source: 'pose', gesture: 'Pointing_Up' });
   assert.equal(result.ok, true);
@@ -119,6 +120,10 @@ test('gesture voice action sends one toggle and does not start a second capture'
   assert.match(notices[0], /Voice commands are off/);
   front = null;
   assert.equal((await dispatch('VOICE_CAPTURE_TOGGLE', { source: 'keyboard' })).ok, false);
+  // Linked to Jester Desktop, its mic answers: this engine's isn't asked.
+  linked = true;
+  assert.equal((await dispatch('VOICE_CAPTURE_TOGGLE', { source: 'keyboard' })).ok, true);
+  assert.equal(sent.length, 2);
 });
 
 async function voiceBridge() {

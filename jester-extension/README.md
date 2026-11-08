@@ -153,6 +153,21 @@ Chrome's own pages, the Web Store, sites Jester has no access to — the badge
 shows ● while listening, … while working and ✓ or ! with the answer, which also
 arrives as a notification; the popup's list keeps every reply.
 
+## Jester Desktop
+
+Settings › Jester Desktop links the extension to the desktop app (`../desktop`),
+through Chrome's native messaging (`src/background/desktop-link.js`; the app's half
+and the messages are in `desktop/src/main/chrome-link.js`). Link asks for the
+optional `nativeMessaging` permission, and holding it is the switch; Unlink drops
+it. Linked, the app watches and listens, so this engine closes (the badge shows a
+purple ●, the popup "Jester Desktop is watching and listening"), and opens again
+when the link goes. With Chrome in front, the app goes by this extension's
+gestures and hands their actions here; a command it hears that's about the browser
+(a tab, a bookmark, a site, or Chrome in front) is carried out here, with this
+extension's model, its steps and questions on the app's pill; and a click of the
+app's cursor in Chrome asks the page for the link nearest the aim. While the app
+isn't running, the extension tries again every half minute (`alarms`).
+
 ## Audit of the fetched implementation
 
 The fetched `origin/main` (`11c9b09`) already avoided full DOM/screenshot

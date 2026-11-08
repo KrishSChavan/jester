@@ -6,7 +6,7 @@ import path from 'node:path';
 import { addressed, wakesEarly } from '../desktop/src/main/wake.js';
 import { asksFirst, parseCommand, parseSequence } from '../desktop/src/main/voice-commands.js';
 import { createConversationLog, EMPTIED_EVERY_MS } from '../desktop/src/main/conversation-log.js';
-import { askOllama, createConversation, LOCAL_KEEP_ALIVE, personaPrompt, pickModel, stamped, summarize, warmOllama } from '../desktop/src/main/conversation.js';
+import { askModel, createConversation, LOCAL_KEEP_ALIVE, personaPrompt, pickModel, stamped, summarize, warmOllama } from '../desktop/src/main/conversation.js';
 import { createRecollections, KEPT_MS } from '../desktop/src/main/recollections.js';
 import { averageVoice, likeness, sounds, TEACHING_LINES } from '../desktop/src/main/voiceprint.js';
 import { createSpeaker, spokenLine, SPOKEN_CHARS } from '../desktop/src/main/speaker.js';
@@ -304,10 +304,8 @@ test('his name mid-sentence changes nothing while he talks, asks or works', asyn
   assert.deepEqual(busy.shown, []);
 });
 
-test('Ollama lets his model go two minutes after he last used it', async () => {
-  let env = null;
-  await askOllama({ model: 'qwen3.5:9b', text: 'hi', history: [], request: async (options) => ((env = options.env), { json: { say: 'Hi.', do: '', new: false } }) });
-  assert.equal(env.keepAlive, LOCAL_KEEP_ALIVE);
+test('Ollama lets his model go two minutes after he last used it', () => {
+  // model-jobs.js gives this computer's model to Ollama with it: tests/desktop-model-jobs.test.mjs.
   assert.equal(LOCAL_KEEP_ALIVE, '2m');
 });
 
@@ -479,14 +477,15 @@ test('the prompt says who he is, what the laptop can do for him and what he cann
   assert.match(stamped('what time is it?', new Date('2026-11-06T17:40:00')), /^\[Friday, November 6, 2026 at 5:40.PM\] what time is it\?$/);
 });
 
-test('the conversation so far reaches the model as turns, and none without Ollama', async () => {
+test('the conversation so far reaches the model as turns, with the time left to the pool', async () => {
   let sent;
-  const reply = await askOllama({ model: 'm', text: 'and you?', history: [{ who: 'you', text: 'hi' }, { who: 'jester', text: 'hey' }], request: async (request) => ((sent = request), { json: { say: ' fine ', do: '' } }) });
+  const reply = await askModel({ text: 'and you?', history: [{ who: 'you', text: 'hi' }, { who: 'jester', text: 'hey' }], request: async (request) => ((sent = request), { json: { say: ' fine ', do: '' } }) });
   assert.deepEqual(reply, { say: 'fine', do: '', new: false });
   assert.deepEqual(sent.history, [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hey' }]);
   assert.match(sent.prompt, /^\[.+\] and you\?$/);
-  assert.equal(sent.env.provider, 'ollama');
-  await assert.rejects(askOllama({ model: '', text: 'hi', history: [] }), /can’t reach Ollama/);
+  // A cloud model's 10 s, or as long as a local one takes to load: model-pool.js decides.
+  assert.equal(sent.maxElapsedMs, undefined);
+  assert.equal(sent.env, undefined);
 });
 
 test('earlier conversations reach the prompt as over and separate, and none means no such part', async () => {
@@ -496,7 +495,7 @@ test('earlier conversations reach the prompt as over and separate, and none mean
   assert.match(prompt, /Earlier conversations, which are over/);
   assert.match(prompt, /Today at 4:40.PM: Planned a trip to Boston\./);
   let sent;
-  const text = await summarize({ model: 'm', entries: [{ who: 'you', text: 'hi' }, { who: 'jester', text: 'hey' }], request: async (request) => ((sent = request), { json: { summary: ' A greeting. ' } }) });
+  const text = await summarize({ entries: [{ who: 'you', text: 'hi' }, { who: 'jester', text: 'hey' }], request: async (request) => ((sent = request), { json: { summary: ' A greeting. ' } }) });
   assert.equal(text, 'A greeting.');
   assert.match(sent.prompt, /User: hi\nJester: hey/);
 });

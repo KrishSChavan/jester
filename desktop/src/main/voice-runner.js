@@ -176,6 +176,8 @@ export function dictation(text) {
  * @param {(frame:object) => object} [deps.toOsFrame]  a DIP frame in the driver's coordinates
  * @param {(frame:object) => object} [deps.toDipFrame]  the driver's frame in DIPs
  * @param {(task:Function) => Promise} [deps.quietly]  accessibility reads with Jester's overlays hidden
+ * @param {{claims:(text:string) => Promise<boolean>, run:(text:string) => Promise<{ok:boolean, text:string}|null>}} [deps.browser]
+ *   the linked Chrome extension (chrome-link.js): whether a command is the browser's, and doing it there
  */
 export function createVoiceRunner({
   driver,
@@ -192,7 +194,8 @@ export function createVoiceRunner({
   displays = () => [],
   toOsFrame = (frame) => frame,
   toDipFrame = (frame) => frame,
-  quietly = (task) => task()
+  quietly = (task) => task(),
+  browser = null
 }) {
   const mac = platform === 'darwin';
   const primary = mac ? 'cmd' : 'ctrl';
@@ -553,9 +556,16 @@ export function createVoiceRunner({
       );
       return { steps, outcome: ok(`${done.outcome.text} · ${saved ? `Say “${phrase}” any time to do that.` : `“${phrase}” couldn’t be saved.`}`) };
     }
-    // What the matcher can't do goes, whole, to a way learned before, then to the assistant.
-    // Without one, half a sentence is not done: "open Spotify and do a little dance" does nothing.
+    // What the matcher can't do goes, whole, to the linked Chrome extension if it's the
+    // browser's, then to a way learned before, then to the assistant. Without one, half a
+    // sentence is not done: "open Spotify and do a little dance" does nothing.
     const unknown = steps.find((step) => step.kind === 'unknown');
+    if (unknown && browser && ((await browser.claims(text)) || (!!said && (await browser.claims(said))))) {
+      log('voice: Chrome’s to do:', JSON.stringify(said || text));
+      const done = await browser.run(said || text);
+      log('voice: Chrome', done ? `${done.ok ? 'did it' : 'didn’t'}: ${JSON.stringify(done.text)}` : 'stopped');
+      return { steps, outcome: done && (done.ok ? ok(done.text || 'Done.') : bad(done.text || 'That didn’t work in Chrome.')) };
+    }
     if (unknown) {
       const known = learned && assistant?.replay ? await learned.find(text).catch(() => null) : null;
       let note = '';
@@ -574,7 +584,7 @@ export function createVoiceRunner({
       if (await assistantReady()) return { steps, outcome: await assisted(text, note, done, { said }) };
       // The assistant could, given a model: say where to add one.
       const partly = done.length ? `The saved way did ${done.length} step${done.length > 1 ? 's' : ''}, then stopped` : 'Nothing was done';
-      if (assistant) return { steps, outcome: bad(`“${unknown.text.replace(/[.!?]+$/, '')}” needs the assistant: add an AI model in Jester’s Settings › Assistant. ${partly}.`) };
+      if (assistant) return { steps, outcome: bad(`“${unknown.text.replace(/[.!?]+$/, '')}” needs a model for actions: choose one in Jester’s Settings › Models. ${partly}.`) };
       const unknownLine = steps.length > 1 ? `Jester doesn’t know how to “${unknown.text}” yet, so it did nothing.` : `“${unknown.text}” isn’t a command Jester knows yet.`;
       return { steps, outcome: bad(unknownLine) };
     }
@@ -590,7 +600,7 @@ export function createVoiceRunner({
         await wait(SEARCH_LOAD_MS);
         return { steps, outcome: await assisted(text, '', [], { pick: true, said }) };
       }
-      if (assistant) return { steps, outcome: ok(`${outcome.text}. To have Jester press Play, add an AI model in Settings › Assistant.`) };
+      if (assistant) return { steps, outcome: ok(`${outcome.text}. To have Jester press Play, choose a model for actions in Settings › Models.`) };
     }
     return { steps, outcome };
   }
