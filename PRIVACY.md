@@ -1,6 +1,6 @@
 # Jester privacy policy
 
-_Last updated: October 20, 2026_
+_Last updated: November 7, 2026_
 
 Jester is a Chrome extension that lets you control video and your browser with
 hand gestures, an eye or head cursor, and voice commands. This policy explains
@@ -72,6 +72,29 @@ sent anywhere.
 are sent only to the provider they belong to. Settings never shows a saved key
 again, and **Remove** deletes it.
 
+## Jester Desktop, if you link it
+
+Jester Desktop is an app that brings Jester to your whole computer. If you link
+the two (Settings › Jester Desktop › Link), Chrome lets the extension exchange
+messages with the app through a small helper program the app installs on your
+computer (Chrome's native messaging). The messages stay on your computer: nothing
+goes over the network, and the developer receives nothing.
+
+While they're linked:
+
+- The extension's camera and microphone stay off. The app does the watching and
+  listening, on your device, and the extension tells it what your gestures are set
+  to do in Chrome.
+- A command you give the app that is about your browser (your tabs, bookmarks or
+  pages) is passed to the extension, which carries it out as if you had said it in
+  Chrome, with the AI provider you chose in Chrome's Settings. Its progress, any
+  question it needs you to answer, and its result go back to the app.
+- When the app's cursor clicks in Chrome, the extension tells the app where the
+  nearest link or button is on the page in front: its position, not its text.
+
+Unlinking removes the permission, and the extension goes back to using its own
+camera and microphone.
+
 ## How Jester uses its browser permissions
 
 Jester uses each permission only to carry out what you ask:
@@ -93,6 +116,9 @@ Jester uses each permission only to carry out what you ask:
   voice pill can't appear.
 - **Storage, offscreen document and scripting**: to save settings, run the
   camera engine, and show Jester's controls on pages.
+- **Native messaging** (optional, asked for only when you click Link) and
+  **alarms**: to talk to Jester Desktop as described above, and to try the link
+  again every half minute while the app isn't running.
 
 ## What Jester doesn't do
 
@@ -108,6 +134,7 @@ Jester uses each permission only to carry out what you ask:
 - Turn voice commands, the cursor, real mouse and keyboard input, or screenshots
   off in Settings.
 - Remove a saved model and its key, or clear the eye calibration, in Settings.
+- Unlink Jester Desktop in Settings.
 - Uninstalling Jester deletes everything it stored, including saved keys and
   calibration.
 
