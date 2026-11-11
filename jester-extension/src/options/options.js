@@ -671,7 +671,8 @@ const LINK_TEXT = {
   off: 'Not linked.',
   missing: 'Jester Desktop isn’t installed here, or hasn’t been opened since it was.',
   waiting: 'Linked: waiting for Jester Desktop to start.',
-  linked: 'Linked: Jester Desktop is watching and listening.'
+  linked: 'Linked: Jester Desktop is watching and listening.',
+  restart: 'Linked: quit and reopen Chrome to finish.'
 };
 
 function renderDesktop({ state = 'off', detail = '' } = {}) {
@@ -690,8 +691,9 @@ desktopLinkBtn.addEventListener('click', async () => {
   else if (await chrome.permissions.request(NATIVE)) await chrome.runtime.sendMessage({ type: 'jester/desktop-link', op: 'connect' }).catch(() => undefined);
   refreshDesktop();
 });
+// Another Settings tab's question to the worker comes here too: only the worker's word, with a state, is the link's.
 chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === 'jester/desktop-link') renderDesktop(message);
+  if (message?.type === 'jester/desktop-link' && message.state) renderDesktop(message);
 });
 refreshDesktop();
 
@@ -764,6 +766,7 @@ if (location.hash === '#welcome') document.getElementById('welcome').hidden = fa
 if (location.hash === '#camera') {
   document.getElementById('cameraSection').scrollIntoView({ block: 'center' });
 }
+if (location.hash === '#desktop') document.getElementById('desktopSection').scrollIntoView({ block: 'center' });
 
 // The whole feature is gone on a CURSOR=false build, not merely switched off:
 // there is nothing to show and nothing to tune.

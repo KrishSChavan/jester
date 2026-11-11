@@ -8,15 +8,24 @@
  * says so and goes, and this tries again every half minute: the app can't
  * reach an extension by itself. While linked, the open port keeps the worker
  * awake, so a command from the app is never waiting on it to start.
+ *
+ * Chrome gives a worker runtime.connectNative only if it held the permission
+ * when it started: one already running when the user says Link never gets it.
+ * So that worker reloads the extension once, and the next one connects.
  */
 
 export const DESKTOP_HOST = 'com.jester.desktop';
-export const LINK_STATE = Object.freeze({ OFF: 'off', MISSING: 'missing', WAITING: 'waiting', LINKED: 'linked' });
+export const LINK_STATE = Object.freeze({ OFF: 'off', MISSING: 'missing', WAITING: 'waiting', LINKED: 'linked', RESTART: 'restart' });
 const RETRY_ALARM = 'jester-desktop-link';
 /** Chrome's shortest alarm. */
 const RETRY_MINUTES = 0.5;
 /** How long starting up waits to learn whether the app has the camera, before opening Jester's own. */
 const FIRST_TRY_MS = 1500;
+/** When the extension last reloaded to get connectNative, and whether Settings was open then. */
+const RESTART_KEY = 'desktopLinkRestart';
+/** A reload this recent that still didn't bring connectNative won't be followed by another: Chrome itself needs restarting. */
+const RESTART_GUARD_MS = 60_000;
+const SETTINGS_PAGE = 'src/options/options.html';
 /** What the app needs to know of the extension's settings: what each gesture does. */
 const BINDING_KEYS = ['bindings', 'windowedBindings', 'swipeBindings', 'windowedSwipeBindings', 'windowedBindingsEnabled'];
 
@@ -27,7 +36,8 @@ export const desktopBindings = (settings) => Object.fromEntries(BINDING_KEYS.fil
  * @param {() => typeof chrome} [deps.api]
  * @param {string} deps.version  this extension's
  * @param {() => Promise<object>} deps.settings
- * @param {(id:string, text:string) => Promise<{ok:boolean, say:string}>} deps.task  a command from the app, carried out
+ * @param {(id:string, text:string, meant:string) => Promise<{ok:boolean, say:string}>} deps.task  a command from the app,
+ *   carried out; `meant`: what the app's conversation took the words to mean, or ''
  * @param {() => void} deps.cancel  the app stopped it
  * @param {(op:string, args:object) => Promise<unknown>} deps.request  a question from the app: knows, aim, act
  * @param {(state:string, detail:string) => void} [deps.onChange]
@@ -56,7 +66,7 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
     if (next === state && why === detail) return;
     state = next;
     detail = why;
-    if (state === LINK_STATE.LINKED || state === LINK_STATE.OFF) chrome().alarms?.clear(RETRY_ALARM);
+    if (state === LINK_STATE.LINKED || state === LINK_STATE.OFF || state === LINK_STATE.RESTART) chrome().alarms?.clear(RETRY_ALARM);
     else chrome().alarms?.create(RETRY_ALARM, { periodInMinutes: RETRY_MINUTES });
     if (state !== LINK_STATE.LINKED) for (const [id, resolve] of asking) (asking.delete(id), resolve(false));
     onChange(state, detail);
@@ -79,7 +89,7 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
       case 'jester/link-error':
         return become(LINK_STATE.WAITING, String(message.detail || 'Jester Desktop isn’t running.'));
       case 'task': {
-        const result = await task(String(message.id), String(message.text || '')).catch((err) => ({ ok: false, say: String(err?.message || err) }));
+        const result = await task(String(message.id), String(message.text || ''), String(message.meant || '')).catch((err) => ({ ok: false, say: String(err?.message || err) }));
         return void post({ type: 'done', id: message.id, ok: !!result?.ok, say: String(result?.say || '') });
       }
       case 'cancel':
@@ -97,10 +107,34 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
     }
   }
 
+  /** Reloads the extension, so a worker that starts with the permission connects; Settings, if open, opens again after. */
+  async function restartForLink() {
+    const store = chrome().storage?.local;
+    const last = (await store?.get(RESTART_KEY).catch(() => null))?.[RESTART_KEY];
+    if (!store || typeof chrome().runtime.reload !== 'function' || Date.now() - (last?.at || 0) < RESTART_GUARD_MS) {
+      return become(LINK_STATE.RESTART, 'Quit and reopen Chrome to finish linking.');
+    }
+    const settingsPage = chrome().runtime.getURL(SETTINGS_PAGE);
+    const tabs = await chrome().runtime.getContexts?.({ contextTypes: ['TAB'] }).catch(() => []);
+    const reopen = (tabs || []).some((context) => String(context.documentUrl || '').startsWith(settingsPage));
+    await store.set({ [RESTART_KEY]: { at: Date.now(), reopen } });
+    chrome().runtime.reload();
+  }
+
+  /** After that reload: Settings back where the user was. */
+  async function reopenSettings() {
+    const store = chrome().storage?.local;
+    const last = (await store?.get(RESTART_KEY).catch(() => null))?.[RESTART_KEY];
+    if (!last?.reopen) return;
+    await store.set({ [RESTART_KEY]: { ...last, reopen: false } });
+    await chrome().tabs?.create({ url: chrome().runtime.getURL(`${SETTINGS_PAGE}#desktop`) });
+  }
+
   async function connect() {
     if (port) return;
     if (!(await permitted())) return become(LINK_STATE.OFF);
     if (port) return;
+    if (typeof chrome().runtime.connectNative !== 'function') return restartForLink();
     let opened;
     try {
       opened = chrome().runtime.connectNative(DESKTOP_HOST);
@@ -138,6 +172,7 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
         setTimeout(resolve, FIRST_TRY_MS);
       });
       connect();
+      reopenSettings().catch(() => undefined);
       return firstTry;
     },
     /** Resolves once it's known whether the app is there, or a moment has passed: before Jester opens its own camera. */

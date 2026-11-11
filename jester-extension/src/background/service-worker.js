@@ -17,7 +17,7 @@ import { abortableDelay, supportsImages } from './model-client.js';
 import { webPage, requiresConfirmation } from '../common/agent-permissions.js';
 import { BROWSER_READS } from '../common/agent-actions.js';
 import { createBrowserTools, publicAddress } from './browser-tools.js';
-import { approvalAnswer, parseBrowserIntent, quickBrowserAction, spokenCommand } from './browser-intent.js';
+import { approvalAnswer, bookmarkNames, parseBrowserIntent, quickBrowserAction, spokenCommand } from './browser-intent.js';
 import { createDesktopLink, desktopBindings } from './desktop-link.js';
 import { siteOf } from '../common/sites.js';
 import { loadCalibration, clearCalibration } from '../common/gaze-store.js';
@@ -1199,7 +1199,7 @@ const RESUME_TTL_MS = 60000;
 let resumeExpiry = null;
 
 /** Said to carry on, rather than to ask for something new. */
-const CONTINUE = /^(keep (going|at it)|carry on|continu\w*|go on|finish (it|that|up)|resume|and then)\b[\s.!?]*$/i;
+const CONTINUE = /^(keep (going|at it|trying)|carry on|continu\w*|go on|finish (it|that|up)|resume|and then|try (it )?(again|now)|retry)\b[\s.!?]*$/i;
 
 /**
  * The last few voice commands and how they ended, so a follow-up such as "next
@@ -1682,9 +1682,12 @@ async function executeReal(run,action,options) {
 /**
  * `fromDesktop`: Jester Desktop heard it and hands it over (desktop-link.js); its pill
  * shows the task, and it says the outcome, which this returns: {ok, say}, or null.
+ * `meant`: what the words were taken to mean in conversation with Jester Desktop,
+ * which has what came before ("try now": try what).
  */
-async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = false} = {}) {
-  const command = String(text || '').trim().slice(0,2000);
+async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = false, meant = ''} = {}) {
+  let command = String(text || '').trim().slice(0,2000);
+  let understood = fromDesktop ? String(meant || '').trim().slice(0,2000) : '';
   if (!command && !explicitResume) return null;
   // The answer to "Allow …? Say yes or no." Anything else is a new request, and not a yes.
   if (approval && !explicitResume) {
@@ -1700,13 +1703,21 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
   if (!settings.voiceEnabled && !fromDesktop) return null;
   cancelAssistant();
   // Whatever tab you're looking at, Chrome's own pages included: browser commands work there.
-  const tab = await visibleTab();
+  // Jester Desktop's own window has the focus while the user types to it, so its
+  // tasks take the tab in Chrome's front window, which it was brought forward for.
+  const tab = fromDesktop ? (await frontView()).tab : await visibleTab();
   const tabId = tab?.id ?? null;
   const resume = explicitResume ? pausedTask() : continuation(command,tabId);
   if ((explicitResume || CONTINUE.test(command)) && (!resume || resume.tabId !== tabId)) {
-    const say = 'There is no task to resume on this tab.';
-    if (!fromDesktop) await reply(tabId,{phase:'answer',text:say,ok:false});
-    return {ok:false,say};
+    // Nothing paused here to carry on with: what the conversation took "keep going" to mean is the request.
+    if (understood && !explicitResume && !CONTINUE.test(understood)) {
+      command = understood;
+      understood = '';
+    } else {
+      const say = 'There is no task to resume on this tab.';
+      if (!fromDesktop) await reply(tabId,{phase:'answer',text:say,ok:false});
+      return {ok:false,say};
+    }
   }
   // A new request replaces whatever was paused; its goal is the only one now.
   if (!resume) await dropTask();
@@ -1760,8 +1771,11 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
       // A continuation's goal is the paused one, so it carries no follow-up context.
       const previous = resume ? [] : await recentCommands();
       result = await runAssistant({text:command,resume,previous,env:env||{},signal:controller.signal,
+        ...(understood && !resume ? {meant:understood} : {}),
         ...(pooledModel ? {modelClient:pooledModel} : {}),host:{
         observe:options => observeAgent(run,options), execute:action => executeAgent(run,action), checkpoint:persist,
+        // A bookmark the user saved is a site they chose: opening it needs no extra say-so.
+        bookmark:async name => { const url = await bookmarkNamed(name); if (url) noteHosts(run,[url]); return url; },
         look:() => lookAgent(run,env),
         thinking:step => assistantRun === run ? showPill(run,{phase:'thinking',step:typeof step === 'string' ? step : step?.status || ''}) : Promise.resolve()
       }});
@@ -1955,9 +1969,28 @@ async function browserKnows(text) {
   const intent = parseBrowserIntent(command);
   if (!intent) return false;
   if (intent.kind !== 'open' || intent.url) return true;
-  const named = String(intent.name || '').replace(/\s+bookmark$/i, '');
-  const found = named ? await chrome.bookmarks.search(named).catch(() => []) : [];
-  return found.some(node => !!node.url);
+  for (const named of bookmarkNames(intent.name)) {
+    if ((await chrome.bookmarks.search(named).catch(() => [])).some(node => !!node.url)) return true;
+  }
+  return false;
+}
+
+const compactTitle = (text) => String(text || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+/**
+ * The address of the bookmark a spoken name means: the one with that very
+ * title, else the only one the name finds. Null for none, or for several
+ * equally likely, which are the planner's to tell apart.
+ */
+async function bookmarkNamed(name) {
+  for (const named of bookmarkNames(name)) {
+    const found = (await chrome.bookmarks.search(named).catch(() => [])).filter(node => /^https?:\/\//i.test(node.url || ''));
+    const exact = found.filter(node => compactTitle(node.title) === compactTitle(named));
+    if (exact.length) return exact[0].url;
+    if (found.length === 1) return found[0].url;
+    if (found.length) return null;
+  }
+  return null;
 }
 
 /** The link or button nearest a point on the screen, as the page in front finds it, in screen points. */
@@ -1969,21 +2002,25 @@ async function aimAt({x, y, radius}) {
   return found?.frame || null;
 }
 
-/** The app's command is about Chrome: with no window of it in view, the last one used comes forward. */
+/**
+ * The app's command is about Chrome: with no window of it in view, the last one
+ * used comes forward, or with none open (Chrome still running), a new one opens,
+ * as clicking Chrome in the Dock would.
+ */
 async function bringChromeForward() {
   if (await visibleTab()) return;
   const last = await chrome.windows.getLastFocused({windowTypes:['normal']}).catch(() => null);
-  if (last?.id === undefined) return;
-  await chrome.windows.update(last.id,{focused:true,...(last.state === 'minimized' ? {state:'normal'} : {})}).catch(() => undefined);
+  if (last?.id === undefined) await chrome.windows.create({focused:true}).catch(() => undefined);
+  else await chrome.windows.update(last.id,{focused:true,...(last.state === 'minimized' ? {state:'normal'} : {})}).catch(() => undefined);
   invalidateActiveTab();
 }
 
 const desktop = createDesktopLink({
   version: chrome.runtime.getManifest?.().version || '',
   settings: getSettings,
-  task: async (_id, text) => {
+  task: async (_id, text, meant) => {
     await bringChromeForward();
-    return handleVoiceCommand(text,false,{fromDesktop:true});
+    return handleVoiceCommand(text,false,{fromDesktop:true,meant});
   },
   cancel: () => cancelAssistant(),
   request: async (op, args) => {

@@ -10,12 +10,35 @@ const VERSION = 1;
 const WAIT = Object.freeze({ wait: true });
 const OPEN = '(?:open(?:\\s+up)?|go\\s+to|take\\s+me\\s+to|visit|pull\\s+up|bring\\s+up|launch|load|navigate\\s+to|head\\s+to)';
 
-/** What was said, without the wake word, the politeness and the dictation's punctuation. */
+/** "Open Chrome and …", "… in Chrome": said to Jester Desktop, it's in Chrome already. */
+const CHROME_FIRST = /^(?:open|launch|start|go\s+to|switch\s+to)\s+(?:up\s+)?(?:google\s+)?chrome\s*,?\s+(?:and\s+then|and|then)\s+/i;
+const IN_CHROME = /\s+(?:in|on|with|using)\s+(?:google\s+)?chrome$/i;
+
+/** What was said, without the wake word, the politeness, Chrome's own name and the dictation's punctuation. */
 export function spokenCommand(text) {
   if (typeof text !== 'string' || text.length > 300) return '';
   const polite = /^(?:please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?|i(?:\s+would|['’]d)\s+like\s+(?:you\s+)?to\s+|i\s+want\s+(?:you\s+)?to\s+)/i;
   return text.trim().replace(/^(?:hey\s+)?jester[:,]?\s+/i, '').replace(/\s*,?\s+please[.!?]?$/i, '')
-    .replace(/[.!?]+$/, '').replace(polite, '').replace(polite, '').trim();
+    .replace(/[.!?]+$/, '').replace(polite, '').replace(polite, '').replace(CHROME_FIRST, '').replace(IN_CHROME, '').trim();
+}
+
+/**
+ * The names a bookmark asked for might have, surest first: "google chrome
+ * bookmark PSU Canvas" and "PSU Canvas bookmark" are "PSU Canvas", and "PSU
+ * Canvas extension" is that too if nothing has the whole name.
+ */
+export function bookmarkNames(name) {
+  const plain = String(name || '').trim()
+    .replace(/^(?:the|my)\s+/i, '')
+    .replace(/\s+(?:from|in)\s+(?:my\s+)?bookmarks$/i, '')
+    .replace(/^(?:(?:google\s+)?chrome\s+)?bookmark(?:ed)?(?:\s+(?:page|site))?\s+(?:called\s+|named\s+)?/i, '')
+    .replace(/\s+(?:(?:google\s+)?chrome\s+)?bookmark$/i, '')
+    .trim();
+  const loose = plain
+    .replace(/^(?:(?:google\s+)?chrome\s+)?(?:extension|page|site|website|link)\s+(?:called\s+|named\s+)?/i, '')
+    .replace(/\s+(?:(?:google\s+)?chrome\s+)?(?:extension|page|site|website|link)$/i, '')
+    .trim();
+  return [...new Set([plain, loose])].filter(Boolean);
 }
 
 const THIS = '(?:(?:this|the|current|this\\s+current|the\\s+current)\\s+)?';

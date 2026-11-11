@@ -5,13 +5,17 @@
  * `osascript`, `shortcuts`). A sentence of several steps runs them in order,
  * waiting for an app to come to the front before anything is typed into it,
  * and stops at the first that fails. The outcome is one line for the pill.
+ * Words the conversation took to mean a command that worked stand for that
+ * command from then on (learned.js aliasable), with no model to ask; so do a
+ * command's own words that only Chrome or the assistant could do.
  */
 
 import { execFile } from 'node:child_process';
 import { goalWords, hasWord } from './agent/screen.js';
 import { appCatalog, findApp, installedApps } from './apps.js';
-import { gist } from './learned.js';
+import { aliasable, asksToBeTold, gist } from './learned.js';
 import { describePlan } from './os-actions.js';
+import { secretIn } from './vault-memory.js';
 import { asksFirst, matchApp, parseSequence } from './voice-commands.js';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -165,12 +169,12 @@ export function dictation(text) {
  * @param {(file:string, args:string[]) => Promise<string>} [deps.run]  runs open, osascript, shortcuts
  * @param {(platform:string) => object[]} [deps.installed]
  * @param {string} [deps.platform]
- * @param {(...parts:any[]) => void} [deps.log]
+ * @param {(...parts:any[]) => void} [deps.log]  dev.log: a part holding a password or card number is left out
  * @param {(ms:number) => Promise<void>} [deps.wait]
  * @param {object} [deps.assistant]  takes what the matcher can't do (phase 6), when a model is set up:
  *   ready(), run(goal, {note, pick}) → {ok, text, trace?}|null, replay(entry, goal) → {ok, text}|{ok:false, step, detail},
  *   running, cancel()
- * @param {ReturnType<import('./learned.js').createLearned>} [deps.learned]  what's been taught and learned
+ * @param {ReturnType<import('./learned.js').createLearned>} [deps.learned]  what's been taught, learned, and taken to mean
  * @param {() => {id:number, bounds:object, workArea:object, internal:boolean, primary?:boolean}[]} [deps.displays]
  *   Electron's displays, in DIPs
  * @param {(frame:object) => object} [deps.toOsFrame]  a DIP frame in the driver's coordinates
@@ -187,7 +191,7 @@ export function createVoiceRunner({
   run = runFile,
   installed = installedApps,
   platform = process.platform,
-  log = () => undefined,
+  log: write = () => undefined,
   wait = pause,
   assistant = null,
   learned = null,
@@ -199,6 +203,8 @@ export function createVoiceRunner({
 }) {
   const mac = platform === 'darwin';
   const primary = mac ? 'cmd' : 'ctrl';
+  /** Words holding a password or card number (vault-memory.js secretIn) aren't kept anywhere, dev.log included. */
+  const log = (...parts) => write(...parts.map((part) => (typeof part === 'string' && secretIn(part) ? `(words holding ${secretIn(part)}, left out)` : part)));
   /** `front`: the names of an app this step brought forward, for the next step to wait on. */
   const ok = (text, front) => ({ ok: true, text, ...(front ? { front } : {}) });
   const bad = (text) => ({ ok: false, text });
@@ -514,18 +520,22 @@ export function createVoiceRunner({
    * learned, to be done without it next time. `pick`: a search is waiting for
    * its result to be pressed, which is all that's left to do. `said`: in
    * conversation, the user's own words, which are the task, `text` being only
-   * how the conversation took them; it's learned only if the two say the same.
+   * how the conversation took them. What was done is kept under `text`, which
+   * is what comes again, but only if the user asked nothing, and what it typed
+   * is in both: their words, and the command's (learned.js learnable).
    */
   async function assisted(text, note = '', done = [], { pick = false, said = '' } = {}) {
     const goal = said || text;
-    const result = await assistant.run(goal, { ...(note ? { note } : {}), ...(pick ? { pick } : {}), ...(gist(goal) !== gist(text) ? { meant: text } : {}) });
+    const reworded = gist(goal) !== gist(text);
+    const result = await assistant.run(goal, { ...(note ? { note } : {}), ...(pick ? { pick } : {}), ...(reworded ? { meant: text } : {}) });
     if (!result) return null;
     const { trace, ...outcome } = result;
-    if (outcome.ok && trace && learned && gist(goal) === gist(text)) {
+    if (outcome.ok && trace && learned) {
       // A learned way that stopped part way: its first steps were done that way, and the assistant went on from there.
-      const kept = await learned.remember(text, [...done, ...trace]).catch((err) => ({ saved: false, why: err.message }));
+      const kept = await learned.remember(text, [...done, ...trace], { said: goal }).catch((err) => ({ saved: false, why: err.message }));
       log('learned:', JSON.stringify(text), kept.saved ? (kept.known ? 'updated' : 'new') : `not kept (${kept.why})`);
-      if (kept.saved && !kept.known) outcome.text = `${outcome.text} · Next time, no AI needed.`;
+      // Reworded, it's done with no AI next time only if the user's words will stand for the command (run).
+      if (kept.saved && !kept.known && (!reworded || aliasable(goal, text))) outcome.text = `${outcome.text} · Next time, no AI needed.`;
     }
     return outcome;
   }
@@ -556,18 +566,33 @@ export function createVoiceRunner({
       );
       return { steps, outcome: ok(`${done.outcome.text} · ${saved ? `Say “${phrase}” any time to do that.` : `“${phrase}” couldn’t be saved.`}`) };
     }
-    // What the matcher can't do goes, whole, to the linked Chrome extension if it's the
-    // browser's, then to a way learned before, then to the assistant. Without one, half a
-    // sentence is not done: "open Spotify and do a little dance" does nothing.
+    // What the matcher can't do goes, whole, to the command the words stood for before if
+    // they did, else to the linked Chrome extension if it's the browser's, then to a way
+    // learned before, then to the assistant. Without one, half a sentence is not done:
+    // "open Spotify and do a little dance" does nothing.
     const unknown = steps.find((step) => step.kind === 'unknown');
+    // The user's own words (not a command the conversation gave), which it took to mean a command that worked.
+    const alias = unknown && !said && learned ? await learned.aliasFor(text).catch(() => null) : null;
+    if (alias) {
+      log('voice: stands for', JSON.stringify(text), '→', JSON.stringify(alias.does));
+      // The apps just read do for the command too; it's done as the conversation's, with these as the user's words.
+      catalog = { at: Date.now(), apps };
+      const { outcome } = await runSentence(alias.does, depth + 1, { ...context, talking: true, said: text });
+      // One that didn't work is no shortcut: the next time, the conversation works the words out afresh.
+      if (outcome) (outcome.ok ? learned.used(alias.key, 'alias') : learned.unalias(text)).catch(() => undefined);
+      return { steps, outcome };
+    }
     if (unknown && browser && ((await browser.claims(text)) || (!!said && (await browser.claims(said))))) {
-      log('voice: Chrome’s to do:', JSON.stringify(said || text));
-      const done = await browser.run(said || text);
+      // The user's own words, and what the conversation took them to mean: Chrome hasn't heard what came before ("try now").
+      const meant = said && gist(said) !== gist(text) ? text : '';
+      log('voice: Chrome’s to do:', JSON.stringify(said || text), meant ? `(meaning ${JSON.stringify(meant)})` : '');
+      const done = await browser.run(said || text, meant);
       log('voice: Chrome', done ? `${done.ok ? 'did it' : 'didn’t'}: ${JSON.stringify(done.text)}` : 'stopped');
       return { steps, outcome: done && (done.ok ? ok(done.text || 'Done.') : bad(done.text || 'That didn’t work in Chrome.')) };
     }
     if (unknown) {
-      const known = learned && assistant?.replay ? await learned.find(text).catch(() => null) : null;
+      // A question's answer is the assistant's to find: a way learned for the command it came as would do it and tell nothing.
+      const known = learned && assistant?.replay && !asksToBeTold(said || text) ? await learned.find(text).catch(() => null) : null;
       let note = '';
       let done = [];
       if (known) {
@@ -619,16 +644,37 @@ export function createVoiceRunner({
     /**
      * @param {string} text
      * @param {{talking?:boolean, said?:string}} [context]  talking: said in conversation (parseCommand);
-     *   said: the user's own words, when `text` is the conversation's command for them
+     *   said: the user's own words, when `text` is the conversation's command for them. When that command
+     *   works, the words stand for it from then on, if they can (learned.js aliasable).
      * @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say
      */
-    run: (text, context = {}) => runSentence(text, 0, context),
+    async run(text, context = {}) {
+      const done = await runSentence(text, 0, context);
+      const { said } = context;
+      // Teaching and forgetting are done once: words for them stand for nothing.
+      const once = done.steps.some((step) => step.kind === 'teach' || step.kind === 'forget');
+      if (learned && said && done.outcome?.ok && !once) {
+        // The user's words, reworded into a command that worked. Or the command's own words, when only Chrome or the
+        // assistant could do it and no way was learned for them: else the next time they'd wait on the talking model.
+        const same = gist(said) === gist(text);
+        const unknown = done.steps.some((step) => step.kind === 'unknown');
+        if (!same || (unknown && !(await learned.find(said).catch(() => null)))) {
+          const kept = await learned.alias(said, text, { same }).catch((err) => ({ saved: false, why: err.message }));
+          // Words refused for holding a secret aren't written down here either: the command's half may be the secret itself.
+          const what = kept.why?.startsWith('it holds') ? [] : [JSON.stringify(said), '→', JSON.stringify(text)];
+          log('learned:', ...what, kept.saved ? (kept.known ? 'again' : 'new') : `not kept (${kept.why})`);
+        }
+      }
+      return done;
+    },
     /** Whether a sentence is one Jester can do with no model. Does nothing, and stops nothing running. */
     async knows(text) {
       if (learned && (await learned.phrase(text).catch(() => null))) return true;
       const apps = (await freshApps()).flatMap((app) => app.names);
       if (!parseSequence(text, { apps, platform, talking: true }).some((step) => step.kind === 'unknown')) return true;
-      return !!(learned && (await learned.find(text).catch(() => null)));
+      if (!learned) return false;
+      // A way learned for these words, or the command they stand for.
+      return !!((await learned.find(text).catch(() => null)) || (await learned.aliasFor(text).catch(() => null)));
     },
     /**
      * Whether a sentence should ask before it's done, having been overheard. What
@@ -637,8 +683,12 @@ export function createVoiceRunner({
     async risky(text) {
       const taught = learned ? await learned.phrase(text).catch(() => null) : null;
       const names = (await freshApps()).flatMap((app) => app.names);
-      const steps = parseSequence(taught?.say ?? text, { apps: names, platform, talking: !taught });
-      if (steps.some((step) => step.kind === 'unknown')) return false;
+      const unknown = (steps) => steps.some((step) => step.kind === 'unknown');
+      let steps = parseSequence(taught?.say ?? text, { apps: names, platform, talking: !taught });
+      // Words that stand for a command risk what it does.
+      const alias = !taught && unknown(steps) && learned ? await learned.aliasFor(text).catch(() => null) : null;
+      if (alias) steps = parseSequence(alias.does, { apps: names, platform, talking: true });
+      if (unknown(steps)) return false;
       return steps.some((step) => asksFirst(step, { platform, listed: (app) => !!matchApp(app, names) }));
     },
     /** Moves a window, as the assistant's place asks: {app?, pid?, name?, where, screen}. */

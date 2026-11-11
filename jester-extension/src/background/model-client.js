@@ -67,9 +67,11 @@ function endpoint(config) {
 /**
  * Whether a saved model can read a screenshot. Model IDs are the only signal
  * every provider shares; an unknown one is assumed text-only, so no image is
- * ever sent where it would be refused.
+ * ever sent where it would be refused. A connection that knows (`vision`, as
+ * Ollama lists it for Jester Desktop's own model) is taken at its word.
  */
 export function supportsImages(connection) {
+  if (typeof connection?.vision === 'boolean') return connection.vision;
   const model = String(connection?.model || '').toLowerCase();
   if (/embed|tts|whisper|guard|imagen|veo/.test(model)) return false;
   if (connection?.provider === 'google') return /gemini|gemma-3/.test(model);

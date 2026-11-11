@@ -34,7 +34,7 @@ const PERMISSION_STATE = {
   unknown: ['Unknown', 'missing']
 };
 
-const TIER = { needed: 'Needed', recommended: 'Recommended', later: 'Later' };
+const TIER = { needed: 'Needed', recommended: 'Recommended', optional: 'Optional' };
 
 let settings = null;
 let desktop = null;
@@ -81,8 +81,8 @@ function renderPermissions() {
       const li = document.createElement('li');
       li.className = `permission${item.granted ? ' granted' : ''}`;
       const [stateText, stateTone] = PERMISSION_STATE[item.status] || PERMISSION_STATE.unknown;
-      // Something not used yet is no cause for alarm.
-      const stateClass = item.tier === 'later' && !item.granted ? 'later' : stateTone;
+      // Something everything works without is no cause for alarm.
+      const stateClass = item.tier === 'optional' && !item.granted ? 'optional' : stateTone;
 
       const text = document.createElement('div');
       text.className = 'text';
@@ -95,7 +95,8 @@ function renderPermissions() {
       badge.textContent = TIER[item.tier];
       title.append(name, badge);
       const why = document.createElement('small');
-      why.textContent = item.why;
+      // Looked for as "Jester" in System Settings, it isn't there.
+      why.textContent = `${item.why}${!item.granted && item.listedAs ? ` System Settings lists it as “${item.listedAs}”.` : ''}`;
       text.append(title, why);
 
       const actions = document.createElement('div');
@@ -208,6 +209,13 @@ function renderVoice() {
     : `${voiceStarters()} starts a command: say “open Spotify”, “volume 30”, “type hello”. Speech is recognized on this computer.`;
   renderSpeechModel(missing);
   renderContinuous();
+}
+
+/** Pictures of the window for the model: on unless turned off here, and on a Mac only with Screen Recording too. */
+function renderPictures() {
+  $('agentScreenshots').checked = settings.agentScreenshots !== false;
+  const recording = (desktop?.permissions || []).find((item) => item.id === 'screen');
+  $('pictures-hint').textContent = `When a window’s words aren’t enough, the assistant may send a model that reads pictures one of that window: up to three a task, never with a password field showing.${recording && !recording.granted ? ' Needs Screen Recording, under Permissions.' : ''}`;
 }
 
 /** The always-on assistant: whether it can listen, and how he sounds. */
@@ -571,10 +579,57 @@ function renderChrome() {
       : `In Chrome, open Jester’s settings and click Link with Jester Desktop. It then has your bookmarks, tabs and pages for what you ask, and one camera and mic for both.${chrome.browsers?.length ? ` Ready for ${chrome.browsers.join(', ')}.` : ''}`;
 }
 
+/** macOS keeps Jester out of the vault: since it was chosen, or since it was opened (its search says so). */
+const vaultDenied = (memory) => memory?.problem === 'denied' || (!!memory?.root && memory.search?.error === 'denied');
+
+/** The vault Jester remembers in, and how well it can search it. */
+function renderMemory() {
+  const memory = desktop?.memory || {};
+  const search = memory.search;
+  const denied = vaultDenied(memory);
+  const detected = (memory.detected || []).find((item) => item.path !== memory.chosen && item.path !== memory.root);
+  $('memoryConversations').checked = settings.memoryConversations !== false;
+  $('vault-hint').textContent = memory.root
+    ? `${memory.name}: ${memory.root}. Jester reads all of it, and writes only in its Jester and Notes folders. Stop using, and Jester does neither (nothing in the vault is deleted).`
+    : 'Jester keeps what it learns about you in an Obsidian vault, reads your notes there to answer, and adds to them when you ask.';
+  // What leaves the computer: the talking model is told what bears on what's said (vault-memory.js recall).
+  if (memory.root) $('vault-hint').textContent += ' What you say goes to the model ticked for Talking with About me and the parts of your notes that look related, never a line that looks like a password.';
+  const problems = {
+    denied: 'macOS hasn’t let Jester into that folder. Click Open Privacy Settings, find Electron (Jester while it’s in development) under Files and Folders, turn on the folder your vault is in (Documents, say), then click Try again.',
+    missing: 'That folder isn’t there any more. Choose the vault again.'
+  };
+  $('vault-problem').textContent = denied ? problems.denied : memory.problem ? problems[memory.problem] || memory.problem : '';
+  $('vault-use').hidden = !detected;
+  if (detected) $('vault-use').textContent = `Use “${detected.name}”`;
+  $('vault-use').dataset.path = detected?.path || '';
+  // A long name is cut short on the button: all of it, and where it is, on hover.
+  $('vault-use').title = detected?.path || '';
+  $('vault-choose').textContent = memory.chosen ? 'Change…' : 'Choose…';
+  $('vault-remove').hidden = !memory.chosen;
+  $('vault-open').hidden = !memory.root;
+  $('vault-privacy').hidden = !denied;
+  // Read again opens the vault again too, so it's how to try once macOS lets Jester in.
+  $('vault-reindex').hidden = !memory.root && !denied;
+  $('vault-reindex').textContent = denied ? 'Try again' : 'Read again';
+  $('vault-search').textContent = !memory.root
+    ? 'Once there’s a vault: by meaning, with nomic-embed-text in Ollama, or by words without it.'
+    : memory.reading || !search
+      ? 'Reading the vault…'
+      : `${search.notes} note${search.notes === 1 ? '' : 's'} read · ${search.mode === 'meaning' ? `by meaning (${search.model})` : search.mode === 'words' ? 'by words' : 'off'}${search.error && search.error !== 'denied' ? ` · ${search.error}` : ''}`;
+}
+
+/** Asks the app to do something with the vault: it answers with how things are now. */
+async function vaultOp(op, path) {
+  desktop = await chrome.runtime.sendMessage({ type: 'jester/desktop-memory', op, path });
+  render();
+}
+
 function render() {
   renderStatus();
   renderChrome();
   renderPermissions();
+  renderPictures();
+  renderMemory();
   renderControls();
   renderBindings();
   renderCameraHint();
@@ -634,6 +689,14 @@ $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled:
 $('voiceEnabled').addEventListener('change', (event) => save({ voiceEnabled: event.target.checked }));
 $('speechModel').addEventListener('change', (event) => save({ speechModel: event.target.value }));
 $('continuousAssistant').addEventListener('change', (event) => save({ continuousAssistant: event.target.checked }));
+$('agentScreenshots').addEventListener('change', (event) => save({ agentScreenshots: event.target.checked }));
+$('memoryConversations').addEventListener('change', (event) => save({ memoryConversations: event.target.checked }));
+for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], ['vault-open', 'open'], ['vault-privacy', 'privacy'], ['vault-reindex', 'reindex']]) {
+  $(id).addEventListener('click', () => vaultOp(op));
+}
+$('vault-use').addEventListener('click', (event) => vaultOp('use', event.currentTarget.dataset.path));
+// Back from System Settings, a vault macOS kept Jester out of is tried again, as Try again does.
+window.addEventListener('focus', () => vaultDenied(desktop?.memory) && vaultOp('reindex'));
 $('assistantModel').addEventListener('change', async (event) => {
   await save({ assistantModel: event.target.value });
   renderChatModels();

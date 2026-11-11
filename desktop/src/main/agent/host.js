@@ -24,6 +24,7 @@
 
 import { parseShortcut } from '../os-actions.js';
 import { MEDIA_KEYS, menuPath } from './actions.js';
+import { pictureRefusal } from './marks.js';
 import { elementById, findElements, screenChanges } from './screen.js';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -89,11 +90,13 @@ const sameApp = (pid, app) => pid === app?.pid || (app?.hostedPid !== undefined 
  * @param {(ms:number) => Promise<void>} [deps.wait]
  * @param {(task:Function) => Promise} [deps.quietly]  runs accessibility work with Jester's
  *   overlays hidden: macOS answers nothing useful while one is on screen (README)
+ * @param {Function & {allowed?: () => boolean}} [deps.picture]  (snapshot, {goal}) => a picture of
+ *   its window with the controls numbered (window-shot.js); `allowed`, whether one can be taken now
  * @param {number} [deps.exclude]  Jester's own process: its windows are never the screen meant
  * @param {number} [deps.pid]  read this app's window instead of the front one (tests)
  * @param {string} [deps.platform]
  */
-export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place = null, wait = pause, quietly = (task) => task(), exclude, pid, platform = process.platform }) {
+export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place = null, picture = null, wait = pause, quietly = (task) => task(), exclude, pid, platform = process.platform }) {
   const primary = platform === 'darwin' ? 'cmd' : 'ctrl';
   /** An accessibility action on an element of the snapshot (none: its window). */
   const act = (snapshot, element, action, value) =>
@@ -489,7 +492,25 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     return { ok: false, detail: failed.message };
   }
 
-  async function perform(action, snapshot, signal) {
+  /**
+   * A picture of the window for the model's next step, from a fresh read: the
+   * numbers drawn on it are that read's, so it's the next step's screen too,
+   * whether or not the picture could be taken (the read before it is stale now).
+   */
+  async function screenshot(goal) {
+    if (!picture) return { ok: false, detail: 'Pictures of the screen aren’t available here: work from the screen text.' };
+    const seen = await observe();
+    if (!seen.ok) return { ok: false, detail: 'The window couldn’t be read again to take its picture.' };
+    const refused = pictureRefusal(seen.snapshot);
+    if (refused) return { ok: false, detail: refused, snapshot: seen.snapshot };
+    // It moves Jester's own windows aside itself, and waits for them to go.
+    const shot = await picture(seen.snapshot, { goal }).catch((err) => ({ ok: false, detail: tidy(err?.message || err, 160) }));
+    if (!shot?.ok) return { ok: false, detail: shot?.detail || 'No picture was taken.', snapshot: seen.snapshot };
+    const count = shot.marked?.length ?? 0;
+    return { ok: true, detail: `a picture of the window comes with the next step, ${count} control${count === 1 ? '' : 's'} numbered`, image: shot.image, marked: shot.marked || [], snapshot: seen.snapshot };
+  }
+
+  async function perform(action, snapshot, signal, goal) {
     const element = action.id === undefined ? null : elementById(snapshot, action.id);
     if (action.id !== undefined && !element) return { ok: false, detail: `There is no element ${action.id} on this screen.` };
     switch (action.action) {
@@ -545,6 +566,8 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       case 'wait':
         await wait(action.ms);
         return { ok: true };
+      case 'screenshot':
+        return screenshot(goal);
       default:
         return { ok: false, detail: `Jester can’t ${action.action}.` };
     }
@@ -552,6 +575,9 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
 
   return {
     observe,
+
+    /** Whether a picture of the window can be taken now: a way to take one, and the OS and settings allowing it. */
+    canPicture: () => !!picture && (picture.allowed ? picture.allowed() : true),
 
     /**
      * What a step needs settled before it is judged: a menu command's real
@@ -591,10 +617,11 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
      * command or a key whose effect the read can't show (bold text, a copy)
      * isn't "nothing changed" but unseen: `changed` is left unsaid. `patient`:
      * a slow app gets one more look before that's said. Cancelled (`signal`),
-     * it stops where it is and reads nothing more.
+     * it stops where it is and reads nothing more. `goal` ranks which
+     * controls a picture numbers when they can't all be.
      */
-    async execute(action, snapshot, { verify = false, signal, patient = false } = {}) {
-      const result = await perform(action, snapshot, signal);
+    async execute(action, snapshot, { verify = false, signal, patient = false, goal = '' } = {}) {
+      const result = await perform(action, snapshot, signal, goal);
       if (!result.ok || !VISIBLE.has(action.action)) return result;
       await wait(result.busy ? BUSY_MS : SETTLE_MS);
       if (!verify || signal?.aborted) return result;

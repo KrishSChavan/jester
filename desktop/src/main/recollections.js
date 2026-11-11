@@ -7,11 +7,14 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { secretIn } from './vault-memory.js';
 
 export const KEPT_MS = 7 * 24 * 60 * 60 * 1000;
 const MOST = 60;
 /** How many reach the model at once. */
 const AT_ONCE = 6;
+/** Kept for a conversation whose sentence would hold a password or card number: that there was one, and no more. */
+const LEFT_OUT = 'A conversation; its details are left out.';
 const COMMON = new Set(['about', 'after', 'again', 'also', 'been', 'could', 'from', 'have', 'just', 'like', 'more', 'said', 'should', 'some', 'that', 'them', 'then', 'there', 'they', 'this', 'user', 'want', 'were', 'what', 'when', 'where', 'which', 'will', 'with', 'would', 'your']);
 
 const wordsIn = (text) => new Set((String(text).toLowerCase().match(/[a-z0-9']{4,}/g) || []).filter((word) => !COMMON.has(word)));
@@ -45,7 +48,10 @@ export function createRecollections({ file, summarize, now = Date.now, log = () 
   }
 
   return {
-    /** A conversation that's over, in a sentence. With no model to hand, its opening stands for it. */
+    /**
+     * A conversation that's over, in a sentence. With no model to hand, its opening stands for it. Either is given to
+     * the model in every prompt for a week, so one that holds a password or card number is kept as only that it was.
+     */
     async keep(entries) {
       const said = entries.filter((entry) => entry.who === 'you');
       if (!said.length) return;
@@ -54,7 +60,7 @@ export function createRecollections({ file, summarize, now = Date.now, log = () 
         return `The user said: ${said[0].text}`;
       });
       fresh();
-      kept.push({ at: now(), summary: String(summary).slice(0, 300) });
+      kept.push({ at: now(), summary: secretIn(summary) ? LEFT_OUT : String(summary).slice(0, 300) });
       write();
     },
     /** The ones that share words with what's being said, then the latest, oldest first. */

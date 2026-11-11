@@ -27,9 +27,10 @@
  *   JESTER_NO_LINK=1          no link to the Chrome extension
  */
 
-import { app, BrowserWindow, globalShortcut, nativeTheme, powerMonitor, safeStorage, screen, session, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
+import { format } from 'node:util';
 import { ACTIONS, ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
 import { createDesktopHost } from './agent/host.js';
 import { runDesktopAgent } from './agent/loop.js';
@@ -38,7 +39,7 @@ import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
 import { createChromeLink } from './chrome-link.js';
-import { askModel, createConversation, LOCAL_KEEP_ALIVE, ollamaModels, pickModel, summarize, warmOllama } from './conversation.js';
+import { askModel, createConversation, LOCAL_KEEP_ALIVE, NEW_AFTER_MS, ollamaModels, pickModel, warmOllama } from './conversation.js';
 import { createConversationLog } from './conversation-log.js';
 import { createDispatcher } from './dispatch.js';
 import { driverPath, startDriver, toDipFrame, toOsFrame } from './driver.js';
@@ -62,9 +63,13 @@ import { createStopButton } from './stop-button.js';
 import { createTray } from './tray.js';
 import { createWatch } from './watch.js';
 import { trayModel } from './tray-menu.js';
+import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault.js';
+import { createVaultIndex } from './vault-index.js';
+import { createVaultMemory, secretIn } from './vault-memory.js';
 import { createVoicePage } from './voice-page.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
+import { createWindowShot } from './window-shot.js';
 import { closeSafely, createEngineWindow, showCalibration, showSettings, showTalk, talkWindow } from './windows.js';
 
 const env = process.env;
@@ -78,11 +83,21 @@ const VOICE_SHORTCUT = 'Alt+Shift+J';
 const STARTED_TOAST_MS = 2000;
 /** The conversation log's hour is checked this often, so a sleeping Mac doesn't stretch it. */
 const LOG_CHECK_MS = 60000;
+/** How stale Obsidian's list of vaults may be. */
+const OBSIDIAN_LIST_MS = 5000;
+/** Jester's own views of the vault, which he rewrites: not notes to list in its map. Told by where they are, not their type. */
+const VIEWS = [PATHS.index, PATHS.routines, PATHS.readme];
+/** Learned things come in bursts (a task and its shortcut): Routines.md is written once they settle. */
+const ROUTINES_DELAY_MS = 1000;
 /** Teaching him a voice gives up after this long with nothing read. */
 const TEACHING_MS = 90000;
 
 registerScheme();
-if (env.JESTER_DATA_DIR) app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
+if (env.JESTER_DATA_DIR) {
+  app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
+  // A test Jester's log is its own, not the user's dev.log.
+  app.setAppLogsPath(path.join(path.resolve(env.JESTER_DATA_DIR), 'logs'));
+}
 // Read by the speech service, which inherits this environment.
 if (env.JESTER_SAVE_SPEECH) env.JESTER_SAVE_SPEECH = path.resolve(env.JESTER_SAVE_SPEECH);
 if (env.JESTER_FAKE_MEDIA) {
@@ -95,7 +110,34 @@ if (env.JESTER_FAKE_MEDIA) {
   }
 }
 
-const log = env.JESTER_LOG ? (...parts) => console.log('[jester]', ...parts) : () => undefined;
+/**
+ * Where the log goes with JESTER_LOG: stdout, which the launcher sends to
+ * dev.log. Restarted from the menu bar, Jester's stdout goes nowhere, so it
+ * adds to dev.log itself. Null: stdout will do (the launcher's file, or a terminal).
+ */
+function ownLogFile() {
+  if (!env.JESTER_LOG || process.stdout.isTTY) return null;
+  try {
+    if (fs.fstatSync(1).isFile()) return null;
+    // dev:mac's JESTER_DEV_LOG, when it was started with one.
+    const file = env.JESTER_DEV_LOG ? path.resolve(env.JESTER_DEV_LOG) : path.join(app.getPath('logs'), 'dev.log');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    return fs.openSync(file, 'a');
+  } catch {
+    return null;
+  }
+}
+const logFile = ownLogFile();
+/** A log line's words, but for any that look like a password or card number: dev.log is plain text, and heard words go in it. */
+const unsecret = (part) => {
+  const secret = typeof part === 'string' ? secretIn(part) : '';
+  return secret ? `(words holding ${secret}, left out)` : part;
+};
+const log = !env.JESTER_LOG
+  ? () => undefined
+  : logFile === null
+    ? (...parts) => console.log('[jester]', ...parts.map(unsecret))
+    : (...parts) => fs.writeSync(logFile, `${format('[jester]', ...parts.map(unsecret))}\n`);
 
 let engineWindow = null;
 let engineHost = null;
@@ -118,6 +160,16 @@ let speech = null;
 let voiceRunner = null;
 let conversation = null;
 let recollections = null;
+/** Taught phrases, learned tasks and shortcuts (learned.js). */
+let learned = null;
+/** The Obsidian vault Jester keeps its memory in (vault.js), its search (vault-index.js), and the memory between them. */
+let vault = null;
+let vaultIndex = null;
+let vaultMemory = null;
+/** Why the chosen vault can't be used: 'missing', 'denied', or an error's own words; '' when it can. */
+let vaultProblem = '';
+/** A read of the vault asked for here (opening it, Read again) is under way: Settings says so, not "0 notes read". */
+let vaultReading = false;
 let speaker = null;
 let voicePage = null;
 /** The model he talks through (model-jobs.js). */
@@ -225,6 +277,7 @@ function desktopState() {
       browsers: linkHost?.browsers || [],
       why: linkHost?.why || ''
     },
+    memory: memoryState(),
     fakeMedia: !!env.JESTER_FAKE_MEDIA
   };
 }
@@ -256,6 +309,7 @@ async function refresh() {
   voiceprint = print || null;
   speech?.setVoiceprint(teaching ? null : voiceprint);
   updateListening();
+  openVault();
   tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState(), watch: watch?.state }));
   post(desktopState());
 }
@@ -336,8 +390,188 @@ async function chatModel() {
   return settings?.assistantModel || pickModel((await ollamaModels()).models);
 }
 
-/** This computer's model, and the jobs Settings › Models lets it do. */
-const localModel = async () => ({ model: await chatModel(), uses: localUses(settings) });
+/**
+ * Pictures of the window for the assistant's model. With JESTER_LOG_SCREENS,
+ * the last one is kept beside the logs as last-picture.jpg, to see what the
+ * model saw: your own screen, so only for debugging.
+ */
+function windowShot() {
+  const shoot = createWindowShot({
+    capturer: desktopCapturer,
+    screen,
+    images: nativeImage,
+    allowed: () => settings?.agentScreenshots !== false && (process.platform !== 'darwin' || readStatuses().screen === 'granted'),
+    ownWindows: () => BrowserWindow.getAllWindows(),
+    toDip: (frame) => toDipFrame(screen, frame)
+  });
+  if (!env.JESTER_LOG_SCREENS) return shoot;
+  const kept = async (snapshot, options) => {
+    const shot = await shoot(snapshot, options);
+    if (shot.ok) {
+      const file = path.join(app.getPath('logs'), 'last-picture.jpg');
+      fs.writeFileSync(file, Buffer.from(shot.image.data, 'base64'));
+      log('assistant picture kept at', file);
+    }
+    return shot;
+  };
+  return Object.assign(kept, { allowed: shoot.allowed });
+}
+
+/** This computer's model, the jobs Settings › Models lets it do, and whether Ollama says it reads pictures. */
+async function localModel() {
+  const { models } = await ollamaModels();
+  const model = settings?.assistantModel || pickModel(models);
+  const vision = models.find((item) => item.name === model)?.vision;
+  return { model, uses: localUses(settings), ...(typeof vision === 'boolean' ? { vision } : {}) };
+}
+
+/** Obsidian's own list of vaults, read at most every few seconds: Settings offers the one it has open. */
+let obsidianList = { at: 0, vaults: [] };
+function obsidianVaults() {
+  if (Date.now() - obsidianList.at > OBSIDIAN_LIST_MS) obsidianList = { at: Date.now(), vaults: detectObsidianVaults() };
+  return obsidianList.vaults;
+}
+
+/** Can't be read: macOS has kept Jester out of the folder (Documents, Desktop, iCloud). */
+const refused = (err) => err?.code === 'EPERM' || err?.code === 'EACCES';
+
+/** The search index, kept in the app's own folder, never the vault. */
+const vaultIndexFile = () => path.join(app.getPath('userData'), 'vault-index.json');
+
+/**
+ * The vault in a folder chosen in Settings, or null when it isn't a folder: the vault inside it when it's the
+ * folder above one, else the folder itself, and always the folder Jester already keeps his memory in, whatever's
+ * been put inside it since. That's kept as the choice, so it's worked out once: worked out again, a second vault
+ * put beside the first would make the folder above the vault, and his memory would move out of both.
+ */
+function vaultRootIn(folder) {
+  return fs.existsSync(path.join(folder, PATHS.aboutMe)) ? path.resolve(folder) : findVaultRoot(folder);
+}
+
+/**
+ * The vault chosen in Settings, opened. Reading it is when macOS asks whether
+ * Jester may use a guarded folder, so that only ever follows the user choosing
+ * it there. Nothing changes when nothing has.
+ */
+function openVault() {
+  if (!vaultIndex) return;
+  const chosen = settings?.memoryVault || '';
+  let root = null;
+  let problem = '';
+  if (chosen) {
+    try {
+      fs.readdirSync(chosen);
+      root = vaultRootIn(chosen);
+      if (!root) problem = 'missing';
+      // Chosen as the folder above it before Jester could look inside, or before choices were kept this way: the vault becomes the choice.
+      else if (root !== chosen) saveSettings({ memoryVault: root }).catch((err) => log('memory: couldn’t keep the vault as chosen:', err.message));
+    } catch (err) {
+      problem = refused(err) ? 'denied' : err.code === 'ENOENT' ? 'missing' : err.message;
+    }
+  }
+  if (root === (vault?.root ?? null) && problem === vaultProblem) return;
+  vault = null;
+  vaultProblem = problem;
+  indexedAs = '';
+  if (root) {
+    try {
+      const opened = createVault({ root });
+      opened.ensureLayout();
+      vault = opened;
+      log('memory: vault', root);
+    } catch (err) {
+      vaultProblem = refused(err) ? 'denied' : err.message;
+      log('memory: can’t use the vault:', err.message);
+    }
+  }
+  // The search follows whichever vault this is (close() is for quitting): watching it, or stopping with none.
+  vaultIndex.watch();
+  if (vault) writeRoutinesNote();
+  refreshVault();
+}
+
+/**
+ * The vault read again, and Settings told it's being read till it's done. What follows a read, whoever asked for
+ * it, is vaultRead's. `retry` (Read again): Ollama is tried now, not a minute after it last failed.
+ */
+function refreshVault({ retry = false } = {}) {
+  if (!vaultIndex) return;
+  vaultReading = true;
+  vaultIndex.refresh({ retry }).catch((err) => {
+    vaultReading = false;
+    log('memory: couldn’t read the vault:', err.message);
+  });
+}
+
+/** After the vault's been read, by Settings, a choice or the watcher: its Index note, and Settings told. */
+function vaultRead() {
+  vaultReading = false;
+  writeIndexNote();
+  post(desktopState());
+}
+
+/**
+ * Settings' Stop using: no vault, so Jester neither reads nor writes one. What he'd read of it goes from the app's
+ * folder too, once a read under way (which saves as it ends) has finished.
+ */
+async function stopUsingVault() {
+  await saveSettings({ memoryVault: '' });
+  await refresh();
+  await vaultIndex.refresh();
+  if (!vault) fs.rmSync(vaultIndexFile(), { force: true });
+}
+
+/** The notes as last listed in Index.md, so rewriting it (which the watcher sees) doesn't go round again. */
+let indexedAs = '';
+function writeIndexNote() {
+  if (!vault) return;
+  try {
+    const notes = vault.listNotes().filter(({ rel }) => !VIEWS.includes(rel));
+    const listed = JSON.stringify(notes.map(({ rel, mtimeMs }) => [rel, mtimeMs]));
+    if (listed === indexedAs) return;
+    // A note that can't be read (gone since, or kept from Jester) is left out, not the whole Index.
+    const entries = notes.flatMap(({ rel }) => {
+      try {
+        const note = vault.read(rel);
+        return [{ rel, title: note.title, type: String(note.data?.type || ''), updated: String(note.data?.updated || note.data?.date || '') }];
+      } catch {
+        return [];
+      }
+    });
+    vault.writeIndex(entries);
+    indexedAs = listed;
+  } catch (err) {
+    log('memory: couldn’t write the index note:', err.message);
+  }
+}
+
+/** Routines.md: what Jester does with no model, rewritten when that changes. */
+let routinesTimer = null;
+function writeRoutinesNote() {
+  clearTimeout(routinesTimer);
+  routinesTimer = setTimeout(async () => {
+    if (!vault || !learned) return;
+    try {
+      vault.writeRoutines(await learned.list());
+    } catch (err) {
+      log('memory: couldn’t write the routines note:', err.message);
+    }
+  }, ROUTINES_DELAY_MS);
+}
+
+/** Settings' Memory section. */
+function memoryState() {
+  return {
+    chosen: settings?.memoryVault || '',
+    root: vault?.root || '',
+    name: vault?.name || '',
+    problem: vaultProblem,
+    reading: vaultReading,
+    search: vaultIndex?.status() || null,
+    detected: obsidianVaults(),
+    conversations: settings?.memoryConversations !== false
+  };
+}
 
 /**
  * The link to the Chrome extension: the relay put where Chrome can start it,
@@ -638,6 +872,26 @@ function listenToPages() {
       case 'jester/desktop-forget':
         conversation.forget();
         return { ok: true };
+      // Settings' Memory section: the vault is only ever chosen, and so first read, from here.
+      case 'jester/desktop-memory':
+        if (message.op === 'choose') {
+          const picked = await dialog.showOpenDialog({
+            title: 'Choose your Obsidian vault',
+            properties: ['openDirectory'],
+            defaultPath: settings?.memoryVault || obsidianVaults()[0]?.path || app.getPath('documents')
+          });
+          // The folder above a vault is kept as that vault: just chosen, it's Jester's to look inside.
+          const folder = picked.filePaths[0];
+          if (!picked.canceled && folder) await saveSettings({ memoryVault: vaultRootIn(folder) || folder });
+        } else if (message.op === 'use') {
+          const found = obsidianVaults().find((item) => item.path === message.path);
+          if (found) await saveSettings({ memoryVault: found.path });
+        } else if (message.op === 'remove') await stopUsingVault();
+        else if (message.op === 'open' && vault) await shell.openExternal(`obsidian://open?vault=${encodeURIComponent(vault.name)}`);
+        else if (message.op === 'privacy') await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders');
+        else if (message.op === 'reindex') refreshVault({ retry: true });
+        await refresh();
+        return desktopState();
       // The window for talking to him. A sentence typed is a command given on purpose.
       case 'jester/talk-type':
         conversation.told(String(message.text).slice(0, 2000));
@@ -1035,12 +1289,16 @@ async function start() {
     listen: (label) => (listening ? conversation.ask(label) : !voiceProblem() && engineHost.voice('start')),
     // macOS reads no app's controls while a Jester overlay is up (README): the pill blinks out meanwhile.
     quietly: (task) => overlays.whileHidden(task),
+    // A picture of the window, when its words aren't enough: with Screen Recording allowed, and not turned off in Settings.
+    picture: windowShot(),
     onBusy: (busy) => (busy ? stopButton.show() : stopButton.hide()),
     log,
     logScreens: !!env.JESTER_LOG_SCREENS,
     // Tasks go to this computer's model when no saved one can take them.
     localModel
   });
+  // Taught phrases, learned tasks and shortcuts, kept with the app's settings, and listed in the vault's Routines note.
+  learned = createLearned({ storage: storage.local, onChange: writeRoutinesNote });
   voiceRunner = createVoiceRunner({
     driver: input,
     dispatch,
@@ -1049,8 +1307,7 @@ async function start() {
     run: runTool,
     log,
     assistant,
-    // Taught phrases and learned tasks, kept with the app's settings.
-    learned: createLearned({ storage: storage.local }),
+    learned,
     displays: () => {
       const primary = screen.getPrimaryDisplay().id;
       return screen.getAllDisplays().map((display) => ({ id: display.id, bounds: display.bounds, workArea: display.workArea, internal: !!display.internal, primary: display.id === primary }));
@@ -1061,7 +1318,7 @@ async function start() {
     // What's the browser's (its bookmarks, tabs and pages) the linked extension does.
     browser: {
       claims: (text) => chromeLink?.claims(text, { browserInFront: browserMode }) ?? false,
-      run: (text) => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal }))
+      run: (text, meant = '') => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal, meant }))
     }
   });
   voicePage = createVoicePage({ log });
@@ -1080,14 +1337,32 @@ async function start() {
     log
   });
   talking = createModelJob({ job: 'talk', local: localModel, keepAlive: LOCAL_KEEP_ALIVE, log, onSelected: ({ provider, model }) => log('talking through:', provider, model) });
+  vaultIndex = createVaultIndex({ vault: () => vault, file: vaultIndexFile(), log, onRefreshed: vaultRead });
+  vaultMemory = createVaultMemory({
+    vault: () => vault,
+    index: vaultIndex,
+    request: talking,
+    log,
+    openExternal: (url) => shell.openExternal(url),
+    keepConversations: () => settings?.memoryConversations !== false
+  });
+  // The vault's opened before the conversation log is: one left from the last run ends as the log loads, and is
+  // summed up knowing what About me holds, kept in the vault, and kept at all only if Remember conversations is on.
+  settings = await loadSettings();
+  openVault();
   recollections = createRecollections({
     file: path.join(app.getPath('userData'), 'recollections.json'),
-    summarize: (entries) => summarize({ request: talking, entries }),
+    // One call sums a conversation up and keeps what's worth keeping in the vault.
+    summarize: async (entries) => (await vaultMemory.ended(entries)).summary,
     log
   });
+  // A conversation is over once it's gone quiet: kept then, rather than when the hour comes round.
   const memory = createConversationLog({
     file: path.join(app.getPath('userData'), 'conversation.json'),
-    onEmptied: (entries) => recollections.keep(entries).catch((err) => log('couldn’t keep a conversation:', err.message))
+    endAfterMs: NEW_AFTER_MS,
+    // Not while a task he handed on is at work, or its result is being said: that's still this conversation.
+    busy: () => !!conversation?.acting,
+    onEnded: (entries) => recollections.keep(entries).catch((err) => log('couldn’t keep a conversation:', err.message))
   });
   setInterval(memory.expire, LOG_CHECK_MS);
   conversation = createConversation({
@@ -1102,6 +1377,14 @@ async function start() {
       knows: (text) => voiceRunner.knows(text),
       risky: (text) => voiceRunner.risky(text),
       run: (text, said) => voiceRunner.run(text, { talking: true, said })
+    },
+    // What he remembers and the user's notes, for each turn; "remember this"; notes made and opened.
+    vaultMemory: {
+      // Whether there's a vault to use. With none (not chosen, or macOS keeps him out), notes are made in the computer's own apps.
+      ready: () => !!vault,
+      recall: (text, history) => vaultMemory.recall(text, { history }),
+      remember: (request) => vaultMemory.remember(request),
+      note: (request) => vaultMemory.note(request)
     },
     assistant,
     show: showConversation,
@@ -1211,5 +1494,6 @@ if (!app.requestSingleInstanceLock()) {
     driver?.close();
     watch?.close();
     linkTransport?.close();
+    vaultIndex?.close();
   });
 }

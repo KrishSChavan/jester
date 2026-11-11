@@ -1,6 +1,6 @@
 import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
-import { runAssistant, validateTurn, compactObservation } from '../jester-extension/src/background/assistant.js';
+import { runAssistant, validateTurn, compactObservation, localStages } from '../jester-extension/src/background/assistant.js';
 import { validateAction } from '../jester-extension/src/common/agent-actions.js';
 import { createMemory, updateMemory, recordResult } from '../jester-extension/src/common/task-memory.js';
 
@@ -174,4 +174,26 @@ test('an unavailable model returns a resumable error using the exact configured 
   assert.equal(h.actions.length, 0);
   assert.equal(result.resume.goal, goal);
   assert.match(result.say, /my-model/);
+});
+
+test('“open <name>” goes to the bookmark of that name; words with no local plan take what a conversation took them to mean', async () => {
+  const bookmarks = { 'PSU Canvas bookmark': 'https://psu.instructure.com/', 'PSU Canvas': 'https://psu.instructure.com/' };
+  const bookmark = async (name) => bookmarks[name] || null;
+  assert.equal((await localStages('open my PSU Canvas bookmark', '', bookmark))[0].url, 'https://psu.instructure.com/');
+  // A name nothing has: the planner's, with the open tabs.
+  assert.equal((await localStages('open my lasagna recipe', '', bookmark))[0].url, undefined);
+  assert.equal((await localStages('Try now', 'open Chrome and open PSU Canvas bookmark', bookmark))[0].url, 'https://psu.instructure.com/');
+  assert.equal((await localStages('open my google chrome extension PSU Canvas', 'open the PSU Canvas bookmark', bookmark))[0].url, 'https://psu.instructure.com/');
+  // The words' own plan stands: the meaning only fills in what they leave out.
+  assert.equal((await localStages('open YouTube', 'open the PSU Canvas bookmark', bookmark))[0].url, 'https://www.youtube.com/');
+  assert.deepEqual(await localStages('Try now', 'tell me what’s due', bookmark), []);
+});
+
+test('the model is given the words, with what the conversation took them to mean', async () => {
+  const h = harness([{ action: { action: 'finish', say: 'Nothing to try here.', success: false } }]);
+  await runAssistant({ text: 'Try now', meant: 'tell me what’s due on Canvas', env, ...h });
+  assert.equal(h.prompts[0].originalGoal, 'Try now (taken in conversation to mean: tell me what’s due on Canvas)');
+  const plain = harness([{ action: { action: 'finish', say: 'Done.', success: true } }]);
+  await runAssistant({ text: 'tell me what’s due on Canvas', env, ...plain });
+  assert.equal(plain.prompts[0].originalGoal, 'tell me what’s due on Canvas');
 });

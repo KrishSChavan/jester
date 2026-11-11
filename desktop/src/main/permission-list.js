@@ -7,7 +7,7 @@
 
 /**
  * `needed`: nothing works without it. `recommended`: a whole feature does.
- * `later`: only a feature that hasn't shipped yet.
+ * `optional`: a fallback that everything works without.
  */
 export const PERMISSIONS = {
   camera: {
@@ -30,8 +30,8 @@ export const PERMISSIONS = {
   },
   screen: {
     label: 'Screen Recording',
-    why: 'Lets the voice assistant look at one window when the words on screen aren’t enough. Not used yet.',
-    tier: 'later',
+    why: 'Lets the voice assistant send a model that reads pictures one of the window it’s working in, when the window’s words aren’t enough. Up to three a task, never with a password field showing.',
+    tier: 'optional',
     platforms: ['darwin']
   }
 };
@@ -39,9 +39,10 @@ export const PERMISSIONS = {
 /** What the button does for a status: ask (the OS shows its prompt) or send you to Settings. */
 function action(id, status, platform) {
   if (status === 'granted') return null;
-  // macOS prompts only for media it hasn't asked about; Accessibility's
-  // prompt adds Jester to the list and points at Settings, every time.
-  if (platform === 'darwin' && (id === 'camera' || id === 'microphone') && status === 'not-determined') return 'request';
+  // macOS prompts only for media it hasn't asked about (Screen Recording's
+  // prompt also puts Jester in its list); Accessibility's prompt adds Jester
+  // to the list and points at Settings, every time.
+  if (platform === 'darwin' && ['camera', 'microphone', 'screen'].includes(id) && status === 'not-determined') return 'request';
   if (platform === 'darwin' && id === 'accessibility') return 'request';
   return 'open-settings';
 }
@@ -49,13 +50,15 @@ function action(id, status, platform) {
 /**
  * @param {string} platform  process.platform
  * @param {Record<string, string>} statuses  'granted' | 'not-determined' | 'denied' | 'restricted' | 'unknown'
+ * @param {{listedAs?:string}} [options]  listedAs: the name System Settings shows for Jester, when it isn't
+ *   "Jester" (run from source, it's Electron)
  */
-export function permissionItems(platform, statuses) {
+export function permissionItems(platform, statuses, { listedAs = '' } = {}) {
   return Object.entries(PERMISSIONS)
     .filter(([, permission]) => permission.platforms.includes(platform))
     .map(([id, permission]) => {
       const status = statuses?.[id] || 'unknown';
-      return { id, ...permission, status, granted: status === 'granted', action: action(id, status, platform) };
+      return { id, ...permission, status, granted: status === 'granted', action: action(id, status, platform), ...(listedAs ? { listedAs } : {}) };
     });
 }
 

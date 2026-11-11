@@ -87,6 +87,16 @@ test('a task the extension carries out: its steps and question on the app’s pi
   assert.equal(link.running, false);
 });
 
+test('a task goes with what the conversation took the words to mean, when there’s that', async () => {
+  const { link, sent } = appSide();
+  link.connected('o', { browser: 1 });
+  link.message(hello);
+  link.task('Try now', { meant: 'open Chrome and open PSU Canvas bookmark' });
+  assert.deepEqual({ ...sent.at(-1), id: 'x' }, { type: 'task', id: 'x', text: 'Try now', meant: 'open Chrome and open PSU Canvas bookmark' });
+  link.task('open my PSU Canvas bookmark');
+  assert.equal('meant' in sent.at(-1), false);
+});
+
 test('a task stopped from the app is cancelled in Chrome, and one cut off by the link closing says so', async () => {
   const { link, sent } = appSide();
   link.connected('o', { browser: 1 });
@@ -144,8 +154,10 @@ test('the relay is copied out of the guarded folders, and a manifest goes only t
 });
 
 /** The extension's half, against a fake Chrome whose native port is scripted. */
-function extensionSide({ granted = true } = {}) {
+function extensionSide({ granted = true, bound = true, stored = {}, tabs = [] } = {}) {
   const ports = [];
+  const reloads = [];
+  const opened = [];
   const alarms = new Map();
   const listeners = { alarm: [], added: [], removed: [] };
   let lastError = null;
@@ -154,6 +166,9 @@ function extensionSide({ granted = true } = {}) {
       get lastError() {
         return lastError;
       },
+      reload: () => reloads.push(Date.now()),
+      getURL: (file) => `chrome-extension://jester/${file}`,
+      getContexts: async () => tabs.map((documentUrl) => ({ contextType: 'TAB', documentUrl })),
       connectNative: (host) => {
         const port = { host, posted: [], message: [], disconnect: [], postMessage: (message) => port.posted.push(message), onMessage: { addListener: (fn) => port.message.push(fn) }, onDisconnect: { addListener: (fn) => port.disconnect.push(fn) } };
         port.receive = (message) => port.message.forEach((fn) => fn(message));
@@ -172,20 +187,25 @@ function extensionSide({ granted = true } = {}) {
       onAdded: { addListener: (fn) => listeners.added.push(fn) },
       onRemoved: { addListener: (fn) => listeners.removed.push(fn) }
     },
-    alarms: { create: (name, info) => alarms.set(name, info), clear: (name) => alarms.delete(name), onAlarm: { addListener: (fn) => listeners.alarm.push(fn) } }
+    alarms: { create: (name, info) => alarms.set(name, info), clear: (name) => alarms.delete(name), onAlarm: { addListener: (fn) => listeners.alarm.push(fn) } },
+    storage: { local: { get: async (key) => (key in stored ? { [key]: stored[key] } : {}), set: async (items) => Object.assign(stored, items) } },
+    tabs: { create: async ({ url }) => opened.push(url) }
   };
+  // Chrome gives a worker connectNative only if it had the permission when it started.
+  if (!bound) delete api.runtime.connectNative;
   const tasks = [];
+  const understood = [];
   const states = [];
   const link = createDesktopLink({
     api: () => api,
     version: '0.2.0',
     settings: async () => ({ enabled: true, bindings: { Victory: { action: 'SLEEP' } }, seekSeconds: 10 }),
-    task: async (id, text) => (tasks.push(text), { ok: true, say: `Did ${text}` }),
+    task: async (id, text, meant) => (tasks.push(text), meant && understood.push([text, meant]), { ok: true, say: `Did ${text}` }),
     cancel: () => tasks.push('cancelled'),
     request: async (op, args) => (op === 'knows' ? args.text.includes('canvas') : null),
     onChange: (state) => states.push(state)
   });
-  return { link, ports, alarms, listeners, tasks, states, grant: (on) => (granted = on) };
+  return { link, ports, alarms, listeners, tasks, meant: understood, states, reloads, opened, stored, grant: (on) => (granted = on) };
 }
 
 test('the extension links once the app welcomes it, does what the app hands it, and answers its questions', async () => {
@@ -202,6 +222,9 @@ test('the extension links once the app welcomes it, does what the app hands it, 
   port.receive({ type: 'task', id: '3', text: 'open my canvas' });
   await pause();
   assert.deepEqual(port.posted.at(-1), { type: 'done', id: '3', ok: true, say: 'Did open my canvas' });
+  port.receive({ type: 'task', id: '5', text: 'Try now', meant: 'open my canvas bookmark' });
+  await pause();
+  assert.deepEqual(side.meant.at(-1), ['Try now', 'open my canvas bookmark']);
   port.receive({ type: 'request', id: '4', op: 'knows', text: 'open my canvas' });
   await pause();
   assert.deepEqual(port.posted.at(-1), { type: 'reply', id: '4', result: true });
@@ -212,7 +235,7 @@ test('the extension links once the app welcomes it, does what the app hands it, 
   port.receive({ type: 'answer', id: question.id, approved: true });
   assert.equal(await asked, true);
   port.receive({ type: 'cancel' });
-  assert.deepEqual(side.tasks, ['open my canvas', 'cancelled']);
+  assert.deepEqual(side.tasks, ['open my canvas', 'Try now', 'cancelled']);
   assert.deepEqual(desktopBindings({ bindings: 1, seekSeconds: 10, windowedBindingsEnabled: false }), { bindings: 1, windowedBindingsEnabled: false });
 });
 
@@ -239,4 +262,39 @@ test('with the app closed it waits, trying every half minute; with it not instal
   await off.link.start();
   assert.equal(off.ports.length, 0, 'never connects without the user’s say-so');
   assert.equal(off.link.state, LINK_STATE.OFF);
+});
+
+test('a worker that started before Link has no connectNative: it reloads once, Settings opens again after, and a second time it asks for Chrome to be reopened', async () => {
+  const settings = 'chrome-extension://jester/src/options/options.html';
+  const before = extensionSide({ bound: false, tabs: [`${settings}#welcome`, 'https://example.com/'] });
+  before.link.start();
+  await pause();
+  assert.equal(before.reloads.length, 1, 'reloaded, not called missing');
+  assert.equal(before.link.state, LINK_STATE.OFF);
+  assert.equal(before.stored.desktopLinkRestart.reopen, true);
+
+  // The next worker has it: it connects, and Settings comes back at the link.
+  const after = extensionSide({ stored: before.stored });
+  after.link.start();
+  await pause();
+  assert.equal(after.ports.length, 1);
+  assert.deepEqual(after.opened, [`${settings}#desktop`]);
+  assert.equal(after.stored.desktopLinkRestart.reopen, false);
+  after.link.start();
+  await pause();
+  assert.equal(after.opened.length, 1, 'only once');
+
+  // Still without it straight after a reload: no reload loop, and no retrying.
+  const stuck = extensionSide({ bound: false, stored: { desktopLinkRestart: { at: Date.now(), reopen: false } } });
+  stuck.link.start();
+  await pause();
+  assert.equal(stuck.reloads.length, 0);
+  assert.equal(stuck.link.state, LINK_STATE.RESTART);
+  assert.equal(stuck.alarms.size, 0);
+
+  // No Settings open: none opened after.
+  const quiet = extensionSide({ bound: false });
+  quiet.link.start();
+  await pause();
+  assert.equal(quiet.stored.desktopLinkRestart.reopen, false);
 });

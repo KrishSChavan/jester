@@ -274,9 +274,10 @@ const RESULTS = (snapshot, playing = false, query = 'gunna') => ({
 });
 
 /** A runner on a driver that answers from a table, with the displays, apps and helpers a test needs. */
-function rig({ platform = 'darwin', answers = {}, displays = [LAPTOP], assistant = null, learned = null, convert = {} } = {}) {
+function rig({ platform = 'darwin', answers = {}, displays = [LAPTOP], assistant = null, learned = null, convert = {}, browser = null, log = () => undefined } = {}) {
   const calls = [];
   const runs = [];
+  const dispatched = [];
   let front = { name: 'Code', pid: 41 };
   const setFront = (app) => (front = app);
   const runner = createVoiceRunner({
@@ -291,7 +292,7 @@ function rig({ platform = 'darwin', answers = {}, displays = [LAPTOP], assistant
         return answer ?? {};
       }
     },
-    dispatch: async () => ({ ok: true, label: '', detail: '' }),
+    dispatch: async (action) => (dispatched.push(action), { ok: true, label: '', detail: '' }),
     canPost: () => true,
     onJester: () => undefined,
     run: async (file, args) => {
@@ -309,9 +310,11 @@ function rig({ platform = 'darwin', answers = {}, displays = [LAPTOP], assistant
     assistant,
     learned,
     displays: () => displays,
+    browser,
+    log,
     ...convert
   });
-  return { runner, calls, runs, setFront, said: async (text) => (await runner.run(text)).outcome };
+  return { runner, calls, runs, dispatched, setFront, said: async (text) => (await runner.run(text)).outcome };
 }
 const placed = (calls) => calls.filter(([cmd]) => cmd === 'placeWindow').map(([, params]) => params);
 
@@ -403,11 +406,17 @@ test('"open Spotify and play Gunna" on Windows plays it in Spotify, though Spoti
 });
 
 /** chrome.storage's shape, in memory, for a real learned store. */
-async function learnedStore() {
+async function learnedStore(options = {}) {
   const { createLearned } = await import('../desktop/src/main/learned.js');
   const data = {};
-  return createLearned({ storage: { get: async (key) => (key in data ? { [key]: structuredClone(data[key]) } : {}), set: async (items) => Object.assign(data, structuredClone(items)) } });
+  return createLearned({
+    ...options,
+    storage: { get: async (key) => (key in data ? { [key]: structuredClone(data[key]) } : {}), set: async (items) => Object.assign(data, structuredClone(items)) }
+  });
 }
+/** Lets what was started and not waited for (a store's bookkeeping) finish. */
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+const DAY = 86400000;
 
 test('"when I say focus mode, …" does it, keeps it, and "focus mode" does it again', async () => {
   const learned = await learnedStore();
@@ -447,7 +456,7 @@ test('a task done before is done again its way first; the assistant takes over, 
   assert.deepEqual(runs[1], ['make a fresh note in notes', { note: 'The way this was done before stopped at step 1: there was no “New Note” on screen.' }]);
 });
 
-test('in conversation the user\'s own words are the task, the model\'s command how they were taken; only the same words are learned', async () => {
+test('in conversation the user\'s own words are the task, the model\'s command how they were taken; what was done is kept under the command', async () => {
   const learned = await learnedStore();
   const runs = [];
   const assistant = {
@@ -457,16 +466,35 @@ test('in conversation the user\'s own words are the task, the model\'s command h
     run: async (goal, options) => (runs.push([goal, options]), { ok: true, text: 'It’s open.', trace: [{ action: { action: 'click' }, app: 'Google Chrome', target: { role: 'button', label: 'Canvas' } }] })
   };
   const { runner } = rig({ assistant, learned });
-  // A follow-up: what it agrees to is the model's to say, and the model's words aren't kept.
+  // A follow-up: what it agrees to is the model's to say. The way is kept under the command, which comes again; "sure, go ahead" stands for nothing.
   const followed = await runner.run('open my Canvas bookmark', { talking: true, said: 'Sure, go ahead' });
   assert.deepEqual(runs[0], ['Sure, go ahead', { meant: 'open my Canvas bookmark' }]);
-  assert.deepEqual(followed.outcome, { ok: true, text: 'It’s open.' });
-  assert.equal(await learned.find('open my Canvas bookmark'), null);
+  assert.deepEqual(followed.outcome, { ok: true, text: 'It’s open.' }, 'those words still go to the model next time: no promise of no AI');
+  assert.deepEqual((await learned.find('open my Canvas bookmark')).steps.map((step) => step.target.label), ['Canvas']);
   assert.equal(await learned.find('Sure, go ahead'), null);
+  assert.equal(await learned.aliasFor('Sure, go ahead'), null);
+  assert.equal(await runner.knows('Sure, go ahead'), false);
   // The same command both ways: learned, as a spoken one is.
-  const same = await runner.run('open my Canvas bookmark', { talking: true, said: 'Open my Canvas bookmark.' });
+  const same = await rig({ assistant, learned: await learnedStore() }).runner.run('open my Canvas bookmark', { talking: true, said: 'Open my Canvas bookmark.' });
   assert.deepEqual(runs[1], ['Open my Canvas bookmark.', {}]);
   assert.deepEqual(same.outcome, { ok: true, text: 'It’s open. · Next time, no AI needed.' });
+});
+
+test('a way kept under the conversation\'s command types only words the user said', async () => {
+  const typed = [
+    { action: { action: 'menu', path: 'File > New Note' }, app: 'Notes' },
+    { action: { action: 'type', text: 'hello world' }, app: 'Notes' }
+  ];
+  const assistant = { ready: async () => true, running: false, cancel() {}, run: async () => ({ ok: true, text: 'Written.', trace: typed }) };
+  const command = 'make a new note in Notes saying hello world';
+  const answered = await learnedStore();
+  assert.deepEqual((await rig({ assistant, learned: answered }).runner.run(command, { talking: true, said: 'yes please' })).outcome, { ok: true, text: 'Written.' });
+  assert.equal(await answered.find(command), null, '“hello world” was the model’s to write, not the user’s');
+  const jotted = await learnedStore();
+  const { runner } = rig({ assistant, learned: jotted });
+  assert.deepEqual((await runner.run(command, { talking: true, said: 'jot hello world down in Notes' })).outcome, { ok: true, text: 'Written. · Next time, no AI needed.' });
+  assert.equal((await jotted.find(command)).steps.length, 2);
+  assert.equal((await jotted.aliasFor('Jot hello world down in Notes.')).does, command);
 });
 
 test('a new command ends a task still running, and typing never goes into a password field', async () => {
@@ -551,4 +579,297 @@ test('second review: on Windows an app\'s program name or its window\'s title sa
   const outcome = await wrong.said('Open Word and type hello.');
   assert.equal(outcome.ok, false);
   assert.equal(wrong.calls.some(([cmd, params]) => cmd === 'text' && params.text === 'hello'), false);
+});
+
+test('what Chrome is handed: the user’s words, and what the conversation took them to mean when that says more', async () => {
+  const handed = [];
+  const runner = createVoiceRunner({
+    driver: { call: async (cmd) => (cmd === 'apps' ? { apps: RUNNING } : cmd === 'frontmost' ? { app: { name: 'Code' } } : {}) },
+    dispatch: async () => ({ ok: true }),
+    canPost: () => true,
+    run: async () => '',
+    installed: () => INSTALLED,
+    platform: 'darwin',
+    wait: async () => undefined,
+    browser: { claims: async () => true, run: async (text, meant) => (handed.push([text, meant]), { ok: true, text: 'Opened “PSU Canvas”.' }) }
+  });
+  const tried = await runner.run('open Chrome and open PSU Canvas bookmark', { talking: true, said: 'Try now' });
+  assert.deepEqual(tried.outcome, { ok: true, text: 'Opened “PSU Canvas”.' });
+  await runner.run('open my PSU Canvas bookmark', { talking: true, said: 'Open my PSU Canvas bookmark.' });
+  await runner.run('open my PSU Canvas bookmark');
+  assert.deepEqual(handed, [
+    ['Try now', 'open Chrome and open PSU Canvas bookmark'],
+    ['Open my PSU Canvas bookmark.', ''],
+    ['open my PSU Canvas bookmark', '']
+  ]);
+});
+
+test('words the conversation reworded into a command that worked stand for it: next time no model is asked, and Chrome is handed the command', async () => {
+  const learned = await learnedStore();
+  const handed = [];
+  const browser = { claims: async (text) => /canvas|bookmark/i.test(text), run: async (text, meant) => (handed.push([text, meant]), { ok: true, text: 'Opened “PSU Canvas”.' }) };
+  const { runner } = rig({ learned, browser });
+  assert.equal(await runner.knows('open canvas'), false);
+  const first = await runner.run('open the PSU Canvas bookmark', { talking: true, said: 'open canvas' });
+  assert.deepEqual(first.outcome, { ok: true, text: 'Opened “PSU Canvas”.' });
+  assert.equal((await learned.aliasFor('open canvas')).does, 'open the PSU Canvas bookmark');
+  assert.equal(await runner.knows('open canvas'), true, 'the conversation needn’t ask its model');
+  assert.equal(await runner.knows('Can you open Canvas?'), true);
+  // Said again, in conversation or as a command: the command, with these as the user's words.
+  assert.deepEqual((await runner.run('Open Canvas.', { talking: true })).outcome, { ok: true, text: 'Opened “PSU Canvas”.' });
+  assert.deepEqual((await runner.run('open canvas')).outcome, { ok: true, text: 'Opened “PSU Canvas”.' });
+  assert.deepEqual(handed, [
+    ['open canvas', 'open the PSU Canvas bookmark'],
+    ['Open Canvas.', 'open the PSU Canvas bookmark'],
+    ['open canvas', 'open the PSU Canvas bookmark']
+  ]);
+});
+
+test('a failed run teaches nothing, a shortcut that stops working is dropped, and “forget the shortcut” forgets one', async () => {
+  const learned = await learnedStore();
+  let works = false;
+  const browser = { claims: async () => true, run: async () => (works ? { ok: true, text: 'Opened “PSU Canvas”.' } : { ok: false, text: 'There’s no bookmark called “PSU Canvas”.' }) };
+  const { runner, said } = rig({ learned, browser });
+  assert.equal((await runner.run('open the PSU Canvas bookmark', { talking: true, said: 'open canvas' })).outcome.ok, false);
+  assert.equal(await runner.knows('open canvas'), false, 'nothing learned from what didn’t work');
+  works = true;
+  await runner.run('open the PSU Canvas bookmark', { talking: true, said: 'open canvas' });
+  assert.equal(await runner.knows('open canvas'), true);
+  // The bookmark's gone: so is the shortcut, and the next time the conversation works the words out afresh.
+  works = false;
+  assert.deepEqual(await said('open canvas'), { ok: false, text: 'There’s no bookmark called “PSU Canvas”.' });
+  await settled();
+  assert.equal(await runner.knows('open canvas'), false);
+  works = true;
+  await runner.run('open the PSU Canvas bookmark', { talking: true, said: 'open canvas' });
+  assert.deepEqual(await said('Forget the shortcut open canvas.'), { ok: true, text: 'Forgot “open canvas”' });
+  assert.equal(await runner.knows('open canvas'), false);
+  assert.deepEqual(await learned.list(), []);
+});
+
+test('carrying on, answering, and words that lean on what came before never stand for a command', async () => {
+  const learned = await learnedStore();
+  const browser = { claims: async () => true, run: async () => ({ ok: true, text: 'Opened “PSU Canvas”.' }) };
+  const { runner } = rig({ learned, browser });
+  for (const said of ['Try now', 'keep going', 'do it again', 'open it']) {
+    assert.equal((await runner.run('open the PSU Canvas bookmark', { talking: true, said })).outcome.ok, true, said);
+    assert.equal(await learned.aliasFor(said), null, said);
+    assert.equal(await runner.knows(said), false, said);
+  }
+  // The matcher played what the conversation chose: "play something" named nothing it did.
+  let reads = 0;
+  const music = rig({ learned, answers: { snapshot: () => RESULTS(++reads, reads > 1) } });
+  assert.deepEqual((await music.runner.run('play Gunna on Spotify', { talking: true, said: 'play something' })).outcome, { ok: true, text: 'Playing Gunna on Spotify' });
+  assert.equal(await learned.aliasFor('play something'), null);
+  assert.deepEqual(await learned.list(), [], 'nothing learned at all: Chrome’s tasks leave no steps here');
+});
+
+test('words can stand for a command the matcher knows, done with no assistant, and asked about first when it would be', async () => {
+  const learned = await learnedStore();
+  const { runner, dispatched, calls } = rig({ learned });
+  assert.equal(await runner.knows('crank the volume'), false);
+  await runner.run('volume up', { talking: true, said: 'crank the volume' });
+  assert.equal(await runner.knows('crank the volume'), true);
+  assert.equal((await runner.run('Crank the volume.', { talking: true })).outcome.ok, true);
+  assert.deepEqual(dispatched, ['VOLUME_UP', 'VOLUME_UP']);
+  assert.equal(await runner.risky('crank the volume'), false);
+  // Overheard, "shut Slack down" asks first, as "quit Slack" would.
+  assert.equal(await runner.risky('shut slack down'), false, 'nothing it stands for yet: the assistant would ask for itself');
+  await runner.run('quit Slack', { talking: true, said: 'shut slack down' });
+  assert.equal(await runner.risky('shut slack down'), true);
+  assert.deepEqual(calls.filter(([cmd]) => cmd === 'quitApp'), [['quitApp', { pid: 43 }]]);
+});
+
+test('with words standing for a command and a way learned under it, the second time needs no AI at all', async () => {
+  const learned = await learnedStore();
+  const runs = [];
+  const replays = [];
+  const trace = [{ action: { action: 'click' }, app: 'zoom.us', target: { role: 'button', label: 'New Meeting' } }];
+  const assistant = {
+    ready: async () => true,
+    running: false,
+    cancel() {},
+    run: async (goal, options) => (runs.push([goal, options]), { ok: true, text: 'Your meeting’s started.', trace }),
+    replay: async (entry, goal) => (replays.push([entry.key, goal]), { ok: true, text: 'Done, the way it was done before.' })
+  };
+  const { runner } = rig({ assistant, learned });
+  const first = await runner.run('open Zoom and start a new meeting', { talking: true, said: 'make a zoom meeting' });
+  assert.deepEqual(runs, [['make a zoom meeting', { meant: 'open Zoom and start a new meeting' }]]);
+  assert.deepEqual(first.outcome, { ok: true, text: 'Your meeting’s started. · Next time, no AI needed.' });
+  assert.equal(await runner.knows('make a zoom meeting'), true);
+  assert.deepEqual((await runner.run('Make a Zoom meeting.', { talking: true })).outcome, { ok: true, text: 'Done, the way it was done before.' });
+  assert.deepEqual(replays, [['open zoom and make new meeting', 'open Zoom and start a new meeting']]);
+  assert.equal(runs.length, 1, 'no model the second time: neither the conversation’s nor the assistant’s');
+  assert.deepEqual((await learned.list()).map(({ kind, said, does }) => [kind, said, does]), [
+    ['alias', 'make a zoom meeting', 'open Zoom and start a new meeting'],
+    ['task', 'open Zoom and start a new meeting', '1 step in zoom.us']
+  ]);
+});
+
+test('a way replayed through the words that stand for its command keeps both fresh: neither’s bookkeeping undoes the other’s', async () => {
+  let clock = 1_000_000;
+  const learned = await learnedStore({ now: () => clock });
+  const assistant = {
+    ready: async () => true,
+    running: false,
+    cancel() {},
+    run: async () => assert.fail('a way was learned: no model'),
+    replay: async () => ({ ok: true, text: 'Done, the way it was done before.' })
+  };
+  const { runner } = rig({ assistant, learned });
+  const command = 'open Zoom and start a new meeting';
+  await learned.remember(command, [{ action: { action: 'click' }, app: 'zoom.us', target: { role: 'button', label: 'New Meeting' } }]);
+  const used = async () => [(await learned.find(command))?.used, (await learned.aliasFor('make a zoom meeting'))?.used];
+  // New words for it in conversation: the way replayed, and the words kept, one just after the other.
+  clock += 10 * DAY;
+  assert.deepEqual((await runner.run(command, { talking: true, said: 'make a zoom meeting' })).outcome, { ok: true, text: 'Done, the way it was done before.' });
+  await settled();
+  assert.deepEqual(await used(), [clock, clock]);
+  // Said each week from then on, through the words: neither lapses 30 days after it was learned.
+  for (let week = 1; week <= 5; week++) {
+    clock += 7 * DAY;
+    assert.deepEqual((await runner.run('Make a Zoom meeting.', { talking: true })).outcome, { ok: true, text: 'Done, the way it was done before.' }, `week ${week}`);
+    await settled();
+    assert.deepEqual(await used(), [clock, clock], `week ${week}`);
+  }
+});
+
+test('a command that dropped what the user said keeps no way that types it: the next entry isn’t typed with the last one’s words', async () => {
+  const learned = await learnedStore();
+  const runs = [];
+  const assistant = {
+    ready: async () => true,
+    running: false,
+    cancel() {},
+    // It works from the user's words, so it types what they said.
+    run: async (goal, options) => {
+      runs.push([goal, options]);
+      const typed = goal.replace(/^.*journal:\s*/i, '');
+      const trace = [
+        { action: { action: 'open_app', name: 'Day One' }, app: '' },
+        { action: { action: 'type', text: typed }, app: 'Day One' }
+      ];
+      return { ok: true, text: 'Written.', trace };
+    },
+    replay: async () => assert.fail('nothing was kept to replay')
+  };
+  const { runner } = rig({ assistant, learned });
+  const command = 'open my journal app and add an entry';
+  assert.deepEqual((await runner.run(command, { talking: true, said: 'add to my journal: today was great' })).outcome, { ok: true, text: 'Written.' }, 'nothing kept, nothing promised');
+  assert.equal(await learned.find(command), null);
+  assert.deepEqual((await runner.run(command, { talking: true, said: 'add to my journal: I failed my midterm' })).outcome, { ok: true, text: 'Written.' });
+  assert.deepEqual(
+    runs.map(([goal]) => goal),
+    ['add to my journal: today was great', 'add to my journal: I failed my midterm']
+  );
+});
+
+test('a question is the assistant’s to answer every time: nothing is learned from one, and no way learned for its command is replayed for one', async () => {
+  const learned = await learnedStore();
+  const steps = [
+    { action: { action: 'click' }, app: 'Google Chrome', target: { role: 'link', label: 'PSU Canvas' } },
+    { action: { action: 'click' }, app: 'Google Chrome', target: { role: 'link', label: 'Assignments' } }
+  ];
+  const answer = { ok: true, text: 'You have the CMPSC 465 homework due Friday.' };
+  const asked = [];
+  const assistant = {
+    ready: async () => true,
+    running: false,
+    cancel() {},
+    run: async (goal) => (asked.push(goal), { ...(/\?$/.test(goal) ? answer : { ok: true, text: 'Your assignments are open.' }), trace: steps }),
+    replay: async () => ({ ok: true, text: 'Done, the way it was done before.' })
+  };
+  const { runner } = rig({ assistant, learned });
+  // The model's command dropped the asking.
+  const command = 'open Canvas and check my assignments';
+  const said = async (words) => (await runner.run(command, { talking: true, said: words })).outcome;
+  assert.deepEqual(await said('what’s due on Canvas this week?'), answer);
+  assert.equal(await learned.find(command), null, 'its answer was that day’s');
+  assert.deepEqual(await said('do I have anything due tomorrow on Canvas?'), answer);
+  // Asked for plainly, the way is learned; a question that comes as the same command is still answered.
+  assert.deepEqual(await said('pull up my canvas assignments'), { ok: true, text: 'Your assignments are open. · Next time, no AI needed.' });
+  assert.deepEqual(await said('is anything due on Canvas tomorrow?'), answer);
+  assert.equal(asked.length, 4);
+  assert.deepEqual(await said('pull up my canvas assignments'), { ok: true, text: 'Done, the way it was done before.' });
+  assert.equal(asked.length, 4, 'the plain request needs no AI');
+});
+
+test('a task holding a passcode is kept sealed and done again, but never listed for the vault’s Routines note, and the words for it stand for nothing', async () => {
+  const learned = await learnedStore();
+  const asked = [];
+  const assistant = {
+    ready: async () => true,
+    running: false,
+    cancel() {},
+    run: async (goal) => (
+      asked.push(goal),
+      {
+        ok: true,
+        text: 'You’re in the meeting.',
+        trace: [
+          { action: { action: 'click' }, app: 'zoom.us', target: { role: 'button', label: 'Join' } },
+          { action: { action: 'type', text: '4321' }, app: 'zoom.us' }
+        ]
+      }
+    ),
+    replay: async () => ({ ok: true, text: 'Done, the way it was done before.' })
+  };
+  const { runner } = rig({ assistant, learned });
+  const command = 'open Zoom and join meeting 812 345 6789 with passcode 4321';
+  const said = 'join zoom meeting 812 345 6789 passcode 4321';
+  const first = await runner.run(command, { talking: true, said });
+  assert.deepEqual(first.outcome, { ok: true, text: 'You’re in the meeting.' }, 'the words won’t stand for it: no promise of no AI');
+  assert.equal(await learned.aliasFor(said), null);
+  assert.equal(await runner.knows(said), false);
+  assert.deepEqual(await learned.list(), []);
+  assert.deepEqual((await runner.run(command, { talking: true, said })).outcome, { ok: true, text: 'Done, the way it was done before.' });
+  assert.equal(asked.length, 1);
+});
+
+test('a command’s own words that only Chrome or the assistant could do stand for it too: the next time, no model works them out', async () => {
+  const learned = await learnedStore();
+  const handed = [];
+  const browser = { claims: async (text) => /canvas/i.test(text), run: async (text, meant) => (handed.push([text, meant]), { ok: true, text: 'Opened “PSU Canvas”.' }) };
+  const { runner } = rig({ learned, browser });
+  assert.equal(await runner.knows('open canvas'), false);
+  assert.deepEqual((await runner.run('open Canvas', { talking: true, said: 'open canvas' })).outcome, { ok: true, text: 'Opened “PSU Canvas”.' });
+  assert.equal(await runner.knows('open canvas'), true, 'the conversation needn’t ask its model');
+  // Said again, the conversation runs the words as they are, and Chrome is handed them as it was the first time.
+  assert.equal(await runner.knows('Open Canvas, please.'), true);
+  assert.deepEqual((await runner.run('Open Canvas, please.', { talking: true })).outcome, { ok: true, text: 'Opened “PSU Canvas”.' });
+  assert.deepEqual(handed, [
+    ['open canvas', ''],
+    ['Open Canvas, please.', '']
+  ]);
+
+  // What the matcher knows, or a way learned for the words, is known without one.
+  const note = [{ action: { action: 'menu', path: 'File > New Note' }, app: 'Notes' }];
+  const assistant = { ready: async () => true, running: false, cancel() {}, run: async () => ({ ok: true, text: 'Made one.', trace: note }) };
+  const others = rig({ learned, assistant });
+  assert.equal((await others.runner.run('volume up', { talking: true, said: 'Volume up.' })).outcome.ok, true);
+  assert.deepEqual((await others.runner.run('make a fresh note in Notes', { talking: true, said: 'Make a fresh note in Notes.' })).outcome, { ok: true, text: 'Made one. · Next time, no AI needed.' });
+  assert.equal(await others.runner.knows('make a fresh note in notes'), true);
+  assert.deepEqual((await learned.list()).map(({ kind, said, does }) => [kind, said, does]), [
+    ['alias', 'open canvas', 'open Canvas'],
+    ['task', 'make a fresh note in Notes', '1 step in Notes']
+  ]);
+  // One the assistant did with no way to keep (it wrote what it chose) has nothing left for the talking model either.
+  const poet = rig({ learned, assistant: { ...assistant, run: async () => ({ ok: true, text: 'Written.', trace: [{ action: { action: 'type', text: 'Roses are red' }, app: 'Notes' }] }) } });
+  assert.deepEqual((await poet.runner.run('write a poem in Notes', { talking: true, said: 'Write a poem in Notes.' })).outcome, { ok: true, text: 'Written.' });
+  assert.equal(await learned.find('write a poem in Notes'), null);
+  assert.equal(await poet.runner.knows('write a poem in notes'), true);
+});
+
+test('dev.log never holds words a shortcut was refused for holding a password, nor any words that plainly hold one', async () => {
+  const learned = await learnedStore();
+  const lines = [];
+  const browser = { claims: async (text) => /canvas/i.test(text), run: async () => ({ ok: true, text: 'You’re logged in.' }) };
+  const { runner } = rig({ learned, browser, log: (...parts) => lines.push(parts.join(' ')) });
+  assert.deepEqual((await runner.run('type hunter2', { talking: true, said: 'type my wifi password hunter2 into the box' })).outcome, { ok: true, text: 'Typed “hunter2”' });
+  assert.deepEqual(lines.filter((line) => line.startsWith('learned:')), ['learned: not kept (it holds a password)'], 'the command’s half is the password itself');
+  const said = 'log into canvas, my password is Tiger2026';
+  assert.deepEqual((await runner.run('log into Canvas with my password Tiger2026', { talking: true, said })).outcome, { ok: true, text: 'You’re logged in.' });
+  assert.ok(lines.some((line) => line.startsWith('voice: Chrome’s to do: (words holding a password, left out)')), lines.join('\n'));
+  assert.equal(lines.some((line) => /wifi password|Tiger2026/.test(line)), false, lines.join('\n'));
+  assert.deepEqual(await learned.list(), []);
 });

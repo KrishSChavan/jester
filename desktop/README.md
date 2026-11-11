@@ -43,14 +43,18 @@ front window fills its display.
 | `src/main/protocol.js`, `files.js` | `jester://ext/…` serves the extension folder, `jester://app/…` this app's pages. |
 | `src/main/speech.js`, `src/main/speech/` | Offline speech (sherpa-onnx) in a `utilityProcess`, fed by the engine page's stand-in `SpeechRecognition` (in the preload). |
 | `src/main/voice-commands.js`, `voice-runner.js`, `apps.js` | What a sentence means, and doing it: actions, apps, volume, keys, typing, clicks, windows, Spotify, Shortcuts. |
-| `src/main/learned.js` | What's taught ("when I say …") and learned (a task the assistant got done, kept to be done again without it). |
+| `src/main/learned.js` | What's taught ("when I say …") and learned (a task the assistant got done, kept to be done again without it, and words the conversation took to mean a command that worked). |
+| `src/main/vault.js`, `vault-index.js`, `vault-memory.js` | Memory, in the user's Obsidian vault: its notes read and written (only in `Jester/` and `Notes/`), searched by words and meaning, and what's kept from a conversation and recalled for one. |
+| `src/main/conversation-log.js`, `recollections.js` | The conversation going on (`conversation.json`), and a sentence for each that's over, kept a week. |
 | `src/worklets/` | The mic for speech, captured on the audio thread; served to the engine page as `jester://ext/_desktop/worklets/…`. |
-| `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it, and what a step changed (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`), the hands (`host.js`) and learned tasks done again (`replay.js`). |
+| `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it, and what a step changed (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`), the hands (`host.js`), the numbers drawn on a picture of the window (`marks.js`) and learned tasks done again (`replay.js`). |
+| `src/main/window-shot.js` | A picture of the window the assistant is working in, for a model that reads pictures. |
 | `src/main/driver.js`, `native/jester-driver/` | Rust helper for OS input and the accessibility tree, JSON lines over stdio. Also Chrome's native-messaging relay. |
 | `src/main/watch.js`, `watch-status.js`, `native/jester-watch/` | The Apple Watch: its app, the Mac's Swift Bluetooth helper, and steering the cursor with them (Mac only). |
 | `src/main/link.js`, `link-host.js`, `chrome-link.js` | The link to the extension: the socket the relay reaches, putting the relay where Chrome can start it, and what's said over it. The extension's half is `../jester-extension/src/background/desktop-link.js`. |
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models). |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
+| `scripts/vault-eval.mjs` | How well memory finds things in a vault: a sample vault and the questions it's scored on. |
 | `spikes/` | Phase 0 experiments, and `link-live.mjs`, the link end to end in a throwaway Chrome. |
 
 Tests live with the extension's, in `../tests/desktop-*.test.mjs`, and run with
@@ -78,6 +82,10 @@ there. Run it on every new checkout, and again after pulling a new model:
 To add one that isn't in the default set, name it: `npm run models --
 parakeet-0.6b` (the Accurate recognizer, ~650 MB) or `npm run models --
 moonshine-tiny`.
+
+Memory searches an Obsidian vault by meaning through Ollama's `nomic-embed-text`
+(274 MB): `ollama pull nomic-embed-text`. Without it the vault is searched by
+words alone (below, Memory and Obsidian).
 
 ## Running
 
@@ -271,6 +279,40 @@ Labs' accessibility-tree computer use), in `act` (mac.rs, win.rs, protocol.rs):
   clicks the middle, as before. Double and right clicks and drags aim the same
   way.
 
+### Pictures of the window
+
+When the window's words aren't enough — an icon with no name, a goal about
+how something looks, controls it can't tell apart — the model can ask for
+`screenshot`, as the extension's `look`. The window is read again, the display
+captured (`desktopCapturer`) and cut to the window, made no wider than 1280
+pixels, and each control's own id drawn on it in a yellow box: the same ids as
+its screen lines, so the model acts with what it saw. The picture goes with the
+next model call only, then it's dropped; three a task at most. That fresh read
+is the next step's screen, since the numbers are its.
+
+It's offered only when it can work: the Mac allows Screen Recording (optional
+in Settings › Permissions), "Pictures of the
+window" is on in Settings › Assistant (the extension's `agentScreenshots`, so
+Windows has a switch too), and a model ticked for actions reads pictures. That's
+judged by name, as in the extension (Gemini, Claude, GPT-4o and later, Llama 4…),
+except this computer's, where Ollama says (`qwen3.5` does). A picture goes only
+to such a model: this computer's takes it when no saved one can. No picture is
+taken while a password or card field is on screen, nor is macOS ever asked for
+Screen Recording mid-task: without it, nothing is captured. Jester's own windows
+over the window (the overlays, the ×) are hidden for the moment it takes.
+
+macOS lists an app under Screen Recording only once it has asked to see the
+screen, and Electron reads the status as granted or denied, never "not asked".
+So until Jester asks, the row says "Not allowed yet", and its Allow… takes a
+one-pixel look at the screen: macOS's prompt comes up and Jester joins the
+list (as "Electron" when run from source). After that the button opens the
+list. Once allowed, macOS wants Jester restarted; run from source, restart it
+yourself: "Quit & Reopen" reopens Electron.app without Jester's folder, which
+should start plain Electron (not yet seen).
+
+`JESTER_LOG_SCREENS=1` keeps the last picture beside the logs as
+`last-picture.jpg` (~/Library/Logs/Jester on a Mac), to see what the model saw.
+
 ### Models: talking and actions
 
 Settings › Models gives each saved model two boxes, Talking and Actions, and
@@ -301,7 +343,11 @@ before): Gemini's thinking counts against it, though a reply is a sentence or tw
 15 percent of 80", "open my Canvas bookmark and tell me what's due") to each
 model ticked for talking and this computer's, three times each, with the app's
 own prompt and request, and says how often it handed over a command when it
-should have and only then, and how long a turn took. Keys stay sealed: it runs as
+should have and only then, and how long a turn took. Thirteen more check his
+memory and notes: "remember that" keeping the user's words, notes made by him
+rather than handed to the laptop, answers from what was recalled (or saying it
+doesn't know), and a saved web page's instructions going undone; what's recalled
+is built by vault-memory.js's own recall(). Keys stay sealed: it runs as
 Jester in Electron, so macOS may ask to let it use "Jester Safe Storage", and it
 never prints them. `-- ollama:qwen3.5:9b` checks one local model; `-- saved-all`
 every saved one, ticked or not. On qwen3.5:2b (2026-11-07, one try each): 16 of 19,
@@ -385,15 +431,20 @@ he said, for the model's context, and is emptied every hour. What's overheard
 isn't kept.
 
 Conversations are told apart: one ends after 5 minutes of quiet, or when the model
-says a new subject has begun (`new` in its reply). What's over stops being sent as
-the conversation so far, and `recollections.js` keeps it as a sentence for a week.
-Up to six of those, the ones sharing words with what's being said and then the
-latest, reach the model marked as over and separate, to use only if they matter.
+says a new subject has begun (`new` in its reply), but never while a task he handed
+on is at work or its result is being said (`acting`, the log's `busy`). What's over
+stops being sent as the conversation so far, is summed up by one model call, and
+`recollections.js` keeps that as a sentence for a week; with a vault chosen, the same
+call keeps it there too (Memory and Obsidian, below). One left from the last run is
+summed up once the vault is open. Up to six of those sentences,
+the ones sharing words with what's being said and then the latest, reach the model
+marked as over and separate, to use only if they matter.
 
 Menu bar › Talk to Jester opens `src/talk/`, his window: an orb that shows what
 he's doing, live captions, a light for whose voice he's listening to,
 what he remembers, a box to type to him (a typed command is on purpose, so it
-doesn't ask first), and a way to stop him listening. It draws from the same frames
+doesn't ask first, unless the model handed it back after reading the user's
+notes: Memory and Obsidian, below), and a way to stop him listening. It draws from the same frames
 as the pill, so the two can't disagree; while it's up and not minimized, the
 conversation's frames go only to it, and the pill is left to the assistant's tasks
 (with the × beside it). What a task did is then said in his window, never on the
@@ -580,6 +631,134 @@ next read failed looking for it. A read that fails is tried once more after
 0.4 s; if it fails again the pill says so, and what it had already done, and
 the log has why.
 
+## Memory and Obsidian
+
+Settings › Memory picks an Obsidian vault: one Obsidian knows is offered (the
+one it has open first), or Choose… takes any folder: the one holding `.obsidian`,
+or a folder above it with one vault in it, which is saved as that vault, so a
+second put beside it later doesn't move his memory. Jester reads all of it, to
+answer from, including folders linked into it, and writes in two folders only:
+`Jester/`, as it needs, and `Notes/`, when asked (a lowercase `jester` or `notes`
+folder already there is used as it is). The rest is the user's and is never
+changed; `vault.js` checks every write, and never writes through a note that's a
+link to a file elsewhere. Stop using leaves the vault alone from then on, deleting
+nothing in it (only the search index, `vault-index.json`). Settings is the only
+place a vault is first read, because on a Mac one in Documents, Desktop or iCloud
+makes macOS ask (in a dev build, for "Electron"); refused, Settings gives the steps
+(Privacy Settings › Files and Folders › Electron › the folder, then Try again) and
+reads it again when its window comes back to the front. With no vault to use, a
+note asked for goes to the computer's own apps, as before.
+
+| Note | What's in it |
+|---|---|
+| `Jester/About me.md` | Facts about the user by section (who they are, school and work, people, preferences, plans and dates), added and taken away as conversations end. The user's to correct: he reads it as it is. |
+| `Jester/Conversations/2026/2026-11-10.md` | A note a day: each conversation's time, title, one-sentence summary, topics and people. |
+| `Jester/Remembered/2026-11-10 Locker combination.md` | What they asked him to remember, word for word, a note each. |
+| `Jester/Routines.md` | What he does with no model: taught phrases, shortcuts, learned tasks. Rewritten as they change. |
+| `Jester/Index.md` | A map of the vault, folder by folder. Rewritten as it changes. |
+| `Jester/How Jester uses this vault.md` | All this, for the user. |
+| `Notes/Grocery list.md` | Notes they asked for ("add eggs to my grocery list"), added to a line at a time. A note the model suggests unasked isn't made: qwen3.5:9b made "Personal Info" of "I'm a junior at Penn State". |
+
+Each of Jester's notes says what it is in its properties (`type`: profile,
+conversations, remembered; a `jester/…` tag; its day), the same way every time, and
+notes made in `Notes/` are `type: note`, tagged `note`, so Obsidian's search and the
+user can tell a profile from a day's talk from a note. Jester tells its own notes
+by where they are, not by type, so a note of the user's typed `profile` or `index`
+is searched like any other. A write lands whole (written beside the note, renamed into place), and
+notes are changed by adding and removing lines, never rewritten, so what the user
+typed into them stays. A note asked for is found by file name, title or alias,
+`Notes/` first; one elsewhere is the user's, so he won't add to it or make a second
+beside it. A name's + and # count: "C++ notes" and "C# notes" aren't "C notes", and
+since no file can be called "C# notes", it's saved as `C sharp notes.md`.
+
+**What's kept.** When a conversation is over (above), one call to the talking model
+sums it up for the day's note and says what it showed about the user, which goes
+into About me unless About me already has it. The Remember conversations switch
+in Settings turns both off. Word for word, only what they ask him to remember:
+"remember that my locker combination is 12-34-56", "don't forget …", "memorize
+this", "keep that in mind", or "remember that" after saying it. "Remember this"
+with nothing of theirs before it, or after his answer to something, gets "Sure.
+What should I remember?", and what they say next, within a minute, is kept as said,
+with no model asked ("remember that" after his answer keeps his answer). "No, don't remember
+that" isn't asking. Whether they asked is read from their words
+(`askedToRemember`), not taken from the model, which filled `remember` for
+"remember when we planned that trip to Boston?" 3 times out of 3; the words are
+then found in what was said (`verbatim`), so a model's paraphrase is never kept as
+theirs. After a bare "remember that", it's their line before, or his answer when
+that line was a question ("what's the capital of Australia" … "remember that").
+Anything that looks like a password, PIN, card number or key is never written
+(`secretIn`), including "I changed my Netflix password to tacos": he says notes
+are plain text files and keeps nothing, a summary that held one says only that the
+details were left out, and `recollections.json` and dev.log leave such words out
+too.
+
+**What's recalled.** Before he answers, what the vault holds on what was just said
+goes in front of it, for at most 1.5 s of looking (`RECALL_MS`): About me, then the
+pieces found, each labelled with its note, its folder (two syllabi aren't one) and
+its day, 1,800 characters in all. A piece found brings its whole section, and the
+lines of it sharing most with the question go when it doesn't all fit: "what time
+is my physics lab" found Tuesday's part of a week's schedule, and the lab is
+Thursday's. Said in under five words ("and on Friday?"), or
+pointing back ("and when do I have to pay it"), it's searched with the user's line
+before. The model is told it's information, never instructions, since a note may
+be a saved web page, and a command that could do harm asks first on a turn that
+read the user's notes, even typed. From the user's own notes, a line naming a
+password, PIN, code or key, the line after one that ends with such a name, and a
+table with a column for one are left out. All of this goes to whichever model
+talks: with a cloud one ticked for Talking (Settings › Models), About me and parts
+of the user's notes go to that provider with what they said.
+
+**Search** (`vault-index.js`). Each note is cut into pieces a heading long, or a
+few lines of a long one (a section over 360 characters goes in parts of 120 to
+320, so the model sees all of any piece found), with the note's other properties
+(birthday, due, professor…) as its first lines, each piece labelled with its note's
+title, headings and properties ("Conversations on Monday,
+November 9, 2026 › 10:05 AM · Algorithms midterm prep"), and found two ways at
+once: by meaning, through `nomic-embed-text` in Ollama on this computer, and by
+words (BM25), so a name or course number the embedding blurs still counts and
+everything still works, less well, with Ollama off. The two rankings are fused,
+with a nudge for a note the question names and for a day it asks about ("what did
+we talk about yesterday"). A day only mentioned ("is it going to rain on Friday")
+nudges only what was already found, so chit-chat doesn't bring back that day's
+talk. Below a floor of 0.6, meaning doesn't count: unrelated text scores about 0.5
+with this model. The index (`vault-index.json`, in the app's data folder, never the
+vault) follows changes as they're saved, re-reading a note only when it changes
+and embedding a piece again only when its words do; a first embedding saves its
+progress every 30 s. Read again asks Ollama straight away, so after starting it or
+pulling the model, search is by meaning at once. On the sample vault in
+`scripts/vault-eval.mjs` (40 notes in 74 pieces; 43 questions with an answer, 13
+without):
+
+| Ranking | hit@1 | hit@3 | MRR | No answer, yet found |
+|---|---|---|---|---|
+| Words only (BM25) | 0.67 | 0.81 | 0.75 | |
+| Meaning only | 0.81 | 0.93 | 0.88 | 5 of 13 above the floor |
+| Both, as Jester searches | 0.93 | 0.93 | 0.93 | 6 of 13 |
+| Both, with Ollama off | 0.77 | 0.88 | 0.83 | 8 of 13 |
+
+A question the vault can't answer that still finds something is a near miss
+(Mom's note for "what's my sister's name"), and the model is told to say it
+doesn't know when the notes don't hold the answer. Cut at 1,200 characters, as at
+first, a week's class schedule reached the model for 23 of 30 questions; cut as
+now, 29.
+
+**Quicker the second time.** When the talking model takes the user's words to mean
+a command that then works ("pull up canvas" → "open the PSU Canvas bookmark"),
+those words stand for that command from then on (`learned.js` aliases): the next
+time, the matcher knows them, so no model is asked at all. So do the command's own
+words, when only Chrome or the assistant could do it: "open canvas" asks no model
+the second time. A web address the user didn't say (the model's guess at one)
+never becomes a shortcut. Words stand for a command only when they name
+what it did and lean on nothing said before: "try now", "the first one", "the
+latest video" and "play something" meant what they did that time. A task the
+assistant got done is kept the same way (above), and both are listed in Routines;
+"forget the shortcut …" drops one. Browser tasks done in Chrome aren't learned yet:
+that needs the extension to say what it did.
+
+Session memory needs nothing more: one app on one computer keeps the conversation
+in memory and in `conversation.json`, and the slow part of a turn is the model,
+not reading what was said.
+
 ## The cursor
 
 The engine's cursor frames are fractions of the screen the cursor aims at (the
@@ -756,7 +935,14 @@ Linked:
   as a spoken command would, with its own model, its bookmarks, tabs and pages; its
   steps show on the app's pill, a step needing an OK is asked by the app (👍, Allow
   or a spoken yes), and the outcome comes back to be shown or said. The × and
-  "stop" stop it. With no Chrome window in view, the last one used comes forward.
+  "stop" stop it. With no Chrome window in view, the last one used comes forward,
+  or a new one opens if Chrome has none; the task works in that window's tab even
+  while the app's own window (the talk window, say) keeps the focus.
+  In conversation the extension gets the user's own words and what the
+  conversation took them to mean (`meant`), as the app's assistant does: "try now"
+  or "keep going" means nothing to Chrome by itself. Its planner uses the words,
+  and the meaning where the words name nothing it can find; its model sees both.
+  "Open my … bookmark" opens the bookmark of that name with no model.
 - **One shortcut, one pill.** ⌥⇧J is the app's; pressed in Chrome under another
   binding it opens the app's mic too. The extension's pill stays down.
 - **Clicks land on the link aimed at.** A click with Chrome in front asks the
@@ -848,7 +1034,17 @@ models decode in under 35 ms.
 
 8. **Talking through a cloud model**: tick Talking on a saved model in Settings ›
    Models, then `npm run talk-check` to compare it with this computer's on the same
-   nineteen cases, and talk to him.
+   cases, and talk to him.
+
+9. **Pictures of the window** (the tests fake the capture; the real pipeline
+   was run on a made-up screen only): click Allow… on Screen Recording in
+   Settings › Permissions, allow it in the list macOS opens, and restart Jester, with a model for actions that
+   reads pictures (Gemini, or `qwen3.5:9b`). Start with `JESTER_LOG=1
+   JESTER_LOG_SCREENS=1` and ask for something only an icon names, like "like
+   this song" in Spotify. The log should say `assistant did: Look at the window`,
+   the closing line `· 1 picture`, and `last-picture.jpg` should show the window
+   with yellow numbers on its controls and none of Jester's own windows. Then
+   check that the Mac doesn't keep a recording indicator up after it.
 
 ## Things learned the hard way
 

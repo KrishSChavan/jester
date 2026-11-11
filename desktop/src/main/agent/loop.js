@@ -13,15 +13,17 @@
 import { requiresConfirmation } from '../../../../jester-extension/src/common/agent-permissions.js';
 import { createMemory, MEMORY_LIMITS, updateMemory } from '../../../../jester-extension/src/common/task-memory.js';
 import { parseShortcut } from '../os-actions.js';
-import { classify, describeAction, menuPath, quoted, READ_ACTIONS, taskCaption, validateTurn } from './actions.js';
+import { classify, describeAction, menuPath, PICTURES_PER_TASK, quoted, READ_ACTIONS, taskCaption, validateTurn } from './actions.js';
 import { DESKTOP_SCHEMA, systemPrompt } from './prompt.js';
 import { elementById, plain, SCREEN_LIMITS, screenText } from './screen.js';
 
-export const DESKTOP_LIMITS = Object.freeze({ maxActions: 30, maxModelCalls: 16, runBudgetMs: 5 * 60 * 1000, failures: 3, invalidReplies: 2, invalidTotal: 3, idleSteps: 3, stepCalls: 6, replans: 2 });
+export const DESKTOP_LIMITS = Object.freeze({ maxActions: 30, maxModelCalls: 16, runBudgetMs: 5 * 60 * 1000, failures: 3, invalidReplies: 2, invalidTotal: 3, idleSteps: 3, stepCalls: 6, replans: 2, pictures: PICTURES_PER_TASK });
 /** The user's choice: ask before sensitive steps only (agent-permissions.js's "entertainment"). */
 const BOUNDARY = 'entertainment';
 /** The least of the screen a model gets, however tight its tokens-per-minute ceiling. */
 const MIN_SCREEN_CHARS = 1500;
+/** What the model is told of a picture that comes with its step. */
+const PICTURE_NOTE = 'The attached picture is the window as the screen shows it now. The number in each yellow box is the id of the control it sits on, the same ids as the screen lines.';
 
 export const tidy = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
@@ -162,8 +164,10 @@ async function screenChars(run, rest) {
  * @param {string} [options.platform]
  * @param {string} [options.note]  what the model should know first: a saved way of doing it that failed
  * @param {string} [options.meant]  in conversation, what the goal (the user's own words) was taken to mean
+ * @param {boolean} [options.see]  the host can take a picture of the window and the model can read it:
+ *   the model is offered `screenshot`
  */
-export function createRun({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now, note = '', meant = '' }) {
+export function createRun({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now, note = '', meant = '', see = false }) {
   const run = {
     goal,
     meant,
@@ -179,7 +183,8 @@ export function createRun({ goal, previous = [], host, model, confirm, onStep = 
     note,
     memory: createMemory(goal),
     startedAt: now(),
-    system: systemPrompt(platform),
+    see,
+    system: systemPrompt(platform, { see }),
     lastResult: null,
     /** The last step that changed something, for when the screen can't be read to check it. */
     lastDone: '',
@@ -203,6 +208,9 @@ export function createRun({ goal, previous = [], host, model, confirm, onStep = 
     landed: new Map(),
     /** The app a plan opened, which later steps need in front. */
     expectApp: '',
+    /** Pictures taken in this task, and the one waiting to go with the next model call. */
+    pictures: 0,
+    picture: null,
     end: (ok, say, extra = {}) => ({ ok, say, actions: run.actions, ...extra })
   };
   return run;
@@ -233,6 +241,15 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
     onStep({ phase: 'acted', label, ok: false, detail: 'left for a fresh look' });
     run.lastResult = { action: label, ok: false, detail: 'Not done: a key before it in the group may have moved the focus. Look at the screen and choose it again.' };
     remember(memory, label, run.lastResult, false);
+    run.failures += 1;
+    return { halted: true };
+  }
+  if (action.action === 'screenshot' && (!run.see || run.pictures >= run.limits.pictures)) {
+    const label = describeAction(action, seen.snapshot, platform);
+    const detail = run.see ? `This task has had its ${run.limits.pictures} pictures: work from the screen text.` : 'Pictures of the screen aren’t available: work from the screen text.';
+    onStep({ phase: 'acted', label, ok: false, detail });
+    run.lastResult = { action: label, ok: false, detail };
+    remember(memory, label, run.lastResult, true);
     run.failures += 1;
     return { halted: true };
   }
@@ -285,12 +302,17 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
   let result;
   try {
     // The last of a group is checked: what it changed, read once, is the next step's screen.
-    result = await host.execute(action, seen.snapshot, { verify, signal, patient });
+    result = await host.execute(action, seen.snapshot, { verify, signal, patient, goal: [goal, run.meant].filter(Boolean).join(' ') });
   } catch (err) {
     result = { ok: false, detail: tidy(err?.message || err, 200) };
   }
   run.actions += 1;
   if (result.snapshot) run.next = result.snapshot;
+  // It goes with the next model call only, then it's dropped.
+  if (result.ok && result.image) {
+    run.pictures += 1;
+    run.picture = result.image;
+  }
   if (action.id !== undefined && (action.action === 'click' || action.action === 'type')) judged.screen = focusOn(judged.screen, action.id);
   else if (action.action === 'press' || action.action === 'type') judged.focusKnown = false;
   judged.selectedAll = result.ok === true && selectsAll(action, platform);
@@ -341,6 +363,8 @@ export async function lookStep(run, { what = '', done = null, maxCalls = Infinit
   const started = run.calls;
   run.failures = 0;
   run.idle = 0;
+  // A picture a step before this one ended without using is of a screen gone by.
+  run.picture = null;
   if (info.told) run.lastResult = info.told;
   for (;;) {
     if (signal?.aborted) return { stop: run.end(false, '', { cancelled: true }) };
@@ -360,8 +384,11 @@ export async function lookStep(run, { what = '', done = null, maxCalls = Infinit
       ...(previous.length ? { previousCommands: previous.slice(-3) } : {}),
       ...(doing ? { doing, ...(info.planned ? { planned: info.planned } : {}) } : {}),
       memory: { subgoal: memory.subgoal, constraints: memory.constraints, facts: memory.facts, ...(doing ? {} : { completed: memory.completed.slice(-4) }), recent: memory.recent },
-      ...(run.lastResult ? { lastResult: run.lastResult } : {})
+      ...(run.lastResult ? { lastResult: run.lastResult } : {}),
+      ...(run.picture ? { picture: PICTURE_NOTE } : {})
     };
+    const picture = run.picture;
+    run.picture = null;
     const screen = screenText(seen.snapshot, { goal: [goal, meant, what].filter(Boolean).join(' '), chars: await screenChars(run, rest) });
     onStep({ phase: 'seen', app: seen.snapshot.app?.name, window: seen.snapshot.window?.title, elements: seen.snapshot.elements?.length ?? 0, screen });
     const prompt = JSON.stringify({ ...rest, screen });
@@ -370,12 +397,17 @@ export async function lookStep(run, { what = '', done = null, maxCalls = Infinit
     let unusable = '';
     run.calls += 1;
     try {
-      reply = await model({ system, prompt, signal, schema: DESKTOP_SCHEMA });
+      reply = await model({ system, prompt, signal, schema: DESKTOP_SCHEMA, ...(picture ? { images: [picture] } : {}) });
     } catch (err) {
       if (aborted(err) || signal?.aborted) return { stop: run.end(false, '', { cancelled: true }) };
       // A reply that wasn't JSON (or was cut off) is the model's to fix; anything else ends the task.
       if (!UNREADABLE.has(err?.code)) return { stuck: { why: 'model', say: modelTrouble(err) } };
       unusable = err.code;
+      // Unused, the picture goes with the retry, on the read its numbers are from.
+      if (picture) {
+        run.picture = picture;
+        run.next = seen.snapshot;
+      }
     }
     let turn;
     try {

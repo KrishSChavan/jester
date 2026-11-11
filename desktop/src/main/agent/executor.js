@@ -156,13 +156,14 @@ async function askPlanner(run, input) {
  * @param {object} options  loop.js's createRun's, and:
  * @param {boolean} [options.pick]  a search is waiting for its result to be pressed
  * @param {(labels:string[]) => (Promise<void>|void)} [options.onPlan]  awaited when a plan is made, to let it be read
- * @returns {Promise<{ok:boolean, say:string, cancelled?:boolean, declined?:boolean, actions:number, calls:number, trace?:object[]}>}
+ * @returns {Promise<{ok:boolean, say:string, cancelled?:boolean, declined?:boolean, actions:number, calls:number, pictures?:number, trace?:object[]}>}
+ *   pictures: how many pictures of the window went to the model, when any did
  *   onStep's phases also include planning, plan (labels), step (index, total, label) and replanning (attempt, of, why)
  */
 export async function runPlannedAgent({ pick = false, onPlan = () => undefined, ...options }) {
   const run = createRun(options);
   const { goal, meant, note, previous, host, onStep, signal, platform, limits, now } = run;
-  const close = (result) => ({ ...result, calls: run.calls });
+  const close = (result) => ({ ...result, calls: run.calls, ...(run.pictures ? { pictures: run.pictures } : {}) });
   const cancelled = () => close(run.end(false, '', { cancelled: true }));
   // What the user said stands in for the caption until the plan gives a shorter one.
   onStep({ phase: 'task', caption: taskCaption(goal), by: 'goal' });

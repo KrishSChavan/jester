@@ -159,14 +159,32 @@ small {
 .state.granted { color: var(--ok); }
 .state.missing { color: var(--warn); }
 .state.denied { color: var(--bad); }
-.state.later { color: var(--muted); }
+.state.optional { color: var(--muted); }
 
-.actions {
+/* A row's buttons, one above another when there are several: their words stay on a line, and the text beside them wraps. */
+.actions,
+.buttons {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
   gap: 4px;
   flex-shrink: 0;
+}
+
+.row > button {
+  flex-shrink: 0;
+}
+
+.row > button,
+.buttons > button {
+  white-space: nowrap;
+}
+
+/* Use “…” with a long vault name is cut short, not left to squeeze the words beside it. */
+.buttons > button {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 button {

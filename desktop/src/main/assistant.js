@@ -56,10 +56,13 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {boolean} [deps.logScreens]  log the screen the model is shown each step: your own
  *   content, so only for debugging (JESTER_LOG_SCREENS)
  * @param {string} [deps.platform]
- * @param {() => Promise<{model:string, uses:string[]}>} [deps.localModel]  this computer's model, and what it may do (model-jobs.js)
+ * @param {() => Promise<{model:string, uses:string[], vision?:boolean}>} [deps.localModel]  this computer's model, what it may do,
+ *   and whether it reads pictures (model-jobs.js)
+ * @param {Function} [deps.picture]  a picture of the window read, its controls numbered (window-shot.js), for when
+ *   the window's words aren't enough
  */
-export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }) }) {
-  const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, quietly, exclude, platform });
+export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }) }) {
+  const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, picture, quietly, exclude, platform });
   /** The models set for actions in Settings, and this computer's for when they can't. */
   const model = createModelJob({
     job: 'act',
@@ -170,6 +173,8 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
       let place = null;
       const line = (label = '') => (place ? stepLine(place.index, place.total, label || place.label) : label);
       try {
+        // A picture of the window is offered only when one can be taken and a model for actions can read it.
+        const see = host.canPicture() && (await model.canSee().catch(() => false));
         const result = await runPlannedAgent({
           goal,
           meant,
@@ -179,6 +184,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
           host,
           model,
           platform,
+          see,
           signal: task.controller.signal,
           confirm: ({ label }) => ask(label, task.controller.signal),
           onPlan: (labels) => (labels.length > 1 ? pause(PLAN_HOLD_MS) : undefined),
@@ -207,7 +213,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
             else if (step.phase === 'unseen') log('assistant couldn’t read the screen:', step.detail);
           }
         });
-        log('assistant:', JSON.stringify(goal), '→', result.cancelled ? 'cancelled' : result.ok ? 'done' : 'not done', JSON.stringify(result.say), `· ${result.actions} steps · ${result.calls} model calls`);
+        log('assistant:', JSON.stringify(goal), '→', result.cancelled ? 'cancelled' : result.ok ? 'done' : 'not done', JSON.stringify(result.say), `· ${result.actions} steps · ${result.calls} model calls${result.pictures ? ` · ${result.pictures} picture${result.pictures > 1 ? 's' : ''}` : ''}`);
         previous = [...previous, { said: goal.slice(0, 200), result: result.cancelled ? 'cancelled' : result.ok ? 'done' : `failed: ${result.say}`.slice(0, 200) }].slice(-REMEMBERED);
         if (result.cancelled) return null;
         return { ok: result.ok, text: result.say || (result.ok ? 'Done.' : 'That didn’t work.'), ...(result.ok && result.trace?.length ? { trace: result.trace } : {}) };

@@ -293,9 +293,10 @@ export function validateTurn(value) {
   };
 }
 
-function restoreState(text, resume) {
+function restoreState(text, resume, meant = '') {
   const source = isRecord(resume) ? resume : {};
   const goal = typeof source.goal === 'string' && source.goal.trim() ? source.goal : text;
+  const understood = typeof source.meant === 'string' ? source.meant : boundedString(meant, 300).trim();
   const memory = createMemory(goal, source.memory);
   const steps = Number.isSafeInteger(source.steps) && source.steps >= 0 ? source.steps : 0;
   if (isRecord(source.pendingAction)) {
@@ -311,6 +312,7 @@ function restoreState(text, resume) {
   return {
     version: 1,
     goal: memory.goal,
+    ...(understood && understood !== memory.goal ? { meant: understood } : {}),
     memory,
     steps,
     failures: 0,
@@ -385,6 +387,7 @@ export async function runAssistant({
   signal,
   resume = null,
   previous = [],
+  meant = '',
   maxActions = ASSISTANT_LIMITS.maxActions,
   runBudgetMs = ASSISTANT_LIMITS.runBudgetMs,
   modelClient = requestModel,
@@ -409,7 +412,7 @@ export async function runAssistant({
   let config;
   let configError;
   try {
-    state = restoreState(text, resume);
+    state = restoreState(text, resume, meant);
     if (
       typeof host?.execute !== 'function' ||
       typeof (host?.observe || host?.digest) !== 'function'
@@ -463,7 +466,7 @@ export async function runAssistant({
   // A recognized request is one or two stages: "open YouTube and play MrBeast's
   // latest video" opens the site locally, then plays locally there. A stage with
   // no local plan is the model's, still working toward the whole original goal.
-  const stages = taskStages(state.goal);
+  const stages = await localStages(state.goal, state.meant, host.bookmark);
   let intent = stages[state.stage] ?? null;
   let episode = intent?.kind === 'play-episode' ? intent : null;
   const observe = async (query) => {
@@ -471,7 +474,7 @@ export async function runAssistant({
     // for the new page's content instead of reading the one being replaced.
     const since = typeof rawPage?.pageId === 'string' && rawPage.pageId ? rawPage.pageId : null;
     rawPage = await measured('observeMs', () => (host.observe || host.digest)({
-      goal: state.goal,
+      goal: [state.goal, state.meant].filter(Boolean).join(' '),
       maxChars: 6000,
       maxElements: 50,
       settle: 'frame',
@@ -514,7 +517,8 @@ export async function runAssistant({
         : chooseBrowserAction(intent, current, state.localProgress);
   // The model is told once when it calls a playback request done with nothing playing.
   let finishChallenged = false;
-  const quick = resume?.pendingAction ? null : quickCommand(state.goal);
+  // Words with nothing to do locally ("try now") take what they were understood to mean's one-step command.
+  const quick = resume?.pendingAction ? null : quickCommand(state.goal) || (!stages.length && state.meant ? quickCommand(state.meant) : null);
   const budget = Math.min(
     1000,
     Math.max(1, Number.isInteger(maxActions) ? maxActions : ASSISTANT_LIMITS.maxActions)
@@ -554,7 +558,7 @@ export async function runAssistant({
     : null;
   const diagnosticText = (value, action = {}) => {
     let detail = String(value || '');
-    for (const secret of [config?.key, env?.key, env?.aiKey, action.text, action.value, state.goal, requested]) {
+    for (const secret of [config?.key, env?.key, env?.aiKey, action.text, action.value, state.goal, state.meant, requested]) {
       if (typeof secret === 'string' && secret) detail = detail.split(secret).join('[redacted]');
     }
     if (privateShowPattern) detail = detail.normalize('NFKC').replace(privateShowPattern, '[requested show]');
@@ -738,7 +742,8 @@ export async function runAssistant({
         }
         const shot = pendingShot;
         pendingShot = null;
-        const rest = { originalGoal: state.goal, ...(previousCommands.length ? { previousCommands } : {}),
+        const rest = { originalGoal: state.meant ? `${state.goal} (taken in conversation to mean: ${state.meant})` : state.goal,
+          ...(previousCommands.length ? { previousCommands } : {}),
           memory: promptMemory(state.memory), ...(lastResult ? { lastResult } : {}),
           ...(shot ? { screenshot: { note: 'The attached image shows the viewport; each yellow number labels the control with that element ID.', legend: shot.legend } } : {}) };
         // A model with a small tokens-per-minute ceiling gets a smaller page, so a
@@ -1066,4 +1071,27 @@ export function taskStages(goal) {
   }
   const single = parseEntertainmentIntent(goal) || parseYouTubeIntent(goal) || browser;
   return single ? [single] : [];
+}
+
+/**
+ * taskStages, with "open <name>" going to the bookmark of that name, if there's
+ * one; and, when the words themselves have no local plan or name nothing known,
+ * those of what a conversation took them to mean (Jester Desktop's: "try now"
+ * meaning "open my PSU Canvas bookmark").
+ * @param {(name:string) => Promise<string|null>} [bookmark]  the address of a bookmark by that name
+ */
+export async function localStages(goal, meant = '', bookmark = null) {
+  const resolve = async (words) => {
+    const stages = taskStages(words);
+    const [first] = stages;
+    if (stages.length !== 1 || first?.kind !== 'open' || first.url || typeof bookmark !== 'function') return stages;
+    const url = await Promise.resolve(bookmark(first.name)).catch(() => null);
+    return typeof url === 'string' && /^https?:\/\//i.test(url) ? [{ ...first, url }] : stages;
+  };
+  const own = await resolve(goal);
+  // An open tab may still have an unknown name: that's for the planner to find, unless the meaning names something surer.
+  const unsure = !own.length || (own.length === 1 && own[0]?.kind === 'open' && !own[0].url);
+  if (!meant || !unsure) return own;
+  const theirs = await resolve(meant);
+  return !own.length || theirs[0]?.url ? theirs : own;
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { quickBrowserAction, parseBrowserIntent, chooseBrowserAction, tabsNamed, spokenCommand } from '../jester-extension/src/background/browser-intent.js';
+import { quickBrowserAction, parseBrowserIntent, chooseBrowserAction, tabsNamed, spokenCommand, bookmarkNames } from '../jester-extension/src/background/browser-intent.js';
 import { parseYouTubeIntent } from '../jester-extension/src/background/youtube.js';
 import { validateAction } from '../jester-extension/src/common/agent-actions.js';
 
@@ -132,4 +132,22 @@ test('search uses this site’s own box, then the web; a named site uses its sea
   const hulu = chooseBrowserAction(parseBrowserIntent('search Hulu for The Bear'), page('https://mail.google.com/'));
   assert.deepEqual(hulu.action, { action: 'browser', op: 'open', url: 'https://www.hulu.com/' });
   assert.equal(hulu.progress.done, undefined, 'Without a search address the search box comes next');
+});
+
+test('said to Jester Desktop, “open Chrome and …” and “… in Chrome” are only Chrome’s name', () => {
+  assert.equal(spokenCommand('Hey Jester open my PSU Canvas bookmark in chrome'), 'open my PSU Canvas bookmark');
+  assert.equal(spokenCommand('Open chrome and open the PSU Canvas chrome bookmark'), 'open the PSU Canvas chrome bookmark');
+  assert.equal(spokenCommand('could you open google chrome, then open a new tab'), 'open a new tab');
+  assert.deepEqual(quickBrowserAction('open Chrome and open a new tab'), { action: 'browser', op: 'new' });
+  assert.equal(spokenCommand('search for chrome extensions'), 'search for chrome extensions');
+});
+
+test('a bookmark asked for by name: its plain name first, then without a word like “extension”', () => {
+  assert.deepEqual(bookmarkNames('PSU Canvas bookmark'), ['PSU Canvas']);
+  assert.deepEqual(bookmarkNames('the PSU Canvas chrome bookmark'), ['PSU Canvas']);
+  assert.deepEqual(bookmarkNames('google chrome bookmark PSU Canvas'), ['PSU Canvas']);
+  assert.deepEqual(bookmarkNames('PSU Canvas extension'), ['PSU Canvas extension', 'PSU Canvas']);
+  assert.deepEqual(bookmarkNames('google chrome extension PSU Canvas'), ['google chrome extension PSU Canvas', 'PSU Canvas']);
+  assert.deepEqual(bookmarkNames('recipes from my bookmarks'), ['recipes']);
+  assert.deepEqual(bookmarkNames(''), []);
 });

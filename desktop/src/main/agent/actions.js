@@ -26,13 +26,16 @@ const FIELDS = {
   media: ['key'],
   find: ['query'],
   wait: ['ms'],
+  screenshot: [],
   finish: ['say', 'success']
 };
 export const DESKTOP_ACTIONS = Object.freeze(Object.keys(FIELDS));
 /** Media keys, as the ACTIONS dispatch.js presses. */
 export const MEDIA_KEYS = Object.freeze({ play: 'PLAY_PAUSE', next: 'MEDIA_NEXT', previous: 'MEDIA_PREV', volume_up: 'VOLUME_UP', volume_down: 'VOLUME_DOWN', mute: 'MUTE_TOGGLE' });
 /** Actions that change nothing. */
-export const READ_ACTIONS = new Set(['find', 'wait']);
+export const READ_ACTIONS = new Set(['find', 'wait', 'screenshot']);
+/** Pictures of the window a task may send its model, as in the extension. */
+export const PICTURES_PER_TASK = 3;
 /** What may go in a group of up to three, on controls already on screen. */
 const GROUPABLE = new Set(['click', 'type', 'press', 'scroll']);
 export const MAX_GROUP = 3;
@@ -203,6 +206,8 @@ export function describeAction(action, screen = null, platform = 'darwin') {
       return `Look for ${quoted(action.query)}`;
     case 'wait':
       return 'Wait';
+    case 'screenshot':
+      return 'Look at the window';
     case 'finish':
       return action.say;
     default:

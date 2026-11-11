@@ -199,6 +199,12 @@ your Chrome gestures still work with Chrome in front, what you ask the app about
 your browser is done in Chrome, and the app's cursor clicks the link you aimed at.
 Linking is off until you click Link in Settings.
 
+**What's new in 0.2.2**: Link works the first time you click it (before, it said
+Jester Desktop wasn't installed until Chrome was restarted). Jester Desktop's
+requests reach Chrome with what the conversation meant, so "try again" works;
+"open my … bookmark" opens it with no AI model; and a request from the app works
+when you're typing to the app, or when Chrome has no window open.
+
 Tick all three certifications. Each is true: data goes only to the AI provider
 the user configures, solely to carry out their commands. It is never sold,
 never used for anything else, and never used for credit or lending.

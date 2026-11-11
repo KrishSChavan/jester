@@ -12,7 +12,7 @@ test('a Mac asks for camera, Accessibility, microphone and screen recording, in 
     { id: 'microphone', status: 'denied', granted: false, action: 'open-settings' },
     { id: 'screen', status: 'granted', granted: true, action: null }
   ]);
-  assert.deepEqual(items.map((item) => item.tier), ['needed', 'needed', 'recommended', 'later']);
+  assert.deepEqual(items.map((item) => item.tier), ['needed', 'needed', 'recommended', 'optional']);
   assert.ok(items.every((item) => item.label && item.why));
 });
 
@@ -20,8 +20,16 @@ test('once macOS has been answered "no", only System Settings can change it', ()
   for (const status of ['denied', 'restricted', 'unknown']) {
     assert.equal(permissionItems('darwin', { camera: status })[0].action, 'open-settings', status);
   }
-  // Screen recording has no prompt of its own to show.
-  assert.equal(permissionItems('darwin', { screen: 'not-determined' }).find((item) => item.id === 'screen').action, 'open-settings');
+});
+
+test('Screen Recording is asked for once, which puts Jester in its list; after that, it\'s System Settings', () => {
+  const screen = (status, options) => permissionItems('darwin', { screen: status }, options).find((item) => item.id === 'screen');
+  assert.equal(screen('not-determined').action, 'request');
+  assert.equal(screen('denied').action, 'open-settings');
+  assert.equal(screen('granted').action, null);
+  // Run from source, System Settings names it Electron.
+  assert.equal(screen('denied', { listedAs: 'Electron' }).listedAs, 'Electron');
+  assert.equal(screen('denied').listedAs, undefined);
 });
 
 test('Windows has only the camera and microphone switches', () => {

@@ -95,6 +95,10 @@
           <span><strong>Continuous assistant</strong><small id="continuous-hint"></small></span>
           <input type="checkbox" id="continuousAssistant" />
         </label>
+        <label class="row">
+          <span><strong>Pictures of the window</strong><small id="pictures-hint"></small></span>
+          <input type="checkbox" id="agentScreenshots" />
+        </label>
         <div class="row">
           <span><strong>Your voice</strong><small id="voice-print-hint"></small></span>
           <span class="buttons">
@@ -107,15 +111,39 @@
           <button id="puter-connect" type="button"></button>
         </div>
         <div class="row">
-          <span><strong>What he remembers</strong><small>Conversations are kept word for word for up to an hour, then as one sentence each for a week. All of it stays on this computer.</small></span>
+          <span><strong>What he remembers</strong><small>Conversations are kept word for word while they’re going on and for up to an hour after, then as one sentence each for a week. Forget it all clears those. What’s in your vault stays until you delete it there.</small></span>
           <button id="forget-conversations" type="button">Forget it all</button>
         </div>
       </div>
     </section>
 
+    <section aria-labelledby="memory-heading">
+      <h2 id="memory-heading">Memory</h2>
+      <div class="cards">
+        <div class="row">
+          <span><strong>Obsidian vault</strong><small id="vault-hint"></small><small id="vault-problem" class="error" role="alert"></small></span>
+          <span class="buttons">
+            <button id="vault-use" type="button" hidden></button>
+            <button id="vault-choose" type="button">Choose…</button>
+            <button id="vault-remove" type="button" hidden>Stop using</button>
+            <button id="vault-open" type="button" hidden>Open in Obsidian</button>
+            <button id="vault-privacy" type="button" hidden>Open Privacy Settings</button>
+          </span>
+        </div>
+        <div class="row">
+          <span><strong>Search</strong><small id="vault-search"></small></span>
+          <button id="vault-reindex" type="button" hidden>Read again</button>
+        </div>
+        <label class="row">
+          <span><strong>Remember conversations</strong><small>After each one, a summary in Jester › Conversations and what you said about yourself in Jester › About me. Word for word only when you say “remember this”. Never passwords or card numbers.</small></span>
+          <input type="checkbox" id="memoryConversations" />
+        </label>
+      </div>
+    </section>
+
     <section aria-labelledby="models-heading">
       <h2 id="models-heading">Models</h2>
-      <p class="intro">A model does two jobs for Jester: <strong>talking</strong> with you, and <strong>actions</strong>, working the app in front step by step on commands he doesn’t know (“play Gunna”, “reply to Sam on Slack”), so the names and text of that window’s controls go to it. Tick what each model does, so one can talk and another act without using up each other’s free requests. A job tries its models in order, then this computer’s when none of them can.</p>
+      <p class="intro">A model does two jobs for Jester: <strong>talking</strong> with you, and <strong>actions</strong>, working the app in front step by step on commands he doesn’t know (“play Gunna”, “reply to Sam on Slack”), so the names and text of that window’s controls go to it, and a picture of the window when those aren’t enough and you allow it. Tick what each model does, so one can talk and another act without using up each other’s free requests. A job tries its models in order, then this computer’s when none of them can.</p>
       <div class="cards" id="model-jobs">
         <div class="row"><span><strong>Talking</strong><small id="job-talk"></small></span></div>
         <div class="row"><span><strong>Actions</strong><small id="job-act"></small></span></div>

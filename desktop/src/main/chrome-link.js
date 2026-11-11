@@ -14,7 +14,7 @@
  * Messages are JSON objects with a `type`:
  *   from the extension: hello {version, settings}, settings {settings}, pill {voice},
  *     ask {id, label}, done {id, ok, say}, reply {id, result}, voice {}
- *   to it: welcome {version}, task {id, text}, answer {id, approved}, cancel {},
+ *   to it: welcome {version}, task {id, text, meant?}, answer {id, approved}, cancel {},
  *     request {id, op, ...}, op being knows {text}, aim {x, y, radius} or act {action, source, gesture}
  */
 
@@ -148,16 +148,18 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
     /**
      * The extension carries out a command; its pill frames and questions come
      * here meanwhile. One at a time: a new one replaces the last.
+     * @param {string} text  the user's words
+     * @param {{signal?:AbortSignal, meant?:string}} [options]  meant: what the conversation took them to mean
      * @returns {Promise<{ok:boolean, text:string}|null>} null: cancelled
      */
-    task(text, { signal } = {}) {
+    task(text, { signal, meant = '' } = {}) {
       if (!linked) return Promise.resolve({ ok: false, text: 'Chrome isn’t linked.' });
       cancel();
       const id = String(++next);
       return new Promise((resolve) => {
         task = { id, resolve };
         signal?.addEventListener('abort', () => task?.id === id && cancel(), { once: true });
-        if (!send({ type: 'task', id, text: String(text).slice(0, 2000) })) finishTask({ ok: false, text: 'Chrome isn’t linked.' });
+        if (!send({ type: 'task', id, text: String(text).slice(0, 2000), ...(meant ? { meant: String(meant).slice(0, 2000) } : {}) })) finishTask({ ok: false, text: 'Chrome isn’t linked.' });
       });
     },
     get running() {

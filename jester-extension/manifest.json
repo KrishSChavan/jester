@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Jester \u2014 Hand Gesture Video Control",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Control YouTube, Netflix and more with hand gestures, an eye/head cursor and your voice. Camera and audio stay on your device.",
   "minimum_chrome_version": "116",
   "permissions": [

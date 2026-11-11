@@ -5,10 +5,13 @@
  */
 
 import { MEMORY_LIMITS } from '../../../../jester-extension/src/common/task-memory.js';
-import { CAPTION_CHARS, MAX_GROUP, MEDIA_KEYS, PLACES, SCREENS, TYPE_MODES } from './actions.js';
+import { CAPTION_CHARS, MAX_GROUP, MEDIA_KEYS, PICTURES_PER_TASK, PLACES, SCREENS, TYPE_MODES } from './actions.js';
 
-/** @param {string} platform  process.platform */
-export function systemPrompt(platform) {
+/**
+ * @param {string} platform  process.platform
+ * @param {{see?:boolean}} [options]  see: a picture of the window can be taken and read
+ */
+export function systemPrompt(platform, { see = false } = {}) {
   const mac = platform === 'darwin';
   const primary = mac ? 'cmd' : 'ctrl';
   return `You control the user's ${mac ? 'Mac' : 'Windows PC'} by voice, one step at a time, through the controls of the app in front. Complete every part of the ORIGINAL GOAL, then finish.
@@ -34,7 +37,7 @@ open_url: url (an https link, in the default browser)
 media: key ${Object.keys(MEDIA_KEYS).join('|')}
 find: query (lists controls matching the words, including ones not shown)
 wait: ms 100..3000, only while something loads
-finish: say (one short sentence for the user), success (boolean)
+${see ? `screenshot: only when the screen lines aren't enough: a control you need has no name (an icon), the goal is about how something looks, or you can't tell controls apart. The next step comes with a picture of the window, each control's id in a yellow box on it: act with those ids. At most ${PICTURES_PER_TASK} per task.\n` : ''}finish: say (one short sentence for the user), success (boolean)
 previousCommands, when present, are the user's last few commands, oldest first: use them only to resolve "that", "again" or "the next one". The ORIGINAL GOAL is the current command. note, when present, says a saved way of doing it failed: work from the screen afresh.
 Memory is optional: subgoal<=160 chars, facts<=6 strings of<=120 chars, constraints<=8 strings of<=180 chars. No explanations.`;
 }
@@ -54,7 +57,7 @@ export const DESKTOP_SCHEMA = {
     object({ task: string, actions: { type: 'array', items: ref('control'), minItems: 1, maxItems: MAX_GROUP }, memory: ref('memory') }, ['actions'])
   ],
   $defs: {
-    action: { anyOf: [...controls, 'scrollTo', 'menu', 'drag', 'place', 'openApp', 'openUrl', 'media', 'find', 'wait', 'finish'].map(ref) },
+    action: { anyOf: [...controls, 'scrollTo', 'menu', 'drag', 'place', 'openApp', 'openUrl', 'media', 'find', 'wait', 'screenshot', 'finish'].map(ref) },
     control: { anyOf: controls.map(ref) },
     // Gemini's schema takes enums of strings only: a count is bounded instead (actions.js checks it's 1 or 2).
     click: action(['click'], { id, button: { type: 'string', enum: ['left', 'right'] }, count: { type: 'integer', minimum: 1, maximum: 2 } }, ['id']),
@@ -70,6 +73,7 @@ export const DESKTOP_SCHEMA = {
     media: action(['media'], { key: { type: 'string', enum: Object.keys(MEDIA_KEYS) } }, ['key']),
     find: action(['find'], { query: string }, ['query']),
     wait: action(['wait'], { ms: { type: 'integer', minimum: 100, maximum: 3000 } }, ['ms']),
+    screenshot: action(['screenshot']),
     finish: action(['finish'], { say: string, success: { type: 'boolean' } }, ['say', 'success']),
     memory: object({
       subgoal: string,
