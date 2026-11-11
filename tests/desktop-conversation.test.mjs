@@ -1069,7 +1069,11 @@ test('a voiceprint: takes averaged, voices compared, and short clips given a low
 
 test('the prompt says who he is, what the laptop can do for him and what he cannot know; the clock is on what was said', () => {
   const prompt = personaPrompt(new Date('2026-11-06T17:40:00'));
-  assert.match(prompt, /Your name is Jester\. You are a helpful AI assistant that can take control of the user's laptop and search the internet\./);
+  assert.match(prompt, /Your name is Jester\. You're the user's own AI and their friend, not just a program: you talk with them about anything, and you can take control of their laptop and search the internet for them\./);
+  // A friend, JARVIS's manner, but no pretending, and not the film's "sir".
+  assert.match(prompt, /Your manner is JARVIS's, from Iron Man/);
+  assert.match(prompt, /never invent a shared moment or a fact about them/);
+  assert.match(prompt, /never call them sir or Mr\. Stark unless they ask you to/);
   assert.match(prompt, /The laptop sees its own screen and does all of that, so never say you can't/);
   assert.match(prompt, /never a web address they didn't say/);
   assert.match(prompt, /never give weather, news, prices/);
