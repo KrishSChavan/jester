@@ -231,6 +231,10 @@ if (run && !process.versions.electron) {
   const twoDaysAgo = new Date(date.getFullYear(), date.getMonth(), date.getDate() - 2);
   const PASSED = await recalledFor(date, [{ rel: 'School/CMPSC 465.md', title: 'CMPSC 465', heading: '', text: `Midterm on ${twoDaysAgo.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} at 10am in 100 Thomas. Covers greedy algorithms and dynamic programming.` }]);
   const KNOWN = await knownFor(date);
+  /** What presence.js tells him when asked how long they've sat: its own wording. */
+  /** A count of hours that isn't one he was given (two and five): a sum of his own. */
+  const WRONG_HOURS = /\b(?!(?:2|two|5|five)\b)(?:\d+|one|three|four|six|seven|eight|nine|ten|an)\s+hours?\b|\bhour and a half\b/i;
+  const SITTING = `[${['How long the user has been at this computer (give these figures as they are, and work out no others):', '- This sitting: since 1:15 PM, which is 2 hours 10 minutes.', '- Before this sitting they were away from it for 40 minutes.', '- Today in all: 5 hours 5 minutes, over 3 sittings, the first begun at 8:42 AM.', '(Counted from keys, the mouse, unlocking and their voice. Ten minutes with none of them counts as away, unless something was playing.)'].join('\n')}]`;
   const NOTHING_KNOWN = await knownFor(date, [], []);
   const DONT_KNOW = /\b(?:don['’]?t|do not|not sure|no idea|can['’]?t|couldn['’]?t|haven['’]?t|didn['’]?t|no record|nothing)\b/i;
 
@@ -369,7 +373,12 @@ if (run && !process.versions.electron) {
     { text: 'forget what I told you about the interview', forgetting: { earlier: ['c2'] } },
     // Nothing he keeps says it: nothing goes, least of all what merely shares a subject.
     { text: 'forget that', history: [['you', 'honestly I might drop out of school'], ['jester', 'That’s a big thing to be weighing. What’s behind it?']], forgetting: {} },
-    { text: 'forget about my goldfish', forgetting: {} }
+    { text: 'forget about my goldfish', forgetting: {} },
+    // How long they've been at the computer (presence.js): answered from what he's told, and never made up when he isn't.
+    { text: 'how long have I been at this?', context: SITTING, say: /two hours|2 hours|1:15|five hours|5 hours/i, sayNot: WRONG_HOURS, maxWords: 40 },
+    { text: 'when did I start today?', context: SITTING, say: /8:42/, sayNot: WRONG_HOURS, maxWords: 40 },
+    { text: 'should I take a break?', context: SITTING, say: /two hours|2 hours|five hours|5 hours|1:15|a while|long/i, sayNot: WRONG_HOURS, maxWords: 50 },
+    { text: 'how long have I been at this?', sayNot: /\b(?:\d+|one|two|three|four|five|six|an?|half an?|a few|several|couple of)\s+(?:hours?|minutes?)\b|\bsince \d/i }
   ].map((want) => ({ ...want, self: true }));
   const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES];
   // --only live|memory|old|facts|self: just those.

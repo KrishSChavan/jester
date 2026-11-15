@@ -33,6 +33,9 @@ const SAMPLE_RATE = 16000;
 /** A service that died is started again after this long, if something is listening. */
 const REVIVE_MS = 1000;
 
+/** A voice that began this long ago with nothing come of it isn't someone mid-sentence any more. */
+const HEARING_MS = 10_000;
+
 export function startSpeech({ log = () => undefined } = {}) {
   /** The service, from the moment it's asked to load until it's let go. */
   let service = null;
@@ -81,6 +84,9 @@ export function startSpeech({ log = () => undefined } = {}) {
     }, IDLE_MS);
   }
 
+  /** When a voice last began, with what it said still to come; 0 with none. No voice goes on longer than HEARING_MS unbroken. */
+  let soundAt = 0;
+
   function load() {
     if (service || quitting) return service;
     const child = utilityProcess.fork(SERVICE, [], { serviceName: 'Jester speech', stdio: 'pipe' });
@@ -90,6 +96,9 @@ export function startSpeech({ log = () => undefined } = {}) {
     child.on('message', (message) => {
       if (service !== child) return;
       if (message?.type === 'ready') return log('speech loaded:', message.model, `${message.loadMs} ms`);
+      // A voice has begun, and until what it said arrives (or doesn't, as a stranger's), someone's talking.
+      if (message?.type === 'speech') soundAt = Date.now();
+      else if (message?.type === 'heard' || message?.type === 'stranger' || message?.type === 'final' || message?.type === 'error') soundAt = 0;
       if (message?.type === 'heard') {
         // Every score, for tuning voiceprint.js against a real voice.
         // The voiceprint's own score too, when what was learned from use raised it.
@@ -247,7 +256,12 @@ export function startSpeech({ log = () => undefined } = {}) {
       teaching = on;
       service?.postMessage({ type: 'teaching', on });
     },
+    /** A voice is being heard right now, the always-on mic's: not the moment to start talking. */
+    get hearing() {
+      return !!listener && soundAt > 0 && Date.now() - soundAt < HEARING_MS;
+    },
     stopListening() {
+      soundAt = 0;
       if (!listener) return;
       listener = null;
       waker = null;

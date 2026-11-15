@@ -21,6 +21,9 @@
  *   self     what he's asked to remember is kept in the vault and "forget that" takes it back out; "what do you know
  *            about me?" reaches the model with all of About me; a named thing is forgotten by the model's pick from
  *            numbered lists; and someone in a hurry is said to be, in the brackets before their words.
+ *   clock    a line due while he wasn't running is told when he starts, saying when it was for; one due while the
+ *            screen's locked is held, and told a moment after it's unlocked; unlocking is the day's first sit-down
+ *            once; and asked how long they've been at it, the model is given when they sat down.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -43,9 +46,13 @@ if (!process.versions.electron) {
   const child = spawn(electron, [here, ...process.argv.slice(2)], { stdio: 'inherit', env });
   child.on('exit', (code) => process.exit(code ?? 1));
 } else {
-  const { app, BrowserWindow, safeStorage, shell } = await import('electron');
+  const { app, BrowserWindow, powerMonitor, safeStorage, shell } = await import('electron');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-live-'));
-  Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1' });
+  // Presence looks every quarter second, and what's held is told half a second after they're back.
+  Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1', JESTER_TICK_MS: '250', JESTER_SETTLE_MS: '500' });
+  // Whether anyone's at the keys is this script's to say, not the real computer's: seconds since the last one.
+  const keys = { idle: 1 };
+  powerMonitor.getSystemIdleTime = () => keys.idle;
   // Sealed keys are kept as written: the keychain is never asked.
   safeStorage.isEncryptionAvailable = () => true;
   safeStorage.encryptString = (text) => Buffer.from(String(text), 'utf8');
@@ -152,7 +159,50 @@ if (!process.versions.electron) {
   const inVault = (rel) => path.join(vaultDir, rel);
   const lastSaid = (server) => server.requests.at(-1)?.messages?.at(-1)?.content || '';
 
+  /** What he's said, as the conversation keeps it. */
+  const his = () => said().filter((entry) => entry.who === 'jester').map((entry) => entry.text);
+  const jobs = () => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(scratch, 'jobs.json'), 'utf8')).jobs;
+    } catch {
+      return null;
+    }
+  };
+
   const SCENARIOS = {
+    /** Step 7: the clock catching up, a line held while they're away, the first sit-down, and how long they've sat. */
+    async clock({ paid }) {
+      const late = await until('the line due before he started', () => his().find((line) => /stand up and stretch/.test(line)), 20000).catch((err) => err.message);
+      check('a line due an hour before he started is told once he has, saying when it was for', /^This was for (?:yesterday at )?\d+:\d\d [AP]M: Time to stand up and stretch\.$/.test(late), late);
+      check('the log says they’re here, and that it’s the day’s first sit-down', /presence: here \(keys or mouse\), the day’s first sit-down/.test(logLines()), logLines().split('\n').filter((line) => /presence:|clock:|telling:/.test(line)).join(' | '));
+      check('and that a line was told and how late, never what it said', /telling: a line, 6\d min late/.test(logLines()) && !/stretch/.test(logLines()));
+      await until('the job gone from the clock', () => jobs()?.length === 0).catch(() => undefined);
+      check('told, it’s off the clock', jobs()?.length === 0, JSON.stringify(jobs()));
+
+      // The screen locks; a line comes due behind it.
+      powerMonitor.emit('lock-screen');
+      keys.idle = 600;
+      await until('away', () => /presence: away \(locked\)/.test(logLines()));
+      // Put on his clock the way anything of his would: there's no asking him for one by voice until reminders.
+      const before = his().length;
+      await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-clock', op: 'add', job: { kind: 'say', inMs: 300, payload: { text: 'Your laundry is done.' } } });`);
+      await until('the line held', () => /telling: they’re away, so a line is held until they’re back/.test(logLines()));
+      await pause(1500);
+      check('due behind a locked screen, a line is held, not said', his().length === before && jobs()?.[0]?.held === true, `${his().length - before} said · ${JSON.stringify(jobs())}`);
+      powerMonitor.emit('unlock-screen');
+      keys.idle = 0;
+      const told = await until('the held line told', () => (his().length > before ? his().at(-1) : null), 8000).catch((err) => err.message);
+      check('unlocked, it’s told a moment later', told === 'Your laundry is done.', told);
+      check('unlocking is them, back, and not the day’s first sit-down again', /presence: here \(unlocked\), after /.test(logLines()) && logLines().match(/the day’s first sit-down/g)?.length === 1);
+
+      paid.answer = () => ({ say: 'Since a moment ago.', do: '', new: false });
+      await type('how long have I been at this?');
+      check('asked how long they’ve been at it, the model is given when they sat down', /\[How long the user has been at this computer [^\n]*\n- This sitting: since \d+:\d\d [AP]M, which is under a minute\.\n- Before this sitting they were away from it for /.test(lastSaid(paid)), lastSaid(paid).slice(0, 300));
+      await type('what should I have for lunch?');
+      check('and not when they ask something else', !/at this computer/.test(lastSaid(paid)), lastSaid(paid).slice(0, 300));
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+    },
+
     /** Step 6: remembering and taking it back, what he knows, forgetting a named thing, and how they sound. */
     async self({ paid }) {
       const { createVault } = await import(path.join(desktop, 'src/main/vault.js'));
@@ -249,6 +299,8 @@ if (!process.versions.electron) {
     // A conversation summed up 31 hours ago, as recollections.js keeps it: the sentence that became a class "in about an hour".
     fs.writeFileSync(path.join(scratch, 'recollections.json'), JSON.stringify({ conversations: [{ at: Date.now() - 31 * 3600000, summary: 'Provided current weather, time, and advised attending the upcoming class.', chat: 'earlier-chat' }] }));
     fs.mkdirSync(path.join(vaultDir, '.obsidian'), { recursive: true });
+    // A line that came due an hour ago, while he wasn't running.
+    if (!wanted.length || wanted.includes('clock')) fs.writeFileSync(path.join(scratch, 'jobs.json'), JSON.stringify({ version: 1, jobs: [{ id: 'stretch', kind: 'say', made: Date.now() - 2 * 3600000, at: Date.now() - 3600000, payload: { text: 'Time to stand up and stretch.' } }] }));
     await import(path.join(desktop, 'src/main/main.js'));
     await app.whenReady();
     home = await until('his window', () => BrowserWindow.getAllWindows().find((win) => /\/home\/home\.html/.test(win.webContents.getURL()) && !win.webContents.isLoading()), 30000);

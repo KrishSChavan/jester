@@ -16,9 +16,14 @@
  * An event's title is someone's words, often someone else's (an invitation), so a
  * turn told any is one whose commands ask first when they could do harm, as one
  * told the user's own notes is (conversation.js).
+ *
+ * Asked how long they've been at the computer, or away from it, or whether
+ * it's time for a break, he's told when they sat down (presence.js), and only
+ * then: it's nothing to bring up unasked.
  */
 
 import { AHEAD_DAYS, BACK_DAYS } from './calendars.js';
+import { PRESENCE_WORDS } from './presence.js';
 import { placeName, weatherLines } from './weather.js';
 
 /** Events said with no question about the schedule, and at most with one. */
@@ -154,9 +159,10 @@ const ago = (ms) => {
  * @param {ReturnType<import('./calendars.js').createCalendars>} deps.calendars
  * @param {() => 'fahrenheit'|'celsius'} deps.units
  * @param {string} [deps.computer]  "Mac", or "computer": what he says the location is from
+ * @param {{lines:() => string}} [deps.presence]  when they sat down at the computer (presence.js)
  * @param {() => number} [deps.now]
  */
-export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', now = Date.now }) {
+export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', presence = null, now = Date.now }) {
   function whereLine(here, asked, at) {
     if (!here) {
       const { problem } = whereabouts.state();
@@ -224,6 +230,13 @@ export function createSituation({ whereabouts, weather, calendars, units, comput
           } catch {
             lines.push(`The weather in ${placeName(there)} couldn’t be fetched just now.`);
           }
+        }
+      }
+      if (presence && PRESENCE_WORDS.test(text)) {
+        const sitting = presence.lines();
+        if (sitting) {
+          lines.push(sitting);
+          summary.push('how long they’ve sat');
         }
       }
       let untrusted = false;

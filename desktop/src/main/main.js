@@ -39,6 +39,7 @@ import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
 import { createChromeLink } from './chrome-link.js';
+import { createClock } from './clock.js';
 import { createCalendars } from './calendars.js';
 import { createChatArchive } from './chat-archive.js';
 import { createChatKeeper } from './chat-keeper.js';
@@ -56,6 +57,7 @@ import { PROVIDERS } from '../../../jester-extension/src/common/credentials.js';
 import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
+import { createPresence, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
@@ -66,6 +68,7 @@ import { createSituation } from './situation.js';
 import { createSpeaker, systemVoice } from './speaker.js';
 import { startSpeech } from './speech.js';
 import { createStopButton } from './stop-button.js';
+import { createTeller, SETTLE_MS } from './tell.js';
 import { createTray } from './tray.js';
 import { createWatch } from './watch.js';
 import { createWeather, unitsFor, weatherLines } from './weather.js';
@@ -197,6 +200,10 @@ let speaker = null;
 /** His own voice, made on this computer (kokoro.js). */
 let kokoro = null;
 let voicePage = null;
+/** Whether the user's at the computer (presence.js), things with a time on them (clock.js), and telling them (tell.js). */
+let presence = null;
+let clock = null;
+let teller = null;
 /** The model he talks through (model-jobs.js). */
 let talking = null;
 /** The Chrome extension, linked (chrome-link.js), and where Chrome finds the relay to it. */
@@ -211,6 +218,8 @@ const CHROME_SCOPES = new Set(['video', 'page', 'browser', 'window']);
 let listening = false;
 /** Why it's closed for the moment, whatever the setting says: 'locked', 'suspended'. */
 const away = new Set();
+/** Driver commands that type, click or move: his doing, not the user's (presence.js own()). */
+const OWN_INPUT = new Set(['key', 'text', 'click', 'button', 'move', 'scroll', 'drag', 'media', 'act', 'menu', 'wake']);
 /** The user's voice, once taught. */
 let voiceprint = null;
 /** Other ways the user's been heard to sound, learned from use (voiceprint.js). */
@@ -454,6 +463,8 @@ function updateListening() {
  */
 function heardAloud(text, heard) {
   const turned = conversation.heard(text, { unsure: !!heard?.unsure, lag: heard?.afterMs });
+  // Their voice, or words he took as said to him: they're there, wherever in the room.
+  if (turned || (voiceprint && !heard?.unsure)) presence?.seen('voice');
   if (turned && heard?.learn && heard.voice && voiceprint) learnVoice(heard.voice);
 }
 
@@ -871,6 +882,7 @@ function onWatchReport(report) {
     log('watch: talk');
     toggleVoice();
   }
+  if (report.talk || report.steering || report.click) presence?.seen('watch');
   const refused = !report.steering ? '' : engine.state === ENGINE.SLEEPING ? `Jester is asleep: ${wakeWords()}` : canPost() ? '' : 'Allow Accessibility in Jester’s Settings first';
   if (refused && refused !== watchRefused) overlays.toast(refused, { tone: 'warn' });
   watchRefused = refused;
@@ -1117,6 +1129,17 @@ function listenToPages() {
         conversation.forget();
         keeper.forgetAll();
         return { ok: true };
+      // His clock, for his own window: what's on it, a line to tell them at a time, and taking one off.
+      case 'jester/desktop-clock': {
+        if (message.op === 'add') {
+          const { inMs, at, payload } = message.job || {};
+          const text = String(payload?.text ?? '').trim().slice(0, 600);
+          const job = text ? clock.add({ kind: 'say', ...(Number.isFinite(at) ? { at } : { inMs: Number(inMs) }), payload: { text } }) : null;
+          return { ok: !!job, id: job?.id || '' };
+        }
+        if (message.op === 'remove') return { ok: clock.remove(String(message.id ?? '')) };
+        return { ok: true, where: presence.where, jobs: clock.list().map(({ id, kind, due, held, payload }) => ({ id, kind, due: Number.isFinite(due) ? due : null, held: !!held, text: String(payload?.text ?? '') })) };
+      }
       // Settings' Memory section: the vault is only ever chosen, and so first read, from here.
       case 'jester/desktop-memory':
         if (message.op === 'choose') {
@@ -1170,6 +1193,7 @@ function listenToPages() {
         }
       // His window. A sentence typed is a command given on purpose, and he writes back.
       case 'jester/talk-type':
+        presence?.seen('typed');
         conversation.told(String(message.text).slice(0, 2000), { typed: true });
         return { ok: true };
       // Typing to him: his model loads meanwhile, rather than after they press Return. Only this computer's needs it.
@@ -1546,6 +1570,15 @@ async function start() {
     : createOverlays();
   startInput();
   startChromeLink();
+  // Whether they're at the computer: asked of the system's own count of quiet seconds, never of the camera.
+  presence = createPresence({
+    idleSeconds: () => powerMonitor.getSystemIdleTime(),
+    keptAwake: process.platform === 'darwin' ? () => macScreenKeptAwake(runFile) : undefined,
+    file: path.join(app.getPath('userData'), 'presence.json'),
+    tickMs: Number(env.JESTER_TICK_MS) || undefined,
+    log,
+    onChange: (where) => teller?.moved(where)
+  });
   pointer = createPointer({
     driver: {
       call: (...args) => {
@@ -1569,7 +1602,15 @@ async function start() {
     onChange: () => refresh(),
     log
   });
-  const input = { call: (...args) => (driver ? driver.call(...args) : Promise.reject(new Error('jester-driver is not running'))) };
+  // His own keys and clicks aren't the user's: presence is told while he's at them.
+  const input = {
+    call: (cmd, ...rest) => {
+      if (!driver) return Promise.reject(new Error('jester-driver is not running'));
+      if (!OWN_INPUT.has(cmd)) return driver.call(cmd, ...rest);
+      const done = presence.own();
+      return driver.call(cmd, ...rest).finally(done);
+    }
+  };
   dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
   // Switched on by refresh(), from the settings.
   speech = startSpeech({ log });
@@ -1673,7 +1714,8 @@ async function start() {
     weather,
     calendars,
     units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()),
-    computer: process.platform === 'darwin' ? 'Mac' : 'computer'
+    computer: process.platform === 'darwin' ? 'Mac' : 'computer',
+    presence
   });
   recollections = createRecollections({
     file: path.join(app.getPath('userData'), 'recollections.json'),
@@ -1753,11 +1795,35 @@ async function start() {
     show: showConversation,
     log
   });
+  // Things with a time on them (clock.js), and telling the user when one comes (tell.js): said if they're here,
+  // held until they're back if they aren't.
+  clock = createClock({ file: path.join(app.getPath('userData'), 'jobs.json'), log });
+  teller = createTeller({
+    where: () => presence.where,
+    // With the mic closed he has no voice: it's written, on the pill and in his window.
+    // Not across the lines being read to teach him their voice, or anyone mid-sentence.
+    announce: (text) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening })),
+    release: () => clock.release(),
+    held: () => clock.held,
+    settleMs: Number(env.JESTER_SETTLE_MS) || undefined,
+    log
+  });
+  clock.on('say', teller.say);
+  presence.start();
+  // What came due while he wasn't running is told once he's had a moment to start, not as he does.
+  setTimeout(() => {
+    clock.start();
+    // Restarted with them still about, nothing says they've come back: what was held is told as if they just had.
+    teller.moved(presence.where === 'away' ? 'away' : 'here');
+  }, Number(env.JESTER_SETTLE_MS) || SETTLE_MS);
   for (const [event, reason, on] of [['lock-screen', 'locked', true], ['unlock-screen', 'locked', false], ['suspend', 'suspended', true], ['resume', 'suspended', false]]) {
     powerMonitor.on(event, () => {
       if (on) away.add(reason);
       else away.delete(reason);
+      presence.screen(reason, on);
       updateListening();
+      // Timers stood still while it slept: what came due meanwhile is seen to now.
+      if (!on) clock.wake();
       // Back at the computer: it may be somewhere else now, and its calendars hours behind.
       if (!on) {
         if (whereabouts.source === 'here') whereabouts.locate().then(() => noteWeather());
@@ -1788,6 +1854,7 @@ async function start() {
     },
     onTrigger: (message) => {
       log('trigger', message.action, `(${message.source} ${message.gesture})`);
+      presence.seen('gesture');
       const toggledSleep = message.action === 'SLEEP';
       // The camera sees the arm that's steering, and a swipe would move what it's aiming at.
       if (message.source === 'swipe' && !toggledSleep && pointer.aiming()) return log('trigger ignored: the watch is aiming');
@@ -1817,6 +1884,8 @@ async function start() {
       onVoiceCommand(text);
     },
     onTelemetry: (telemetry) => {
+      // A hand in view, with the camera already on for gestures: someone's there.
+      if (telemetry.handPresent) presence.seen('camera');
       const now = Date.now();
       if (now - lastTelemetryLog < 5000) return;
       lastTelemetryLog = now;
@@ -1868,6 +1937,8 @@ if (!app.requestSingleInstanceLock()) {
     vaultIndex?.close();
     kokoro?.stop();
     calendars?.stop();
+    presence?.stop();
+    clock?.stop();
     spend?.flush().catch(() => undefined);
   });
 }

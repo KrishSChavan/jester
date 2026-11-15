@@ -531,12 +531,18 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   let lastConnected = {};
   /** He's shown he's listening, for what's still being said. */
   let wokenEarly = false;
+  /** When that was: what was being said may never arrive (a stranger's, or the mic closed on it). */
+  let wokenAt = 0;
+  /** Times listening has ended (reset): a line being said then was cut off with nobody there to hear it. */
+  let resets = 0;
   /** Commands he's handed on, at work or with their results being said: however long, still this conversation. */
   let acting = 0;
   /** The last thing said to him was typed: what he asks about it, he writes too. */
   let typing = false;
   /** The typed turn at work, if one is: it never needed the mic, so listening ending doesn't end it. */
   let typedTurn = 0;
+  /** Turns heard and not yet answered. */
+  let answering = 0;
   /**
    * Bumped when what's going on is over for good (Forget it all, another chat picked up): a task's result coming
    * after that belongs nowhere. A newer turn alone doesn't bump it: a typed task's result is still written then.
@@ -956,6 +962,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     memory.add('you', text);
     // Reaching here at all, overheard, is what a voiceprint says it was them, unless it only maybe was.
     show({ phase: 'heard', text, matched: overheard && knowsYou() && !unsure });
+    answering += 1;
     try {
       if (await commands.knows(text)) {
         begun?.controller.abort();
@@ -1065,6 +1072,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       early?.drop(true);
       await answer(err.message, { ok: false });
     } finally {
+      answering -= 1;
       early?.drop();
       if (typedTurn === mine) typedTurn = 0;
       keep(ended);
@@ -1141,6 +1149,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     woken() {
       if (talking || now() < quietUntil || assistant.asking || assistant.running) return;
       wokenEarly = true;
+      wokenAt = now();
       // What he'll need for the answer gets ready while the rest is said.
       try {
         warm();
@@ -1187,6 +1196,35 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     get acting() {
       return acting > 0;
     },
+    /**
+     * Something to tell them that nobody asked for just now (a reminder whose time has come, tell.js). It's said as
+     * his own line and kept in the conversation, so "thanks" or "what was that about?" has something to follow, and
+     * then he listens on as after any answer. `written`: with the mic closed there's no voice, so it's written, on
+     * the pill and in his window.
+     * @returns {Promise<boolean>|null} once it's said: false when listening ended as he said it (the screen locked, the
+     *   lid closed), so nobody heard it to the end. null when now isn't the moment: he's mid-sentence or mid-task,
+     *   they're talking, or he's waiting on what they'll say next
+     */
+    announce(text, { written = false } = {}) {
+      // His name heard, with the rest still being said: unless it never came.
+      const lookingUp = wokenEarly && now() - wokenAt < WOKEN_MS;
+      if (answering || talking || acting || pending || lookingUp || assistant.asking || assistant.running || now() < openUntil || now() < quietUntil) return null;
+      const line = written ? writtenLine(text) : spokenLine(text);
+      if (!line) return Promise.resolve(true);
+      // What came before, long enough ago, is over: this begins the next conversation, as their words would.
+      const ended = memory.idleFor() >= NEW_AFTER_MS ? memory.startNew() : [];
+      if (ended.length) archive(ended);
+      pace = 1;
+      const mine = turns;
+      const reset = resets;
+      const told = Promise.resolve(say(text, { written })).then(() => {
+        if (reset !== resets && !written) return false;
+        if (mine === turns && !written && knowsYou()) stayOpen();
+        return true;
+      });
+      keep(ended);
+      return told;
+    },
     /** The assistant's question: out loud, or written to someone typing to him. */
     ask: (label) => (typing ? say(`${label}? Yes or no?`, { written: true }) : say(`${label}? Say yes or no.`)),
     /** He stops mid-sentence. */
@@ -1211,6 +1249,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      * A task's stays, and so does a typed turn at work: it never needed the mic.
      */
     reset() {
+      resets += 1;
+      wokenEarly = false;
       openUntil = 0;
       hush();
       dropPending();

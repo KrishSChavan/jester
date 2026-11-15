@@ -54,6 +54,9 @@ front window fills its display.
 | `src/main/watch.js`, `watch-status.js`, `native/jester-watch/` | The Apple Watch: its app, the Mac's Swift Bluetooth helper, and steering the cursor with them (Mac only). |
 | `src/main/link.js`, `link-host.js`, `chrome-link.js` | The link to the extension: the socket the relay reaches, putting the relay where Chrome can start it, and what's said over it. The extension's half is `../jester-extension/src/background/desktop-link.js`. |
 | `src/main/mood.js` | How the user seems, from what they plainly say: told to the model, and how fast he speaks. |
+| `src/main/clock.js` | His clock: things to do at a time, kept in `jobs.json`, and done on waking when they came due while the computer slept. |
+| `src/main/presence.js` | Whether the user's at the computer (here, near, away), the day's first sit-down, and how long they've sat. |
+| `src/main/tell.js` | Telling them something when its time comes: said if they're there, held until they're back if they aren't. |
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models): paid before free, and who covers for one that fails. |
 | `src/main/spend.js` | What the saved models' replies have cost this month, as near as their token counts say. |
 | `scripts/live-check.mjs` | `npm run live-check`: the real app on a scratch profile with scripted model servers, typed to and read back. |
@@ -1190,6 +1193,80 @@ note made and taken back to the trash, About me reaching the model whole, a name
 fact forgotten and the rest kept, "forget everything" refused, the Settings row,
 and "How they sound: in a hurry." before the user's words: 9 of 9.
 
+## His clock, and whether they're there
+
+Step 7 of the plan, and what reminders, the morning brief and anything sent to a
+phone stand on. Nothing here is asked for by voice yet: that's the next step's
+timers and reminders.
+
+**The clock** (`clock.js`) keeps jobs in `jobs.json`, in the app's own folder: due
+once, every day at a time by this computer's clock (on some days of the week, if
+given), or every so often. What a job does is its kind's handler. Timers stand
+still while a computer sleeps and its clock can change, so nothing is trusted to
+one long timer: he looks at the time at least every half minute and whenever the
+computer wakes, and a daily job's next time is worked out from the wall clock
+each time. What came due while it slept, or while he wasn't running, is done
+once on waking and told how late it is; a daily job missed for days runs once,
+late by this morning's; and a job can say how late is too late (`keepFor`), so a
+brief missed by six hours isn't said at three in the afternoon. A handler that
+throws is tried again after a minute, five, then fifteen. A job of a kind nothing
+does yet is kept, not run, and not lost.
+
+**Presence** (`presence.js`) says whether they're here, near or away, from things
+that need no permission: the system's own count of seconds since a key or the
+mouse, the screen unlocking, their voice, something typed to him, the watch, and
+a hand in view when the camera's already on for gestures. The camera is never
+opened to look for them.
+
+| | |
+| --- | --- |
+| here | one of those in the last two minutes |
+| near | quiet for longer, under ten minutes; or quiet however long while something keeps the screen awake (a film, a call: `pmset -g assertions`, asked at most once a minute and only then), up to three hours |
+| away | the screen locked, the computer asleep, or ten quiet minutes |
+
+His own typing and clicking resets the system's count like anyone's, so the
+driver's posting commands tell presence while they're at it and input in that
+stretch isn't taken as the user's: a task at work for eleven minutes with nobody
+there ends as away. A sitting ends when they were last seen, not when it was
+noticed. A day starts at four in the morning, so working past midnight isn't the
+next day's first sit-down, which is logged (`presence: here (unlocked), the day’s
+first sit-down`) and is where the morning brief will come. Restarted mid-sitting
+he carries it on rather than greeting them again. Sittings are kept for a week
+in `presence.json`, in the app's own folder, and go nowhere; asked how long
+they've been at it, when they started, or whether it's time for a break, he's
+given the figures, one to a line. In one sentence, qwen3.5:9b did sums of its own
+with them ("4 hours and 48 minutes", of 5 hours 5); a line apiece, it got 10 of
+12 and Claude Haiku 5.5 12 of 12 (`npm run talk-check -- --only self --match
+"been at this|start today|take a break"`). Not asked, he isn't told.
+
+**Telling** (`tell.js`) is the handler for a job of kind `say`: a line whose time
+has come. Here or near, he says it once he's free to, never across his own
+sentence, theirs, or a task at work, and it's in the conversation like anything
+he says, so "thanks" has something to follow. With the mic closed it's written,
+on the pill and in his window. Away, it's held (by the clock, so it outlasts a
+restart) and told eight seconds after they're back, saying when it was for
+("This was for 3:05 PM: …"). The log says a line was told and how late, never
+what it said. A phone is where a held line will go instead, once there is one.
+
+A second reading of all this found ten ways it went wrong, each now a test.
+The ones worth knowing: every stretch of his own input is remembered, not only
+the last (a click, then a read of the screen six seconds later, uncovered the
+click and brought an absent user "back"); a key from before the lid closed never
+counts as them returning, whether the system's count ran on or stood still
+while it was shut; someone quiet through a film was at it until it ended, so the
+film is in the sitting; a line cut off as the screen locks isn't taken as told;
+his name heard with nothing come of it doesn't keep him from speaking for good;
+he doesn't start a line while a voice is mid-sentence at the mic, or while he's
+being taught theirs; a daily job doesn't run twice for one date when the clock
+is set back or the zone moves west; and a handler that never answers is given
+ten minutes, then the clock goes on without it.
+
+`npm run live-check -- clock` runs it in the real app on a scratch profile, with
+the idle count and the screen lock scripted: a line due an hour before he
+started is told late, one due behind a locked screen is held and told after the
+unlock, the first sit-down is logged once, and the sitting reaches the model
+only when asked: 9 of 9.
+
 ## Weather, location and calendars
 
 Settings › Weather and calendars tells Jester the user's day: where they are, the
@@ -1574,6 +1651,15 @@ models decode in under 35 ms.
     that my locker is 12-34-56" and "forget that" (the note should be in the
     Trash), and "Jester, forget that …" with something About me holds. The log
     has `voice loaded: Kokoro`, a `turn:` line for each, and `memory: forgot …`.
+
+11. **Whether you're there** (the idle count and the lock are scripted in the
+    checks; the real ones have been read on this Mac only in passing): leave the
+    Mac untouched for ten minutes, lock it, unlock it, and read the log for
+    `presence: away (quiet for 10 minutes)`, `presence: away (locked)` and
+    `presence: here (unlocked), after … away`. Play a film for fifteen minutes
+    without touching anything: no `away`. Ask him "how long have I been at
+    this?" and compare with what you know. While a long task of his works with
+    your hands off the Mac, no `presence: here (keys or mouse)` should appear.
 
 ## Things learned the hard way
 
