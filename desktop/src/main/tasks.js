@@ -395,6 +395,11 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
   let askedAt = 0;
   /** He's asked which timer to cancel: the next few words may be just its name. */
   let cancelAskedAt = 0;
+  /** The task last made, changed or taken off, until it's asked for: his window shows it as a card with what he says. */
+  let touchedLast = null;
+  const touch = (task) => {
+    touchedLast = task ? { kind: 'task', id: task.id, type: task.timer ? 'timer' : Number.isFinite(task.due) && !task.allDay ? 'reminder' : 'task', text: task.text } : null;
+  };
 
   function write() {
     try {
@@ -444,6 +449,7 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
       log('tasks: the clock had no room, so that wasn’t kept');
       return null;
     }
+    touch(task);
     changed();
     return task;
   }
@@ -453,6 +459,7 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
     if (!task) return null;
     tasks = tasks.filter((item) => item !== task);
     clock.remove(jobId(id));
+    touch(task);
     changed();
     return task;
   }
@@ -502,6 +509,7 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
       // Put back after its time: it's overdue, not something to be told about out of nowhere.
       if (Number.isFinite(task.due) && !task.allDay && task.due < now() && !task.told) task.told = now();
     }
+    touch(task);
     schedule(task);
     changed();
     return task;
@@ -514,6 +522,7 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
     if (allDay) task.allDay = true;
     else delete task.allDay;
     delete task.told;
+    touch(task);
     schedule(task);
     changed();
     return task;
@@ -676,6 +685,26 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
       };
     },
     get: (id) => tasks.find((task) => task.id === id) || null,
+    /**
+     * The task last made, changed or taken off, as a card for his window to show with what he says of it; asked for
+     * once. `fresh` first, before doing something: what's touched after that is this turn's.
+     * @returns {{kind:'task', id:string, type:'timer'|'reminder'|'task', text:string}|null}
+     */
+    touched({ fresh = false } = {}) {
+      const card = touchedLast;
+      touchedLast = null;
+      return fresh ? null : card;
+    },
+    /** A card for one task, whatever was touched last: the reminder being told. */
+    cardFor(id) {
+      const task = tasks.find((item) => item.id === id);
+      return task ? { kind: 'task', id: task.id, type: task.timer ? 'timer' : Number.isFinite(task.due) && !task.allDay ? 'reminder' : 'task', text: task.text } : null;
+    },
+    /** Put off by so many minutes from now: the user's click on its card. */
+    snooze(id, minutes = 10) {
+      const span = Math.min(Math.max(Number(minutes) || 10, 1), 24 * 60);
+      return moveTo(id, { due: now() + span * MIN });
+    },
     /** How many are open, timers aside: for the button that opens the panel. */
     get count() {
       return open().filter((task) => !task.timer).length;

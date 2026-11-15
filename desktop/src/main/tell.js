@@ -39,7 +39,8 @@ export function lateLine(text, meant, at) {
 /**
  * @param {object} deps
  * @param {() => 'here'|'near'|'away'} deps.where
- * @param {(text:string) => Promise<boolean|void>|null} deps.announce  says it, and answers false when it was cut off with
+ * @param {(text:string, card:object|null) => Promise<boolean|void>|null} deps.announce  says it (with the job's
+ *   `payload.card`, for his window to show), and answers false when it was cut off with
  *   nobody listening; null when now isn't the moment
  * @param {() => Promise<void>} deps.release  what's held is tried again (clock.js)
  * @param {() => number} deps.held  how many are
@@ -59,7 +60,7 @@ export function createTeller({ where, announce, release, held, settleMs = SETTLE
       }
       // Told late, it says when it was for: in the job's own words for that (payload.late), if it has them.
       const tardy = String(job.payload.late ?? '').trim().slice(0, MOST_CHARS);
-      const said = announce(late >= LATE_MS ? tardy || lateLine(text, meant, now()) : text);
+      const said = announce(late >= LATE_MS ? tardy || lateLine(text, meant, now()) : text, job.payload.card || null);
       if (!said) return { retryIn: busyMs };
       // Cut off as the screen locked or the lid closed: nobody heard it out, so it's still to tell.
       if ((await said) === false) {

@@ -845,44 +845,47 @@ test('remember: "yes, remember that" after his offer keeps the user’s words in
   assert.match(read('Jester/Remembered/2026-11-10 Locker combination.md'), /\n# Locker combination\n\n> my locker combination is 12-34-56\n\nSaid to Jester on Tuesday, November 10, 2026 at 1:30 PM\.\n$/);
 });
 
+/** What he says of a note, and whether it worked: which note it was goes with it too, for its card. */
+const said = ({ ok, text }) => ({ ok, text });
+
 test('notes: added to, made, opened and refused, with what Jester says', async () => {
   const opened = [];
   const vault = fakeVault({ notes: { 'Notes/Grocery list.md': '- eggs', 'Reading/Reading list.md': '- Dune', 'Jester/About me.md': '# About me' } });
   const { memory, index } = memoryWith({ vault, openExternal: async (url) => void opened.push(url) });
 
-  assert.deepEqual(await memory.note({ title: 'grocery list', add: 'milk' }), { ok: true, text: 'Added “milk” to Grocery list.' });
+  assert.deepEqual(await memory.note({ title: 'grocery list', add: 'milk' }), { ok: true, text: 'Added “milk” to Grocery list.', rel: 'Notes/Grocery list.md', title: 'Grocery list', added: 'milk' }, 'with which note it was, for its card');
   assert.equal(vault.notes['Notes/Grocery list.md'], '- eggs\n- milk');
   // Much the same name: the list there is, rather than a second one.
-  assert.deepEqual(await memory.note({ title: 'my groceries', add: 'bread' }), { ok: true, text: 'Added “bread” to Grocery list.' });
-  assert.deepEqual(await memory.note({ title: 'Packing list', add: 'socks' }), { ok: true, text: 'Made a note called Packing list, with “socks” in it.' });
-  assert.deepEqual(await memory.note({ title: 'Reading list', add: 'Piranesi' }), { ok: false, text: '“Reading list” isn’t in your Notes folder, so I can’t change it.' });
-  assert.deepEqual(await memory.note({ title: 'About me', add: 'likes jazz' }), { ok: false, text: '“About me” isn’t in your Notes folder, so I can’t change it.' });
+  assert.deepEqual(said(await memory.note({ title: 'my groceries', add: 'bread' })), { ok: true, text: 'Added “bread” to Grocery list.' });
+  assert.deepEqual(said(await memory.note({ title: 'Packing list', add: 'socks' })), { ok: true, text: 'Made a note called Packing list, with “socks” in it.' });
+  assert.deepEqual(said(await memory.note({ title: 'Reading list', add: 'Piranesi' })), { ok: false, text: '“Reading list” isn’t in your Notes folder, so I can’t change it.' });
+  assert.deepEqual(said(await memory.note({ title: 'About me', add: 'likes jazz' })), { ok: false, text: '“About me” isn’t in your Notes folder, so I can’t change it.' });
   assert.equal(index.refreshes, 3);
 
-  assert.deepEqual(await memory.note({ title: 'Grocery list', open: true }), { ok: true, text: 'Opening Grocery list.' });
-  assert.deepEqual(await memory.note({ title: 'groceries', open: true }), { ok: true, text: 'Opening Grocery list.' });
-  assert.deepEqual(await memory.note({ title: 'Reading list', open: true }), { ok: true, text: 'Opening Reading list.' }, 'any note opens, the user’s own too');
+  assert.deepEqual(said(await memory.note({ title: 'Grocery list', open: true })), { ok: true, text: 'Opening Grocery list.' });
+  assert.deepEqual(said(await memory.note({ title: 'groceries', open: true })), { ok: true, text: 'Opening Grocery list.' });
+  assert.deepEqual(said(await memory.note({ title: 'Reading list', open: true })), { ok: true, text: 'Opening Reading list.' }, 'any note opens, the user’s own too');
   assert.deepEqual(opened, ['obsidian://open?vault=Jester%20Desktop&file=Notes%2FGrocery%20list', 'obsidian://open?vault=Jester%20Desktop&file=Notes%2FGrocery%20list', 'obsidian://open?vault=Jester%20Desktop&file=Reading%2FReading%20list']);
-  assert.deepEqual(await memory.note({ title: 'Recipes', open: true }), { ok: false, text: 'There’s no note called “Recipes”.' });
+  assert.deepEqual(said(await memory.note({ title: 'Recipes', open: true })), { ok: false, text: 'There’s no note called “Recipes”.' });
 
   const added = vault.calls.added.length;
-  assert.deepEqual(await memory.note({ title: 'Wifi', add: 'the password is hunter2' }), { ok: false, text: SECRET });
-  assert.deepEqual(await memory.note({ title: 'Bank PIN', add: '4821' }), { ok: false, text: SECRET });
-  assert.deepEqual(await memory.note({ title: 'Cards', add: '4111 1111 1111 1111' }), { ok: false, text: SECRET });
+  assert.deepEqual(said(await memory.note({ title: 'Wifi', add: 'the password is hunter2' })), { ok: false, text: SECRET });
+  assert.deepEqual(said(await memory.note({ title: 'Bank PIN', add: '4821' })), { ok: false, text: SECRET });
+  assert.deepEqual(said(await memory.note({ title: 'Cards', add: '4111 1111 1111 1111' })), { ok: false, text: SECRET });
   assert.equal(vault.calls.added.length, added, 'no secret reached the vault');
 
   const none = createVaultMemory({ vault: () => null, index: fakeIndex(), request: fakeModel({}) });
-  assert.deepEqual(await none.note({ title: 'Grocery list', add: 'milk' }), { ok: false, text: NO_VAULT });
+  assert.deepEqual(said(await none.note({ title: 'Grocery list', add: 'milk' })), { ok: false, text: NO_VAULT });
   const { memory: noObsidian } = memoryWith({ vault, openExternal: async () => { throw new Error('No application knows obsidian://'); } });
-  assert.deepEqual(await noObsidian.note({ title: 'Grocery list', open: true }), { ok: false, text: 'I couldn’t open Obsidian.' });
+  assert.deepEqual(said(await noObsidian.note({ title: 'Grocery list', open: true })), { ok: false, text: 'I couldn’t open Obsidian.' });
 });
 
 test('notes: added to the very note found, though its title is another note’s name', async () => {
   const { vault, read } = realVault({ 'Notes/Groceries.md': '# Shopping list\n\n- eggs\n', 'Notes/Shopping list.md': '# Shopping list\n\n- batteries\n' });
   const { memory } = memoryWith({ vault });
-  assert.deepEqual(await memory.note({ title: 'Groceries', add: 'milk' }), { ok: true, text: 'Added “milk” to Groceries.' });
+  assert.deepEqual(said(await memory.note({ title: 'Groceries', add: 'milk' })), { ok: true, text: 'Added “milk” to Groceries.' });
   // Much the same name as Groceries, by its file: that note, not the one its title names.
-  assert.deepEqual(await memory.note({ title: 'my groceries', add: 'bread' }), { ok: true, text: 'Added “bread” to Groceries.' });
+  assert.deepEqual(said(await memory.note({ title: 'my groceries', add: 'bread' })), { ok: true, text: 'Added “bread” to Groceries.' });
   assert.equal(read('Notes/Groceries.md'), '# Shopping list\n\n- eggs\n- milk\n- bread\n');
   assert.equal(read('Notes/Shopping list.md'), '# Shopping list\n\n- batteries\n');
 });
@@ -892,7 +895,7 @@ test('notes: a note in Notes/ that’s a link to a file elsewhere is said to be 
   mkdirSync(join(root, 'Notes'), { recursive: true });
   symlinkSync(join(root, 'Elsewhere/Reading list.md'), join(root, 'Notes/Reading list.md'));
   const { memory } = memoryWith({ vault });
-  assert.deepEqual(await memory.note({ title: 'Reading list', add: 'Hyperion' }), { ok: false, text: '“Reading list” is a link to a file elsewhere, so I won’t change it.' });
+  assert.deepEqual(said(await memory.note({ title: 'Reading list', add: 'Hyperion' })), { ok: false, text: '“Reading list” is a link to a file elsewhere, so I won’t change it.' });
   assert.equal(read('Elsewhere/Reading list.md'), '- Dune\n');
 });
 
@@ -902,7 +905,7 @@ test('notes: a lookalike whose names find another note isn’t added to, nor is 
   utimesSync(join(root, 'Notes/C# list.md'), new Date(2026, 0, 1), new Date(2026, 0, 1));
   utimesSync(join(root, 'Notes/C sharp list.md'), new Date(2026, 5, 1), new Date(2026, 5, 1));
   const { memory } = memoryWith({ vault });
-  assert.deepEqual(await memory.note({ title: 'my C# lists', add: 'LINQ' }), { ok: false, text: 'I couldn’t tell which note “my C# lists” is.' });
+  assert.deepEqual(said(await memory.note({ title: 'my C# lists', add: 'LINQ' })), { ok: false, text: 'I couldn’t tell which note “my C# lists” is.' });
   assert.equal(read('Notes/C# list.md'), '- events\n');
   assert.equal(read('Notes/C sharp list.md'), '- delegates\n');
 });
@@ -910,11 +913,11 @@ test('notes: a lookalike whose names find another note isn’t added to, nor is 
 test('notes: C++ notes and C# notes aren’t C notes, and C# notes are found again by that name', async () => {
   const { vault, read, rels } = realVault({ 'Notes/C notes.md': '# C notes\n\n- pointers\n' });
   const { memory } = memoryWith({ vault });
-  assert.deepEqual(await memory.note({ title: 'C++ notes', add: 'templates' }), { ok: true, text: 'Made a note called C++ notes, with “templates” in it.' });
+  assert.deepEqual(said(await memory.note({ title: 'C++ notes', add: 'templates' })), { ok: true, text: 'Made a note called C++ notes, with “templates” in it.' });
   // No file can be called "C# notes": vault.js spells its # out.
-  assert.deepEqual(await memory.note({ title: 'C# notes', add: 'LINQ' }), { ok: true, text: 'Made a note called C sharp notes, with “LINQ” in it.' });
-  assert.deepEqual(await memory.note({ title: 'C# notes', add: 'async' }), { ok: true, text: 'Added “async” to C sharp notes.' });
-  assert.deepEqual(await memory.note({ title: 'my C++ note', open: true }), { ok: true, text: 'Opening C++ notes.' });
+  assert.deepEqual(said(await memory.note({ title: 'C# notes', add: 'LINQ' })), { ok: true, text: 'Made a note called C sharp notes, with “LINQ” in it.' });
+  assert.deepEqual(said(await memory.note({ title: 'C# notes', add: 'async' })), { ok: true, text: 'Added “async” to C sharp notes.' });
+  assert.deepEqual(said(await memory.note({ title: 'my C++ note', open: true })), { ok: true, text: 'Opening C++ notes.' });
   assert.deepEqual(rels(), ['Notes/C notes.md', 'Notes/C sharp notes.md', 'Notes/C++ notes.md']);
   assert.equal(read('Notes/C notes.md'), '# C notes\n\n- pointers\n');
   assert.match(read('Notes/C++ notes.md'), /\n# C\+\+ notes\n\n- templates\n$/);

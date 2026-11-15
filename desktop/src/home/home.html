@@ -23,6 +23,11 @@
       <symbol id="i-tasks" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4" /><path d="M8.5 12.2l2.4 2.4 4.6-5" /></symbol>
       <symbol id="i-tick" viewBox="0 0 24 24"><path d="M6 12.5l4 4 8-9" /></symbol>
       <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7" /><path d="M12 13.5V9.5M9.5 3h5M12 3v3.5" /></symbol>
+      <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15zM10 20.5a2.2 2.2 0 0 0 4 0" /></symbol>
+      <symbol id="i-note" viewBox="0 0 24 24"><path d="M6 3.5h8.5L19 8v12.5H6zM14 3.5V8.5h5M9 12.5h6M9 16h4" /></symbol>
+      <symbol id="i-snooze" viewBox="0 0 24 24"><circle cx="12" cy="13" r="7.5" /><path d="M9.5 10.5h5l-5 5h5M5 4.5L3 6.5M19 4.5l2 2" /></symbol>
+      <symbol id="i-open" viewBox="0 0 24 24"><path d="M13.5 5H19v5.5M19 5l-8 8M10 6.5H6.5a1.5 1.5 0 0 0-1.5 1.5v9.5A1.5 1.5 0 0 0 6.5 19H16a1.5 1.5 0 0 0 1.5-1.5V14" /></symbol>
+      <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" /></symbol>
       <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" /></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5L2.5 20h19z" /><path d="M12 10v4.5M12 17.4v.1" /></symbol>
       <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-3 8-7 9.5-4-1.5-7-5.1-7-9.5V6z" /><path d="M9 12l2 2 4-4" /></symbol>
@@ -58,6 +63,8 @@
           <span id="banner-text"></span>
           <button id="banner-fix" type="button">Set up</button>
         </div>
+        <!-- What's in play, as cards: timers running, reminders given or coming up (cards.js). -->
+        <div id="shelf" class="shelf" aria-label="Timers and reminders in play" hidden></div>
         <div class="stage">
           <div id="presence" class="presence">
             <canvas id="orb" aria-hidden="true"></canvas>
@@ -101,7 +108,7 @@
         <div class="scroll">
           <div id="task-list" class="task-list"></div>
           <p id="tasks-none" class="empty" hidden>Nothing on your list. Tell Jester “remind me to call the dentist at three”, “add stamps to my to-do list” or “set a timer for ten minutes”, or add one below.</p>
-          <p class="note">Only you tick things off: here, or by telling him it’s done. A reminder is said when it’s due, or once you’re back at the computer, and stays here until it’s ticked. Kept on this computer; what’s ticked off goes after a week.</p>
+          <p class="note">Each is a card: tick its box, snooze it, cancel it or open it. Only you tick things off: on a card, or by telling him it’s done. A reminder is said when it’s due, or once you’re back at the computer, and stays here until it’s ticked. Kept on this computer; what’s ticked off goes after a week. Notes are in your Obsidian vault.</p>
         </div>
         <footer class="bottom">
           <form id="task-add" class="type">

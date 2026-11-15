@@ -58,7 +58,8 @@ front window fills its display.
 | `src/main/presence.js` | Whether the user's at the computer (here, near, away), the day's first sit-down, and how long they've sat. |
 | `src/main/tell.js` | Telling them something when its time comes: said if they're there, held until they're back if they aren't. |
 | `src/main/tasks.js` | Their to-do list, reminders and timers: `tasks.json`, a clock job for each one with a time, and the rule that only they tick one off. |
-| `src/home/tasks.js` | The Tasks panel in his window: timers counting down, what's open by when, what's ticked off. |
+| `src/home/cards.js` | Cards: a timer, a reminder, a task or a note as a thing to look at and act on, on his line in the chat, on the shelf over the orb, and in the Tasks screen. |
+| `src/home/tasks.js` | The Tasks screen in his window: every timer, reminder and task as a card, by when it's for, and the notes he's made lately. |
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models): paid before free, and who covers for one that fails. |
 | `src/main/spend.js` | What the saved models' replies have cost this month, as near as their token counts say. |
 | `scripts/live-check.mjs` | `npm run live-check`: the real app on a scratch profile with scripted model servers, typed to and read back. |
@@ -1343,6 +1344,31 @@ Chats does; its button carries how many are open. Timers count down by the main
 process's clock; open tasks are under Overdue, Today, Tomorrow, Later and No
 date; what was ticked off stays for a week and can be put back. A task can be
 added there by hand (with no time: times are asked of him).
+
+**Cards** (`src/home/cards.js`; the user, 2026-11-15: "create physical card for
+timers, notes, reminders, and tasks, etc. so I can also see them in the desktop
+app and interact with them"). Whatever he makes or changes is a card in his
+window, in three places:
+
+- *With the line he said it in.* "10 minutes, starting now." has the timer under
+  it, counting down with a bar, and a × to cancel; "Okay, I’ll remind you…" has
+  the reminder, with its box to tick; a note he made has its title, a few words
+  of what was added, and Open, which opens it in Obsidian; something he was
+  asked to remember has its title and Open, and not the words. A reminder being
+  told comes with its card too: tick it, snooze it ten minutes, or remove it.
+  The line carries only what the card is of (`card` on the conversation's
+  entry, kept with the chat for its week), so a chat opened again from Chats
+  shows the same cards as they stand now.
+- *On the shelf over the orb*, one line each: timers running, reminders given
+  and not yet ticked, and reminders due within three hours. Four at most, then
+  "+2 more", which opens Tasks.
+- *In the Tasks screen*, where every timer, reminder and task is one, with the
+  notes he's made or kept in the past week at the foot.
+
+A card is a view of what main.js keeps, not a copy: every card of one task shows
+the same thing and changes when it does, and one whose task is gone says what
+it was ("Finished", "No longer on your list"). A click on a card is the user's
+own doing, the same as their saying so.
 
 Measured (2026-11-15, `npm run talk-check -- --only self --match "remind|to-do|…"`,
 3 tries a case, 18 cases; `--show` prints what he said and the task he gave).

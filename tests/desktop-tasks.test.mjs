@@ -672,3 +672,82 @@ test('review: refused, a task is offered rather than agreed to; and no first sen
   assert.equal(await w.type('add something to my to-do list'), 'What should I put on your list?');
   assert.equal(await w.type('buy stamps'), 'Added to your list: Buy stamps.');
 });
+
+// Cards (2026-11-15): a timer, a reminder, a task or a note as a thing to look at and act on in his window.
+
+test('cards: what each shows, and what can be done to it', async () => {
+  const { cardView, shelfOf, SOON_MS } = await import('../desktop/src/home/cards.js');
+  const now = at(14, 30);
+  const state = {
+    timers: [{ id: 't1', text: 'Pasta timer', due: now + 8 * MIN, timer: 8 * MIN }],
+    open: [
+      { id: 'r1', text: 'Call the dentist', due: at(15), when: 'at 3:00 PM' },
+      { id: 'r2', text: 'Stretch', due: at(14), when: 'at 2:00 PM', told: at(14), overdue: true },
+      { id: 'r3', text: 'Renew passport', due: at(9, 0, 18), when: 'on Wednesday at 9:00 AM' },
+      { id: 'd1', text: 'Homework 5', due: at(0, 0, 20), allDay: true, when: 'on Friday' },
+      { id: 'p1', text: 'Buy stamps' }
+    ],
+    done: [{ id: 'x1', text: 'Email Sarah', done: now }]
+  };
+  const view = (card) => cardView(card, state);
+  assert.deepEqual(view({ kind: 'task', id: 't1' }), { label: 'Timer', title: 'Pasta timer', detail: '', icon: 'i-timer', tick: null, tone: '', actions: ['cancel'], due: now + 8 * MIN, span: 8 * MIN });
+  assert.deepEqual(view({ kind: 'task', id: 'r1' }), { label: 'Reminder', title: 'Call the dentist', detail: 'At 3:00 PM', icon: 'i-bell', tick: false, tone: '', actions: ['done', 'remove'] });
+  assert.deepEqual(view({ kind: 'task', id: 'r2' }), { label: 'Reminder', title: 'Stretch', detail: 'At 2:00 PM · reminded', icon: 'i-bell', tick: false, tone: 'due', actions: ['done', 'snooze', 'remove'] }, 'given and not ticked: it can be snoozed');
+  assert.deepEqual(view({ kind: 'task', id: 'd1' }).actions, ['done', 'remove'], 'a day’s task has nothing to snooze');
+  assert.equal(view({ kind: 'task', id: 'p1' }).label, 'To do');
+  assert.deepEqual(view({ kind: 'task', id: 'x1' }), { label: 'Done', title: 'Email Sarah', detail: '', icon: 'i-tasks', tick: true, tone: 'done', actions: ['undo'] });
+  // Gone from the list, a card says what it was, and offers nothing.
+  assert.deepEqual(view({ kind: 'task', id: 'gone', type: 'timer', text: '10 minute timer' }), { label: 'Timer', title: '10 minute timer', detail: 'Finished', icon: 'i-timer', tick: null, tone: 'gone', actions: [], gone: true });
+  assert.equal(view({ kind: 'task', id: 'gone', type: 'reminder', text: 'Call mom' }).detail, 'No longer on your list');
+  assert.deepEqual(view({ kind: 'note', title: 'Trip ideas', rel: 'Notes/Trip ideas.md', snippet: 'the coast road' }), { label: 'Note', title: 'Trip ideas', detail: 'the coast road', icon: 'i-note', tick: null, tone: '', actions: ['open'] });
+  assert.deepEqual(view({ kind: 'remembered', title: 'Locker combination', rel: 'Jester/Remembered/x.md' }).actions, ['open']);
+  assert.equal(view({ kind: 'remembered', title: 'Locker combination', rel: 'x' }).detail, '', 'what was kept isn’t shown on its card');
+  // The shelf: timers, what's been given and not ticked, and what's due within a few hours. Not next week's.
+  assert.deepEqual(shelfOf(state, now).cards.map((card) => card.id), ['t1', 'r2', 'r1']);
+  assert.equal(shelfOf(state, now).more, 0);
+  const busy = { timers: Array.from({ length: 6 }, (_, i) => ({ id: `t${i}`, text: `Timer ${i}`, due: now + MIN, timer: MIN })), open: [], done: [] };
+  assert.deepEqual([shelfOf(busy, now).cards.length, shelfOf(busy, now).more], [4, 2]);
+  assert.equal(shelfOf({}, now).cards.length, 0);
+  assert.ok(SOON_MS >= 3600_000);
+});
+
+test('cards: a line in the chat carries the card of what it made, and the archive keeps it clean', async () => {
+  const { cardOf } = await import('../desktop/src/main/chat-archive.js');
+  assert.deepEqual(cardOf({ kind: 'task', id: 'abc', type: 'timer', text: 'Pasta timer', extra: 'no', nested: { x: 1 } }), { kind: 'task', id: 'abc', type: 'timer', text: 'Pasta timer' });
+  assert.equal(cardOf({ kind: 'script', id: 'abc' }), null);
+  assert.equal(cardOf(null), null);
+  assert.equal(cardOf({ kind: 'note', title: 'x'.repeat(500) }).title.length, 120);
+  // A conversation whose memory notes the cards it's handed.
+  const { createConversation } = await import('../desktop/src/main/conversation.js');
+  const book2 = book();
+  const lines = [];
+  const conversation = createConversation({
+    chat: async () => ({ say: 'Okay', do: '', new: false, task: { op: 'add', text: 'call your mom', at: '2026-11-16 15:00' } }),
+    speaker: { say: async () => undefined, stop: () => undefined },
+    memory: { add: (who, text, more) => lines.push({ who, text, ...(more?.card ? { card: more.card } : {}) }), current: () => [...lines], idleFor: () => 0, startNew: () => lines.splice(0), clear: () => (lines.length = 0) },
+    recollections: { keep: async () => '', relevant: () => [], forget: () => undefined },
+    commands: { knows: async () => false, risky: () => false, run: async () => ({ ok: true, text: '' }) },
+    assistant: { asking: false, running: false, cancel: () => undefined },
+    show: () => undefined,
+    tasks: book2.tasks,
+    now: () => book2.time
+  });
+  await conversation.told('set a timer for ten minutes', { typed: true });
+  await conversation.told('remind me to call my mom tomorrow at 3 pm', { typed: true });
+  const [timer] = book2.tasks.list().timers;
+  const [reminder] = book2.tasks.list().open;
+  assert.deepEqual(lines.filter((line) => line.who === 'jester'), [
+    { who: 'jester', text: '10 minutes, starting now.', card: { kind: 'task', id: timer.id, type: 'timer', text: '10 minute timer' } },
+    { who: 'jester', text: 'Okay, I’ll remind you tomorrow at 3:00 PM: Call your mom.', card: { kind: 'task', id: reminder.id, type: 'reminder', text: 'Call your mom' } }
+  ]);
+  // Told when it's due, the line has its card too; and one that only answers has none.
+  await conversation.announce('Reminder: call your mom.', { written: true, card: book2.tasks.cardFor(reminder.id) });
+  assert.deepEqual(lines.at(-1).card, { kind: 'task', id: reminder.id, type: 'reminder', text: 'Call your mom' });
+  await conversation.told('how long is left on the timer?', { typed: true });
+  assert.equal(lines.at(-1).card, undefined);
+  // Snoozed from its card: ten minutes from now, and it rings again.
+  book2.tasks.rang(reminder.id);
+  assert.equal(book2.tasks.snooze(reminder.id).due, book2.time + 10 * MIN);
+  assert.equal(book2.jobs.get(`task-${reminder.id}`).at, book2.time + 10 * MIN);
+  assert.equal(book2.tasks.snooze(timer.id), null, 'a timer isn’t snoozed');
+});

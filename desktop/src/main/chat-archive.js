@@ -51,7 +51,15 @@ function keptLine(entry, fallbackAt, { follows = '' } = {}) {
   if (entry?.hidden) return { who, text, at, hidden: true };
   const short = text.split(/\s+/).filter(Boolean).length <= ANSWER_WORDS;
   const secret = secretIn(text) || (who === 'you' && short ? follows : '');
-  return { who, text: secret ? `Left out: this held ${secret}.` : text, at, ...(secret ? { hidden: true } : {}) };
+  return { who, text: secret ? `Left out: this held ${secret}.` : text, at, ...(secret ? { hidden: true } : {}), ...(!secret && cardOf(entry?.card) ? { card: cardOf(entry.card) } : {}) };
+}
+
+/** A line's card as it's kept: what it's of and where to find it, each a short string, and nothing else. */
+export function cardOf(card) {
+  if (!card || typeof card !== 'object' || !['task', 'note', 'remembered'].includes(card.kind)) return null;
+  const short = (value, most) => (typeof value === 'string' && value ? value.slice(0, most) : undefined);
+  const kept = { kind: card.kind, id: short(card.id, 40), type: short(card.type, 12), text: short(card.text, 200), title: short(card.title, 120), rel: short(card.rel, 300), snippet: short(card.snippet, 160) };
+  return Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined));
 }
 
 /** The secret a line leaves the user's next line to give: '' for none. */

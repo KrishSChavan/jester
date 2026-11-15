@@ -12,6 +12,7 @@ import { chatElements, createChats, dividerElement, lineElement } from './chats.
 import { createOrb, ORB_STATES } from './orb.js';
 import { createScreens } from './screens.js';
 import { createTasksPanel } from './tasks.js';
+import { cardElement, refreshCards, shelfOf, watchCards } from './cards.js';
 import { onRender, save, showing, startSettings, state } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
@@ -323,6 +324,30 @@ const chats = createChats({ go: (screen) => screens.go(screen), onPickedUp: () =
 // The to-do list, reminders and timers, to the left of the orb beside Chats.
 const tasksPanel = createTasksPanel();
 
+// The shelf over the orb: what's in play right now, as cards. Timers running, reminders given and not ticked, and
+// those coming up in the next few hours. Drawn again only when what's on it changes: a card keeps itself current.
+let shelved = '';
+watchCards((list) => {
+  const { cards, more } = shelfOf(list, list.now);
+  const key = `${cards.map((card) => card.id).join(',')}+${more}`;
+  $('shelf').hidden = cards.length === 0;
+  if (key === shelved) return;
+  shelved = key;
+  const parts = cards.map((card) => cardElement(card, { compact: true }));
+  if (more) {
+    const rest = document.createElement('button');
+    rest.type = 'button';
+    rest.className = 'chip more';
+    rest.dataset.go = 'tasks';
+    rest.textContent = `+${more} more`;
+    parts.push(rest);
+  }
+  $('shelf').replaceChildren(...parts);
+});
+refreshCards();
+// A reminder's time passing changes what it says ("overdue") with nothing else happening: looked at each minute.
+setInterval(refreshCards, 60_000);
+
 const screens = createScreens({
   root: $('screens'),
   onChange: (screen) => {
@@ -398,7 +423,7 @@ chrome.runtime.onMessage.addListener((message) => {
       chats.changed(screens.current);
       break;
     case 'jester/tasks-changed':
-      tasksPanel.changed(screens.current, message.count);
+      refreshCards();
       break;
     // Opened again from the menu bar or the Dock: to the screen asked for, with the intro if it wasn't on screen.
     case 'jester/home-go':

@@ -5,6 +5,8 @@
  * on again, under the orb, and he has all of it to go on.
  */
 
+import { cardElement } from './cards.js';
+
 const $ = (id) => document.getElementById(id);
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Delete is clicked twice: the second click counts up to this long after the first. */
@@ -35,8 +37,11 @@ export function lineElement(line) {
   const classes = ['line', line.who === 'jester' ? 'jester' : 'you'];
   if (line.hidden) classes.push('hidden-text');
   if (line.earlier) classes.push('earlier');
+  if (line.card) classes.push('carded');
   item.className = classes.join(' ');
   item.textContent = line.text;
+  // What the line was about, to look at and act on: the timer it set, the reminder, the note (cards.js).
+  if (line.card && !line.hidden) item.append(cardElement(line.card));
   return item;
 }
 

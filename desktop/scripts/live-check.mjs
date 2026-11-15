@@ -28,7 +28,8 @@
  *   tasks    a timer set, asked after and cancelled on the user's own words with no model asked; a reminder the
  *            model asks for said back from what was kept, told when it's due, and ticked off by "done"; a wrong
  *            pick ticking nothing; a task nobody asked for not made; the list reaching the model when asked; and
- *            the Tasks panel: its rows, a box ticked by a click, and the count on its button.
+ *            cards: a timer's under his line and on the shelf, a reminder's with Snooze, a note's with Open; and the
+ *            Tasks screen: its cards, a box ticked by a click, and the count on its button.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -232,22 +233,55 @@ if (!process.versions.electron) {
       check('saying it’s set with nothing set is owned up to', claimed === 'Sorry, that didn’t get set. Tell me again: what, and when?', claimed);
       check('the log says what was done to the list, never what’s on it', /tasks: added one with a time/.test(logLines()) && /tasks: one ticked off, by their saying so/.test(logLines()) && !/stamps|Sarah|your mom/.test(logLines().split('\n').filter((line) => /tasks:|"task"/.test(line)).join('\n')));
 
-      // The panel: a timer and a day's task for the look of it, then a box ticked by a click.
+      // Cards: what he made, to look at and act on, on his line in the chat, on the shelf, and in the Tasks screen.
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
       await type('set a pasta timer for 8 minutes');
+      const cardsIn = (where) => inPage(`return [...document.querySelectorAll('${where} .card')].map((el) => [el.querySelector('.label').textContent, el.querySelector('.title').textContent, el.querySelector('.detail')?.textContent || '', [...el.querySelectorAll('.act')].map((b) => b.title).join('+')].join(' | '));`);
+      const onLine = await until('a card on his line', async () => (await cardsIn('#live-lines li:last-child')).find((card) => /^Timer/.test(card)));
+      check('what he set is a card under his line, counting down, with a way to cancel it', /^Timer \| Pasta timer \| \d:\d\d left \| Cancel$/.test(onLine), onLine);
+      const shelf = await until('the shelf', async () => (await cardsIn('#shelf')).find((card) => /Pasta/.test(card)));
+      check('and on the shelf over the orb while it runs', /^Timer \| Pasta timer \| \d:\d\d left \| Cancel$/.test(shelf) && !(await inPage(`return document.getElementById('shelf').hidden;`)), shelf);
       paid.answer = () => ({ say: 'Okay', do: '', new: false, task: { op: 'add', text: 'submit homework 5', at: new Date(Date.now() + 3 * 864e5).toLocaleDateString('en-CA') } });
       await type('add submitting homework 5 to my list for three days from now');
-      const badge = await inPage(`const b = document.getElementById('tasks-count'); return b.hidden ? '' : b.textContent;`);
-      check('the button says how many are open', badge === '3', badge);
-      await inPage(`window.jesterHome.go('tasks', { instant: true });`);
-      const rows = await until('the panel’s rows', () => inPage(`const rows = [...document.querySelectorAll('#task-list > *')].map((el) => el.tagName === 'H2' ? '# ' + el.textContent : el.querySelector('.title').textContent + (el.querySelector('.when') ? ' | ' + el.querySelector('.when').textContent : '')); return rows.length > 5 ? rows : null;`));
-      check('the panel shows the timer counting down, what’s open by when, and what’s ticked off', rows[0] === '# Timers' && /^Pasta timer \| \d:\d\d left$/.test(rows[1]) && rows.includes('# Later') && rows.some((row) => /^Submit homework 5 \| On \w+/.test(row)) && rows.includes('# No date') && rows.includes('Buy stamps') && rows.includes('# Ticked off') && rows.at(-1) === 'Call your mom', JSON.stringify(rows));
-      await shot('tasks');
-      await inPage(`[...document.querySelectorAll('#task-list .task-item')].find((row) => row.querySelector('.title').textContent === 'Buy stamps').querySelector('.tick').click();`);
-      await until('the tick kept', () => taskFile().find((task) => task.text === 'Buy stamps')?.done);
-      const after = await until('the panel drawn again', () => inPage(`const row = [...document.querySelectorAll('#task-list .task-item')].find((el) => el.querySelector('.title').textContent === 'Buy stamps'); return row?.classList.contains('done') ? document.getElementById('tasks-count').textContent : null;`));
-      check('a box ticked by a click is ticked, and the count drops', after === '2', after);
-      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      paid.answer = () => ({ say: 'Okay', do: '', new: false, task: { op: 'add', text: 'stretch', in: 1 } });
+      const beforeRing = his().length;
+      await type('remind me in two seconds to stretch');
+      const ring = await until('the reminder', () => his().slice(beforeRing).find((line) => /^Reminder:/.test(line)), 10000).catch((err) => err.message);
+      const given = await until('the reminder’s card', async () => (await cardsIn('#live-lines li:last-child')).find((card) => /^Reminder/.test(card))).catch((err) => err.message);
+      check('a reminder told comes with its card: tick it, snooze it or remove it', ring === 'Reminder: stretch.' && /^Reminder \| Stretch \| At \d+:\d\d [AP]M · reminded \| Snooze 10 min\+Remove$/.test(given), `${ring} · ${given}`);
       await shot('main');
+      await inPage(`[...document.querySelectorAll('#live-lines li:last-child .card .act')].find((b) => b.title === 'Snooze 10 min').click();`);
+      const snoozed = await until('the snooze kept', () => {
+        const task = taskFile().find((item) => item.text === 'Stretch');
+        return task && !task.told && task.due > Date.now() + 9 * 60000 ? task : null;
+      }).catch((err) => err.message);
+      check('Snooze on the card puts it off ten minutes, back on his clock', typeof snoozed === 'object' && jobs()?.some((job) => job.payload?.id === snoozed.id), JSON.stringify(snoozed));
+      // A note he's asked to make: a card that opens it in Obsidian.
+      const opened = [];
+      shell.openExternal = async (url) => void opened.push(url);
+      paid.answer = () => ({ say: 'Noted.', do: '', new: false, note: { title: 'Trip ideas', add: 'the coast road in spring' } });
+      const noted = await type('make a note called trip ideas: the coast road in spring');
+      const noteCard = await until('the note’s card', async () => (await cardsIn('#live-lines li:last-child')).find((card) => /^Note/.test(card))).catch((err) => err.message);
+      check('a note he makes is a card with what was added, and Open', /^Made a note called Trip ideas/.test(noted) && noteCard === 'Note | Trip ideas | the coast road in spring | Open in Obsidian', `${noted} · ${noteCard}`);
+      await inPage(`document.querySelector('#live-lines li:last-child .card .act').click();`);
+      await until('Obsidian asked for it', () => opened.length).catch(() => undefined);
+      check('Open opens that note in Obsidian', opened.length === 1 && /^obsidian:\/\/open\?vault=vault&file=Notes%2FTrip%20ideas$/.test(opened[0]), opened.join(' '));
+
+      const badge = await inPage(`const b = document.getElementById('tasks-count'); return b.hidden ? '' : b.textContent;`);
+      check('the button says how many are open', badge === '4', badge);
+      await inPage(`window.jesterHome.go('tasks', { instant: true });`);
+      const rows = await until('the Tasks screen’s cards', () => inPage(`const rows = [...document.querySelectorAll('#task-list > *')].map((el) => el.tagName === 'H2' ? '# ' + el.textContent : el.querySelector('.title').textContent + (el.querySelector('.detail') ? ' | ' + el.querySelector('.detail').textContent : '')); return rows.length > 8 ? rows : null;`));
+      check('the Tasks screen shows the timer counting down, what’s open by when, what’s ticked off, and the note', rows[0] === '# Timers' && /^Pasta timer \| \d:\d\d left$/.test(rows[1]) && rows.includes('# Today') && rows.some((row) => /^Stretch \| At /.test(row)) && rows.includes('# Later') && rows.some((row) => /^Submit homework 5 \| On \w+/.test(row)) && rows.includes('# No date') && rows.includes('Buy stamps') && rows.includes('# Ticked off') && rows.includes('Call your mom') && rows.at(-2) === '# Notes, lately' && rows.at(-1) === 'Trip ideas | the coast road in spring', JSON.stringify(rows));
+      await shot('tasks');
+      await inPage(`[...document.querySelectorAll('#task-list .card')].find((row) => row.querySelector('.title').textContent === 'Buy stamps').querySelector('.tick').click();`);
+      await until('the tick kept', () => taskFile().find((task) => task.text === 'Buy stamps')?.done);
+      const after = await until('the card drawn again', () => inPage(`const row = [...document.querySelectorAll('#task-list .card')].find((el) => el.querySelector('.title').textContent === 'Buy stamps'); return row?.classList.contains('done') ? document.getElementById('tasks-count').textContent : null;`));
+      check('a box ticked by a click is ticked, and the count drops', after === '3', after);
+      // The timer's card in the chat, cancelled from there: every card of it says so.
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      await inPage(`[...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.title').textContent === 'Pasta timer').querySelector('.act').click();`);
+      const gone = await until('the timer gone', async () => (taskFile().some((task) => task.timer) ? null : await cardsIn('#live-lines'))).catch((err) => [err.message]);
+      check('Cancel on a timer’s card cancels it, and its cards say it’s over', gone.some((card) => /^Timer \| Pasta timer \| Finished \| $/.test(card)) && (await cardsIn('#shelf')).every((card) => !/Pasta/.test(card)), JSON.stringify(gone));
       paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
     },
 

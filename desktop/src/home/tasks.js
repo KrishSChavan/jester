@@ -1,27 +1,23 @@
 /**
  * Tasks: the user's to-do list, reminders and timers (main.js keeps them,
- * tasks.js), in a screen to the left of the orb beside Chats. Timers count
- * down; what's open is grouped by when it's for; what was ticked off lately is
- * at the bottom, and can be put back. Ticking a box is the user's own doing,
- * which is the point: he never ticks one for them.
+ * tasks.js), in a screen to the left of the orb beside Chats, each one a card
+ * (cards.js). Timers count down; what's open is grouped by when it's for; what
+ * was ticked off lately is below, and can be put back; and the notes he's made
+ * or been asked to remember lately are at the foot, each opening in Obsidian.
+ * Ticking a box is the user's own doing, which is the point: he never ticks
+ * one for them.
  */
 
+import { cardElement, countdown, refreshCards, tookCards, watchCards } from './cards.js';
+
+export { countdown };
+
 const $ = (id) => document.getElementById(id);
-const ask = (message) => chrome.runtime.sendMessage({ type: 'jester/tasks', ...message }).catch(() => null);
 
 const dayStart = (ms, days = 0) => {
   const date = new Date(ms);
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days).getTime();
 };
-
-/** "3:20", "1:05:09": what's left of a timer. */
-export function countdown(ms) {
-  const seconds = Math.max(0, Math.ceil(ms / 1000));
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = String(seconds % 60).padStart(2, '0');
-  return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
-}
 
 /** Which heading an open task goes under. */
 export function groupOf(task, now) {
@@ -30,15 +26,6 @@ export function groupOf(task, now) {
   return task.due < dayStart(now, 1) ? 'Today' : task.due < dayStart(now, 2) ? 'Tomorrow' : 'Later';
 }
 
-const icon = (name) => {
-  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  svg.setAttribute('class', 'icon-svg');
-  const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-  use.setAttribute('href', `#${name}`);
-  svg.append(use);
-  return svg;
-};
-
 const heading = (text, late = false) => {
   const h2 = document.createElement('h2');
   h2.textContent = text;
@@ -46,78 +33,14 @@ const heading = (text, late = false) => {
   return h2;
 };
 
+const card = (task, type) => cardElement({ kind: 'task', id: task.id, type, text: task.text });
+const typeOf = (task) => (Number.isFinite(task.due) && !task.allDay ? 'reminder' : 'task');
+
 export function createTasksPanel() {
   let showing = false;
-  let ticker = null;
-  /** The clock in main.js and this page's may differ by the time a message takes: timers count from main's. */
-  let skew = 0;
-
-  function removeButton(task, label) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'icon danger';
-    button.title = label;
-    button.setAttribute('aria-label', `${label}: ${task.text}`);
-    button.append(icon('i-trash'));
-    button.addEventListener('click', async () => draw(await ask({ op: 'remove', id: task.id })));
-    return button;
-  }
-
-  function timerRow(task) {
-    const row = document.createElement('div');
-    row.className = 'task-item timer';
-    const glyph = document.createElement('span');
-    glyph.className = 'glyph';
-    glyph.append(icon('i-timer'));
-    const words = document.createElement('div');
-    words.className = 'words';
-    const title = document.createElement('span');
-    title.className = 'title';
-    title.textContent = task.text;
-    const left = document.createElement('span');
-    left.className = 'when left';
-    left.dataset.due = String(task.due);
-    words.append(title, left);
-    row.append(glyph, words, removeButton(task, 'Cancel'));
-    return row;
-  }
-
-  function taskRow(task) {
-    const done = !!task.done;
-    const row = document.createElement('div');
-    row.className = `task-item${done ? ' done' : ''}${task.overdue && !done ? ' late' : ''}`;
-    const tick = document.createElement('button');
-    tick.type = 'button';
-    tick.className = 'tick';
-    tick.setAttribute('role', 'checkbox');
-    tick.setAttribute('aria-checked', String(done));
-    tick.setAttribute('aria-label', done ? `Put back: ${task.text}` : `Done: ${task.text}`);
-    tick.title = done ? 'Put it back on the list' : 'Tick it off';
-    tick.append(icon('i-tick'));
-    tick.addEventListener('click', async () => draw(await ask({ op: 'done', id: task.id, on: !done })));
-    const words = document.createElement('div');
-    words.className = 'words';
-    const title = document.createElement('span');
-    title.className = 'title';
-    title.textContent = task.text;
-    words.append(title);
-    const when = done ? '' : [task.when, task.told ? 'reminded' : ''].filter(Boolean).join(' · ');
-    if (when) {
-      const line = document.createElement('span');
-      line.className = 'when';
-      line.textContent = when.charAt(0).toUpperCase() + when.slice(1);
-      words.append(line);
-    }
-    row.append(tick, words, removeButton(task, 'Remove'));
-    return row;
-  }
-
-  function tickTimers() {
-    for (const left of document.querySelectorAll('#task-list .left')) {
-      const ms = Number(left.dataset.due) - (Date.now() + skew);
-      left.textContent = ms > 0 ? `${countdown(ms)} left` : 'Up';
-    }
-  }
+  let notes = [];
+  /** What's drawn, by its ids: the list changing a card's own state (a tick) is the card's to show, not a redraw. */
+  let drawn = '';
 
   function badge(count) {
     const el = $('tasks-count');
@@ -128,18 +51,21 @@ export function createTasksPanel() {
 
   function draw(list) {
     if (!list?.ok) return;
-    skew = list.now - Date.now();
     badge(list.count);
-    const parts = [];
-    if (list.timers.length) parts.push(heading('Timers'), ...list.timers.map(timerRow));
+    if (!showing) return;
+    const groups = [];
+    if (list.timers.length) groups.push(['Timers', list.timers.map((task) => card(task, 'timer'))]);
     for (const name of ['Overdue', 'Today', 'Tomorrow', 'Later', 'No date']) {
       const group = list.open.filter((task) => groupOf(task, list.now) === name);
-      if (group.length) parts.push(heading(name, name === 'Overdue'), ...group.map(taskRow));
+      if (group.length) groups.push([name, group.map((task) => card(task, typeOf(task)))]);
     }
-    if (list.done.length) parts.push(heading('Ticked off'), ...list.done.map(taskRow));
-    $('task-list').replaceChildren(...parts);
-    $('tasks-none').hidden = parts.length > 0;
-    tickTimers();
+    if (list.done.length) groups.push(['Ticked off', list.done.map((task) => card(task, typeOf(task)))]);
+    if (notes.length) groups.push(['Notes, lately', notes.map((note) => cardElement(note))]);
+    const key = JSON.stringify([list.timers.map((task) => task.id), list.open.map((task) => [task.id, groupOf(task, list.now)]), list.done.map((task) => task.id), notes.map((note) => note.rel)]);
+    $('tasks-none').hidden = groups.length > 0;
+    if (key === drawn) return;
+    drawn = key;
+    $('task-list').replaceChildren(...groups.flatMap(([name, cards]) => [heading(name, name === 'Overdue'), ...cards]));
   }
 
   $('task-add').addEventListener('submit', async (event) => {
@@ -148,27 +74,20 @@ export function createTasksPanel() {
     if (!text) return;
     $('task-text').value = '';
     $('task-add').classList.remove('filled');
-    draw(await ask({ op: 'add', text }));
+    tookCards(await chrome.runtime.sendMessage({ type: 'jester/tasks', op: 'add', text }).catch(() => null));
   });
   $('task-text').addEventListener('input', () => $('task-add').classList.toggle('filled', !!$('task-text').value.trim()));
 
-  // How many are open, on the button, from the start.
-  ask({ op: 'list' }).then((list) => list?.ok && badge(list.count));
+  watchCards(draw);
 
   return {
-    /** A screen is showing: this one's drawn afresh, and its timers count down only while it is. */
+    /** A screen is showing: this one's drawn afresh, with the notes he's made lately. */
     async shown(screen) {
       showing = screen === 'tasks';
-      clearInterval(ticker);
-      ticker = null;
       if (!showing) return;
-      draw(await ask({ op: 'list' }));
-      ticker = setInterval(tickTimers, 500);
-    },
-    /** The list changed in main (he added one, a timer rang): the button's count, and the screen if it's showing. */
-    async changed(screen, count) {
-      badge(count);
-      if (screen === 'tasks') draw(await ask({ op: 'list' }));
+      drawn = '';
+      notes = (await chrome.runtime.sendMessage({ type: 'jester/notes', op: 'list' }).catch(() => null))?.notes || [];
+      draw(await refreshCards());
     }
   };
 }

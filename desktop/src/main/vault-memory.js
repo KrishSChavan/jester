@@ -1112,7 +1112,7 @@ export function createVaultMemory({
   async function opened(vault, rel) {
     try {
       await openExternal(vault.openUrl(rel));
-      return { ok: true, text: `Opening ${nameOf(rel)}.` };
+      return { ok: true, text: `Opening ${nameOf(rel)}.`, rel, title: nameOf(rel) };
     } catch (err) {
       log('memory: couldn’t open a note:', err.message);
       return { ok: false, text: 'I couldn’t open Obsidian.' };
@@ -1418,7 +1418,7 @@ export function createVaultMemory({
           refreshSoon();
           if (open) await opened(vault, rel);
           const what = adding.length <= 60 && !adding.includes('\n') ? `“${adding}”` : 'that';
-          return { ok: true, text: created ? `Made a note called ${nameOf(rel)}, with ${what} in it.` : `Added ${what} to ${nameOf(rel)}.` };
+          return { ok: true, text: created ? `Made a note called ${nameOf(rel)}, with ${what} in it.` : `Added ${what} to ${nameOf(rel)}.`, rel, title: nameOf(rel), added: adding };
         } catch (err) {
           const name = err?.rel ? nameOf(err.rel) : found ? nameOf(found.rel) : asked;
           if (err?.code === 'read_only' && err.linked) return { ok: false, text: `“${name}” is a link to a file elsewhere, so I won’t change it.` };

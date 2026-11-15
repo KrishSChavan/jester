@@ -647,17 +647,19 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * pill's copy cut short). `ok`: false shows it there as something that went wrong.
    * @returns {Promise<void>} once said
    */
-  function say(text, { written = false, ok = true, clock = null } = {}) {
+  function say(text, { written = false, ok = true, clock = null, card = null } = {}) {
+    // `card`: what the line is about (a timer, a reminder, a note), for his window to show with it.
+    const more = card ? [{ card }] : [];
     if (written) {
       const line = writtenLine(text);
       if (!line) return Promise.resolve();
-      memory.add('jester', line);
+      memory.add('jester', line, ...more);
       show({ phase: 'answer', text: line.length > PILL_CHARS ? `${line.slice(0, PILL_CHARS - 1).trimEnd()}…` : line, ok });
       return Promise.resolve();
     }
     const line = spokenLine(text);
     if (!line) return Promise.resolve();
-    memory.add('jester', line);
+    memory.add('jester', line, ...more);
     const hush = hushes;
     const spoken = queue.then(() => (hush === hushes ? speakNow(line, { hush, clock }) : undefined));
     queue = spoken.catch((err) => log('couldn’t say it:', err.message));
@@ -680,14 +682,14 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     const spoken = queue.then(() => (hush === hushes ? speakNow(first, { more, hush, clock }) : undefined));
     queue = spoken.catch((err) => log('couldn’t say it:', err.message));
     return {
-      finish(text) {
+      finish(text, card = null) {
         if (settled) return queue;
         settled = true;
         const line = spokenLine(text);
         // What he's begun is how the line begins, unless the turn ended up saying something else (a note's outcome).
         const carried = line.startsWith(first);
         const rest = carried ? line.slice(first.length).trim() : line;
-        memory.add('jester', carried ? line : `${first} ${line}`.trim());
+        memory.add('jester', carried ? line : `${first} ${line}`.trim(), ...(card ? [{ card }] : []));
         // Its sound is fetched while the first sentence plays.
         if (rest && hush === hushes) speaker.prepare?.(rest, { pace });
         settle(rest);
@@ -867,12 +869,17 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   }
 
   /** A note made, added to or opened. @returns {Promise<string>} what he says of it, or '' */
+  /** @returns {Promise<{text:string, card:object|null}>} what he says of it, and the note as a card for his window */
   async function takeNote(note) {
     try {
-      return String((await vaultMemory.note(note))?.text ?? '').trim();
+      const done = await vaultMemory.note(note);
+      // What was added is shown on the card as a few words of it: not if it looks like something to keep off a screen.
+      const added = String(done?.added ?? '').replace(/\s+/g, ' ').trim();
+      const card = done?.ok && done.rel ? { kind: 'note', rel: done.rel, title: String(done.title || ''), ...(added ? { snippet: added.slice(0, 160) } : {}) } : null;
+      return { text: String(done?.text ?? '').trim(), card };
     } catch (err) {
       log('couldn’t do a note:', err.message);
-      return 'I couldn’t get to your notes just now.';
+      return { text: 'I couldn’t get to your notes just now.', card: null };
     }
   }
 
@@ -1003,7 +1010,9 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     pace = paceFor(moodOf(text, memory.current(), now()));
     if (typed) typedTurn = mine;
     // Typed to, he writes back; spoken to, he speaks.
-    const answer = (line, { ok = true } = {}) => say(line, { written: typed, ok });
+    const answer = (line, { ok = true, card = null } = {}) => say(line, { written: typed, ok, card });
+    /** What was kept this turn, as a card: the note he was asked to remember. */
+    const keptCard = () => (lastKept?.turn === mine && lastKept.rel ? { kind: 'remembered', rel: lastKept.rel, title: lastKept.title } : null);
     // What came before is over, unless a task it asked for is still at work: then this is still that conversation
     // (conversation-log.js busy). It's in Chats at once; it's summed up once he's answered: Ollama does one thing at
     // a time.
@@ -1016,11 +1025,12 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     answering += 1;
     try {
       // A timer set, cancelled or asked after: the clock's, on their own words, with no model to wait for.
+      tasks?.touched?.({ fresh: true });
       const timed = tasks ? await tasks.direct(text) : '';
       if (timed) {
         begun?.controller.abort();
         if (stale()) return;
-        await answer(timed);
+        await answer(timed, { card: tasks.touched?.() || null });
         if (!stale() && knowsYou() && !typed) stayOpen();
         return;
       }
@@ -1035,7 +1045,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         begun?.controller.abort();
         const why = await keepWords(text, [{ who: 'you', text }]);
         if (stale()) return;
-        await answer(why || 'Got it. I’ll remember that.');
+        await answer(why || 'Got it. I’ll remember that.', { card: why ? null : keptCard() });
         if (!stale() && knowsYou() && !typed) stayOpen();
         return;
       }
@@ -1098,7 +1108,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       const wanted = given && !NOTE_ASKED.test(text) ? null : given;
       if (given && !wanted) log('a note nobody asked for wasn’t made');
       const note = notes ? whichNote(reply.do ? null : noteAsked(text), wanted) : null;
-      const noted = note ? await takeNote(note) : '';
+      const taken = note ? await takeNote(note) : { text: '', card: null };
+      const noted = taken.text;
+      // What this turn made or changed, for his window to show with what he says of it: the latest of them.
+      let card = taken.card;
       if (stale()) return;
       // Words are kept only when the user asked, and then even if the model didn't copy them: vault-memory.js finds
       // them in what was said. Kept before he speaks (it takes a moment), so he never says he will and then won't.
@@ -1107,6 +1120,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       if (vaultMemory && askedToRemember(text, words)) {
         why = await keepWords(words, [...lines, { who: 'you', text }]);
         if (stale()) return;
+        if (!why && !noted) card = keptCard();
       } else if (vaultMemory && words) log('not asked to remember anything: the model’s words to keep weren’t kept');
       // Asked to forget in words the rules above didn't know: the model took it so, and the user's words could mean it.
       // Or said it would, without setting "forget" (qwen3.5:9b: "I will forget that about Sam", and nothing done).
@@ -1120,8 +1134,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       const lastHis = history.at(-1)?.who === 'jester' ? history.at(-1).text : '';
       let ticked = '';
       if (reply.task && tasks && (!['add', 'timer'].includes(reply.task.op) || tasks.asked(text, lastHis, reply.task.op, reply.task.text))) {
-        why = (await tasks.apply(reply.task, { said: text, last: lastHis })) || why;
+        tasks.touched?.({ fresh: true });
+        const applied = await tasks.apply(reply.task, { said: text, last: lastHis });
+        why = applied || why;
         if (stale()) return;
+        if (applied && !noted) card = tasks.touched?.() || card;
         // The same thing handed to the laptop as well ("open Reminders and add…") isn't wanted twice.
         if (reply.do && /\b(?:remind|reminder|timer|to[- ]?do|list|alarm)/i.test(reply.do)) reply.do = '';
       } else if (reply.task) {
@@ -1131,9 +1148,9 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       }
       // He says one's done and set nothing (qwen3.5:9b, to "I called the dentist": "Okay, that call's done"): their own
       // words name it, so it's they who said so, and it's ticked.
-      else if (tasks && !reply.do && !why && DONE_CLAIM.test(reply.say) && (ticked = tasks.saidDone?.(text) || '')) why = ticked;
+      else if (tasks && !reply.do && !why && DONE_CLAIM.test(reply.say) && (ticked = tasks.saidDone?.(text) || '')) [why, card] = [ticked, tasks.touched?.() || card];
       // Or that one's off the list ("I've removed 'Buy stamps'"), to their asking for just that.
-      else if (tasks && !reply.do && !why && DROP_CLAIM.test(reply.say) && (ticked = tasks.saidDrop?.(text) || '')) why = ticked;
+      else if (tasks && !reply.do && !why && DROP_CLAIM.test(reply.say) && (ticked = tasks.saidDrop?.(text) || '')) [why, card] = [ticked, tasks.touched?.() || card];
       // He says it's set, and set nothing (qwen3.5:9b): then it's said that it wasn't.
       else if (tasks && !reply.do && !why && TASK_CLAIM.test(reply.say) && tasks.asked(text, lastHis)) {
         log('he said a task was set and gave none: said so instead');
@@ -1142,7 +1159,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // Nor does he say he made the note he didn't.
       const line = given && !wanted && /\bnote/i.test(reply.say) ? 'Got it.' : reply.say;
       const whole = noted || why || line || (reply.do ? 'On it.' : 'Sorry, I lost my words there.');
-      const spoken = early ? early.finish(whole) : say(whole, { written: typed, clock });
+      const spoken = early ? early.finish(whole, card) : say(whole, { written: typed, clock, card });
       // Written, or said by a voice that never reports its start: the line's still worth having.
       if (typed) clock.tell(true);
       // The model's command drops and changes details, so the user's own words go with it. Given the user's notes, or
@@ -1291,7 +1308,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      *   lid closed), so nobody heard it to the end. null when now isn't the moment: he's mid-sentence or mid-task,
      *   they're talking, or he's waiting on what they'll say next
      */
-    announce(text, { written = false } = {}) {
+    announce(text, { written = false, card = null } = {}) {
       // His name heard, with the rest still being said: unless it never came.
       const lookingUp = wokenEarly && now() - wokenAt < WOKEN_MS;
       if (answering || talking || acting || pending || lookingUp || assistant.asking || assistant.running || now() < openUntil || now() < quietUntil) return null;
@@ -1303,7 +1320,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       pace = 1;
       const mine = turns;
       const reset = resets;
-      const told = Promise.resolve(say(text, { written })).then(() => {
+      const told = Promise.resolve(say(text, { written, card })).then(() => {
         if (reset !== resets && !written) return false;
         if (mine === turns && !written && knowsYou()) stayOpen();
         return true;

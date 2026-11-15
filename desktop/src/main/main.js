@@ -41,7 +41,7 @@ import { installBridge, onMessage, onStorageChanged, post, postTo, storage } fro
 import { createChromeLink } from './chrome-link.js';
 import { createClock } from './clock.js';
 import { createCalendars } from './calendars.js';
-import { createChatArchive } from './chat-archive.js';
+import { cardOf, createChatArchive } from './chat-archive.js';
 import { createChatKeeper } from './chat-keeper.js';
 import { askModel, createConversation, LOCAL_KEEP_ALIVE, NEW_AFTER_MS, ollamaModels, pickModel, warmOllama } from './conversation.js';
 import { createConversationLog } from './conversation-log.js';
@@ -533,7 +533,7 @@ function showConversation(voice) {
 function currentChat() {
   return {
     id: conversationLog.chatId(),
-    lines: conversationLog.entries().map(({ who, text, at, earlier, hidden }) => ({ who, text, at, ...(earlier ? { earlier: true } : {}), ...(hidden ? { hidden: true } : {}) }))
+    lines: conversationLog.entries().map(({ who, text, at, earlier, hidden, card }) => ({ who, text, at, ...(earlier ? { earlier: true } : {}), ...(hidden ? { hidden: true } : {}), ...(!hidden && cardOf(card) ? { card: cardOf(card) } : {}) }))
   };
 }
 
@@ -1138,7 +1138,26 @@ function listenToPages() {
         if (message.op === 'add') tasks.add({ text: String(message.text ?? '').slice(0, 200) });
         else if (message.op === 'done') tasks.done(String(message.id ?? ''), message.on !== false);
         else if (message.op === 'remove') tasks.remove(String(message.id ?? ''));
+        else if (message.op === 'snooze') tasks.snooze(String(message.id ?? ''), message.minutes);
         return { ok: true, count: tasks.count, ...tasks.list() };
+      }
+      // A note's card: opened in Obsidian, if it's one of the vault's; and the notes he's made or kept lately, for
+      // the Tasks screen (the cards on his lines in the chat going on and those kept in Chats).
+      case 'jester/notes': {
+        if (message.op === 'open') {
+          const rel = String(message.rel ?? '');
+          const known = !!vault && vault.listNotes().some((note) => note.rel === rel);
+          if (known) await shell.openExternal(vault.openUrl(rel));
+          return { ok: known };
+        }
+        const cards = [currentChat(), ...keeper.list().map((chat) => keeper.get(chat.id)).filter(Boolean)]
+          .flatMap((chat) => chat.lines.map((line) => ({ ...line.card, at: Date.parse(line.at) })))
+          .filter((card) => (card.kind === 'note' || card.kind === 'remembered') && card.rel)
+          .sort((a, b) => b.at - a.at);
+        const seen = new Set();
+        const notes = cards.filter((card) => !seen.has(card.rel) && seen.add(card.rel)).slice(0, 12);
+        const there = new Set(vault ? vault.listNotes().map((note) => note.rel) : []);
+        return { ok: true, notes: notes.filter((card) => there.has(card.rel)) };
       }
       // His clock, for his own window: what's on it, a line to tell them at a time, and taking one off.
       case 'jester/desktop-clock': {
@@ -1825,7 +1844,7 @@ async function start() {
     where: () => presence.where,
     // With the mic closed he has no voice: it's written, on the pill and in his window.
     // Not across the lines being read to teach him their voice, or anyone mid-sentence.
-    announce: (text) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening })),
+    announce: (text, card) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening, card })),
     release: () => clock.release(),
     held: () => clock.held,
     settleMs: Number(env.JESTER_SETTLE_MS) || undefined,
@@ -1838,7 +1857,7 @@ async function start() {
     const text = tasks.ringLine(id);
     // Ticked off or removed meanwhile: there's nothing to say.
     if (!text) return undefined;
-    const answer = await teller.say({ ...job, payload: { text, late: tasks.ringLine(id, info.meant) } }, info);
+    const answer = await teller.say({ ...job, payload: { text, late: tasks.ringLine(id, info.meant), card: tasks.cardFor(id) } }, info);
     if (!answer) tasks.rang(id);
     return answer;
   });

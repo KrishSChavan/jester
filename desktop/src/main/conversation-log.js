@@ -144,10 +144,13 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
   return {
     /** What's gone quiet is over, and the hour empties the file: main.js checks once a minute. */
     expire: () => expire(),
-    /** @param {'you'|'jester'} who */
-    add(who, text) {
+    /**
+     * @param {'you'|'jester'} who
+     * @param {{card?:object}} [more]  card: what the line is about, for his window to show with it (cards.js)
+     */
+    add(who, text, { card = null } = {}) {
       expire(who === 'jester');
-      data.entries.push({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation, chat: data.chat });
+      data.entries.push({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation, chat: data.chat, ...(card ? { card } : {}) });
       write();
       changed();
     },
