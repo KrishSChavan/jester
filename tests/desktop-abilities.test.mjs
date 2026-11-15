@@ -29,7 +29,7 @@ test('a connector that’s off is said to be, with where in Settings it’s turn
   for (const where of ['Settings › Memory', 'Settings › Weather and calendars', 'Settings › Chrome', 'Settings › Assistant and voice › Your voice', 'Gestures, in the menu bar', 'Settings › Apple Watch']) {
     assert.ok(off.includes(where), where);
   }
-  assert.match(off, /- Their calendars \(Settings › Weather and calendars\), so you don’t know what’s on them: asked what’s on them, have the laptop open their calendar app and look, with "do"\./);
+  assert.match(off, /- Their calendars \(Settings › Weather and calendars\), so you don’t know what’s on them: asked what’s on them, have the laptop open their calendar app and look, with "do", straight away rather than offering to\./);
   // Pictures have no "off" line: reading a window's words is the laptop's anyway.
   assert.doesNotMatch(off, /picture/);
 
