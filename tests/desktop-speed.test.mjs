@@ -342,3 +342,117 @@ test('the voice says when its sound starts, and a line prepared ahead is fetched
   await plain.say('Hello.', { onSound: () => starts.push(1) });
   assert.deepEqual(starts, [1]);
 });
+
+/** What he knows of it is in (a moment's work, with nothing to recall here), and his model's been asked. */
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+
+/** A conversation that may think ahead, whose model takes 300 ms and says what it was asked, and when. */
+function pausing({ thinkAhead = () => true, knows = async () => false } = {}) {
+  let time = 1_000_000;
+  const asked = [];
+  const said = [];
+  const lines = [];
+  const shown = [];
+  const logged = [];
+  const wait = (ms) => new Promise((resolve) => setTimeout(() => ((time += ms), resolve()), 2));
+  const conversation = createConversation({
+    chat: async ({ text, signal }) => {
+      const call = { text, at: time, signal };
+      asked.push(call);
+      await wait(300);
+      if (signal.aborted) throw Object.assign(new Error('cancelled'), { name: 'AbortError' });
+      return { say: `You said ${text}.`, do: '', new: false };
+    },
+    speaker: { say: async (line, { onSound } = {}) => (onSound?.(), said.push({ line, at: time })), stop: () => undefined },
+    memory: { add: (who, text) => lines.push([who, text]), current: () => [], idleFor: () => 0, startNew: () => [] },
+    recollections: { keep: async () => undefined, relevant: () => [] },
+    commands: { knows, risky: async () => false, run: async () => ({ outcome: { ok: true, text: 'Done.' } }) },
+    assistant: { asking: false, running: false },
+    show: (frame) => shown.push(frame),
+    thinkAhead,
+    log: (...parts) => logged.push(parts.join(' ')),
+    now: () => time
+  });
+  return { conversation, asked, said, lines, shown, logged, wait, pass: (ms) => (time += ms) };
+}
+
+test('at a pause that may be the end, his reply is begun; heard whole, those words carry on from there', async () => {
+  const { conversation, asked, said, lines, shown, logged, pass } = pausing();
+  await conversation.paused('Jester, how are things');
+  await settled();
+  // Thought about, and nothing more: not said, shown or kept.
+  assert.deepEqual(asked.map((call) => call.text), ['how are things']);
+  assert.deepEqual([said, lines, shown], [[], [], []]);
+  // The pause lasted: 300 ms on, the utterance is over.
+  pass(300);
+  await conversation.heard('Jester, how are things', { lag: 600 });
+  // Asked once, and the reply is the one begun at the pause.
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].signal.aborted, false);
+  assert.deepEqual(said.map((entry) => entry.line), ['You said how are things.']);
+  assert.deepEqual(lines, [['you', 'how are things'], ['jester', 'You said how are things.']]);
+  assert.match(logged.find((line) => line.startsWith('turn:')), /^turn: heard 600 ms after the last word · thinking since 300 ms before that · /);
+});
+
+test('they went on talking: what was begun is called off, and the whole of it is asked afresh', async () => {
+  const { conversation, asked, said, lines } = pausing();
+  await conversation.paused('Jester, what’s the weather');
+  await settled();
+  conversation.wentOn();
+  assert.equal(asked[0].signal.aborted, true);
+  await conversation.heard('Jester, what’s the weather in Boston on Friday');
+  assert.deepEqual(asked.map((call) => call.text), ['what’s the weather', 'what’s the weather in Boston on Friday']);
+  assert.deepEqual(said.map((entry) => entry.line), ['You said what’s the weather in Boston on Friday.']);
+  assert.equal(lines.filter(([who]) => who === 'jester').length, 1);
+  // Other words than the pause's, with no word that they went on: the same.
+  const other = pausing();
+  await other.conversation.paused('Jester, tell me a joke');
+  await settled();
+  await other.conversation.heard('Jester, tell me a joke about cats');
+  assert.equal(other.asked[0].signal.aborted, true);
+  assert.deepEqual(other.said.map((entry) => entry.line), ['You said tell me a joke about cats.']);
+});
+
+test('he thinks ahead only where it’s allowed, only on what’s said to him, and never on a command', async () => {
+  // Not allowed (the default: a free plan, or a model on this computer): a pause is nothing.
+  const off = pausing({ thinkAhead: () => false });
+  await off.conversation.paused('Jester, how are things');
+  await settled();
+  assert.equal(off.asked.length, 0);
+  await off.conversation.heard('Jester, how are things');
+  assert.equal(off.asked.length, 1);
+  // Without his name, and with nothing he's waiting to hear: it isn't for him.
+  const aside = pausing();
+  await aside.conversation.paused('how are things with you lately');
+  await settled();
+  assert.equal(aside.asked.length, 0);
+  // Only maybe their voice, it counts with his name, as it does heard whole.
+  const maybe = pausing();
+  await maybe.conversation.paused('how are things', { unsure: true });
+  await settled();
+  assert.equal(maybe.asked.length, 0);
+  await maybe.conversation.paused('Jester, how are things', { unsure: true });
+  await settled();
+  assert.equal(maybe.asked.length, 1);
+  // A command is the laptop's: nothing of it is begun at a pause, and it's done once, when it's heard whole.
+  const command = pausing({ knows: async () => true });
+  await command.conversation.paused('Jester, open Spotify');
+  await settled();
+  assert.equal(command.asked.length, 0);
+  assert.deepEqual(command.said, []);
+});
+
+test('a reply begun at a pause that’s never followed up is dropped, and so is one when listening ends', async () => {
+  const { conversation, asked } = pausing();
+  await conversation.paused('Jester, how are things');
+  await settled();
+  conversation.reset();
+  assert.equal(asked[0].signal.aborted, true);
+  // Typed meanwhile, the typed words are their own turn: the pause's reply isn't theirs.
+  const typed = pausing();
+  await typed.conversation.paused('Jester, how are things');
+  await settled();
+  await typed.conversation.told('how are things', { typed: true });
+  assert.equal(typed.asked.length, 2);
+  assert.equal(typed.asked[0].signal.aborted, true);
+});

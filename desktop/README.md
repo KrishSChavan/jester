@@ -392,13 +392,33 @@ save next to nothing). Three things changed:
   drops it after ten idle minutes, and the first question after that waited up
   to 1.2 s for it or was searched by words alone.
 
+- At a pause that may be the end of what's being said, he starts on his reply
+  (2026-11-15). An utterance is over after 0.6 s of quiet, and that can't simply
+  be shorter: of 91 real utterances kept on the user's Mac, a 0.45 s pause came
+  mid-sentence in a fifth to a third. So a second detector calls a pause at
+  0.3 s (`EARLY_SILENCE_S`, speech/service.js): whose voice it is and what it
+  said are read then and sent as `early`, and the conversation begins the reply
+  (`paused` → `think`, conversation.js) without saying, showing, keeping or
+  doing anything. When the quiet lasts, the utterance is `heard` with that same
+  reading (nothing is read twice, so it arrives at 0.6 s where it was 0.7–0.8),
+  and the turn carries on from the reply already under way. If they go on
+  talking (`resumed`), or the words turn out different, it's called off and
+  asked afresh. A command is never begun on. It happens only when the model
+  first in line for talking is a paid one (`thinkAhead`, main.js): a request
+  thrown away costs a few thousandths of a cent there, where a free plan counts
+  it against its minute and a model on this computer does one thing at a time.
+  `npm run hear-check -- pauses` says a sentence to the real speech service at
+  its own speed: read 0.36 s after its last word, heard at 0.60 s; and one with
+  a 0.45 s pause in it, read, resumed, and heard whole once.
+
 `npm run speed-check` says each line both ways, with the saved model and Puter's
 real voice (fetched, not played): on Haiku 5.5 his voice started a median 1.0 s
 after he heard the words, where it had been 1.7 s, and the slow turns of 2–3.5 s
-went. On qwen3.5:9b, 0.7 s where it was 0.9 s. Every spoken turn now writes a
-line to the log saying where its time went: `turn: heard 684 ms after the last
-word · knew what he knows at 12 ms · first sentence at 574 ms · reply at 778 ms
-· speaking at 863 ms`.
+went. On qwen3.5:9b, 0.7 s where it was 0.9 s. It starts from the words being
+heard, so the head start from a pause comes on top. Every spoken turn now writes
+a line to the log saying where its time went: `turn: heard 603 ms after the last
+word · thinking since 240 ms before that · knew what he knows at 0 ms · first
+sentence at 334 ms · reply at 538 ms · speaking at 623 ms`.
 
 Talking through a cloud model needed the conversation's earlier turns sent to
 every provider, not only the OpenAI-compatible ones: `model-client.js` now gives
@@ -552,7 +572,10 @@ until chosen) keeps the sound of a voice that scored at least 0.2 without being
 taken as theirs, the newest 200, in the app's `heard` folder, each with its
 score. `npm run hear-check -- kept` scores them against the real voiceprint and
 decodes them, marking the ones with his name in them: those are most likely the
-user, and how they scored is what the thresholds should be set by. What he
+user, and how they scored is what the thresholds should be set by. Run on the
+first day's 91 (2026-11-15), none had his name in it: they were other talk near
+the laptop, 45 of it only maybe theirs, so nothing said to him had been turned
+away and the thresholds stayed where they were. What he
 hears, once he takes it, is already right: every spoken line in a week of chats
 read as it was said, so no second recognizer was added.
 

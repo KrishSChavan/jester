@@ -9,6 +9,8 @@
  *                                       he wasn't sure of), each scored against the user's own voiceprint, with
  *                                       what was said: for telling which of them were the user after all
  *   npm run hear-check -- kept <folder> the same, for recordings somewhere else
+ *   npm run hear-check -- pauses        a sentence said at its own speed: read at its last pause (`early`), over 0.6 s
+ *                                       after the last word; and one with a pause in the middle, heard whole
  *
  * `kept` reads the user's sealed voiceprint as Jester does (Electron's safeStorage; macOS may ask to let it use
  * "Jester Safe Storage"), prints scores and words, and never the voiceprint. It decodes voices the app itself
@@ -76,8 +78,11 @@ if (!process.versions.electron) {
   function startService() {
     const child = utilityProcess.fork(path.join(desktop, 'src/main/speech/service.js'), [], { serviceName: 'Jester speech (hear-check)', stdio: 'pipe' });
     const waiting = [];
+    /** Everything it says while a recording is being gone through (hearWhole), or null. */
+    let gathered = null;
     child.stderr?.on('data', (chunk) => String(chunk).trim() && console.log('   service:', String(chunk).trim()));
     child.on('message', (message) => {
+      if (gathered && ['heard', 'stranger', 'error', 'early', 'resumed'].includes(message?.type)) return void gathered.push({ ...message, at: performance.now() });
       const at = waiting.findIndex((want) => want.types.includes(message?.type));
       if (at >= 0) waiting.splice(at, 1)[0].resolve(message);
     });
@@ -106,6 +111,45 @@ if (!process.versions.electron) {
         for (let at = 0; at < all.length; at += 1600) post({ type: 'audio', samples: all.slice(at, at + 1600) });
         return answer;
       },
+      /**
+       * A real recording, which he may take as two utterances, or as one he says nothing of (speech he couldn't
+       * read): how he took the longest part of it, or {type:'nothing'}. It's given `ms` after the last thing he says.
+       */
+      async hearWhole(samples, ms = 1500) {
+        gathered = [];
+        const all = new Float32Array(samples.length + RATE * 1.5);
+        all.set(samples);
+        for (let at = 0; at < all.length; at += 1600) post({ type: 'audio', samples: all.slice(at, at + 1600) });
+        for (let seen = -1, quiet = 0; quiet < ms; quiet += 100) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          if (gathered.length !== seen) quiet = 0;
+          seen = gathered.length;
+        }
+        const said = gathered.filter((message) => !['early', 'resumed'].includes(message.type));
+        gathered = null;
+        return said.sort((a, b) => (b.seconds || 0) - (a.seconds || 0))[0] || { type: 'nothing' };
+      },
+      /**
+       * An utterance at the speed it was said, as the mic brings it, then quiet: everything he says of it, each with
+       * `after`, the milliseconds since its last sample went in.
+       */
+      async live(samples) {
+        gathered = [];
+        const all = new Float32Array(samples.length + RATE * 2);
+        all.set(samples);
+        const started = performance.now();
+        let ended = 0;
+        for (let at = 0; at < all.length; at += 1600) {
+          post({ type: 'audio', samples: all.slice(at, at + 1600) });
+          if (!ended && at + 1600 >= samples.length) ended = performance.now();
+          // Kept to the clock, not to a count of waits: a late timer is caught up, as a mic's audio is.
+          const due = started + ((at + 1600) / RATE) * 1000;
+          await new Promise((resolve) => setTimeout(resolve, Math.max(0, due - performance.now())));
+        }
+        const said = gathered.map((message) => ({ ...message, after: Math.round(message.at - ended) }));
+        gathered = null;
+        return said;
+      },
       /** What was said, whoever said it. */
       async words(samples) {
         const answer = next(['final', 'error']);
@@ -116,7 +160,7 @@ if (!process.versions.electron) {
     };
   }
 
-  const verdict = (message) => (message.type === 'stranger' ? 'not theirs' : message.type === 'error' ? `error: ${message.detail}` : message.unsure ? 'maybe theirs' : 'theirs');
+  const verdict = (message) => (message.type === 'stranger' ? 'not theirs' : message.type === 'nothing' ? 'no speech' : message.type === 'error' ? `error: ${message.detail}` : message.unsure ? 'maybe theirs' : 'theirs');
   const two = (value) => (typeof value === 'number' ? value.toFixed(2) : ' -  ');
 
   // --- a made-up voice -------------------------------------------------------------------------------------------
@@ -218,6 +262,68 @@ if (!process.versions.electron) {
     return checks.every(([, ok]) => ok);
   }
 
+  // --- pauses ----------------------------------------------------------------------------------------------------
+
+  /**
+   * At a pause that may be the end of what's being said, he reads it and says so (`early`), so thinking can start;
+   * it's only over (`heard`) once the pause has lasted, and if they go on instead he says that (`resumed`).
+   */
+  async function pauses() {
+    if (process.platform !== 'darwin') throw new Error('this needs macOS’s `say`');
+    const service = startService();
+    const ready = service.next(['ready', 'error'], 60000);
+    service.post({ type: 'start', model: 'parakeet-110m' });
+    await ready;
+    service.post({ type: 'listen' });
+    await pause(50);
+    const quiet = (seconds) => new Float32Array(Math.round(RATE * seconds));
+    const join = (...parts) => {
+      const out = new Float32Array(parts.reduce((sum, part) => sum + part.length, 0));
+      let at = 0;
+      for (const part of parts) {
+        out.set(part, at);
+        at += part.length;
+      }
+      return out;
+    };
+    /** `say` leaves quiet at each end of what it renders: the voice alone, so a pause here is the pause given. */
+    const voiced = (x) => {
+      const loud = (value) => Math.abs(value) > 0.01;
+      let from = 0;
+      let to = x.length;
+      while (from < to && !loud(x[from])) from += 1;
+      while (to > from && !loud(x[to - 1])) to -= 1;
+      return x.slice(from, to);
+    };
+    const one = voiced(say('Daniel', 'Jester, what is the weather like outside right now?'));
+    const first = voiced(say('Daniel', 'Jester, remind me to call my mom'));
+    const second = voiced(say('Daniel', 'after my class ends tomorrow afternoon.'));
+    const told = (events) => events.map((event) => `${event.type}${event.type === 'heard' && event.early ? ' (as read at the pause)' : ''} at ${event.after} ms${event.text ? ` ${JSON.stringify(event.text)}` : ''}`).join('\n      ');
+
+    console.log('\nOne sentence, then quiet:');
+    const plain = await service.live(one);
+    console.log(`      ${told(plain)}`);
+    console.log('\nA sentence with a 0.45 s pause in the middle of it:');
+    const broken = await service.live(join(first, quiet(0.45), second));
+    console.log(`      ${told(broken)}`);
+    service.stop();
+
+    const early = plain.find((event) => event.type === 'early');
+    const heard = plain.find((event) => event.type === 'heard');
+    const kinds = broken.map((event) => event.type);
+    const whole = broken.findLast((event) => event.type === 'heard');
+    const checks = [
+      ['a sentence is read at its last pause, before it’s over', !!early && !!heard && early.after < heard.after, 'no `early` before `heard`'],
+      ['and those are the words it’s heard as, with nothing read twice', !!early && heard?.early === true && heard.text === early.text, `early ${JSON.stringify(early?.text)}, heard ${JSON.stringify(heard?.text)}`],
+      ['it’s over 0.6 s after the last word, with no reading left to wait for', !!heard && heard.after >= 500 && heard.after <= 800, `${heard?.after} ms`],
+      ['a pause mid-sentence is read, and then they’re heard going on', kinds.indexOf('early') >= 0 && kinds.indexOf('resumed') > kinds.indexOf('early'), kinds.join(', ')],
+      ['and the sentence is heard whole, once, both halves of it', broken.filter((event) => event.type === 'heard').length === 1 && /m[ou]m/i.test(whole?.text || '') && /tomorrow/i.test(whole?.text || ''), JSON.stringify(whole?.text)]
+    ];
+    console.log('');
+    for (const [name, ok, detail] of checks) console.log(`${ok ? '  ok  ' : ' FAIL '} ${name}${ok ? '' : `: ${detail}`}`);
+    return checks.every(([, ok]) => ok);
+  }
+
   // --- what was kept ---------------------------------------------------------------------------------------------
 
   async function kept(folder) {
@@ -249,7 +355,7 @@ if (!process.versions.electron) {
       } catch {
         /* no note beside it */
       }
-      const heard = await service.hear(samples);
+      const heard = await service.hearWhole(samples);
       // Whoever it was: these are the user's own recordings, and whether it was them is the question.
       const text = heard.text || (await service.words(samples));
       const named = addressed(text).woken;
@@ -267,7 +373,7 @@ if (!process.versions.electron) {
   app.whenReady().then(async () => {
     let ok = false;
     try {
-      ok = args[0] === 'kept' ? await kept(args[1]) : await madeUp();
+      ok = args[0] === 'kept' ? await kept(args[1]) : args[0] === 'pauses' ? await pauses() : await madeUp();
     } catch (err) {
       console.log(`hear-check failed: ${err.message}`);
     }

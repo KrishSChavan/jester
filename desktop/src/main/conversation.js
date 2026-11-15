@@ -55,6 +55,8 @@ const RECALL_MS = 1500;
 const SITUATION_MS = 4000;
 /** What's connected (abilities.js), likewise: past this, what it was last time. Ollama's list is asked with 1.5 s. */
 const ABILITIES_MS = 1500;
+/** A reply begun at a pause waits this long for the utterance to be over before it's dropped: the pause is 0.6 s. */
+const PENDING_MS = 3000;
 const LATE = Symbol('late');
 /** His voice dies away in the room for about this long after the audio ends. */
 const FADE_MS = 300;
@@ -481,14 +483,21 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => import('./abilities.js').AbilityState|Promise<import('./abilities.js').AbilityState>} [deps.abilities]  what else is connected right now (Chrome,
  *   pictures, their voice, gestures, the watch), for what he says he can do; the vault and situation say the rest
  * @param {() => void} [deps.warm]  his name's just been heard: whatever a turn waits on that can be got ready, is
+ * @param {() => boolean|Promise<boolean>} [deps.thinkAhead]  whether he may start on his reply at a pause that may be
+ *   the end of what's being said (paused), before it's known to be: a request to his model that's thrown away when
+ *   they go on talking. For a model where that costs nothing that matters; never by default
  * @param {(...parts:any[]) => void} [deps.log]
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, listenAfresh = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, abilities = () => ({}), warm = () => undefined, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, listenAfresh = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
+  /** A reply begun at a pause that may be the end of what's being said (paused): the next turn's, if those were its words. */
+  let pending = null;
+  let pendingTimer = null;
+  let ponders = 0;
   /** What he's saying, in order: one line at a time. */
   let queue = Promise.resolve();
   let hushes = 0;
@@ -626,10 +635,16 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     const started = now();
     const at = {};
     let told = false;
+    /** How long before the words were heard whole he'd begun on them (think, at a pause). */
+    let ahead = 0;
     const NAMES = { known: 'knew what he knows at', first: 'first sentence at', reply: 'reply at', sound: 'speaking at' };
     return {
-      mark(name) {
-        at[name] ??= now() - started;
+      /** `when`: the moment it happened, if not now; one before the turn began counts as its start. */
+      mark(name, when = now()) {
+        if (Number.isFinite(when)) at[name] ??= Math.max(0, when - started);
+      },
+      began(when) {
+        ahead = Math.max(0, started - when);
       },
       sound() {
         this.mark('sound');
@@ -640,7 +655,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         if (told || at.reply === undefined || (at.sound === undefined && !anyway)) return;
         told = true;
         const parts = Object.keys(NAMES).filter((name) => at[name] !== undefined).map((name) => `${NAMES[name]} ${span(at[name])}`);
-        log('turn:', [...(Number.isFinite(lag) ? [`heard ${span(lag)} after the last word`] : []), ...parts].join(' · '));
+        log('turn:', [...(Number.isFinite(lag) ? [`heard ${span(lag)} after the last word`] : []), ...(ahead ? [`thinking since ${span(ahead)} before that`] : []), ...parts].join(' · '));
       }
     };
   }
@@ -775,6 +790,85 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     }
   }
 
+  /** Whether what's said now opens a new conversation: what came before has gone quiet, with no task of its at work. */
+  const quietSince = () => !acting && memory.idleFor() >= NEW_AFTER_MS;
+  /** "Remember this", and now the words: kept as they were said, with no model to say they would be and then not. */
+  const keptAsSaid = (text, history) => !!vaultMemory && pointsAhead(history, now()) && !NO.test(text) && !STOP.test(text) && !TAKEN_BACK.test(text) && !QUESTION.test(text);
+
+  /**
+   * A reply to `text`, begun: what he knows of it, then his model's answer. Nothing's said or done by it. `first` is
+   * his first sentence once that's written (and `onFirst` is told it, if set by then); `result` resolves to null
+   * when it was called off before the model was asked.
+   */
+  function think(text, history, { typed = false } = {}) {
+    const ongoing = new AbortController();
+    const lines = history.map(({ who, text: line }) => ({ who, text: line }));
+    const thought = { text, history, controller: ongoing, began: now(), at: {}, first: '', onFirst: null, result: null };
+    thought.result = (async () => {
+      // With no vault open, the user's notes are the laptop's, as they were before he kept them.
+      const notes = !!vaultMemory && vaultMemory.ready?.() !== false;
+      // What's connected is asked at the same time: whether a model reads pictures may be Ollama's to say.
+      const [{ block: context, theirs }, around, can] = await Promise.all([
+        vaultMemory ? recall(text, lines) : { block: '', theirs: false },
+        situation ? aware(text) : { block: '', untrusted: false },
+        connected()
+      ]);
+      if (ongoing.signal.aborted) return null;
+      thought.at.known = now();
+      const live = situation?.live?.() || {};
+      // Said as it's written, when what he says is the model's to choose: asked for a note or to remember, it's how
+      // that went, which isn't known yet. Typed to, he writes.
+      const ahead = !typed && !NOTE_ASKED.test(text) && !noteAsked(text) && !askedToRemember(text, text);
+      const onFirst = (sentence) => {
+        if (thought.first) return;
+        thought.at.first = now();
+        thought.first = sentence;
+        thought.onFirst?.(sentence);
+      };
+      const reply = await chat({ text, history, earlier: recollections.relevant(text), context, situation: around.block, live, can, notes, signal: ongoing.signal, ...(ahead ? { onFirst } : {}) });
+      thought.at.reply = now();
+      return { reply, theirs, around, notes, lines };
+    })();
+    // Called off, nobody's waiting on it.
+    thought.result.catch(() => undefined);
+    return thought;
+  }
+
+  /** What was begun at a pause is for nothing: they went on talking, or said something else. */
+  function dropPending() {
+    ponders += 1;
+    clearTimeout(pendingTimer);
+    pending?.controller.abort();
+    pending = null;
+  }
+
+  /**
+   * What's been said so far, at a pause that may be its end: if it would be a turn for his model, the reply is begun
+   * (think), and it's the turn's own if those turn out to be the words (turn). Nothing is said, shown, kept or done
+   * here: a command is never begun on, only thought about.
+   */
+  async function ponder(said, unsure) {
+    dropPending();
+    const { woken, rest } = addressed(said);
+    const meant = woken ? rest : String(said).trim();
+    // As overheard() would take it, and only then.
+    if (!meant || talking || now() < quietUntil || assistant.asking || assistant.running || echoes(meant)) return;
+    if (!woken && (unsure || now() >= openUntil)) return;
+    const mine = ponders;
+    const during = turns;
+    try {
+      if (!(await thinkAhead()) || (await commands.knows(meant))) return;
+    } catch {
+      return;
+    }
+    if (mine !== ponders || during !== turns) return;
+    const history = quietSince() ? [] : memory.current(HISTORY);
+    if (keptAsSaid(meant, history)) return;
+    pending = think(meant, history);
+    pendingTimer = setTimeout(dropPending, PENDING_MS);
+    pendingTimer.unref?.();
+  }
+
   async function turn(text, { overheard, typed = false, unsure = false, lag = NaN }) {
     const mine = ++turns;
     const stale = () => mine !== turns;
@@ -782,8 +876,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     /** His first sentence, begun while the rest was being written (sayAhead). */
     let early = null;
     controller?.abort();
-    const ongoing = new AbortController();
-    controller = ongoing;
+    controller = null;
+    // What was begun at the pause that ended this, if these are the words it was begun on.
+    const begun = overheard && pending?.text === text ? pending : null;
+    if (begun) pending = null;
+    dropPending();
     hush();
     openUntil = 0;
     typing = typed;
@@ -801,43 +898,40 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     show({ phase: 'heard', text, matched: overheard && knowsYou() && !unsure });
     try {
       if (await commands.knows(text)) {
+        begun?.controller.abort();
         if (!stale()) await act(text, { overheard, stale, answer, typed });
         return;
       }
-      if (stale()) return;
+      if (stale()) return void begun?.controller.abort();
       show({ phase: 'thinking', task: '', step: '' });
-      const lines = history.map(({ who, text: line }) => ({ who, text: line }));
-      // "Remember this", and now the words: kept as they were said, with no model to say they would be and then not.
-      if (vaultMemory && pointsAhead(history, now()) && !NO.test(text) && !STOP.test(text) && !TAKEN_BACK.test(text) && !QUESTION.test(text)) {
+      if (keptAsSaid(text, history)) {
+        begun?.controller.abort();
         const why = await keepWords(text, [{ who: 'you', text }]);
         if (stale()) return;
         await answer(why || 'Got it. I’ll remember that.');
         if (!stale() && knowsYou() && !typed) stayOpen();
         return;
       }
-      // With no vault open, the user's notes are the laptop's, as they were before he kept them.
-      const notes = !!vaultMemory && vaultMemory.ready?.() !== false;
-      // What's connected is asked at the same time: whether a model reads pictures may be Ollama's to say.
-      const [{ block: context, theirs }, around, can] = await Promise.all([
-        vaultMemory ? recall(text, lines) : { block: '', theirs: false },
-        situation ? aware(text) : { block: '', untrusted: false },
-        connected()
-      ]);
-      if (stale()) return;
-      clock.mark('known');
-      const live = situation?.live?.() || {};
-      // Said as it's written, when what he says is the model's to choose: asked for a note or to remember, it's how
-      // that went (below), which isn't known yet; nor does he begin on a note nobody asked for. Typed to, he writes.
-      const ahead = !typed && !NOTE_ASKED.test(text) && !noteAsked(text) && !askedToRemember(text, text);
-      const onFirst = (sentence) => {
-        clock.mark('first');
+      // Begun at the pause, it's this turn's if the conversation it was begun in is still this one.
+      const same = begun && begun.history.length === history.length && begun.history.at(-1)?.text === history.at(-1)?.text;
+      if (begun && !same) begun.controller.abort();
+      const thought = same ? begun : think(text, history, { typed });
+      controller = thought.controller;
+      clock.began(thought.began);
+      // He starts on his first sentence as it's written, unless it's about a note: one nobody asked for isn't made,
+      // and then isn't claimed (below).
+      thought.onFirst = (sentence) => {
+        clock.mark('first', thought.at.first);
         if (early || stale() || /\bnote/i.test(sentence)) return;
         early = sayAhead(sentence, clock);
       };
-      const reply = await chat({ text, history, earlier: recollections.relevant(text), context, situation: around.block, live, can, notes, signal: ongoing.signal, ...(ahead ? { onFirst } : {}) });
-      clock.mark('reply');
+      if (thought.first) thought.onFirst(thought.first);
+      const got = await thought.result;
+      clock.mark('known', thought.at.known);
+      clock.mark('reply', thought.at.reply);
       clock.tell();
-      if (stale()) return;
+      if (!got || stale()) return;
+      const { reply, theirs, around, notes, lines } = got;
       log('jester:', logged(reply));
       // A new subject: what came before is over, and this opens the next. Not while a task it asked for is at work,
       // nor in a chat the user's just picked back up: carrying it on is why they opened it.
@@ -951,6 +1045,18 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       return turned ?? undefined;
     },
     /** His name, with the user still talking: he's listening, before they're done. */
+    /**
+     * What's been said so far, at a pause that may be its end: he starts thinking about it, where that's allowed
+     * (`thinkAhead`), and says and does nothing. If those were the words, heard() carries on from there.
+     * @returns {Promise<void>}
+     */
+    paused(text, { unsure = false } = {}) {
+      return ponder(text, unsure).catch((err) => log('couldn’t think ahead:', err.message));
+    },
+    /** They went on talking after the pause: what was begun then is dropped. */
+    wentOn() {
+      dropPending();
+    },
     woken() {
       if (talking || now() < quietUntil || assistant.asking || assistant.running) return;
       wokenEarly = true;
@@ -1010,6 +1116,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       turns += 1;
       typedTurn = 0;
       controller?.abort();
+      dropPending();
       openUntil = 0;
       hush();
       memory.clear();
@@ -1025,6 +1132,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     reset() {
       openUntil = 0;
       hush();
+      dropPending();
       if (typedTurn && typedTurn === turns) return;
       turns += 1;
       controller?.abort();
@@ -1037,6 +1145,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       turns += 1;
       typedTurn = 0;
       controller?.abort();
+      dropPending();
       openUntil = 0;
       hush();
       show({ phase: 'speaking', done: true });

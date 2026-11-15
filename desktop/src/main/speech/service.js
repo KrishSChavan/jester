@@ -7,7 +7,7 @@
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
  * Messages in:  start {model} · begin · listen · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
- * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, afterMs, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · error {detail}
+ * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · early {text, unsure?} · resumed · heard {text, decodeMs, afterMs, early?, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
@@ -42,6 +42,12 @@ const SAMPLE_RATE = 16000;
 const WINDOW = 512;
 /** How long the speaker must be quiet before the utterance counts as over. */
 const END_SILENCE_S = 0.6;
+/**
+ * A pause this long, while listening, may be the end: who's talking and what they've said is read then (`early`), so
+ * whoever's listening can start thinking, and the utterance is still only over at END_SILENCE_S. Shorter than that
+ * it can't simply be: of 91 real utterances kept (2026-11-15), a 0.45 s pause came mid-sentence in a fifth to a third.
+ */
+const EARLY_SILENCE_S = 0.3;
 /** Partial text is re-decoded from the audio so far this often while someone talks. */
 const PARTIAL_EVERY_MS = 500;
 /**
@@ -67,6 +73,8 @@ const send = (message) => port.postMessage(message);
 
 let recognizer = null;
 let vad = null;
+/** A second detector, quicker to call a pause: see EARLY_SILENCE_S. */
+let soon = null;
 let state = null;
 /** Windows since the detector last started over. */
 let sinceRestart = 0;
@@ -87,7 +95,8 @@ let teaching = false;
 
 function freshState(listening = false) {
   // `windows` is everything since `begin`; `speechAt` the window where speech was first detected.
-  return { carry: new Float32Array(0), windows: [], speechAt: -1, lastPartialAt: 0, partialBusy: false, done: false, listening, peeks: 0, peeking: false };
+  // `ahead`: what was read at a pause that may be the end (readAhead), until they go on talking.
+  return { carry: new Float32Array(0), windows: [], speechAt: -1, lastPartialAt: 0, partialBusy: false, done: false, listening, peeks: 0, peeking: false, ahead: null };
 }
 
 /** The utterance: from just before speech was detected to now. */
@@ -132,6 +141,7 @@ function start(modelName) {
   if (!model || model.kind !== 'offline') throw new Error(`"${modelName}" is not an offline speech model`);
   const started = performance.now();
   recognizer = new sherpa.OfflineRecognizer(model.config(modelDir(modelName)));
+  soon = new sherpa.Vad({ sileroVad: { model: VAD_MODEL, threshold: 0.5, minSilenceDuration: EARLY_SILENCE_S, minSpeechDuration: 0.2, windowSize: WINDOW, maxSpeechDuration: 20 }, sampleRate: SAMPLE_RATE, numThreads: 1, provider: 'cpu', debug: 0 }, 30);
   vad = new sherpa.Vad({
     sileroVad: { model: VAD_MODEL, threshold: 0.5, minSilenceDuration: END_SILENCE_S, minSpeechDuration: 0.2, windowSize: WINDOW, maxSpeechDuration: 20 },
     sampleRate: SAMPLE_RATE,
@@ -185,15 +195,15 @@ function keepUnsure(samples, facts) {
 }
 
 /** Decodes off the audio's path, so nothing said meanwhile is lost. Falling behind keeps only the newest. */
-async function overheard(samples) {
+async function overheard(samples, ahead = null) {
   if (decoding) {
-    waiting = samples;
+    waiting = { samples, ahead };
     return;
   }
   decoding = true;
   try {
-    for (let next = samples; next; ) {
-      await hear(next);
+    for (let next = { samples, ahead }; next; ) {
+      await hear(next.samples, next.ahead);
       next = waiting;
       waiting = null;
     }
@@ -202,33 +212,62 @@ async function overheard(samples) {
   }
 }
 
-/** Who it was, then, if that's someone to listen to, what they said. */
-async function hear(samples) {
-  const began = performance.now();
-  const during = listens;
+/** Who it was, then, if that's someone to listen to, what they said: a stranger's words aren't read. */
+async function judge(samples) {
   const seconds = samples.length / SAMPLE_RATE;
   const voice = voiceprint || teaching ? voiceOf(samples) : null;
   const { score, enrolled } = voiceprint ? (voice ? scored(voice, voiceprint, learned) : { score: 0, enrolled: 0 }) : { score: null, enrolled: null };
   const who = voiceprint && !teaching ? judged(score, seconds) : 'you';
+  if (who === 'stranger') return { seconds, voice, score, enrolled, who };
+  return { seconds, voice, score, enrolled, who, ...(await decode(samples)) };
+}
+
+/** An utterance that's over, told. `ahead`: it was read at its last pause (readAhead), and nothing was said after. */
+async function hear(samples, ahead = null) {
+  const began = performance.now();
+  const during = listens;
+  const early = ahead ? await ahead.catch(() => null) : null;
+  const { seconds, voice, score, enrolled, who, text, decodeMs } = early || (await judge(samples));
   const round = (value) => Math.round(value * 1000) / 1000;
   if (who === 'stranger') {
     if (keepDir && score >= KEEP_FLOOR) keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds) });
     return send({ type: 'stranger', score, enrolled, seconds });
   }
-  const { text, decodeMs } = await decode(samples);
   if (keepDir && who === 'maybe') keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds), text });
   if (!text || during !== listens) return undefined;
   // The voice goes along while teaching, and when it's one more way the user sounds: kept only if this was for him.
   const keep = !!voice && (teaching || (who === 'you' && !!voiceprint && worthLearning(voice, { score, enrolled, seconds }, learned)));
   // afterMs: how long after the last word this is: the pause that ended it, then telling whose voice and what it said.
-  return send({ type: 'heard', text, decodeMs, afterMs: Math.round(END_SILENCE_S * 1000 + performance.now() - began), score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
+  // early: these are the words told at the pause, so what was begun on them then is this utterance's.
+  return send({ type: 'heard', text, decodeMs, afterMs: Math.round(END_SILENCE_S * 1000 + performance.now() - began), ...(early ? { early: true } : {}), score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
 }
 
 /** One utterance over, and straight on to the next. */
 function endOverheard() {
   const samples = utterance();
+  // What was read at the pause is what was said, when nothing was said after it.
+  const ahead = state.ahead;
   state = freshState(true);
-  if (samples.length) overheard(samples).catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
+  if (samples.length) overheard(samples, ahead).catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
+}
+
+/**
+ * A pause that may be the end of what's being said: whose voice it is and what it said are read now, and told as
+ * `early` when it's someone to listen to. If nothing more is said, that reading is the utterance's own (hear), so
+ * it's `heard` the moment the pause has lasted END_SILENCE_S, with nothing left to read.
+ */
+function readAhead() {
+  const during = state;
+  const samples = utterance();
+  if (!samples.length) return;
+  const read = judge(samples);
+  during.ahead = read;
+  read
+    .then((got) => {
+      if (state !== during || during.ahead !== read || got.who === 'stranger' || !got.text) return;
+      send({ type: 'early', text: got.text, ...(got.who === 'maybe' ? { unsure: true } : {}) });
+    })
+    .catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
 }
 
 /**
@@ -270,6 +309,7 @@ function keepListening() {
   if (state.windows.length > KEPT_WINDOWS) state.windows.shift();
   if (sinceRestart * WINDOW >= VAD_RESTART_S * SAMPLE_RATE) {
     vad.reset();
+    soon?.reset();
     sinceRestart = 0;
   }
 }
@@ -296,6 +336,19 @@ async function audio(samples) {
     if (vad.isDetected() && state.speechAt < 0) {
       state.speechAt = state.windows.length - 1;
       send({ type: 'speech' });
+    }
+    if (state.listening && soon) {
+      soon.acceptWaveform(window);
+      // They've gone on talking: what was read at the pause was only part of it.
+      if (state.ahead && soon.isDetected()) {
+        state.ahead = null;
+        send({ type: 'resumed' });
+      }
+      if (!soon.isEmpty()) {
+        while (!soon.isEmpty()) soon.pop();
+        // Not over another reading: one utterance is read at a time.
+        if (state.speechAt >= 0 && !state.ahead && !teaching && !decoding && !state.peeking && vad.isEmpty()) readAhead();
+      }
     }
     // The detector hands back a segment once the speaker has been quiet for
     // END_SILENCE_S: that is the end of the command. Only its timing is
@@ -347,6 +400,7 @@ port.on('message', async ({ data }) => {
         break;
       case 'listen':
         vad?.reset();
+        soon?.reset();
         listens += 1;
         waiting = null;
         sinceRestart = 0;

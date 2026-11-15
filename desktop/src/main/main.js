@@ -438,7 +438,9 @@ function updateListening() {
     voicePage.open();
     speech.listen(
       (text, heard) => (teaching ? tookLine(heard) : heardAloud(text, heard)),
-      () => !teaching && conversation.woken()
+      () => !teaching && conversation.woken(),
+      // A pause that may be the end of it: he starts thinking, and says and does nothing until it is.
+      (text, early) => !teaching && (text === null ? conversation.wentOn() : conversation.paused(text, { unsure: !!early?.unsure }))
     );
   } else {
     speech.stopListening();
@@ -1702,6 +1704,10 @@ async function start() {
     },
     listenAfresh: () => speech.listenAfresh(),
     warm: warmUp,
+    // At a pause that may be the end of what's being said, his reply is begun, and thrown away if they go on: only
+    // when the model that would be asked is a paid one, where that costs a few thousandths of a cent. A free plan
+    // counts every request against its minute, and one on this computer does one thing at a time.
+    thinkAhead: async () => (await talking.savedOnes())[0]?.plan === 'paid',
     // Only with the mic open: typing to him with it closed, there's nobody to wait for.
     knowsYou: () => !!voiceprint && listening,
     commands: {

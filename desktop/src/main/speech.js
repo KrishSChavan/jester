@@ -47,6 +47,8 @@ export function startSpeech({ log = () => undefined } = {}) {
   let listener = null;
   /** Called when his name starts something still being said. */
   let waker = null;
+  /** Told what's been said so far at a pause that may be its end, and when they went on talking after all. */
+  let pauser = null;
   /** The user's voice, sent to each service as it starts. */
   let voiceprint = null;
   /** Other ways the user's been heard to sound (voiceprint.js). */
@@ -96,6 +98,8 @@ export function startSpeech({ log = () => undefined } = {}) {
         return void listener?.(message.text, message);
       }
       if (message?.type === 'wake') return void waker?.();
+      if (message?.type === 'early') return void pauser?.(message.text, message);
+      if (message?.type === 'resumed') return void pauser?.(null);
       if (message?.type === 'stranger') return log(`speech: not your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
       if (message?.type === 'error') log('speech error:', message.detail);
       if (message?.type === 'final' && current) {
@@ -212,10 +216,15 @@ export function startSpeech({ log = () => undefined } = {}) {
         resume();
       }
     },
-    /** Every utterance from now on goes to `onHeard`, until stopListening; `onWake` hears his name as it's said. */
-    listen(onHeard, onWake = () => undefined) {
+    /**
+     * Every utterance from now on goes to `onHeard`, until stopListening; `onWake` hears his name as it's said.
+     * `onPause(text, {unsure})`: what's been said so far, at a pause that may be its end (it's `onHeard`'s, marked
+     * `early`, if it was); `onPause(null)` when they went on talking instead.
+     */
+    listen(onHeard, onWake = () => undefined, onPause = () => undefined) {
       listener = onHeard;
       waker = onWake;
+      pauser = onPause;
       clearTimeout(idleTimer);
       resume();
     },
@@ -242,6 +251,7 @@ export function startSpeech({ log = () => undefined } = {}) {
       if (!listener) return;
       listener = null;
       waker = null;
+      pauser = null;
       if (!current) service?.postMessage({ type: 'abort' });
       rest();
     }
