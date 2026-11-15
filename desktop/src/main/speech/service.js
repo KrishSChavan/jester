@@ -7,7 +7,7 @@
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
  * Messages in:  start {model} · begin · listen · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
- * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · error {detail}
+ * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, afterMs, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
@@ -204,6 +204,7 @@ async function overheard(samples) {
 
 /** Who it was, then, if that's someone to listen to, what they said. */
 async function hear(samples) {
+  const began = performance.now();
   const during = listens;
   const seconds = samples.length / SAMPLE_RATE;
   const voice = voiceprint || teaching ? voiceOf(samples) : null;
@@ -219,7 +220,8 @@ async function hear(samples) {
   if (!text || during !== listens) return undefined;
   // The voice goes along while teaching, and when it's one more way the user sounds: kept only if this was for him.
   const keep = !!voice && (teaching || (who === 'you' && !!voiceprint && worthLearning(voice, { score, enrolled, seconds }, learned)));
-  return send({ type: 'heard', text, decodeMs, score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
+  // afterMs: how long after the last word this is: the pause that ended it, then telling whose voice and what it said.
+  return send({ type: 'heard', text, decodeMs, afterMs: Math.round(END_SILENCE_S * 1000 + performance.now() - began), score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
 }
 
 /** One utterance over, and straight on to the next. */

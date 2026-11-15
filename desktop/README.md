@@ -60,6 +60,7 @@ front window fills its display.
 | `scripts/hear-check.mjs` | `npm run hear-check`: his own speech service on audio from files: a made-up voice learned from use, or (`kept`) what he wasn't sure of, scored against the real voiceprint. |
 | `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
+| `scripts/speed-check.mjs` | `npm run speed-check`: how soon his voice starts after he hears you, with the real model and Puter's real voice, against how it was. |
 | `scripts/vault-eval.mjs` | How well memory finds things in a vault: a sample vault and the questions it's scored on. |
 | `spikes/` | Phase 0 experiments, and `link-live.mjs`, the link end to end in a throwaway Chrome. |
 
@@ -356,13 +357,48 @@ puts it right. So is a turn they've moved on from.
 Claude is asked as its current models want (2026-11-14, `model-client.js`): the
 system prompt as a cached block, read back at a tenth of the price for five
 minutes (512 tokens is the least the 5 generation caches; his prompt is about
-1,800), and the reply held to its schema with `output_config.format` when the
+1,800), and a reply held to its schema with `output_config.format` (his own
+spoken reply aside: see how soon he starts to answer, below) when the
 schema is one Claude takes as it stands (`claudeTakesSchema`: his reply's is;
 the agents' have `minimum` and `maxItems`, so they're asked for in words, as
 before). `spend.js` adds up what each saved model's replies cost, by their own
 token counts at the listed price, and Settings › Models shows it by the model:
 an estimate, for a month. On Claude Haiku 5.5 the whole of talk-check, 171
 turns, came to about a cent, 163 right, a median turn of 1.0 s.
+
+How soon he starts to answer (2026-11-14). Measured on Haiku 5.5 with his real
+prompt, a spoken turn's time went: 0.6 s for the pause that ends an utterance,
+about 0.9 s before Claude's first word and 1.3 s to its last, and 0.4 s for
+Puter's voice whatever the line's length (so a voice on this computer would
+save next to nothing). Three things changed:
+
+- His reply isn't held to its schema when it's Claude talking (`plain`,
+  model-client.js). The schema cost half a second before the first word: 0.37 s
+  without it against 0.9–1.2 s with. The prompt already spells the reply out;
+  across talk-check's 201 turns asked this way none came back as anything but
+  JSON (197 right), and one that does is asked for once more, held to it. The
+  agents' replies are still held: they're bigger, and a step isn't waited on
+  by someone listening.
+- The reply is read as it's written (`onText`: server-sent events from Claude
+  and from Ollama; Groq's JSON mode sends everything at once either way, so
+  it's asked as before), and he starts on his first sentence while the rest
+  comes (`firstSaid`, `sayAhead` in conversation.js). The rest's sound is
+  fetched while the first sentence plays, and the whole line goes in the
+  conversation as one. He waits for the whole reply as before when it was
+  typed, when a note or remembering was asked for (what he says is then how
+  that went), and when the sentence is about a note.
+- Hearing his name, opening the mic or typing to him loads the model that
+  searches the notes by meaning (`warmUp`, main.js). Nothing did before: Ollama
+  drops it after ten idle minutes, and the first question after that waited up
+  to 1.2 s for it or was searched by words alone.
+
+`npm run speed-check` says each line both ways, with the saved model and Puter's
+real voice (fetched, not played): on Haiku 5.5 his voice started a median 1.0 s
+after he heard the words, where it had been 1.7 s, and the slow turns of 2–3.5 s
+went. On qwen3.5:9b, 0.7 s where it was 0.9 s. Every spoken turn now writes a
+line to the log saying where its time went: `turn: heard 684 ms after the last
+word · knew what he knows at 12 ms · first sentence at 574 ms · reply at 778 ms
+· speaking at 863 ms`.
 
 Talking through a cloud model needed the conversation's earlier turns sent to
 every provider, not only the OpenAI-compatible ones: `model-client.js` now gives

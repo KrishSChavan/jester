@@ -29,6 +29,7 @@
  *   npm run talk-check -- --trials 1 ...       each case once (3 by default)
  *   npm run talk-check -- --only live ...      only the weather-and-calendars cases (or old, memory, or facts)
  *   npm run talk-check -- --match 'joke|gym'   only the cases whose words match
+ *   npm run talk-check -- --held ...           Claude held to the reply's schema, as before 2026-11-14, to compare
  *
  * Saved models' keys are sealed with the Mac's keychain, so this runs in
  * Electron, as Jester: macOS may ask to let it use "Jester Safe Storage". Keys
@@ -170,6 +171,7 @@ if (run && !process.versions.electron) {
   const args = process.argv.slice(2).filter((arg, i, all) => !arg.startsWith('--') && !/^\d+$/.test(arg) && !['--only', '--match'].includes(all[i - 1]));
   const trialsAt = process.argv.indexOf('--trials');
   const TRIALS = trialsAt > 0 ? Math.max(1, Number(process.argv[trialsAt + 1]) || 3) : 3;
+  const HELD = process.argv.includes('--held');
   const wanted = args.length ? args : ['saved', 'local'];
 
   /** [what the user says, whether it should hand over a command, the conversation before it] */
@@ -406,6 +408,9 @@ if (run && !process.versions.electron) {
       console.log(`\n=== ${name(connection)}: ${RUN.length} cases × ${TRIALS} ===`);
       const right = { old: 0, new: 0, live: 0, facts: 0, oldByDo: 0, filled: 0 };
       const times = [];
+      /** When his first sentence was written, for the replies sent as they're written; and any that wasn't how the reply began. */
+      const firsts = [];
+      const astray = [];
       let failed = 0;
       for (const want of RUN) {
         const outs = [];
@@ -422,7 +427,15 @@ if (run && !process.versions.electron) {
               const lines = want.summarize.map(([who, said], at) => ({ who, text: said, at: new Date(date.getTime() - (want.summarize.length - at) * 20000).toISOString() }));
               reply = { say: (await memory.ended(lines)).summary, do: '', remember: '', note: null };
             } else {
-              reply = await askModel({ request: job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, date });
+              // As the app asks when it's spoken to: told his first sentence as soon as it's written. --held: Claude
+              // held to the reply's schema, as it was before 2026-11-14, to compare.
+              let first = null;
+              reply = await askModel({ request: HELD ? (options) => job({ ...options, plain: false }) : job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, date, onFirst: (sentence) => (first = { sentence, ms: Date.now() - started - paced }) });
+              if (first) {
+                firsts.push(first.ms);
+                // What he'd have begun saying has to be how what he says begins.
+                if (!reply.say.replace(/\s+/g, ' ').startsWith(first.sentence.replace(/\s+/g, ' '))) astray.push(`${JSON.stringify(first.sentence)} isn't the start of ${JSON.stringify(reply.say)}`);
+              }
             }
             times.push(Date.now() - started - paced);
             const wrong = problems(reply, want);
@@ -445,6 +458,7 @@ if (run && !process.versions.electron) {
         }
       }
       times.sort((a, b) => a - b);
+      firsts.sort((a, b) => a - b);
       const count = (group) => RUN.filter(group).length * TRIALS;
       const old = count((want) => want.old);
       const asked = count((want) => want.remember);
@@ -457,8 +471,9 @@ if (run && !process.versions.electron) {
         live && `weather and calendars ${right.live}/${live}`,
         facts && `facts and abilities ${right.facts}/${facts}`
       ].filter(Boolean);
-      const line = `${name(connection)}: ${parts.join(' · ')} · turn median ${times[times.length >> 1] ?? '-'} ms, slowest ${times.at(-1) ?? '-'} ms${failed ? ` · ${failed} failed` : ''}`;
+      const line = `${name(connection)}: ${parts.join(' · ')} · turn median ${times[times.length >> 1] ?? '-'} ms, slowest ${times.at(-1) ?? '-'} ms${firsts.length ? ` · first sentence median ${firsts[firsts.length >> 1]} ms (${firsts.length} replies read as written)` : ''}${failed ? ` · ${failed} failed` : ''}`;
       console.log(`--- ${line}`);
+      for (const wrong of astray) console.log(`    first sentence astray: ${wrong}`);
       if (!local) console.log(`    tokens: ${spent.input + spent.cacheWrite} in at full price (${spent.cacheWrite} of them written to the cache), ${spent.cacheRead} read from the cache, ${spent.output} out${spent.priced ? ` · ${dollars(spent.usd)}` : ''}`);
       summary.push(line);
     }

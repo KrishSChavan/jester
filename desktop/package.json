@@ -16,7 +16,8 @@
     "talk-check": "node scripts/talk-check.mjs",
     "live-check": "node scripts/live-check.mjs",
     "hear-check": "node scripts/hear-check.mjs",
-    "task-check": "node scripts/task-check.mjs"
+    "task-check": "node scripts/task-check.mjs",
+    "speed-check": "node scripts/speed-check.mjs"
   },
   "dependencies": {
     "ical.js": "2.2.1",

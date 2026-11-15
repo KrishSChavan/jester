@@ -452,7 +452,7 @@ function updateListening() {
  * they sound (voiceprint.js): kept, so the next thing said like that is theirs without his name.
  */
 function heardAloud(text, heard) {
-  const turned = conversation.heard(text, { unsure: !!heard?.unsure });
+  const turned = conversation.heard(text, { unsure: !!heard?.unsure, lag: heard?.afterMs });
   if (turned && heard?.learn && heard.voice && voiceprint) learnVoice(heard.voice);
 }
 
@@ -907,6 +907,21 @@ function voiceProblem({ mic = true } = {}) {
   return '';
 }
 
+/** How often, at most, what a turn waits on is got ready: once Ollama has the notes' model, asking again is nothing. */
+const WARM_EVERY_MS = 30000;
+let warmedAt = 0;
+
+/**
+ * He's about to be asked something (his name was heard, the mic was opened, or they're typing to him): the model
+ * that searches the user's notes by meaning is loaded meanwhile. Ollama drops it after ten idle minutes, and the
+ * first question after that waited on it for up to 1.2 s, or went without (vault-index.js QUERY_MS).
+ */
+function warmUp() {
+  if (Date.now() - warmedAt < WARM_EVERY_MS) return;
+  warmedAt = Date.now();
+  vaultIndex?.warm().catch((err) => log('couldn’t get the notes’ search ready:', err.message));
+}
+
 /** The voice shortcut, gesture or menu item: start listening, or finish. */
 function toggleVoice() {
   const problem = voiceProblem({ mic: false });
@@ -924,6 +939,7 @@ function toggleVoice() {
   }
   conversation.hush();
   voiceRunner.prepare();
+  warmUp();
   engineHost.voice('toggle');
 }
 
@@ -1143,6 +1159,7 @@ function listenToPages() {
       // Typing to him: his model loads meanwhile, rather than after they press Return. Only this computer's needs it.
       case 'jester/talk-typing':
         talking.savedOnes().then(async (saved) => !saved.length && warmOllama({ model: (await talking.localOne())?.model }));
+        warmUp();
         return { ok: true };
       case 'jester/talk-listen':
         await saveSettings({ continuousAssistant: message.on === true });
@@ -1684,6 +1701,7 @@ async function start() {
       forget: () => recollections.forget()
     },
     listenAfresh: () => speech.listenAfresh(),
+    warm: warmUp,
     // Only with the mic open: typing to him with it closed, there's nobody to wait for.
     knowsYou: () => !!voiceprint && listening,
     commands: {

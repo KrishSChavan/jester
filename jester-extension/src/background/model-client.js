@@ -185,7 +185,7 @@ function alternating(history, prompt) {
 /** `schema`: the reply's shape for Gemini's structured output — the browser agent's unless
  * a caller with other actions (Jester Desktop) passes its own. */
 export function buildModelRequest(config, { system, prompt, images = [], maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens,
-  schema = AGENT_RESPONSE_SCHEMA, history = [] }) {
+  schema = AGENT_RESPONSE_SCHEMA, history = [], stream = false, plain = false }) {
   if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 8192) {
     throw new Error('Output token limit must be between 1 and 8192.');
   }
@@ -201,7 +201,9 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
     const thinks = claudeThinksByDefault(config.model);
     const earlier = alternating(history, prompt);
     // The 5 generation can be held to a schema; the ones before it that can are told apart by no rule worth keeping.
-    const takes = thinks ? claudeSchema(schema) : null;
+    // `plain`: not for a reply the prompt already spells out, and that's waited on: held to a schema, Haiku 5.5's
+    // first word came at 0.9–1.2 s rather than 0.37 s (measured 2026-11-14, the same prompt, cached).
+    const takes = thinks && !plain ? claudeSchema(schema) : null;
     const held = takes ? { format: { type: 'json_schema', schema: takes } } : {};
     body = { model: config.model, max_tokens: maxOutputTokens + (thinks ? CLAUDE_THINKING_TOKENS : 0),
       // The same from one request to the next (a persona, an agent's rules), so it's cached: read back at a tenth
@@ -251,7 +253,19 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
     if (config.provider === 'ollama') Object.assign(body, { reasoning_effort: 'none', keep_alive: config.keepAlive || OLLAMA_KEEP_ALIVE,
       response_format: { type: 'json_schema', json_schema: { name: 'reply', schema } } });
   }
+  // Sent as it's written, where that's worth having: see streams().
+  if (stream && streams(config)) Object.assign(body, { stream: true }, config.protocol === 'anthropic' ? {} : { stream_options: { include_usage: true } });
   return { url: endpoint(config), init: { method: 'POST', headers, body: JSON.stringify(body), redirect: 'error' } };
+}
+
+/**
+ * Whether a reply from this model can be read as it's written (requestModel's onText). Claude takes about a second
+ * to answer in three sentences and has the first written a third of a second sooner; a model on this computer writes
+ * slower still. Groq's JSON mode sends the whole reply at once either way (measured 2026-11-14), and the others'
+ * streams aren't ones this reads, so they're asked as they always were.
+ */
+export function streams(config) {
+  return config?.protocol === 'anthropic' || config?.provider === 'ollama';
 }
 
 /** The model answered, but not with a JSON object the host can read. */
@@ -379,8 +393,76 @@ async function readBody(response, signal) {
   }
 }
 
-/** Timeout covers both fetch headers and the entire response body. */
-async function fetchBounded(request, { signal, fetchImpl, timeoutMs }) {
+/**
+ * A reply sent as it's written (server-sent events), read to its end. `onText` is told the reply's text so far each
+ * time it grows. What comes back is the body the provider would have sent unstreamed, so everything after reads it
+ * the same way. A stream that stops short of its end is the provider failing, not a reply.
+ */
+async function readEvents(response, signal, { config, onText }) {
+  const claude = config.protocol === 'anthropic';
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const onAbort = () => { reader.cancel().catch(() => {}); };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  let pending = '';
+  let read = 0;
+  let text = '';
+  let usage = null;
+  let stopped = null;
+  const take = (line) => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    let event;
+    try { event = JSON.parse(data); } catch { return; }
+    if (event.type === 'error' || (event.error && !event.choices)) {
+      const told = event.error || {};
+      if (/overloaded|rate_limit/i.test(told.type || '')) throw new ProviderBusyError({ provider: config.provider, status: 529 });
+      throw httpError(config, 500, JSON.stringify({ error: told }));
+    }
+    let more = '';
+    if (claude) {
+      if (event.type === 'message_start') usage = event.message?.usage || usage;
+      else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') more = event.delta.text || '';
+      else if (event.type === 'message_delta') {
+        stopped = event.delta?.stop_reason ?? stopped;
+        if (event.usage) usage = { ...usage, ...event.usage };
+      }
+    } else {
+      const choice = event.choices?.[0];
+      more = typeof choice?.delta?.content === 'string' ? choice.delta.content : '';
+      stopped = choice?.finish_reason ?? stopped;
+      if (event.usage) usage = event.usage;
+    }
+    if (!more) return;
+    text += more;
+    try { onText(text); } catch { /* a listener's trouble isn't the reply's */ }
+  };
+  try {
+    for (;;) {
+      checkAbort(signal);
+      const { value, done } = await reader.read();
+      if (done) break;
+      read += value.length;
+      if (read > MAX_BODY_CHARS * 4) throw new Error('The model response exceeded the size limit.');
+      pending += decoder.decode(value, { stream: true });
+      const lines = pending.split('\n');
+      pending = lines.pop();
+      for (const line of lines) take(line.replace(/\r$/, ''));
+    }
+    take((pending + decoder.decode()).trim());
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  if (!stopped) throw new ProviderBusyError({ provider: config.provider, status: 502 });
+  return JSON.stringify(claude ? { content: [{ type: 'text', text }], stop_reason: stopped, usage }
+    : { choices: [{ message: { content: text }, finish_reason: stopped }], usage });
+}
+
+/** Timeout covers both fetch headers and the entire response body. `stream`: read it as it's written (readEvents). */
+async function fetchBounded(request, { signal, fetchImpl, timeoutMs, stream = null }) {
   checkAbort(signal);
   const controller = new AbortController();
   const onAbort = () => controller.abort(abortReason(signal));
@@ -394,7 +476,8 @@ async function fetchBounded(request, { signal, fetchImpl, timeoutMs }) {
   try {
     return await Promise.race([(async () => {
       const response = await fetchImpl(request.url, { ...request.init, signal: controller.signal });
-      const body = await readBody(response, controller.signal);
+      const events = stream && response.ok && response.body?.getReader && /text\/event-stream/i.test(response.headers?.get?.('content-type') || '');
+      const body = events ? await readEvents(response, controller.signal, stream) : await readBody(response, controller.signal);
       return { response, body };
     })(), aborted]);
   } finally {
@@ -516,12 +599,30 @@ function httpError(config, status, body) {
   return Object.assign(new Error(message), { code: 'http_error', status, retryable: false, ...(type ? { type } : {}) });
 }
 
-export async function requestModel({ env, config = normalizeModelConfig(env), system, prompt, signal,
+/**
+ * Asks a model and reads its reply as JSON. `onText(text so far)`: the reply is read as it's written, from the models
+ * that send it so (streams()). `plain`: Claude isn't held to the schema, which costs it half a second before its
+ * first word; should what it writes then not be JSON, it's asked once more, held to it.
+ */
+export async function requestModel(options = {}) {
+  if (!options.plain) return requestOnce(options);
+  try {
+    return await requestOnce(options);
+  } catch (error) {
+    if (error?.code !== 'invalid_json' || options.signal?.aborted) throw error;
+    return requestOnce({ ...options, plain: false, onText: null });
+  }
+}
+
+async function requestOnce({ env, config = normalizeModelConfig(env), system, prompt, signal,
   fetchImpl = globalThis.fetch, timeoutMs = MODEL_REQUEST_LIMITS.maxElapsedMs,
   maxElapsedMs = MODEL_REQUEST_LIMITS.maxElapsedMs, maxRetryWaitMs = MODEL_REQUEST_LIMITS.maxRetryWaitMs,
-  maxRetries = MODEL_REQUEST_LIMITS.maxRetries, maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens, onRetry, images = [], schema, history }) {
+  maxRetries = MODEL_REQUEST_LIMITS.maxRetries, maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens, onRetry, images = [], schema, history,
+  onText = null, plain = false }) {
   checkAbort(signal);
-  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens, schema, history });
+  // onText(text so far): the reply is read as it's written, from the models that send it so (streams()).
+  const stream = typeof onText === 'function' && streams(config) ? { config, onText } : null;
+  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens, schema, history, stream: !!stream, plain });
   const bounded = (value, fallback, min, max) => Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
   const elapsedLimit = bounded(maxElapsedMs, MODEL_REQUEST_LIMITS.maxElapsedMs, 1, 60000);
   const attemptLimit = bounded(timeoutMs, elapsedLimit, 1, 60000);
@@ -565,7 +666,7 @@ export async function requestModel({ env, config = normalizeModelConfig(env), sy
       requestStartedAt = clock();
       try {
         ({ response, body } = await fetchBounded(request, { signal: operation.signal, fetchImpl,
-          timeoutMs: Math.min(attemptLimit, remainingMs) }));
+          timeoutMs: Math.min(attemptLimit, remainingMs), stream }));
       } finally {
         requestMs += clock() - requestStartedAt;
         requestStartedAt = null;

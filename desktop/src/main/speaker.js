@@ -95,13 +95,23 @@ export function systemVoice({ platform = process.platform, spawnImpl = spawn, mu
 export function createSpeaker({ token, synthesize, play, stopPlaying, system, onTrouble = () => undefined, log = () => undefined, now = Date.now }) {
   let controller = null;
   let restingUntil = 0;
+  /** A line's sound, being fetched ahead of its turn (prepare): the line, and the sound or null. */
+  let ahead = null;
 
-  const puter = async (text, signal) => {
+  const sound = async (text, signal) => {
     const key = now() < restingUntil ? null : await token();
-    if (!key) return false;
+    return key ? synthesize(text, key, { signal }) : null;
+  };
+
+  const puter = async (text, signal, onSound) => {
     try {
-      const { bytes, type } = await synthesize(text, key, { signal });
+      const early = ahead?.text === text ? ahead.made : null;
+      ahead = null;
+      const made = (early && (await early)) || (await sound(text, signal));
+      if (!made) return false;
       if (signal.aborted) return true;
+      const { bytes, type } = made;
+      onSound();
       await play(bytes, type);
       onTrouble('');
       return true;
@@ -117,14 +127,35 @@ export function createSpeaker({ token, synthesize, play, stopPlaying, system, on
   };
 
   return {
-    /** @returns {Promise<void>} once it's been said, or stopped */
-    async say(text) {
+    /**
+     * `onSound`: called as the sound starts, once.
+     * @returns {Promise<void>} once it's been said, or stopped
+     */
+    async say(text, { onSound = () => undefined } = {}) {
       controller?.abort();
       const mine = new AbortController();
       controller = mine;
-      if (!(await puter(text, mine.signal)) && !mine.signal.aborted) await system.say(text);
+      let begun = false;
+      const begin = () => {
+        if (begun) return;
+        begun = true;
+        try {
+          onSound();
+        } catch {
+          // A listener's trouble isn't the voice's.
+        }
+      };
+      if (!(await puter(text, mine.signal, begin)) && !mine.signal.aborted) {
+        begin();
+        await system.say(text);
+      }
+    },
+    /** A line that's about to be said, after the one being said now: its sound is fetched meanwhile, so no gap. */
+    prepare(text) {
+      ahead = { text, made: sound(text).catch(() => null) };
     },
     stop() {
+      ahead = null;
       controller?.abort();
       stopPlaying();
       system.stop();
