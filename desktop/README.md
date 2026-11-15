@@ -386,7 +386,8 @@ save next to nothing). Three things changed:
   fetched while the first sentence plays, and the whole line goes in the
   conversation as one. He waits for the whole reply as before when it was
   typed, when a note or remembering was asked for (what he says is then how
-  that went), and when the sentence is about a note.
+  that went), and when the sentence says a note was made (`NOTE_CLAIM`: one
+  nobody asked for isn't made, and then isn't claimed).
 - Hearing his name, opening the mic or typing to him loads the model that
   searches the notes by meaning (`warmUp`, main.js). Nothing did before: Ollama
   drops it after ten idle minutes, and the first question after that waited up
@@ -410,6 +411,12 @@ save next to nothing). Three things changed:
   `npm run hear-check -- pauses` says a sentence to the real speech service at
   its own speed: read 0.36 s after its last word, heard at 0.60 s; and one with
   a 0.45 s pause in it, read, resumed, and heard whole once.
+
+`npm run speed-check -- --spoken` says each line aloud (macOS `say`, into the
+real speech service at the speed it's said) and times from the last word to the
+first sound of his voice, through the real model and Puter's voice: on Haiku 5.5
+a median 1.04 s thinking ahead and 1.37 s without, sooner in 6 lines of 6. Before
+any of this it was about 2.4 s (0.7 s to hear and read it, then 1.7 s).
 
 `npm run speed-check` says each line both ways, with the saved model and Puter's
 real voice (fetched, not played): on Haiku 5.5 his voice started a median 1.0 s

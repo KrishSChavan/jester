@@ -11,6 +11,9 @@
  *   npm run speed-check -- ollama:qwen3.5:9b    one Ollama model
  *   npm run speed-check -- --rounds 3           each line three times each way (once by default)
  *   npm run speed-check -- --no-voice           without Puter: only the model's part
+ *   npm run speed-check -- --spoken             said aloud instead (macOS `say`, into his real speech service at the
+ *                                               speed it's said): from the last word to his voice, with and without
+ *                                               starting on the reply at a pause that may be the end (thinkAhead)
  *
  * What it leaves out is the same either way: the 0.6 s pause that ends an utterance and reading it (the app's log
  * says "heard … after the last word" for each real turn), and what his memory and the weather take, which have no
@@ -21,7 +24,8 @@
  * model and about 20 lines to Puter's voice (some 2,500 characters of its monthly allowance).
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -48,7 +52,7 @@ if (!process.versions.electron) {
   const child = spawn(electron, [here, ...process.argv.slice(2)], { stdio: 'inherit', env });
   child.on('exit', (code) => process.exit(code ?? 1));
 } else {
-  const { app, safeStorage } = await import('electron');
+  const { app, safeStorage, utilityProcess } = await import('electron');
   const { askModel, createConversation, LOCAL_KEEP_ALIVE, ollamaModels, pickModel } = await import('../src/main/conversation.js');
   const { createModelJob } = await import('../src/main/model-jobs.js');
   const { createSpeaker } = await import('../src/main/speaker.js');
@@ -99,12 +103,121 @@ if (!process.versions.electron) {
   };
   const ms = (value) => (Number.isFinite(value) ? `${Math.round(value)}`.padStart(5) : '    -');
 
+  // --- said aloud ------------------------------------------------------------------------------------------------
+
+  const RATE = 16000;
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-speed-said-'));
+  /** A line in a Mac voice, as 16 kHz samples, with the quiet `say` leaves at each end taken off. */
+  function said(text) {
+    const file = path.join(scratch, `${createHash('sha1').update(text).digest('hex').slice(0, 16)}.wav`);
+    if (!fs.existsSync(file)) execFileSync('say', ['-v', 'Daniel', '-o', file, `--data-format=LEI16@${RATE}`, text]);
+    const data = fs.readFileSync(file);
+    let at = 12;
+    while (at + 8 <= data.length && data.toString('ascii', at, at + 4) !== 'data') at += 8 + data.readUInt32LE(at + 4) + (data.readUInt32LE(at + 4) % 2);
+    const frames = Math.floor(Math.min(data.readUInt32LE(at + 4), data.length - at - 8) / 2);
+    const samples = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) samples[i] = data.readInt16LE(at + 8 + i * 2) / 32768;
+    let from = 0;
+    let to = samples.length;
+    while (from < to && Math.abs(samples[from]) <= 0.01) from += 1;
+    while (to > from && Math.abs(samples[to - 1]) <= 0.01) to -= 1;
+    return samples.slice(from, to);
+  }
+
+  /**
+   * Each line said aloud to his real speech service, at the speed it's said, and answered by the app's conversation
+   * through the model and Puter's voice: how long after the last word his voice begins, thinking ahead and not.
+   */
+  async function spoken(connection, token) {
+    if (process.platform !== 'darwin') throw new Error('--spoken needs macOS’s `say`');
+    const local = connection.provider === 'ollama';
+    const job = createModelJob({ job: 'talk', saved: async () => (local ? [] : [{ ...connection, uses: ['talk'] }]), local: async () => ({ model: local ? connection.model : '', uses: ['talk'] }), keepAlive: LOCAL_KEEP_ALIVE, markLimited: async () => undefined });
+    const service = utilityProcess.fork(path.join(path.dirname(here), '../src/main/speech/service.js'), [], { serviceName: 'Jester speech (speed-check)', stdio: 'pipe' });
+    let onMessage = () => undefined;
+    service.on('message', (message) => onMessage(message));
+    await new Promise((resolve, reject) => {
+      onMessage = (message) => (message?.type === 'ready' ? resolve() : message?.type === 'error' ? reject(new Error(message.detail)) : undefined);
+      service.postMessage({ type: 'start', model: 'parakeet-110m' });
+    });
+
+    async function turn(line, ahead) {
+      const samples = said(`Jester, ${line}`);
+      const at = { heard: NaN, sound: NaN };
+      let ended = 0;
+      let log = '';
+      const sound = async () => {
+        if (!Number.isFinite(at.sound)) at.sound = performance.now() - ended;
+      };
+      const conversation = createConversation({
+        chat: (request) => askModel({ ...request, request: job }),
+        speaker: createSpeaker({ token: async () => token, synthesize, play: sound, stopPlaying: () => undefined, system: { say: sound, stop: () => undefined } }),
+        memory: { add: () => undefined, current: () => [], idleFor: () => 0, startNew: () => [] },
+        recollections: { keep: async () => undefined, relevant: () => [] },
+        commands: { knows: async () => false, risky: async () => false, run: async () => ({ outcome: null }) },
+        assistant: { asking: false, running: false },
+        show: () => undefined,
+        abilities: () => ({ voice: true, chrome: true }),
+        thinkAhead: () => ahead,
+        log: (...parts) => parts[0] === 'turn:' && (log = parts.slice(1).join(' '))
+      });
+      const answered = new Promise((resolve) => {
+        const limit = setTimeout(resolve, 20000);
+        onMessage = (message) => {
+          if (message?.type === 'early') conversation.paused(message.text, { unsure: !!message.unsure });
+          else if (message?.type === 'resumed') conversation.wentOn();
+          else if (message?.type === 'heard') {
+            at.heard = performance.now() - ended;
+            Promise.resolve(conversation.heard(message.text, { lag: message.afterMs })).then(() => (clearTimeout(limit), resolve()));
+          }
+        };
+      });
+      service.postMessage({ type: 'listen' });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // As a mic brings it: a tenth of a second at a time, kept to the clock, then quiet.
+      const all = new Float32Array(samples.length + RATE * 2);
+      all.set(samples);
+      const started = performance.now();
+      for (let from = 0; from < all.length; from += 1600) {
+        service.postMessage({ type: 'audio', samples: all.slice(from, from + 1600) });
+        if (!ended && from + 1600 >= samples.length) ended = performance.now();
+        await new Promise((resolve) => setTimeout(resolve, Math.max(0, started + ((from + 1600) / RATE) * 1000 - performance.now())));
+      }
+      await answered;
+      onMessage = () => undefined;
+      return { ...at, log };
+    }
+
+    console.log(`\n=== ${name(connection)}, said aloud: ${LINES.length - 1} lines, each way ===`);
+    console.log('   not ahead: heard  voice |  ahead: heard  voice | sooner');
+    await turn(LINES[0], false).catch(() => undefined);
+    const rows = [];
+    // The last line is a command, which is never begun on at a pause.
+    for (const [i, line] of LINES.slice(0, -1).entries()) {
+      const got = {};
+      for (const ahead of i % 2 ? [true, false] : [false, true]) got[ahead] = await turn(line, ahead);
+      rows.push(got);
+      console.log(`              ${ms(got.false.heard)}  ${ms(got.false.sound)} |         ${ms(got.true.heard)}  ${ms(got.true.sound)} | ${ms(got.false.sound - got.true.sound)} ms  ${line.slice(0, 40)}`);
+      console.log(`                 ${got.true.log}`);
+    }
+    service.kill();
+    const before = median(rows.map((row) => row.false.sound));
+    const now = median(rows.map((row) => row.true.sound));
+    const line = `${name(connection)}, said aloud: his voice starts ${Math.round(now)} ms after the last word thinking ahead (median of ${rows.length}), ${Math.round(before)} ms without: ${Math.round(before - now)} ms sooner`;
+    console.log(`--- ${line}`);
+    return line;
+  }
+
   app.whenReady().then(async () => {
     const list = await targets().catch((err) => (console.log(`Couldn't read the saved models: ${err.message}`), []));
     if (!list.length) console.log('No model to check: tick Talking on one in Settings › Models, or name one (ollama:qwen3.5:9b).');
     const token = VOICE ? unsealed('puterToken') : null;
     console.log(token ? 'Voice: Puter’s, fetched for real and not played.' : 'Voice: none (Puter isn’t signed in, or --no-voice): only the model’s part is timed.');
     const summary = [];
+    if (process.argv.includes('--spoken')) {
+      for (const connection of list) summary.push(await spoken(connection, token).catch((err) => `${name(connection)}: ${err.message}`));
+      if (summary.length > 1 || summary.some((line) => !line.includes('said aloud:'))) console.log(`\n${summary.join('\n')}`);
+      return app.quit();
+    }
     for (const connection of list) {
       const local = connection.provider === 'ollama';
       const job = createModelJob({

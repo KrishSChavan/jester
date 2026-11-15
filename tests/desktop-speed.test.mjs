@@ -273,6 +273,14 @@ test('typed to, asked for a note or to remember, or about to claim a note, he wa
   assert.deepEqual(noting.said.map((entry) => entry.line), ['Got it.']);
 });
 
+test('a first sentence that only mentions notes is begun on: it claims nothing', async () => {
+  const whole = 'Start by redoing old problems and take notes on what trips you up. Then time yourself.';
+  const { conversation, said } = talking({ pieces: ['{"say":"Start by redoing old problems and take notes on what trips you up. Then ', 'time yourself.","do":"","new":false}'], reply: { say: whole, do: '', new: false } });
+  await conversation.told('how should I study for my midterm');
+  assert.deepEqual(said.map((entry) => entry.line), ['Start by redoing old problems and take notes on what trips you up.', 'Then time yourself.']);
+  assert.equal(said[0].at, 1_000_100);
+});
+
 test('a reply that fails after he’s begun: what he said stays said, and then why', async () => {
   const { conversation, said, lines } = talking({ pieces: ['{"say":"Let me think about that one. It '], reply: null, fail: new Error('The model stopped answering.') });
   await conversation.told('what should I do this weekend');

@@ -348,6 +348,11 @@ const theirsIn = (used) => !Array.isArray(used) || used.some((item) => !HIS.some
 const ESCAPED = { n: '\n', t: '\t', r: ' ', b: '', f: '' };
 /** A full stop that ends no sentence: a title, an initial, "a.m.", a number in a list. */
 const NO_END = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc|e\.g|i\.e|No|a\.m|p\.m)|\b[A-Z]|\d)\.\s$/;
+/**
+ * A first sentence that says a note was made or added to: not begun on, since a note nobody asked for isn't made and
+ * then isn't claimed. "Take notes as you read" claims nothing, and is most of what "note" turns up in (2026-11-15).
+ */
+const NOTE_CLAIM = /\b(?:noted|(?:made|making|make|added|adding|add|put|putting|jotted|jotting|wrote|written|writing|saved|saving|kept|keeping|started|created|creating|updated|updating)\b[^.!?]*\bnotes?)\b/i;
 /** A first sentence shorter than this waits for the next: "Sure." alone is no head start. */
 const FIRST_LEAST = 12;
 
@@ -918,11 +923,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       const thought = same ? begun : think(text, history, { typed });
       controller = thought.controller;
       clock.began(thought.began);
-      // He starts on his first sentence as it's written, unless it's about a note: one nobody asked for isn't made,
-      // and then isn't claimed (below).
+      // He starts on his first sentence as it's written, unless it says a note was made: one nobody asked for isn't
+      // made, and then isn't claimed (below).
       thought.onFirst = (sentence) => {
         clock.mark('first', thought.at.first);
-        if (early || stale() || /\bnote/i.test(sentence)) return;
+        if (early || stale() || NOTE_CLAIM.test(sentence)) return;
         early = sayAhead(sentence, clock);
       };
       if (thought.first) thought.onFirst(thought.first);
