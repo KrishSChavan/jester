@@ -93,6 +93,23 @@ test('the user\'s rule: ask before sending, buying, deleting or settings; never 
   assert.equal(kind({ action: 'press', keys: 'cmd+n' }, SPOTIFY), 'browse');
   assert.equal(kind({ action: 'click', id: 2 }, MESSAGES), 'blocked');
   assert.equal(kind({ action: 'click', id: 0 }, { app: { name: 'System Settings' }, elements: [{ id: 0, role: 'switch', label: 'Wi-Fi' }] }), 'sensitive');
+  // Getting around the settings changes none of them (2026-11-14: 'Click "Wi-Fi"? Yes or no?', to read which network).
+  const SETTINGS = { app: { name: 'System Settings' }, elements: [
+    { id: 0, role: 'row' }, { id: 1, role: 'text', label: 'Wi‑Fi' }, { id: 2, role: 'searchfield', label: 'Search' }, { id: 3, role: 'button', label: 'Back' },
+    { id: 4, role: 'switch', label: 'Wi‑Fi' }, { id: 5, role: 'button', label: 'Details…' }, { id: 6, role: 'popup', label: 'Appearance' }, { id: 7, role: 'textfield', label: 'Computer Name' },
+    { id: 8, role: 'tab', label: 'Display' }, { id: 9, role: 'link', label: 'Learn more' }, { id: 10, role: 'checkbox', label: 'Ask to join networks' }, { id: 11, role: 'slider', label: 'Brightness' }
+  ] };
+  for (const [action, why] of [[{ action: 'click', id: 0 }, 'a sidebar row'], [{ action: 'click', id: 1 }, 'the words beside it'], [{ action: 'click', id: 3 }, 'Back'], [{ action: 'click', id: 8 }, 'a tab'], [{ action: 'click', id: 9 }, 'a link'],
+    [{ action: 'type', id: 2, text: 'wifi', enter: true }, 'searching'], [{ action: 'scroll', direction: 'down' }, 'scrolling'],
+    // With the settings only happening to be in front, what's done elsewhere is as it would be anywhere.
+    [{ action: 'open_app', name: 'Calculator' }, 'opening another app'], [{ action: 'media', key: 'play' }, 'a media key'], [{ action: 'place', where: 'left', app: 'Notes' }, 'moving another window'],
+    [{ action: 'open_url', url: 'https://www.youtube.com/' }, 'a site that needs no asking']]) {
+    assert.equal(kind(action, SETTINGS), 'browse', why);
+  }
+  for (const [action, why] of [[{ action: 'click', id: 4 }, 'a switch'], [{ action: 'click', id: 5 }, 'any other button'], [{ action: 'click', id: 6 }, 'a popup'], [{ action: 'click', id: 10 }, 'a checkbox'], [{ action: 'click', id: 11 }, 'a slider'],
+    [{ action: 'type', id: 7, text: 'Mac' }, 'a field'], [{ action: 'open_url', url: 'https://evil.example/' }, 'a site nobody named, as anywhere'], [{ action: 'click', id: 1, count: 2 }, 'a double click'], [{ action: 'click', id: 1, button: 'right' }, 'a right click'], [{ action: 'press', keys: 'enter' }, 'a key'], [{ action: 'menu', path: 'View > Wi-Fi' }, 'a menu']]) {
+    assert.equal(kind(action, SETTINGS), 'sensitive', why);
+  }
   assert.equal(kind({ action: 'open_url', url: 'https://www.youtube.com/results?search_query=gunna' }, SPOTIFY), 'browse');
   assert.equal(kind({ action: 'open_url', url: 'https://www.theverge.com/' }, SPOTIFY, 'open the verge'), 'browse');
   assert.equal(kind({ action: 'open_url', url: 'https://evil.example/?q=secret' }, SPOTIFY, 'play gunna'), 'sensitive');
@@ -246,6 +263,28 @@ function fakeDriver({ front = 42, focusedIn = 42, secure = false, comesBack = tr
 }
 const hostWith = (fake) =>
   createDesktopHost({ driver: fake.driver, activate: fake.activate, openApp: async () => ({ ok: true, text: 'Opening Notes' }), openUrl: async () => undefined, dispatch: async () => ({ ok: true }), wait: async () => undefined });
+
+test('macOS’s own dialog in front ends the task with why, rather than a minute of “isn’t in front any more”', async () => {
+  // 2026-11-14: a picture of the window brought up macOS's screen-recording consent, and every step after failed.
+  const { MACOS_ASKING } = await import('../desktop/src/main/agent/host.js');
+  const dialog = { calls: [], driver: { call: async (cmd) => (cmd === 'frontmost' ? { app: { name: 'UserNotificationCenter', pid: 900 } } : cmd === 'focused' ? { element: {}, app: { pid: 900 } } : {}) }, activate: async () => undefined };
+  const host = createDesktopHost({ driver: dialog.driver, activate: dialog.activate, openApp: async () => ({ ok: false, text: 'Calculator didn’t come to the front.' }), openUrl: async () => undefined, dispatch: async () => ({ ok: true }), wait: async () => undefined, platform: 'darwin' });
+  assert.deepEqual(await host.execute({ action: 'type', text: 'hello' }, SPOTIFY), { ok: false, asking: true, detail: MACOS_ASKING });
+  assert.deepEqual(await host.execute({ action: 'open_app', name: 'Calculator' }, SPOTIFY), { ok: false, asking: true, detail: MACOS_ASKING });
+  assert.match(MACOS_ASKING, /macOS is asking you something in a dialog of its own.*answer it, then say “keep going”/);
+  // Another app in front is still only that: the step failed, and the model's told.
+  const other = fakeDriver({ front: 77, comesBack: false });
+  const plain = await createDesktopHost({ driver: other.driver, activate: other.activate, openApp: async () => ({ ok: true }), openUrl: async () => undefined, dispatch: async () => ({ ok: true }), wait: async () => undefined, platform: 'darwin' }).execute({ action: 'type', text: 'hello' }, SPOTIFY);
+  assert.equal(plain.asking, undefined);
+  assert.match(plain.detail, /isn’t in front any more/);
+  // The whole run stops there, saying so, at the first step that meets it: no second try, no new plan.
+  let asked = 0;
+  const ended = await runDesktopAgent({ goal: 'type hello', host, model: async () => ((asked += 1), { json: { action: { action: 'type', text: 'hello' } } }), confirm: async () => true, platform: 'darwin' });
+  assert.equal(ended.ok, false);
+  assert.equal(ended.say, MACOS_ASKING);
+  assert.equal(ended.asking, true);
+  assert.equal(asked, 1);
+});
 
 test('the host presses through accessibility, clicks where drawn if refused, and guards typing', async () => {
   const fake = fakeDriver();

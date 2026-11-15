@@ -536,6 +536,28 @@ test('a plan’s trace is learned by the same rules as ever', async () => {
   assert.equal(learnable('text Trisha hello', sent.trace).why, 'a step needed your OK');
 });
 
+test('a new plan that can’t be used, part way through, is told what was wrong with it once; the first plan isn’t asked for twice', async () => {
+  // 2026-11-14: Calculator's sum was done, the step had run out of calls, and the new plan's one bad field ended it.
+  const fixed = fakeTextEdit({ existing: '' });
+  const typo = { ...GROCERY_PLAN, steps: [{ label: 'Open Text Edit', action: 'open_app', name: 'Text Edit' }, ...GROCERY_PLAN.steps.slice(1)] };
+  const bad = { ...GROCERY_PLAN, steps: [{ label: 'Press the keys', action: 'press', keys: '8 0 * 1 5' }] };
+  const { model, requests } = scripted(typo, bad, GROCERY_PLAN);
+  const done = await runPlannedAgent({ goal: GROCERY, host: fixed.host, model, confirm: noAsking, platform: 'darwin' });
+  assert.equal(done.ok, true, 'the plan put right is the one carried out');
+  assert.equal(fixed.state.document.text, LIST);
+  const planned = requests.map((request) => JSON.parse(request.prompt));
+  assert.equal(planned.length, 3);
+  assert.equal(planned[0].yourLastPlanWasInvalid, undefined);
+  assert.equal(planned[1].yourLastPlanWasInvalid, undefined);
+  assert.match(planned[2].yourLastPlanWasInvalid, /keys.* Return the plan with that put right\.$/);
+  assert.equal(planned[2].replan.why, 'app_missing', 'and it’s still told where things stand');
+  // Unusable twice running, and the task ends there, having asked no third time.
+  const again = scripted(typo, bad, bad);
+  const stopped = await runPlannedAgent({ goal: GROCERY, host: fakeTextEdit({ existing: '' }).host, model: again.model, confirm: noAsking, platform: 'darwin' });
+  assert.equal(stopped.ok, false);
+  assert.equal(again.requests.length, 3);
+});
+
 test('tokens: a plan and a step stay small, and a run’s prompts don’t grow', async () => {
   assert.ok(plannerPrompt('darwin').length < 1800);
   assert.ok(plannerPrompt('win32').length < 1800);

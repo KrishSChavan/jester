@@ -80,6 +80,9 @@ const squash = (text) => plainName(text).replace(/[^a-z0-9]/g, '');
 /** How alike a heard name must be to an app's: "spot of fire" still finds Spotify. */
 const APP_MATCH = 0.82;
 
+/** What may follow an app's name and still be only its name, squashed: "Notes please", "Spotify for me now". */
+const POLITE_TAIL = /^(?:please|now|forme|up|again|thanks|thankyou|quickly|realquick|app|application|window)*$/;
+
 /** How well a heard name fits an app's: the whole name, its start, its last words, or near enough. */
 function nameScore(heard, name) {
   const wanted = squash(heard);
@@ -88,7 +91,11 @@ function nameScore(heard, name) {
   if (candidate === wanted) return 2;
   // "Spotify and play Gunna" is two steps, not a long way of saying Spotify.
   if (/\b(?:and|then)\b/.test(plainName(heard))) return 0;
-  if ((wanted.length >= 3 && candidate.startsWith(wanted)) || wanted.startsWith(candidate)) return 1.5;
+  if (wanted.length >= 3 && candidate.startsWith(wanted)) return 1.5;
+  // The app's name and a word of politeness is the app. Its name and more to do isn't: "TextEdit, make a new
+  // document" opened TextEdit and dropped the rest, saying it was done (2026-11-14), where the whole is the
+  // assistant's.
+  if (wanted.startsWith(candidate)) return POLITE_TAIL.test(wanted.slice(candidate.length)) ? 1.5 : 0;
   // "chrome" for Google Chrome, "settings" for System Settings, "word" for Microsoft Word.
   if (` ${plainName(name).replace(/[^a-z0-9]+/g, ' ')}`.endsWith(` ${plainName(heard).replace(/[^a-z0-9]+/g, ' ')}`)) return 1.3;
   return jaroWinkler(wanted, candidate);
@@ -223,6 +230,8 @@ function searchTerms(text) {
 
 /** Dictation takes the rest of a sentence, whatever is in it. */
 const DICTATION = /^\W*(?:please\s+)?(type|write|say)\b[\s,:]*(.+)$/i;
+/** "Write down milk" writes milk: "down" (or "out") is how writing is said, not what's written. "Type down" types it. */
+const WRITTEN = (verb, words) => (verb.toLowerCase() === 'write' ? words.replace(/^(?:down|out)\s+(?=\S)/i, '') : words).trim();
 
 /** "When I say focus mode, open Notes and put it on the left": the phrase, then what it does. */
 const TEACH = /^\W*(?:(?:ok|okay|hey)\s+)?(?:jester\W+)?when(?:ever)? i say\s+["“']?(.+?)["”']?\s*,\s*(?:(?:then|please|you should)\s+)?(.+?)[.!]*$/i;
@@ -361,7 +370,7 @@ export function parseCommand(transcript, { apps = [], platform = 'darwin', liste
   // a new note" is a new note, not those words; "type" is always typing.
   const fresh = text.match(NEW_ITEM);
   const dictated = original.match(DICTATION);
-  if (dictated && (dictated[1].toLowerCase() === 'type' || (!fresh && !talking))) return { kind: 'type', text: dictated[2].trim() };
+  if (dictated && (dictated[1].toLowerCase() === 'type' || (!fresh && !talking))) return { kind: 'type', text: WRITTEN(dictated[1], dictated[2]) };
   if (fresh) return { kind: 'new', item: ITEM_NAMES[fresh[1] || fresh[2]] };
 
   for (const [pattern, make] of PHRASES) {

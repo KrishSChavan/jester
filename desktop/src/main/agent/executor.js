@@ -132,7 +132,7 @@ async function eyesOn(run, { what, until, text, told, info, maxCalls }) {
 }
 
 /** One call to the planner: a plan, or the run's end, or (unusable) nothing to go on. */
-async function askPlanner(run, input) {
+async function askPlanner(run, input, { again = false } = {}) {
   const { model, onStep, signal, platform } = run;
   run.calls += 1;
   let reply;
@@ -148,7 +148,12 @@ async function askPlanner(run, input) {
     return { plan: validatePlan(reply?.json) };
   } catch (err) {
     onStep({ phase: 'invalid', detail: tidy(err.message, 200) });
-    return { unusable: true };
+    // A new plan that can't be used, part way through, is told what was wrong with it, once: one bad field (a press
+    // of "8 0 * 1 5", 2026-11-14) is one field from a good plan, and with no plan the task ends there. The first
+    // plan needs no second go: without one, the task is worked from the screen.
+    if (!again) return { unusable: true };
+    // Said in the input's own words: the planner's prompt has no room for one more line (1,800 characters, tests).
+    return askPlanner(run, { ...input, yourLastPlanWasInvalid: `${tidy(err.message, 200)} Return the plan with that put right.` });
   }
 }
 
@@ -252,7 +257,7 @@ export async function runPlannedAgent({ pick = false, onPlan = () => undefined, 
     onStep({ phase: 'replanning', attempt: replans, of: limits.replans, why });
     const front = await screenNow(run);
     if (front.ok) run.next = front.snapshot;
-    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: front.snapshot?.app?.name ?? first.snapshot.app?.name, previous, replan: { done, stuckOn: step.label, why, hint: hint || say } }));
+    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: front.snapshot?.app?.name ?? first.snapshot.app?.name, previous, replan: { done, stuckOn: step.label, why, hint: hint || say } }), { again: true });
     if (asked.stop) return close(asked.stop);
     const fresh = asked.plan ? asked.plan.steps.filter((next) => !doneSteps.has(stepKey(next))) : [];
     // The same way again would get stuck the same way.

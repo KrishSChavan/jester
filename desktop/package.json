@@ -15,7 +15,8 @@
     "models": "node scripts/fetch-models.mjs vad voice parakeet-110m",
     "talk-check": "node scripts/talk-check.mjs",
     "live-check": "node scripts/live-check.mjs",
-    "hear-check": "node scripts/hear-check.mjs"
+    "hear-check": "node scripts/hear-check.mjs",
+    "task-check": "node scripts/task-check.mjs"
   },
   "dependencies": {
     "ical.js": "2.2.1",

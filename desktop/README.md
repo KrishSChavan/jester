@@ -56,6 +56,7 @@ front window fills its display.
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models): paid before free, and who covers for one that fails. |
 | `src/main/spend.js` | What the saved models' replies have cost this month, as near as their token counts say. |
 | `scripts/live-check.mjs` | `npm run live-check`: the real app on a scratch profile with scripted model servers, typed to and read back. |
+| `scripts/task-check.mjs` | `npm run task-check`: real tasks on this computer, typed to the real app one after another, with the real driver, the saved models and the linked Chrome. Acts for real. |
 | `scripts/hear-check.mjs` | `npm run hear-check`: his own speech service on audio from files: a made-up voice learned from use, or (`kept`) what he wasn't sure of, scored against the real voiceprint. |
 | `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
@@ -304,7 +305,10 @@ except this computer's, where Ollama says (`qwen3.5` does). A picture goes only
 to such a model: this computer's takes it when no saved one can. No picture is
 taken while a password or card field is on screen, nor is macOS ever asked for
 Screen Recording mid-task: without it, nothing is captured. Jester's own windows
-over the window (the overlays, the ×) are hidden for the moment it takes.
+over the window (the overlays, the ×, his own window) are seen through for the
+moment it takes (`setOpacity(0)`), never hidden: hidden and shown again, his
+window came back in front of the app being worked on, and every step after the
+picture failed as "Calculator isn't in front any more" (2026-11-14).
 
 macOS lists an app under Screen Recording only once it has asked to see the
 screen, and Electron reads the status as granted or denied, never "not asked".
@@ -644,6 +648,61 @@ process, so no remote code runs in the app; signing in goes through the browser,
 as Puter's Node package does. It isn't unlimited: Puter's source gives a free
 account $0.50 a month, or about 31,000 characters at this voice's price, and it
 answers 402 past that. Only what he says goes to Puter.
+
+### Tasks on the real computer
+
+`npm run task-check` types a list of tasks to the real app and says how each
+went: the real driver, the user's own saved models, their linked Chrome, on a
+scratch profile so none of it lands in their chats or their vault. It acts for
+real (apps open, music plays), so it's for when nobody else is at the computer,
+with Jester quit: one Jester holds the link to Chrome. `-- --act
+claude-sonnet-5-5` moves actions to another model of the saved Claude key.
+
+The first run (2026-11-14, Claude Haiku 5.5) got 2 of 7 done, and none of what
+stopped the rest was the model:
+
+- A picture of the window put Jester's own window back in front (above).
+- macOS's own dialog in front (a permission asked for, an alert) left every step
+  failing as "not in front" for a minute. Now it ends the task at once and says
+  so: "macOS is asking you something in a dialog of its own… answer it, then
+  say keep going" (`host.js` `systemDialog`).
+- "Open TextEdit, make a new document and type…" was matched as opening an app
+  called "TextEdit make a new document": TextEdit opened, the rest was dropped,
+  and it was said to be done. An app's name with more to do after it is now the
+  assistant's (`voice-commands.js` `POLITE_TAIL`). "Write down milk" typed
+  "down milk".
+- With System Settings in front, everything asked first, "Open Calculator?"
+  included, and reading which Wi-Fi it's on needed a yes to 'Click "Wi-Fi"?'.
+  Getting around the settings (a sidebar row, a tab, a link, a scroll, its
+  search) and what's done elsewhere no longer ask; a switch, a button, a popup
+  or a field there still does (`actions.js` `findsItsWay`).
+- A step had 6 model calls and a run 16. Calculator's eight presses for 15% of
+  80 used a step's up with the sum done, and the new plan's one bad field ended
+  the task: now 10 and 24, and a new plan that can't be used is told why, once.
+
+After: 6 of 7, then all of them. The Wi-Fi's name in 7.5 s, a new TextEdit
+document typed in, Finder's count of Downloads (441; `ls` says 442), Spotify
+played and paused, the PSU Canvas bookmark opened and the dashboard read
+through the linked Chrome. Claude Sonnet 5.5 for actions did the same tasks in
+fewer steps (Finder: 7.5 s against 30.6 s) and no more of them.
+
+Still wrong, in the extension (0.2.2, the Web Store's): "open YouTube and play
+a funny video" opens the video and then says a control isn't responding, and
+the dashboard's items of twelve days ago were read out as due "this week": its
+model isn't told the date.
+
+"Keep going" and "try again" are the task that just failed, again, for five
+minutes (`voice-runner.js` `AGAIN`), with no talking model in between: on
+2026-11-13 that model made a new command of "keep going", and the time after
+answered with assignments nothing had read. Chrome's "No open tab matches…"
+isn't done, though 0.2.2 says it is. A task asked for its answer ("work out",
+"count", "convert") isn't kept to be done again without a model.
+
+Claude is held to the planner's and the desktop agent's reply schemas
+(`claudeSchema`, model-client.js): the limits it refuses are left out, and a
+reply that's one of two shapes becomes one object. Its API takes 24 optional
+fields at most; the browser agent's schema has 40 and is still asked for in
+words.
 
 ### Planning and doing a command
 

@@ -247,6 +247,28 @@ function settingsScreen(screen) {
   const says = [screen?.window?.title, ...(screen?.elements || []).map((item) => `${item.label || ''} ${typeof item.value === 'string' ? item.value : ''}`)];
   return says.some((text) => /\bcontrol panel\b/i.test(text || ''));
 }
+/**
+ * Getting around the settings, which changes none of them: a section's row in the sidebar or the words beside it (as
+ * macOS's System Settings reads: an unnamed row, then a line of text), a tab, a link, a disclosure, a scroll, words
+ * typed in the search field, the Back button. Asked before each, he couldn't answer "which Wi-Fi am I on?" without a
+ * yes to 'Click "Wi-Fi"?' (2026-11-14). What changes a setting is none of these: a switch, a checkbox, a popup, a
+ * slider, any other button, a field.
+ */
+const WAYFINDING_ROLES = new Set(['row', 'cell', 'text', 'heading', 'link', 'tab', 'disclosure']);
+const WAYFINDING_BUTTONS = /^(?:back|forward|show all|go back)$/i;
+/** What leaves the settings window alone altogether: with it in front, "open Calculator" asked first too (2026-11-14). */
+const ELSEWHERE = new Set(['open_app', 'open_url', 'media', 'place']);
+function findsItsWay(action, element, focused) {
+  if (action.action === 'scroll' || ELSEWHERE.has(action.action)) return true;
+  if (action.action === 'click') {
+    if (!element || action.button === 'right' || (action.count ?? 1) > 1) return false;
+    return WAYFINDING_ROLES.has(element.role) || (element.role === 'button' && WAYFINDING_BUTTONS.test(String(element.label || '').trim()));
+  }
+  // Searching the settings: Enter there only searches.
+  if (action.action === 'type') return (element || focused)?.role === 'searchfield';
+  return false;
+}
+
 /** Sites a step may open without the user having named them. */
 const KNOWN_SITES = ['google.com', 'youtube.com', 'spotify.com', 'wikipedia.org', 'github.com', 'netflix.com', 'apple.com', 'microsoft.com', 'bing.com', 'duckduckgo.com'];
 
@@ -296,7 +318,7 @@ export function classify(action, { screen = null, goal = '' } = {}) {
   if ((action.action === 'menu' && focused?.role === 'password') || (action.action === 'drag' && elementById(screen, action.to)?.role === 'password')) {
     return { category: 'blocked', reason: 'Jester never types into password fields.' };
   }
-  if (settingsScreen(screen)) return { category: 'sensitive', reason: `it changes ${app || 'the computer’s settings'}` };
+  if (settingsScreen(screen) && !findsItsWay(action, element, focused)) return { category: 'sensitive', reason: `it changes ${app || 'the computer’s settings'}` };
   const sends = { category: 'sensitive', reason: 'it may send, buy or delete something' };
   const deletes = { category: 'sensitive', reason: 'it may delete something' };
   /** Whether pressing this control sends, buys or deletes: by its name, or as the "OK" to a dialog asking to. */

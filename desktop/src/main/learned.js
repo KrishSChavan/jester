@@ -48,7 +48,9 @@ const QUESTION_WORDS = /^\W*(?:what|what's|whats|who|whose|when|where|why|how|wh
 /** A request put politely, which speech often writes with a question mark ("Can you make a new note?"). */
 const POLITE = /^\W*(?:(?:can|could|would|will) you|please)\b[\s,]*/i;
 /** A part of it that asks to be told something: "open Canvas and tell me what's due". A replay would do the rest, and never tell. */
-const TELLS_BACK = /\b(?:tell|read) me\b|\blet me know\b|\bfind out\b|\b(?:check|see) (?:if|whether|what|when|who|how)\b|\b(?:and|then),? (?:what|what's|whats|who|when|where|which|whether|if|how|is|are|was|were|does|did)\b/i;
+// "Work out 15 percent of 80" is asked for its answer too (2026-11-14: done once by reading a 12 already on the
+// display, it was kept as "open Calculator", to be called done every time after).
+const TELLS_BACK = /\b(?:tell|read) me\b|\blet me know\b|\bfind out\b|\b(?:work|figure|add) (?:it |that |them )?(?:out|up)\b|\b(?:calculate|compute|count|look up|convert|translate|summari[sz]e)\b|\b(?:check|see) (?:if|whether|what|when|who|how)\b|\b(?:and|then),? (?:what|what's|whats|who|when|where|which|whether|if|how|is|are|was|were|does|did)\b/i;
 
 /** Words that lean on what came before: what they meant was the conversation's to work out, and changes with it. */
 const LEANS_ON = new Set([

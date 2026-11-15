@@ -41,6 +41,9 @@ const SCROLL_PIXELS = 400;
 const OBSERVE_RETRY_MS = 400;
 /** How long an app brought forward may take to be in front: 20 looks, 100 ms apart. */
 const FRONT_TRIES = 20;
+/** The processes macOS shows its own dialogs from: permission prompts, alerts, passwords, "wants to control". */
+const SYSTEM_DIALOGS = /^(?:UserNotificationCenter|SecurityAgent|CoreServicesUIAgent|universalAccessAuthWarn|coreauthd|loginwindow)$/;
+export const MACOS_ASKING = 'macOS is asking you something in a dialog of its own, and I can’t work past it: answer it, then say “keep going”.';
 /** Between the presses of a key pressed several times. */
 const KEY_GAP_MS = 60;
 /** Typed text is looked for in its field this often, this many times: a web page's value catches up a frame or two late. */
@@ -117,7 +120,21 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     }
     return false;
   }
-  const notInFront = (snapshot) => ({ ok: false, detail: `${snapshot.app?.name || 'The app'} isn’t in front any more, so nothing was typed or clicked.` });
+  /**
+   * macOS's own dialog, when one is over everything: a permission being asked for, a password, an alert. The app a
+   * task works on can't be had in front while it's up, and what it asks is the user's to answer, never Jester's.
+   * (2026-11-14: a picture of the window brought up "…is requesting to bypass the system private window picker",
+   * and for a minute every step after it failed as "Calculator isn't in front any more".)
+   * @returns {Promise<string>} its owner's name, or ''
+   */
+  async function systemDialog() {
+    if (platform !== 'darwin') return '';
+    const name = String((await driver.call('frontmost').catch(() => null))?.app?.name || '');
+    return SYSTEM_DIALOGS.test(name) ? name : '';
+  }
+
+  // `front: false`: it failed for want of the app in front, which is when macOS's own dialog may be why (execute).
+  const notInFront = (snapshot) => ({ ok: false, front: false, detail: `${snapshot.app?.name || 'The app'} isn’t in front any more, so nothing was typed or clicked.` });
   /** The screen it was chosen from is gone, or the control is: the loop reads it again. */
   const changed = (err) => STALE.test(err?.message) || GONE.test(err?.message);
 
@@ -548,7 +565,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       case 'open_app': {
         const opened = await openApp(action.name);
         if (opened.ok) await wait(OPENED_MS);
-        return { ok: opened.ok, detail: opened.text };
+        return { ok: opened.ok, detail: opened.text, ...(opened.ok ? {} : { front: false }) };
       }
       case 'open_url':
         await openUrl(action.url);
@@ -621,7 +638,10 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
      * controls a picture numbers when they can't all be.
      */
     async execute(action, snapshot, { verify = false, signal, patient = false, goal = '' } = {}) {
-      const result = await perform(action, snapshot, signal, goal);
+      const { front, ...result } = await perform(action, snapshot, signal, goal);
+      // The app wouldn't come to the front, and macOS's own dialog is what's there: that's why, and it ends the
+      // task (`asking`), since trying again can't help until the user has answered it.
+      if (!result.ok && front === false && !signal?.aborted && (await systemDialog())) return { ok: false, asking: true, detail: MACOS_ASKING };
       if (!result.ok || !VISIBLE.has(action.action)) return result;
       await wait(result.busy ? BUSY_MS : SETTLE_MS);
       if (!verify || signal?.aborted) return result;

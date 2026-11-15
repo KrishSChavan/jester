@@ -7,7 +7,7 @@
  * macOS gives Jester the screen only with Screen Recording allowed, and asking
  * without it would put up the system's prompt in the middle of a task, so
  * nothing is captured until it's allowed. Jester's own windows over the
- * window (the overlays, the stop button) step aside for the moment it takes.
+ * window (the overlays, the stop button, his own window) are seen through for the moment it takes.
  *
  * Electron's parts come in as deps, so this runs in tests without it.
  */
@@ -67,16 +67,21 @@ export function createWindowShot({ capturer, screen, images, allowed, ownWindows
     if (!region) return { ok: false, detail: 'The window is off the screen.' };
     const pixels = { width: Math.round(display.size.width * display.scaleFactor), height: Math.round(display.size.height * display.scaleFactor) };
 
-    const inTheWay = ownWindows().filter((win) => !win.isDestroyed() && win.isVisible() && meets(win.getBounds(), region));
+    // Jester's own windows over it are seen through for the picture, not hidden: hidden and shown again, one comes
+    // back in front of the app being worked on (2026-11-14: his window over Calculator, and every step after the
+    // picture failed as "Calculator isn't in front any more"). Each keeps its place among the windows.
+    const inTheWay = ownWindows()
+      .filter((win) => !win.isDestroyed() && win.isVisible() && meets(win.getBounds(), region))
+      .map((win) => ({ win, opacity: win.getOpacity() }));
     let sources;
     try {
-      for (const win of inTheWay) win.hide();
+      for (const { win } of inTheWay) win.setOpacity(0);
       if (inTheWay.length) await wait(HIDE_MS);
       sources = await capturer.getSources({ types: ['screen'], thumbnailSize: pixels, fetchWindowIcons: false });
     } catch (err) {
       return { ok: false, detail: `The picture couldn’t be taken: ${String(err?.message || err).slice(0, 120)}` };
     } finally {
-      for (const win of inTheWay) if (!win.isDestroyed()) win.showInactive();
+      for (const { win, opacity } of inTheWay) if (!win.isDestroyed()) win.setOpacity(opacity);
     }
     const source = sources.find((item) => String(item.display_id) === String(display.id)) || (sources.length === 1 ? sources[0] : null);
     const capture = source?.thumbnail;

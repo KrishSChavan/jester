@@ -604,6 +604,25 @@ test('what Chrome is handed: the user’s words, and what the conversation took 
   ]);
 });
 
+test('an app’s name with more to do after it isn’t the app alone, and “write down” writes what follows', async () => {
+  const { parseSequence } = await import('../desktop/src/main/voice-commands.js');
+  const apps = ['TextEdit', 'Notes', 'Spotify', 'Google Chrome', 'Visual Studio Code'];
+  const parse = (text) => parseSequence(text, { apps, platform: 'darwin' });
+  // 2026-11-14: TextEdit was opened, "make a new document" dropped, and it was said to be done.
+  assert.deepEqual(parse('open TextEdit, make a new document and type hello from Jester'), [{ kind: 'unknown', text: 'open TextEdit, make a new document and type hello from Jester' }]);
+  assert.deepEqual(parse('open Notes about dinner'), [{ kind: 'unknown', text: 'open Notes about dinner' }]);
+  // The name, said politely or in part, is still the app.
+  assert.deepEqual(parse('open Notes please'), [{ kind: 'open', app: 'Notes', heard: 'notes' }]);
+  assert.deepEqual(parse('open text edit'), [{ kind: 'open', app: 'TextEdit', heard: 'text edit' }]);
+  assert.deepEqual(parse('open visual studio'), [{ kind: 'open', app: 'Visual Studio Code', heard: 'visual studio' }]);
+  assert.deepEqual(parse('open chrome'), [{ kind: 'open', app: 'Google Chrome', heard: 'chrome' }]);
+  // "Down" is how it's said, not what's written; alone after "write", it's the word.
+  assert.deepEqual(parse('open Notes and write down milk and eggs'), [{ kind: 'open', app: 'Notes', heard: 'notes' }, { kind: 'type', text: 'milk and eggs' }]);
+  assert.deepEqual(parse('write out the plan'), [{ kind: 'type', text: 'the plan' }]);
+  assert.deepEqual(parse('write down'), [{ kind: 'type', text: 'down' }]);
+  assert.deepEqual(parse('type down the hall'), [{ kind: 'type', text: 'down the hall' }], '"type" types every word');
+});
+
 test('“keep going” is the task that just failed, again, with no model in between: in Chrome with the words, so a paused task picks up', async () => {
   // 2026-11-13: the words went to the talking model, which made "open Calendar and list assignments…" of them, and
   // the time after, the assignments themselves.

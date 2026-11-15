@@ -92,7 +92,7 @@ function shooter({ allowed = true, windows = [] } = {}) {
     capturer: {
       getSources: async (options) => {
         log.push(['capture', options.types, options.thumbnailSize]);
-        log.push(['hidden', windows.filter((win) => !win.shown).length]);
+        log.push(['hidden', windows.filter((win) => win.opacity === 0).length]);
         return [
           { display_id: '1', thumbnail: fakeImage(3024, 1964, log) },
           { display_id: '2', thumbnail: fakeImage(1920, 1080, log) }
@@ -112,7 +112,8 @@ function shooter({ allowed = true, windows = [] } = {}) {
   });
   return { shoot, log };
 }
-const ownWindow = (bounds) => ({ shown: true, bounds, isDestroyed: () => false, isVisible() { return this.shown; }, getBounds() { return this.bounds; }, hide() { this.shown = false; }, showInactive() { this.shown = true; } });
+/** One of Jester's windows. Hidden and shown again it would come back in front of the app being worked on, so neither may be called. */
+const ownWindow = (bounds, opacity = 1) => ({ opacity, order: [], bounds, isDestroyed: () => false, isVisible: () => true, getBounds() { return this.bounds; }, getOpacity() { return this.opacity; }, setOpacity(value) { this.opacity = value; }, hide() { this.order.push('hide'); }, show() { this.order.push('show'); }, showInactive() { this.order.push('showInactive'); } });
 
 const SPOTIFY = {
   snapshot: 7,
@@ -125,15 +126,18 @@ const SPOTIFY = {
   ]
 };
 
-test('a picture of the window: Jester’s windows over it step aside, the display is cut to it, no wider than a model needs', async () => {
-  const pill = ownWindow({ x: 600, y: 900, width: 300, height: 60 });
+test('a picture of the window: Jester’s windows over it are seen through and keep their place, the display is cut to it, no wider than a model needs', async () => {
+  const pill = ownWindow({ x: 600, y: 900, width: 300, height: 60 }, 0.9);
   const elsewhere = ownWindow({ x: 3000, y: 0, width: 300, height: 60 });
   const { shoot, log } = shooter({ windows: [pill, elsewhere] });
   const shot = await shoot(SPOTIFY, { goal: 'play' });
   assert.equal(shot.ok, true);
   assert.deepEqual(shot.image, { mimeType: 'image/jpeg', data: Buffer.from('jpeg bytes').toString('base64') });
-  assert.deepEqual(log.slice(0, 2), [['capture', ['screen'], { width: 3024, height: 1964 }], ['hidden', 1]], 'only the window over it was hidden');
-  assert.ok(pill.shown, 'and it came back');
+  assert.deepEqual(log.slice(0, 2), [['capture', ['screen'], { width: 3024, height: 1964 }], ['hidden', 1]], 'only the window over it was seen through');
+  assert.equal(pill.opacity, 0.9, 'and it came back as it was');
+  assert.equal(elsewhere.opacity, 1);
+  // 2026-11-14: hidden and shown again, his window came back in front of Calculator, and every step after failed.
+  assert.deepEqual([...pill.order, ...elsewhere.order], [], 'never hidden or shown: each keeps its place among the windows');
   assert.deepEqual(log[2], ['crop', { x: 0, y: 0, width: 3024, height: 1964 }]);
   assert.deepEqual(log[3], ['resize', SHOT_MAX_WIDTH]);
   assert.deepEqual([shot.width, shot.height], [1280, 831]);

@@ -17,7 +17,12 @@ import { classify, describeAction, menuPath, PICTURES_PER_TASK, quoted, READ_ACT
 import { DESKTOP_SCHEMA, systemPrompt } from './prompt.js';
 import { elementById, plain, SCREEN_LIMITS, screenText } from './screen.js';
 
-export const DESKTOP_LIMITS = Object.freeze({ maxActions: 30, maxModelCalls: 16, runBudgetMs: 5 * 60 * 1000, failures: 3, invalidReplies: 2, invalidTotal: 3, idleSteps: 3, stepCalls: 6, replans: 2, pictures: PICTURES_PER_TASK });
+/**
+ * A step's calls and a run's were 6 and 16 until 2026-11-14, when "work out 15 percent of 80" in Calculator took
+ * Claude Sonnet 5.5 eight right presses (AC 8 0 × 1 5 % =) in seven calls: the step ran out with the sum done, and
+ * the task was called not done. A press a call is how careful models work a keypad, so a step gets 10 and a run 24.
+ */
+export const DESKTOP_LIMITS = Object.freeze({ maxActions: 30, maxModelCalls: 24, runBudgetMs: 5 * 60 * 1000, failures: 3, invalidReplies: 2, invalidTotal: 3, idleSteps: 3, stepCalls: 10, replans: 2, pictures: PICTURES_PER_TASK });
 /** The user's choice: ask before sensitive steps only (agent-permissions.js's "entertainment"). */
 const BOUNDARY = 'entertainment';
 /** The least of the screen a model gets, however tight its tokens-per-minute ceiling. */
@@ -307,6 +312,11 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
     result = { ok: false, detail: tidy(err?.message || err, 200) };
   }
   run.actions += 1;
+  // macOS's own dialog is in the way (host.js): the task is over until the user's answered it, and says so.
+  if (result.asking) {
+    onStep({ phase: 'acted', label, ok: false, detail: tidy(result.detail, 160) });
+    return { stop: run.end(false, result.detail, { asking: true }) };
+  }
   if (result.snapshot) run.next = result.snapshot;
   // It goes with the next model call only, then it's dropped.
   if (result.ok && result.image) {
