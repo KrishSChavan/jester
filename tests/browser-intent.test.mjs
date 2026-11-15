@@ -107,6 +107,21 @@ test('named-tab operations close every match only when asked for all; other tabs
   assert.deepEqual(choose('close all other tabs').action, { action: 'browser', op: 'close', tabIds: [2, 3] });
   assert.deepEqual(choose('mute the soup tab').action, { action: 'browser', op: 'mute', tabId: 2 });
   assert.equal(choose('close the banking tab').say, 'No open tab matches “banking”.');
+  assert.equal(choose('close the banking tab').failed, true, 'nothing to close isn’t done');
+  assert.equal(choose('close all other tabs').failed, undefined);
+});
+
+test('tabs named together are each looked for: “my YouTube and my Canvas tabs” is two', () => {
+  // 2026-11-13: looked for as one name, it matched nothing, and that was called done.
+  const tabs = [tab(1, 'Inbox', 'https://mail.google.com/', { current: true }), tab(2, 'FUNNY VIDEOS - YouTube', 'https://www.youtube.com/watch?v=1'),
+    tab(3, 'Dashboard', 'https://psu.instructure.com/'), tab(4, 'Soup recipe', 'https://a.example/soup'), tab(5, 'Cake recipe', 'https://b.example/cake')];
+  const choose = (text) => chooseBrowserAction(parseBrowserIntent(text), page('https://mail.google.com/', [], tabs));
+  assert.deepEqual(choose('close my YouTube and my instructure tabs').action, { action: 'browser', op: 'close', tabIds: [2, 3] });
+  assert.deepEqual(choose('close the YouTube, soup and cake tabs').action, { action: 'browser', op: 'close', tabIds: [2, 4, 5] });
+  const none = choose('close my YouTube and my banking tabs');
+  assert.deepEqual([none.say, none.failed], ['No open tab matches “banking”.', true], 'the one that isn’t there is named, and nothing is closed');
+  // One of the names has two tabs that aren't one site's: which is meant isn't known, so it's the model's.
+  assert.equal(choose('close the YouTube and recipe tab'), null);
 });
 
 test('search uses this site’s own box, then the web; a named site uses its search address', () => {

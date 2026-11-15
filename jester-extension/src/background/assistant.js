@@ -42,6 +42,7 @@ look: only when the page text lacks a needed control (e.g. unlabeled player icon
 command: actionId in ${COMMAND_IDS.join(',')} (with no player on this tab, it reaches the tab that is playing)
 browser: op with its fields. tabs(query?) lists open tabs and their tabIds; open(url, or urls+group?) switches to a tab already on that site, else opens a new tab; search(query) searches the web; switch(tabId); close(tabIds?); new; next; previous; reopen; window(url?); back/forward/reload/pin/unpin/mute/unmute/duplicate(tabId?); move(index,tabId?); group(tabIds,group?,color?); ungroup(tabIds); collapse/expand(group); history(query?,days?); bookmarks(query); bookmark(title?). tabId defaults to the task's tab, and the task continues on any tab it opens or switches to. A page that cannot be read (Chrome's own pages) still takes browser actions.
 finish: say (one sentence),success (boolean). Finish only after observing evidence the complete goal succeeded; otherwise success:false.
+now is today's date and the time. A date on the page before it has passed: never call it due, upcoming or "this week"; say when it was, or leave it out of what's still to come.
 previousCommands, when present, are the user's last few voice commands and how they ended, oldest first: use them only to resolve references such as "next episode", "go back", "that one" or "not that". The ORIGINAL GOAL is the current command; never redo or continue a previous command unless it asks.
 Every action object has action naming the operation. Always use current or just-retrieved element IDs. After uncertain execution, inspect before repeating. Prefer narrow retrieval if a needed target is absent; don't repeat failed operations. Memory optional: subgoal<=160 chars, facts<=6 strings of<=120 chars, constraints<=8 strings of<=180 chars. Keep verified task facts; original goal is immutable. No explanations or repeated history in the response.`;
 
@@ -379,8 +380,21 @@ const QUICK_COMMANDS = new Map([
 /** A goal that is only met once something plays: finishing it needs a playing player on the page. */
 const PLAYBACK_GOAL = /\b(?:play|watch|put on)\b|\b(?:latest|newest|recent|last|new)\s+(?:[\w’']+\s+){0,3}?(?:video|upload|episode)\b/i;
 
+/**
+ * A task, and with its result a short account of what was done (`trace`: each step tried and how it went, the
+ * reply that couldn't be used, why it stopped): for Jester Desktop's log, where a browser task used to be only how
+ * it ended ("A control is not responding", 2026-11-13, with nothing to say which control or why). Not enumerable:
+ * the result is still {ok, say, resume} to everything that reads it.
+ */
+export async function runAssistant(options) {
+  const trace = [];
+  const result = await runAssistantSteps({ ...options, trace });
+  if (result && typeof result === 'object') Object.defineProperty(result, 'trace', { value: trace, enumerable: false });
+  return result;
+}
+
 /** Local intent handling and small verified action groups avoid unnecessary model calls. */
-export async function runAssistant({
+async function runAssistantSteps({
   text,
   env,
   host,
@@ -392,8 +406,14 @@ export async function runAssistant({
   runBudgetMs = ASSISTANT_LIMITS.runBudgetMs,
   modelClient = requestModel,
   localReadinessMs = 4000,
-  delay = abortableDelay
+  delay = abortableDelay,
+  trace = []
 }) {
+  /** One line of the account: the newest forty, each cut short. No page text but a control's own name. */
+  const noted = (line) => {
+    trace.push(String(line).replace(/\s+/g, ' ').slice(0, 220));
+    if (trace.length > 40) trace.shift();
+  };
   const startedAt = performance.now();
   const timing = {
     modelCalls: 0,
@@ -445,6 +465,7 @@ export async function runAssistant({
   // `retryAt` is when the task can next make progress, for a provider cooldown or pacing wait.
   const pause = async (say, reason = 'paused', retryAt = 0) => {
     stopReason = reason;
+    noted(`paused (${reason}): ${say}`);
     await checkpoint();
     return { ok: false, say, resume: clone(state), ...(retryAt > 0 ? { retryAt } : {}) };
   };
@@ -603,6 +624,7 @@ export async function runAssistant({
       detail: `Invalid response: ${feedback} No action ran.`
     };
     recordResult(state.memory, { action: 'observe' }, lastResult);
+    noted(`reply unusable: ${feedback}`);
     return invalidReplies >= ASSISTANT_LIMITS.invalidReplies;
   };
 
@@ -702,6 +724,12 @@ export async function runAssistant({
         // A step whose own success is the request says it best: "Switched to “Inbox”."
         const said = decision.say || decision.action?.say || (episode
           ? `Playing ${intent.show}, season ${intent.season}, episode ${intent.episode}.` : lastResult?.detail || 'Done.');
+        // Decided here that it can't be done ("No open tab matches…"): the end of it, and not a success.
+        if (decision.failed) {
+          stopReason = 'local-failed';
+          await host.checkpoint?.(null);
+          return { ok: false, say: said, resume: null };
+        }
         if (state.stage + 1 >= stages.length) return finish(said);
         // The next part of the request starts afresh on the page this one reached.
         state.stage++;
@@ -756,6 +784,9 @@ export async function runAssistant({
         const promptPage = pageChars < ASSISTANT_LIMITS.pageChars ? compactObservation(rawPage, pageChars) : page;
         const prompt = JSON.stringify({
           originalGoal: rest.originalGoal,
+          // The model has no clock: asked what's due this week on 2026-11-14, it read out a dashboard's items of
+          // November 2 and 3 as due "this week".
+          now: new Date().toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' }),
           ...(rest.previousCommands ? { previousCommands: rest.previousCommands } : {}),
           memory: rest.memory,
           page: promptPage,
@@ -860,6 +891,8 @@ export async function runAssistant({
             finishChallenged = true;
             lastResult = { ok: false, detail: 'Not finished: no video is playing on this page, and the goal needs one playing. Continue toward it, or finish with success false and say why.' };
             recordResult(state.memory, { action: 'observe' }, lastResult);
+            const players = rawPage.elements.filter((entry) => entry?.role === 'video');
+            noted(`finish refused: no video playing (${players.length ? players.map((entry) => (entry.paused ? 'one paused' : entry.playing ? 'one playing' : 'one ended or not started')).join(', ') : 'no player among what was read'}); the model said ${JSON.stringify(String(actions[0].say || '').slice(0, 100))}`);
             console.info('[jester] finish challenged', { step: state.steps + 1 });
             continue;
           }
@@ -887,6 +920,7 @@ export async function runAssistant({
         repeats = signature === previousSignature ? repeats + 1 : 1;
         previousSignature = signature;
         if (repeats >= 3) {
+          noted(`the same step a third time on a page that hadn’t changed: ${actionLabel(action, [...(readPage?.elements || []), ...(rawPage?.elements || [])])}`);
           return pause('A control is not responding. Adjust the page and say “keep going”.', 'unresponsive-control');
         }
         state.pendingAction = action;
@@ -961,6 +995,7 @@ export async function runAssistant({
           typedShowField = null;
         }
         recordResult(state.memory, action, { ...lastResult, ok: confirmed });
+        noted(`${confirmed ? 'did' : 'couldn’t'}${local ? ' (no model)' : ''}: ${actionLabel(action, [...(readPage?.elements || []), ...(rawPage?.elements || [])])}${lastResult.detail ? ` (${lastResult.detail})` : ''}`);
         state.failures = confirmed ? 0 : state.failures + 1;
         const openedBefore = JSON.stringify(state.localProgress?.opened ?? null);
         if (local && confirmed && proposedProgress) {

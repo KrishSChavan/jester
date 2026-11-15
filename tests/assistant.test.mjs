@@ -147,6 +147,23 @@ test('repeated no-op actions stop before the third identical attempt', async () 
   const result = await runAssistant({ text: goal, env, ...h });
   assert.equal(actions, 2);
   assert.match(result.say, /not responding/);
+  // What was done comes with how it ended, for Jester Desktop's log: each step, the step that was one too many, and
+  // why it stopped. Not among the result's own fields, which are what they were.
+  assert.deepEqual(Object.keys(result).sort(), ['ok', 'resume', 'say']);
+  assert.equal(result.trace.length, 4);
+  assert.match(result.trace[0], /^did: .*\(Dispatched\.\)$/);
+  assert.match(result.trace[1], /^did: /);
+  assert.match(result.trace[2], /^the same step a third time on a page that hadn’t changed: /);
+  assert.match(result.trace[3], /^paused \(unresponsive-control\): A control is not responding\./);
+});
+
+test('every step’s prompt carries the date and time, and the model is told a date gone by is over', async () => {
+  // 2026-11-14: a dashboard's items of November 2 and 3 were read out as due "this week".
+  const h = harness([{ action: { action: 'finish', say: 'Nothing is due.', success: true } }]);
+  await runAssistant({ text: 'tell me what is due this week', env, ...h });
+  assert.match(h.prompts[0].now, /^\w+day, \w+ \d{1,2}, \d{4} at \d{1,2}:\d\d.[AP]M$/);
+  const { SYSTEM_PROMPT } = await import('../jester-extension/src/background/assistant.js');
+  assert.match(SYSTEM_PROMPT, /now is today's date and the time\. A date on the page before it has passed: never call it due, upcoming or "this week"/);
 });
 
 test('cancellation after planning or before execution prevents mutation', async () => {

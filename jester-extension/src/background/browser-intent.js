@@ -211,9 +211,20 @@ export function chooseBrowserAction(intent, page, progress = {}) {
   if (intent.kind === 'tabs') {
     if (!tabs) return null;
     const window = tabs.filter((tab) => !tab.otherWindow);
-    const named = intent.others ? window.filter((tab) => !tab.current) : tabsNamed(tabs, intent.name);
-    if (!named.length) return done(intent.others ? 'There are no other tabs in this window.' : `No open tab matches “${intent.name}”.`);
-    if (!intent.all && !intent.others && named.length > 1) return null;
+    // "My YouTube and my Canvas tabs" names two: each is looked for by itself (2026-11-13: looked for as one name,
+    // "YouTube and my canvas", it matched nothing, and that was called done).
+    const names = intent.others ? [] : String(intent.name).split(/\s*,\s*(?:and\s+)?|\s+(?:and|&)\s+/i).map((part) => part.replace(/^(?:my|the)\s+/i, '').trim()).filter(Boolean);
+    const several = names.length > 1;
+    const perName = names.map((name) => ({ name, tabs: tabsNamed(tabs, name) }));
+    const missing = perName.find((entry) => !entry.tabs.length);
+    // Nothing to do it to isn't done: said as it is, and told as a failure.
+    if (!intent.others && missing) return { ...done(`No open tab matches “${several ? missing.name : intent.name}”.`), failed: true };
+    const named = intent.others ? window.filter((tab) => !tab.current) : [...new Map(perName.flatMap((entry) => entry.tabs).map((tab) => [tab.tabId, tab])).values()];
+    if (!named.length) return done('There are no other tabs in this window.');
+    // One name with more than one tab, and not asked for all of them: which one isn't known. Several names are each
+    // meant, and each may have only the one.
+    if (!intent.all && !intent.others && !several && named.length > 1) return null;
+    if (several && perName.some((entry) => entry.tabs.length > 1 && !siteNamed(entry.name)) && !intent.all) return null;
     const ids = named.map((tab) => tab.tabId).slice(0, 40);
     if (intent.op === 'close') return propose({ action: 'browser', op: 'close', tabIds: ids }, { done: true });
     if (ids.length > 1) return null; // One tab at a time for the rest; the model can loop.

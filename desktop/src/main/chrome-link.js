@@ -13,7 +13,7 @@
  *
  * Messages are JSON objects with a `type`:
  *   from the extension: hello {version, settings}, settings {settings}, pill {voice},
- *     ask {id, label}, done {id, ok, say}, reply {id, result}, voice {}
+ *     ask {id, label}, done {id, ok, say, trace?}, reply {id, result}, voice {}
  *   to it: welcome {version}, task {id, text, meant?}, answer {id, approved}, cancel {},
  *     request {id, op, ...}, op being knows {text}, aim {x, y, radius} or act {action, source, gesture}
  */
@@ -101,7 +101,11 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
             () => send({ type: 'answer', id: message.id, approved: false })
           );
         case 'done':
-          if (task?.id === message.id) finishTask({ ok: message.ok === true, text: String(message.say || '') });
+          if (task?.id === message.id) {
+            // What the extension did, step by step (0.2.3 on): the log's only account of a browser task.
+            for (const line of Array.isArray(message.trace) ? message.trace.slice(-40) : []) log('chrome', String(line).slice(0, 220));
+            finishTask({ ok: message.ok === true, text: String(message.say || '') });
+          }
           return undefined;
         case 'reply':
           return settle(String(message.id), message.result ?? null);

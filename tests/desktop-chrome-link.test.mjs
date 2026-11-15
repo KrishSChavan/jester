@@ -87,6 +87,27 @@ test('a task the extension carries out: its steps and question on the app’s pi
   assert.equal(link.running, false);
 });
 
+test('what the extension did, step by step, comes back with how it ended, for the app’s log', async () => {
+  // 2026-11-13: "A control is not responding", with nothing anywhere to say which control or why.
+  const logged = [];
+  const { link, sent } = appSide({ log: (...parts) => logged.push(parts.join(' ')) });
+  link.connected('o', { browser: 1 });
+  link.message(hello);
+  const done = link.task('open YouTube and play a funny video');
+  link.message({ type: 'done', id: sent.at(-1).id, ok: false, say: 'A control is not responding.', trace: ['did: Open youtube.com', 'did: Click “FUNNY VIDEOS”', 'finish refused: no video playing (one paused); the model said "Playing it."', 'x'.repeat(500), 7] });
+  assert.deepEqual(await done, { ok: false, text: 'A control is not responding.' });
+  const lines = logged.filter((line) => line.startsWith('chrome ') && !line.startsWith('chrome link'));
+  assert.deepEqual(lines.slice(0, 3), ['chrome did: Open youtube.com', 'chrome did: Click “FUNNY VIDEOS”', 'chrome finish refused: no video playing (one paused); the model said "Playing it."']);
+  assert.equal(lines[3].length, 'chrome '.length + 220, 'a line is cut short');
+  assert.equal(lines[4], 'chrome 7', 'and whatever it is, it’s written as words');
+  // An extension from before this sends none: nothing more is logged, and the task ends as it did.
+  const older = link.task('close the tab');
+  const before = logged.length;
+  link.message({ type: 'done', id: sent.at(-1).id, ok: true, say: 'Closed.' });
+  assert.deepEqual(await older, { ok: true, text: 'Closed.' });
+  assert.equal(logged.length, before);
+});
+
 test('a task goes with what the conversation took the words to mean, when there’s that', async () => {
   const { link, sent } = appSide();
   link.connected('o', { browser: 1 });
@@ -200,7 +221,7 @@ function extensionSide({ granted = true, bound = true, stored = {}, tabs = [] } 
     api: () => api,
     version: '0.2.0',
     settings: async () => ({ enabled: true, bindings: { Victory: { action: 'SLEEP' } }, seekSeconds: 10 }),
-    task: async (id, text, meant) => (tasks.push(text), meant && understood.push([text, meant]), { ok: true, say: `Did ${text}` }),
+    task: async (id, text, meant) => (tasks.push(text), meant && understood.push([text, meant]), { ok: true, say: `Did ${text}`, ...(text === 'traced' ? { trace: ['did: one thing', 'y'.repeat(400)] } : {}) }),
     cancel: () => tasks.push('cancelled'),
     request: async (op, args) => (op === 'knows' ? args.text.includes('canvas') : null),
     onChange: (state) => states.push(state)
@@ -222,6 +243,10 @@ test('the extension links once the app welcomes it, does what the app hands it, 
   port.receive({ type: 'task', id: '3', text: 'open my canvas' });
   await pause();
   assert.deepEqual(port.posted.at(-1), { type: 'done', id: '3', ok: true, say: 'Did open my canvas' });
+  // With what was done, when the task has it to give: each line cut short.
+  port.receive({ type: 'task', id: '4', text: 'traced' });
+  await pause();
+  assert.deepEqual(port.posted.at(-1), { type: 'done', id: '4', ok: true, say: 'Did traced', trace: ['did: one thing', 'y'.repeat(220)] });
   port.receive({ type: 'task', id: '5', text: 'Try now', meant: 'open my canvas bookmark' });
   await pause();
   assert.deepEqual(side.meant.at(-1), ['Try now', 'open my canvas bookmark']);
@@ -235,7 +260,7 @@ test('the extension links once the app welcomes it, does what the app hands it, 
   port.receive({ type: 'answer', id: question.id, approved: true });
   assert.equal(await asked, true);
   port.receive({ type: 'cancel' });
-  assert.deepEqual(side.tasks, ['open my canvas', 'Try now', 'cancelled']);
+  assert.deepEqual(side.tasks, ['open my canvas', 'traced', 'Try now', 'cancelled']);
   assert.deepEqual(desktopBindings({ bindings: 1, seekSeconds: 10, windowedBindingsEnabled: false }), { bindings: 1, windowedBindingsEnabled: false });
 });
 

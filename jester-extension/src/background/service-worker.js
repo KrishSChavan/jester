@@ -1798,7 +1798,8 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
   if (!fromDesktop) await reply(run.tabId,{phase:'answer',text:said,ok:!!result.ok});
   else releaseBadge();
   await recordAction({source:'voice',action:'ASSISTANT',label:`Voice: ${(resume?.goal || command).slice(0,70)}`,ok:!!result.ok,detail:said});
-  return {ok:!!result.ok,say:said};
+  // What was done, step by step, for Jester Desktop's log (assistant.js `trace`).
+  return {ok:!!result.ok,say:said,...(fromDesktop && Array.isArray(result.trace) ? {trace:result.trace} : {})};
 }
 
 // ---------------------------------------------------------------------------

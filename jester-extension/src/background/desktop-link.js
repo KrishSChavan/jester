@@ -90,7 +90,7 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
         return become(LINK_STATE.WAITING, String(message.detail || 'Jester Desktop isn’t running.'));
       case 'task': {
         const result = await task(String(message.id), String(message.text || ''), String(message.meant || '')).catch((err) => ({ ok: false, say: String(err?.message || err) }));
-        return void post({ type: 'done', id: message.id, ok: !!result?.ok, say: String(result?.say || '') });
+        return void post({ type: 'done', id: message.id, ok: !!result?.ok, say: String(result?.say || ''), ...(Array.isArray(result?.trace) ? { trace: result.trace.slice(-40).map((line) => String(line).slice(0, 220)) } : {}) });
       }
       case 'cancel':
         return cancel();

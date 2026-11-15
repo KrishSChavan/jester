@@ -88,7 +88,10 @@ While they're linked:
 - A command you give the app that is about your browser (your tabs, bookmarks or
   pages) is passed to the extension, which carries it out as if you had said it in
   Chrome, with the AI provider you chose in Chrome's Settings. Its progress, any
-  question it needs you to answer, and its result go back to the app.
+  question it needs you to answer, and its result go back to the app, with a short
+  list of the steps it took (such as "Clicked “Videos”": the names of the controls
+  it used, not the page's contents), which the app can keep in its own log on your
+  computer to tell why a task stopped.
 - When the app's cursor clicks in Chrome, the extension tells the app where the
   nearest link or button is on the page in front: its position, not its text.
 

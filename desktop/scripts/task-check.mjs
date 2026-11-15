@@ -178,7 +178,7 @@ if (process.versions.electron && process.env.JESTER_TASK_SEAL) {
     }
     const log = logText().slice(before.log);
     // With --screens, the screens the model was shown come too (the app's JESTER_LOG_SCREENS): the user's own content.
-    const trace = log.split('\n').filter((line) => /\[jester\] (?:assistant|voice:|jester:|talking|actions|learned|chrome link)/.test(line) || (SCREENS && /^\s*(?:\[\d+\]|#|-|\w+:)/.test(line) && !line.startsWith('['))).map((line) => line.replace('[jester] ', ''));
+    const trace = log.split('\n').filter((line) => /\[jester\] (?:assistant|voice:|jester:|talking|actions|learned|chrome\b)/.test(line) || (SCREENS && /^\s*(?:\[\d+\]|#|-|\w+:)/.test(line) && !line.startsWith('['))).map((line) => line.replace('[jester] ', ''));
     const outcome = /assistant: .* → (done|not done|cancelled)/.exec(log)?.[1] || (/voice: Chrome (did it|didn’t|stopped)/.exec(log)?.[1] ?? '');
     return { task, lines, seconds: Math.round((Date.now() - started) / 100) / 10, timedOut: !over, outcome, trace };
   }

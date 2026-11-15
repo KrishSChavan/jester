@@ -123,6 +123,13 @@ try {
   const result = await runAssistant({ text: goal, env: { provider: 'groq', model: 'live-check', key: 'not-a-key' },
     modelClient: async (request) => {
       modelCalls++;
+      // A model of the caller's (globalThis.__jesterLiveModel, set by whatever started this): a goal with no way
+      // through it worked out here, like "play a funny video", is the model's, and this follows it step by step.
+      if (typeof globalThis.__jesterLiveModel === 'function') {
+        const reply = await globalThis.__jesterLiveModel(request);
+        log(`model step ${modelCalls}: ${JSON.stringify(reply.json).slice(0, 300)}`);
+        return reply;
+      }
       log('Model requested on this page:\n' + JSON.parse(request.prompt).page.text);
       throw new Error('The live check expects no model request');
     },
@@ -140,7 +147,8 @@ try {
       },
       async execute(action) {
         let outcome;
-        if (action.action === 'navigate') { await open(action.url); outcome = { ok: true, detail: 'Opened the page.' }; }
+        if (action.action === 'navigate' || (action.action === 'browser' && action.op === 'open' && action.url)) { await open(action.url); outcome = { ok: true, detail: 'Opened the page.' }; }
+        else if (action.action === 'browser' && action.op === 'search') { await open(`https://www.google.com/search?q=${encodeURIComponent(action.query || '')}`); outcome = { ok: true, detail: 'Searched the web.' }; }
         else if (action.action === 'command') outcome = await evaluate(`(async () => { const v = document.querySelector('video'); await v?.play().catch(() => {}); return { ok: !!v && !v.paused }; })()`);
         else if (['click', 'type', 'press_key'].includes(action.action)) {
           outcome = await real(action);
@@ -154,8 +162,9 @@ try {
     } });
   const final = await evaluate(`({ url: location.href, playing: !!document.querySelector('video') && !document.querySelector('video').paused })`);
   log(JSON.stringify({ ok: result.ok, say: result.say, modelCalls, ...final }));
+  for (const line of result.trace || []) log(`trace: ${line}`);
   assert.equal(result.ok, true, result.say);
-  assert.equal(modelCalls, 0);
+  if (typeof globalThis.__jesterLiveModel !== 'function') assert.equal(modelCalls, 0);
   assert.equal(final.playing, true);
 } finally {
   socket?.close();

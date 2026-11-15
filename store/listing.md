@@ -205,6 +205,13 @@ requests reach Chrome with what the conversation meant, so "try again" works;
 "open my … bookmark" opens it with no AI model; and a request from the app works
 when you're typing to the app, or when Chrome has no window open.
 
+**What's new in 0.2.3**: Jester knows today's date when it reads a page, so
+something dated two weeks ago is no longer read out as due "this week". "Close
+my YouTube and my Canvas tabs" closes both, and when no tab matches, Jester says
+so and no longer calls it done. With Claude, the system prompt is cached, so
+each step costs less. Linked to Jester Desktop, what it did step by step goes
+into the app's own log on your computer, to tell why a task stopped.
+
 Tick all three certifications. Each is true: data goes only to the AI provider
 the user configures, solely to carry out their commands. It is never sold,
 never used for anything else, and never used for credit or lending.
