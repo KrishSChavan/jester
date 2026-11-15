@@ -57,6 +57,46 @@ export function likeness(a, b) {
   return dot / (Math.sqrt(sizeA * sizeB) || 1);
 }
 
+/**
+ * Learning how the user sounds from use (2026-11-14). The voiceprint is five lines read once, close to the mic;
+ * said from across the room, about half of what they say scores under MATCH (dev.log, 2026-11-14: 36 heard as
+ * theirs, 38 as maybe), so it needs his name again mid-conversation. A voice heard as theirs in a turn he took is
+ * kept as one more reference, and a voice scores as the best of them.
+ *
+ * So that the references can't wander off to someone else, one counts only for a voice the enrolled voiceprint
+ * already half-knows (LEARN_GATE), and only such a voice is ever kept. On ten synthetic voices in a simulated room
+ * (reverb, 20 dB of noise), the same voice was heard as itself 46% of the time against the voiceprint alone and
+ * 76% with what it learned; other voices 0% and 2%, all of those from pairs that pass for each other read up close
+ * too. Farther off than that (scores around 0.25) nothing helps: that's for push-to-talk.
+ */
+export const LEARN_GATE = 0.4;
+/** The newest this many are kept: the room and the mic of last week, not of last year. */
+export const LEARNED_MOST = 8;
+/** Long enough to be worth keeping as how they sound. */
+export const LEARN_SECONDS = 1.5;
+/** As like one already kept as this, and it adds nothing. */
+const SAME = 0.8;
+
+/**
+ * How like the user a voice is: by the enrolled voiceprint, or, for a voice that half-knows, by the best of what's
+ * been learned too.
+ * @returns {{score:number, enrolled:number}}  score: what's judged; enrolled: the voiceprint's own word
+ */
+export function scored(voice, print, learned = []) {
+  const enrolled = likeness(voice, print);
+  if (enrolled < LEARN_GATE || !learned?.length) return { score: enrolled, enrolled };
+  return { score: Math.max(enrolled, ...learned.map((known) => likeness(voice, known))), enrolled };
+}
+
+/** Whether a voice heard as the user's is one more way they sound: theirs for sure, long enough, and not already kept. */
+export function worthLearning(voice, { score, enrolled, seconds }, learned = []) {
+  if (!(seconds >= LEARN_SECONDS) || !(score >= MATCH) || !(enrolled >= LEARN_GATE) || enrolled >= SAME) return false;
+  return learned.every((known) => likeness(voice, known) < SAME);
+}
+
+/** What's learned with one more, the oldest let go past the most kept. */
+export const withLearned = (learned, voice) => [...(Array.isArray(learned) ? learned : []), Array.from(voice)].slice(-LEARNED_MOST);
+
 /** Whether this is the user. Short clips are given a lower bar. */
 export const sounds = (score, seconds) => score >= (seconds < SHORT_SECONDS ? SHORT_MATCH : MATCH);
 

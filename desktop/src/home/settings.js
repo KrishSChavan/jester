@@ -236,6 +236,7 @@ function renderVoice() {
 /** Pictures of the window for the model: on unless turned off here, and on a Mac only with Screen Recording too. */
 function renderPictures() {
   $('agentScreenshots').checked = settings.agentScreenshots !== false;
+  $('keepUnsureSpeech').checked = settings.keepUnsureSpeech === true;
   const recording = (desktop?.permissions || []).find((item) => item.id === 'screen');
   $('pictures-hint').textContent = `When a window’s words aren’t enough, the assistant may send a model that reads pictures one of that window: up to three a task, never with a password field showing.${recording && !recording.granted ? ' Needs Screen Recording, under Permissions.' : ''}`;
 }
@@ -911,6 +912,7 @@ $('voiceEnabled').addEventListener('change', (event) => save({ voiceEnabled: eve
 $('speechModel').addEventListener('change', (event) => save({ speechModel: event.target.value }));
 $('continuousAssistant').addEventListener('change', (event) => save({ continuousAssistant: event.target.checked }));
 $('agentScreenshots').addEventListener('change', (event) => save({ agentScreenshots: event.target.checked }));
+$('keepUnsureSpeech').addEventListener('change', (event) => save({ keepUnsureSpeech: event.target.checked }));
 $('memoryConversations').addEventListener('change', (event) => save({ memoryConversations: event.target.checked }));
 for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], ['vault-open', 'open'], ['vault-privacy', 'privacy'], ['vault-reindex', 'reindex']]) {
   $(id).addEventListener('click', () => vaultOp(op));

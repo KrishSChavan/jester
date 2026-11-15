@@ -937,6 +937,7 @@ const FAKE_BRIDGE = `
       say('bluetooth', { state: 'on' });
       say('nearby', { count: 1 });
       say('motion', { yaw: 10, pitch: 0, ms: 20, steering: true, click: false, typing: false });
+      if (script === 'talk') say('motion', { yaw: 0, pitch: 0, ms: 20, steering: true, click: false, talk: true, typing: false });
       if (script === 'vanish') setTimeout(() => process.exit(1), 50);
     }
     if (message.cmd === 'pair') say('code', { code: '012345' });
@@ -994,6 +995,18 @@ test('turned on, it starts the helper with the key, and steers once a frame is p
   assert.equal(r.watch.state.connected, true);
   assert.equal(r.watch.state.steering, true);
   assert.equal(r.reports[0].yaw, 10);
+});
+
+test('a tap of the watch’s Talk button comes through, for the mic to open with no need of his name', async (t) => {
+  const r = watchRig(t, { key: 'a2V5', env: 'talk' });
+  r.watch.setEnabled(true);
+  await r.until(() => r.reports.length >= 2);
+  assert.equal(r.reports[0].talk, undefined, 'a frame with no tap says nothing of it');
+  assert.equal(r.reports[1].talk, true);
+  // main.js opens (or closes) the mic for it, before anything about steering: asleep or without Accessibility,
+  // toggleVoice says why it can't.
+  const main = fs.readFileSync(new URL('../desktop/src/main/main.js', import.meta.url), 'utf8');
+  assert.match(main, /function onWatchReport\(report\) \{\n(?:\s*\/\/[^\n]*\n)*\s*if \(report\.talk\) \{\n\s*log\('watch: talk'\);\n\s*toggleVoice\(\);/);
 });
 
 test('turned off, the helper stops and steering is let go at once', async (t) => {

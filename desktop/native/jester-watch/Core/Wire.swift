@@ -183,6 +183,8 @@ struct Report: Equatable {
     var held = false
     /// That press is all fingers: a hold carries the window, not what's under the cursor.
     var whole = false
+    /// The Talk button was tapped since the last frame: Jester opens the mic for a command, or closes it.
+    var talk = false
 }
 
 /// `[kind, counter×4, yaw×2, pitch×2, ms, flags, clicks, tag×8]`: exactly one frame.
@@ -218,12 +220,20 @@ struct WatchSession {
         clicks &+= 1
     }
 
+    /// Sent with every frame as one bit that turns over at each tap of Talk: like `clicks`, a tap survives a lost
+    /// frame and can't happen twice. Two taps inside one lost frame cancel out, as they would have anyway.
+    private(set) var talks = false
+
+    mutating func talk() {
+        talks.toggle()
+    }
+
     mutating func frame(yaw: Int16, pitch: Int16, milliseconds: UInt8, steering: Bool, held: Bool = false, whole: Bool = false) -> Data {
         counter += 1
         let c = counter
         var bytes: [UInt8] = [Kind.motion.rawValue, UInt8(c & 0xff), UInt8(c >> 8 & 0xff), UInt8(c >> 16 & 0xff), UInt8(c >> 24)]
         bytes += int16(yaw) + int16(pitch)
-        bytes += [milliseconds, (steering ? 1 : 0) | (held ? 2 : 0) | (whole ? 4 : 0), clicks]
+        bytes += [milliseconds, (steering ? 1 : 0) | (held ? 2 : 0) | (whole ? 4 : 0) | (talks ? 8 : 0), clicks]
         let body = Data(bytes)
         return body + sign(key, Layout.label, challenge + body, length: Layout.total - Layout.signed)
     }
@@ -235,6 +245,8 @@ struct MacSession {
     private let challenge = randomBytes(16)
     private var counter: UInt32 = 0
     private var clicks: UInt8 = 0
+    /// The Talk bit as last seen; nil until a frame has come, so the first one's bit is where it starts, not a tap.
+    private var talks: Bool?
 
     init(key: SymmetricKey?) {
         self.key = key
@@ -254,6 +266,9 @@ struct MacSession {
         counter = sent
         let click = bytes[11] != clicks
         clicks = bytes[11]
-        return Report(yaw: int16(bytes[5], bytes[6]), pitch: int16(bytes[7], bytes[8]), milliseconds: bytes[9], steering: bytes[10] & 1 != 0, click: click, held: bytes[10] & 2 != 0, whole: bytes[10] & 4 != 0)
+        let bit = bytes[10] & 8 != 0
+        let talk = talks != nil && bit != talks
+        talks = bit
+        return Report(yaw: int16(bytes[5], bytes[6]), pitch: int16(bytes[7], bytes[8]), milliseconds: bytes[9], steering: bytes[10] & 1 != 0, click: click, held: bytes[10] & 2 != 0, whole: bytes[10] & 4 != 0, talk: talk)
     }
 }

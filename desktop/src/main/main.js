@@ -75,7 +75,7 @@ import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault
 import { createVaultIndex } from './vault-index.js';
 import { createVaultMemory, secretIn } from './vault-memory.js';
 import { createVoicePage } from './voice-page.js';
-import { averageVoice, TEACHING_LINES, TEACHING_SECONDS } from './voiceprint.js';
+import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
 import { closeSafely, createEngineWindow, homeWindow, noteHomeScreen, reopenHome, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
@@ -211,6 +211,8 @@ const away = new Set();
 let puterConnected = false;
 /** The user's voice, once taught. */
 let voiceprint = null;
+/** Other ways the user's been heard to sound, learned from use (voiceprint.js). */
+let voiceLearned = [];
 /** Teaching him a voice: the takes so far, and what ends it. */
 let teaching = null;
 /** Why Puter's voice isn't being used, when it's connected. */
@@ -407,10 +409,13 @@ async function refresh() {
   speech?.setModel(settings.speechModel);
   speech?.setEnabled(settings.enabled && settings.voiceEnabled);
   watch?.setEnabled(settings.enabled && !!settings.watchEnabled);
-  const { puterToken, voiceprint: print } = await storage.local.get(['puterToken', 'voiceprint']);
+  const { puterToken, voiceprint: print, voiceLearned: known } = await storage.local.get(['puterToken', 'voiceprint', 'voiceLearned']);
   puterConnected = !!puterToken;
   voiceprint = print || null;
-  speech?.setVoiceprint(teaching ? null : voiceprint);
+  voiceLearned = voiceprint && Array.isArray(known) ? known : [];
+  speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned);
+  // Voices he wasn't sure of, kept for tuning only when the user's said to (Settings › Assistant and voice).
+  speech?.setKeeping(settings.keepUnsureSpeech === true ? path.join(app.getPath('userData'), 'heard') : '');
   updateListening();
   openVault();
   followLocation();
@@ -432,7 +437,7 @@ function updateListening() {
   if (on) {
     voicePage.open();
     speech.listen(
-      (text, heard) => (teaching ? tookLine(heard) : conversation.heard(text, { unsure: !!heard?.unsure })),
+      (text, heard) => (teaching ? tookLine(heard) : heardAloud(text, heard)),
       () => !teaching && conversation.woken()
     );
   } else {
@@ -440,6 +445,22 @@ function updateListening() {
     conversation.reset();
     voicePage.close();
   }
+}
+
+/**
+ * What the always-on mic heard. A voice heard as the user's, in something he took as said to him, is one more way
+ * they sound (voiceprint.js): kept, so the next thing said like that is theirs without his name.
+ */
+function heardAloud(text, heard) {
+  const turned = conversation.heard(text, { unsure: !!heard?.unsure });
+  if (turned && heard?.learn && heard.voice && voiceprint) learnVoice(heard.voice);
+}
+
+async function learnVoice(voice) {
+  voiceLearned = withLearned(voiceLearned, voice);
+  speech.setVoiceprint(teaching ? null : voiceprint, voiceLearned);
+  log('voice: learned another way you sound,', voiceLearned.length, 'kept');
+  await storage.local.set({ voiceLearned }).catch((err) => log('voice: couldn’t keep it:', err.message));
 }
 
 /** Starts teaching him the user's voice: they read each line, and what they read comes back here. */
@@ -457,7 +478,11 @@ async function stopTeaching(takes) {
   clearTimeout(teaching?.limit);
   teaching = null;
   speech.setTeaching(false);
-  if (takes) await storage.local.set({ voiceprint: averageVoice(takes) });
+  // A voice taught afresh starts with nothing learned: what was may have been someone else's.
+  if (takes) {
+    await storage.local.set({ voiceprint: averageVoice(takes) });
+    await storage.local.remove('voiceLearned');
+  }
   log(takes ? 'voice taught' : 'voice not taught');
   refresh();
 }
@@ -828,6 +853,12 @@ function canPost() {
 
 /** One report from the watch: asleep means a full stop for it too. */
 function onWatchReport(report) {
+  // The watch's Talk button: the mic opens for one command (or closes), as the ☝️ gesture has it, with no need of
+  // his name or of the voice being known: a tap on their own paired watch is them.
+  if (report.talk) {
+    log('watch: talk');
+    toggleVoice();
+  }
   const refused = !report.steering ? '' : engine.state === ENGINE.SLEEPING ? `Jester is asleep: ${wakeWords()}` : canPost() ? '' : 'Allow Accessibility in Jester’s Settings first';
   if (refused && refused !== watchRefused) overlays.toast(refused, { tone: 'warn' });
   watchRefused = refused;
@@ -1048,7 +1079,7 @@ function listenToPages() {
       case 'jester/desktop-voiceprint':
         if (message.op === 'teach') return { ok: !teachVoice(), error: voiceProblem() };
         if (message.op === 'cancel') await stopTeaching();
-        else if (message.op === 'forget') await storage.local.remove('voiceprint');
+        else if (message.op === 'forget') await storage.local.remove(['voiceprint', 'voiceLearned']);
         await refresh();
         return { ok: true };
       case 'jester/desktop-forget':

@@ -163,6 +163,30 @@ do {
     check(mac.receive(Data(forged)) == nil, "nobody can turn a press into moving your windows")
 }
 
+// A tap of Talk: one bit that turns over, so it's told once, survives a lost frame, and nobody can forge it.
+do {
+    let key = SymmetricKey(size: .bits256)
+    var mac = MacSession(key: key)
+    var watch = WatchSession(key: key, opening: mac.opening)
+    check(mac.receive(watch.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true))?.talk == false, "no tap, no talk")
+    watch.talk()
+    check(mac.receive(watch.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true))?.talk == true, "a tap is told")
+    check(mac.receive(watch.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true))?.talk == false, "and only once")
+    watch.talk()
+    _ = watch.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true)
+    check(mac.receive(watch.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true))?.talk == true, "a lost frame doesn't lose the tap")
+    var forged = [UInt8](watch.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true))
+    forged[10] ^= 8
+    check(mac.receive(Data(forged)) == nil, "nobody can open your mic for you")
+    // A watch tapped an odd number of times before this Mac met it: where it starts, not a tap.
+    var later = MacSession(key: key)
+    var tapped = WatchSession(key: key, opening: later.opening)
+    tapped.talk()
+    check(later.receive(tapped.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true))?.talk == false, "the first frame's bit is where it starts")
+    tapped.talk()
+    check(later.receive(tapped.frame(yaw: 0, pitch: 0, milliseconds: 20, steering: true))?.talk == true, "and a tap after that is a tap")
+}
+
 // Which fingers, on real pinches: ten of each taking turns, each judged by the others.
 do {
     let file = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("pinch-recording-fingers.csv")

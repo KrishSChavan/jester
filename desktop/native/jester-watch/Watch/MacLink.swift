@@ -33,6 +33,11 @@ final class MacLink: NSObject, ObservableObject, CBCentralManagerDelegate, CBPer
         session?.click()
     }
 
+    /// A tap of Talk: it goes with the next motion frame, so only while steering.
+    func talk() {
+        session?.talk()
+    }
+
     func sendMotion(yaw: Int16, pitch: Int16, milliseconds: UInt8, steering: Bool, held: Bool = false, whole: Bool = false) {
         guard let frame = session?.frame(yaw: yaw, pitch: pitch, milliseconds: milliseconds, steering: steering, held: held, whole: whole),
               let mac, let toMac else { return }

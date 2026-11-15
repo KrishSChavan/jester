@@ -6,14 +6,19 @@
  * Float32 chunks; a voice-activity detector decides where the utterance ends,
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
- * Messages in:  start {model} · begin · listen · voiceprint {print} · teaching {on} · audio {samples} · end · abort · transcribe {samples}
- * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, score, seconds, unsure?, voice?} · stranger {score, seconds} · error {detail}
+ * Messages in:  start {model} · begin · listen · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
+ * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
  * between. While someone's still talking, the start of it is read twice for
  * his name, and `wake` says it's there: only that, never the words.
- * Nothing heard this way is saved, whatever JESTER_SAVE_SPEECH says.
+ * Nothing heard this way is saved, whatever JESTER_SAVE_SPEECH says, unless the
+ * user has turned on keeping what he wasn't sure of (`keep {dir}`, Settings ›
+ * Assistant and voice): then a voice that scored near theirs without being
+ * taken as theirs is kept as a WAV with its score, the newest KEEP_MOST of
+ * them, on this computer only, for tuning voiceprint.js against the real voice
+ * (scripts/hear-check.mjs reads them).
  * With a voiceprint set, a voice that isn't the user's is never even decoded:
  * no text of what anyone else says exists, here or anywhere. One that's only
  * maybe theirs (voiceprint.js MAYBE) is, marked `unsure`: it needs his name.
@@ -25,7 +30,7 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { judged, likeness } from '../voiceprint.js';
+import { judged, scored, worthLearning } from '../voiceprint.js';
 import { wakesEarly } from '../wake.js';
 import { modelDir, SPEECH_MODELS, VAD_MODEL, VOICE_MODEL } from './models.js';
 
@@ -53,6 +58,9 @@ const KEPT_WINDOWS = Math.ceil((PREROLL_S * SAMPLE_RATE) / WINDOW) + 2;
 /** The detector counts samples in 32 bits and finds nothing past 37 hours of them (measured), so it starts over. */
 const VAD_RESTART_S = 6 * 60 * 60;
 const SAVE_DIR = process.env.JESTER_SAVE_SPEECH || '';
+/** Kept for tuning, when the user's said to: voices that scored at least this, and weren't plainly theirs. */
+const KEEP_FLOOR = 0.2;
+const KEEP_MOST = 200;
 
 const port = process.parentPort;
 const send = (message) => port.postMessage(message);
@@ -70,6 +78,10 @@ let listens = 0;
 let voices = null;
 /** The user's voice, once known. */
 let voiceprint = null;
+/** Where what he wasn't sure of is kept for tuning, or '' when the user hasn't said to. */
+let keepDir = '';
+/** Other ways the user's been heard to sound, learned from use (voiceprint.js). */
+let learned = [];
 /** Reading the lines that make a voiceprint: each utterance comes with its voice. */
 let teaching = false;
 
@@ -152,6 +164,26 @@ function save(samples, text) {
   }
 }
 
+/**
+ * Keeps a voice he wasn't sure of, for tuning: its sound, and beside it what it scored and how it was judged. What
+ * was said is there only for a voice that was decoded anyway (maybe the user's). The oldest go past KEEP_MOST.
+ */
+function keepUnsure(samples, facts) {
+  try {
+    fs.mkdirSync(keepDir, { recursive: true });
+    const name = path.join(keepDir, new Date().toISOString().replace(/[:.]/g, '-'));
+    sherpa.writeWave(`${name}.wav`, { samples, sampleRate: SAMPLE_RATE });
+    fs.writeFileSync(`${name}.json`, `${JSON.stringify(facts)}\n`);
+    const kept = fs.readdirSync(keepDir).filter((file) => file.endsWith('.wav')).sort();
+    for (const old of kept.slice(0, Math.max(0, kept.length - KEEP_MOST))) {
+      fs.rmSync(path.join(keepDir, old), { force: true });
+      fs.rmSync(path.join(keepDir, old.replace(/\.wav$/, '.json')), { force: true });
+    }
+  } catch (err) {
+    console.error('could not keep the utterance:', err.message);
+  }
+}
+
 /** Decodes off the audio's path, so nothing said meanwhile is lost. Falling behind keeps only the newest. */
 async function overheard(samples) {
   if (decoding) {
@@ -175,12 +207,19 @@ async function hear(samples) {
   const during = listens;
   const seconds = samples.length / SAMPLE_RATE;
   const voice = voiceprint || teaching ? voiceOf(samples) : null;
-  const score = voiceprint ? (voice ? likeness(voice, voiceprint) : 0) : null;
+  const { score, enrolled } = voiceprint ? (voice ? scored(voice, voiceprint, learned) : { score: 0, enrolled: 0 }) : { score: null, enrolled: null };
   const who = voiceprint && !teaching ? judged(score, seconds) : 'you';
-  if (who === 'stranger') return send({ type: 'stranger', score, seconds });
+  const round = (value) => Math.round(value * 1000) / 1000;
+  if (who === 'stranger') {
+    if (keepDir && score >= KEEP_FLOOR) keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds) });
+    return send({ type: 'stranger', score, enrolled, seconds });
+  }
   const { text, decodeMs } = await decode(samples);
+  if (keepDir && who === 'maybe') keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds), text });
   if (!text || during !== listens) return undefined;
-  return send({ type: 'heard', text, decodeMs, score, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(teaching && voice ? { voice: Array.from(voice) } : {}) });
+  // The voice goes along while teaching, and when it's one more way the user sounds: kept only if this was for him.
+  const keep = !!voice && (teaching || (who === 'you' && !!voiceprint && worthLearning(voice, { score, enrolled, seconds }, learned)));
+  return send({ type: 'heard', text, decodeMs, score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
 }
 
 /** One utterance over, and straight on to the next. */
@@ -204,7 +243,7 @@ async function peek() {
     if (voiceprint) {
       // Only his name wakes him early, so maybe the user's will do.
       const voice = voiceOf(samples);
-      if (judged(voice ? likeness(voice, voiceprint) : 0, samples.length / SAMPLE_RATE) === 'stranger') return;
+      if (judged(voice ? scored(voice, voiceprint, learned).score : 0, samples.length / SAMPLE_RATE) === 'stranger') return;
     }
     const { text } = await decode(samples);
     if (state !== during || !wakesEarly(text)) return;
@@ -296,9 +335,13 @@ port.on('message', async ({ data }) => {
         break;
       case 'voiceprint':
         voiceprint = data.print ? Float32Array.from(data.print) : null;
+        learned = voiceprint && Array.isArray(data.learned) ? data.learned.map((voice) => Float32Array.from(voice)) : [];
         break;
       case 'teaching':
         teaching = !!data.on;
+        break;
+      case 'keep':
+        keepDir = typeof data.dir === 'string' ? data.dir : '';
         break;
       case 'listen':
         vad?.reset();

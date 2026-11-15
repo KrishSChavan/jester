@@ -27,7 +27,7 @@ const WORKER_URL = `${EXT_ROOT}src/background/service-worker.js`;
  * Pages never see them, through storage or its change events, and they're
  * sealed on disk.
  */
-export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection', 'desktopLearned', 'watchKey', 'puterToken', 'voiceprint', 'calendarFeeds']);
+export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection', 'desktopLearned', 'watchKey', 'puterToken', 'voiceprint', 'voiceLearned', 'calendarFeeds']);
 const isPrivate = (key) => PRIVATE_KEYS.includes(key);
 const withoutPrivate = (items) => Object.fromEntries(Object.entries(items || {}).filter(([key]) => !isPrivate(key)));
 

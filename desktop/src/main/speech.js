@@ -49,6 +49,10 @@ export function startSpeech({ log = () => undefined } = {}) {
   let waker = null;
   /** The user's voice, sent to each service as it starts. */
   let voiceprint = null;
+  /** Other ways the user's been heard to sound (voiceprint.js). */
+  let learned = [];
+  /** Where voices he wasn't sure of are kept for tuning, or '' (the user's choice, off until made). */
+  let keepDir = '';
   let teaching = false;
 
   function send(message) {
@@ -86,7 +90,9 @@ export function startSpeech({ log = () => undefined } = {}) {
       if (message?.type === 'ready') return log('speech loaded:', message.model, `${message.loadMs} ms`);
       if (message?.type === 'heard') {
         // Every score, for tuning voiceprint.js against a real voice.
-        if (message.score !== null) log(`speech: ${message.unsure ? 'maybe your voice, so only with his name' : 'your voice'} (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
+        // The voiceprint's own score too, when what was learned from use raised it.
+        const raised = typeof message.enrolled === 'number' && message.score - message.enrolled >= 0.005 ? `, ${message.enrolled.toFixed(2)} by the voiceprint alone` : '';
+        if (message.score !== null) log(`speech: ${message.unsure ? 'maybe your voice, so only with his name' : 'your voice'} (${message.score.toFixed(2)}${raised}, ${message.seconds.toFixed(1)} s)`);
         return void listener?.(message.text, message);
       }
       if (message?.type === 'wake') return void waker?.();
@@ -116,7 +122,8 @@ export function startSpeech({ log = () => undefined } = {}) {
     });
     // Messages queue behind this one, so audio sent while it loads waits.
     child.postMessage({ type: 'start', model });
-    child.postMessage({ type: 'voiceprint', print: voiceprint });
+    child.postMessage({ type: 'voiceprint', print: voiceprint, learned });
+    child.postMessage({ type: 'keep', dir: keepDir });
     child.postMessage({ type: 'teaching', on: teaching });
     return child;
   }
@@ -215,9 +222,16 @@ export function startSpeech({ log = () => undefined } = {}) {
     /** Whatever's being heard right now doesn't count: he's just stopped talking, and it's him. */
     listenAfresh: () => resume(),
     /** @param {number[]|null} print */
-    setVoiceprint(print) {
+    /** `known`: other ways the user's been heard to sound, learned from use; they count only with a voiceprint. */
+    setVoiceprint(print, known = []) {
       voiceprint = print;
-      service?.postMessage({ type: 'voiceprint', print });
+      learned = print ? known : [];
+      service?.postMessage({ type: 'voiceprint', print, learned });
+    },
+    /** Keeps voices he wasn't sure of in `dir`, for tuning; '' stops. */
+    setKeeping(dir) {
+      keepDir = dir || '';
+      service?.postMessage({ type: 'keep', dir: keepDir });
     },
     /** While on, what's heard comes with its voice, and nobody's turned away. */
     setTeaching(on) {

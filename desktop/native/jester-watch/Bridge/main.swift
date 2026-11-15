@@ -10,7 +10,7 @@ import Foundation
 // In:  {cmd: "start", key?}, {cmd: "pair"}, {cmd: "confirm"}, {cmd: "cancel"}, {cmd: "forget"}
 // Out: {event: "bluetooth", state}, {event: "nearby", count}, {event: "code", code},
 //      {event: "paired", key}, {event: "pairFailed"}, {event: "stranger"},
-//      {event: "motion", yaw, pitch, ms, steering, click, held, whole, typing}
+//      {event: "motion", yaw, pitch, ms, steering, click, held, whole, talk, typing}
 //
 // Closing stdin ends it, and with it the advertising.
 
@@ -109,7 +109,7 @@ final class Bridge: NSObject, CBPeripheralManagerDelegate {
             guard let report = sessions[id]?.receive(frame) else { return refuse(central) }
             say("motion", [
                 "yaw": Int(report.yaw), "pitch": Int(report.pitch), "ms": Int(report.milliseconds),
-                "steering": report.steering, "click": report.click, "held": report.held, "whole": report.whole, "typing": typing()
+                "steering": report.steering, "click": report.click, "held": report.held, "whole": report.whole, "talk": report.talk, "typing": typing()
             ])
         case .commit, .watchKey:
             pair(frame, from: central)

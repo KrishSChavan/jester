@@ -176,6 +176,13 @@ final class Steer: NSObject, ObservableObject, WKExtendedRuntimeSessionDelegate 
         click()
     }
 
+    /// The Talk button: Jester opens the Mac's mic for one command, with no need of his name, or closes it.
+    func talk() {
+        guard on else { return }
+        link.talk()
+        WKInterfaceDevice.current().play(.click)
+    }
+
     private func sample(_ motion: CMDeviceMotion) {
         let dt = last.map { min(0.1, max(0, motion.timestamp - $0)) } ?? 1 / Sensors.rate
         last = motion.timestamp

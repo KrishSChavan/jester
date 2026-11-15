@@ -36,7 +36,7 @@ export function bridgePath({ resourcesPath = null, platform = process.platform }
  * @param {() => Promise<string|undefined>} deps.loadKey
  * @param {(key:string) => Promise<void>} deps.saveKey
  * @param {() => Promise<void>} deps.forgetKey
- * @param {(report:{yaw:number,pitch:number,ms:number,steering:boolean,click:boolean,held:boolean,whole:boolean,typing:boolean}) => void} deps.onReport
+ * @param {(report:{yaw:number,pitch:number,ms:number,steering:boolean,click:boolean,held:boolean,whole:boolean,talk?:boolean,typing:boolean}) => void} deps.onReport
  * @param {() => void} [deps.onChange]  `state` changed
  * @param {number} [deps.pairWindowMs]
  * @param {(...parts:any[]) => void} [deps.log]

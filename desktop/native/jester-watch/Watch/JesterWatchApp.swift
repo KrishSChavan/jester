@@ -130,8 +130,12 @@ struct SteeringView: View {
             }
             .buttonStyle(Pressing { steer.press($0) })
             .doubleTapClicks()
-            Button("Stop") { steer.stop() }
-                .tint(.red)
+            HStack(spacing: 6) {
+                Button { steer.talk() } label: { Label("Talk", systemImage: "mic.fill") }
+                    .tint(.purple)
+                Button("Stop") { steer.stop() }
+                    .tint(.red)
+            }
             Note(text: link.status == .ready ? link.note : "Lost your Mac…")
         }
         .navigationTitle("Steering")

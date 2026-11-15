@@ -56,6 +56,7 @@ front window fills its display.
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models): paid before free, and who covers for one that fails. |
 | `src/main/spend.js` | What the saved models' replies have cost this month, as near as their token counts say. |
 | `scripts/live-check.mjs` | `npm run live-check`: the real app on a scratch profile with scripted model servers, typed to and read back. |
+| `scripts/hear-check.mjs` | `npm run hear-check`: his own speech service on audio from files: a made-up voice learned from use, or (`kept`) what he wasn't sure of, scored against the real voiceprint. |
 | `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
 | `scripts/vault-eval.mjs` | How well memory finds things in a vault: a sample vault and the questions it's scored on. |
@@ -490,6 +491,36 @@ as a yes to his question or a follow-up without it. Below 0.35 isn't decoded.
 Every score is still logged ("your voice", "maybe your voice", "not your voice").
 Only with a voiceprint does he take what's said after an answer without his name;
 his name alone opens the next 8 seconds either way.
+
+The voiceprint is five lines read once, up close. Said from across the room,
+about half of what the user says lands in "maybe" (dev.log, 2026-11-14: 36 heard
+as theirs, 38 as maybe, and 45 more just under 0.35, turned away undecoded), so
+he wanted his name again mid-conversation. Since then he learns how they sound
+from use: a voice heard as theirs, in something he took as said to him, is kept
+as one more reference (`voiceLearned`, sealed, the newest 8), and a voice scores
+as the best of them. One counts only for a voice the voiceprint already
+half-knows (0.4, `LEARN_GATE`), and only such a voice is kept, so what's learned
+can't wander off to someone else. Teaching the voice again, or forgetting it,
+starts that over. `npm run hear-check` runs his own speech service on a made-up
+voice (macOS `say`, a room added in code): taught up close and heard across the
+room, it was theirs 2 times in 6 before and 6 in 6 after learning two ways of
+sounding, and another voice was turned away 6 in 6. That says the pipeline does
+what the rule says, not what a real voice's numbers will be.
+
+For those: Settings › Assistant and voice › Keep what he wasn't sure of (off
+until chosen) keeps the sound of a voice that scored at least 0.2 without being
+taken as theirs, the newest 200, in the app's `heard` folder, each with its
+score. `npm run hear-check -- kept` scores them against the real voiceprint and
+decodes them, marking the ones with his name in them: those are most likely the
+user, and how they scored is what the thresholds should be set by. What he
+hears, once he takes it, is already right: every spoken line in a week of chats
+read as it was said, so no second recognizer was added.
+
+Push-to-talk needs neither his name nor a known voice: the ☝️ gesture (while
+Gestures is on), and the Talk button on the watch's steering screen, which sends
+one bit that turns over at each tap (`Wire.swift`, signed with the frame, so a
+lost frame doesn't lose it and nobody can forge it). A watch that hasn't been
+reloaded since has no Talk button and changes nothing.
 
 `conversation.json` in the app's data folder holds what was said to him and what
 he said, for the model's context, and is emptied every hour. Each conversation
