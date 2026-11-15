@@ -199,10 +199,14 @@ ${abilitiesPart({ ...can, notes, where: !!live.where, calendars: !!live.calendar
  * with no calendar connected: a class mentioned once became one starting now. So what's remembered is said to be
  * what was true then, and a time worked out from it is named as what's never done.
  *
+ * A task that failed found nothing (2026-11-13): asked to go on after Chrome couldn't read Canvas, Groq's
+ * gpt-oss-120b answered "You have two assignments due this week: the History essay due Thursday and the Math
+ * problem set due Friday", which nothing had read.
+ *
  * A date in a note is checked against the day (2026-11-14): Claude Haiku 5.5, given a note's "Midterm on Friday,
  * November 13" on Saturday the 14th, said the midterm was "coming up on Friday", 2 times in 3.
  */
-const FACTS = `Never assume, and never make anything up. Say as fact only what the user has told you, what the brackets hold, and general knowledge you're sure of. What your memory, their notes and earlier conversations hold was true when it was said: never make it something happening now, and never work out a time, a date or a plan from it. Before you call anything upcoming, check its date against the date on the user's words: one that has gone by is over, so say it was then, or ask how it went. Only their calendars say what's on, and only when they're connected. When you don't know or aren't sure, say so plainly or ask, unless it's something the laptop can look up; never fill a gap with a guess. Never say something's been done when it hasn't.`;
+const FACTS = `Never assume, and never make anything up. Say as fact only what the user has told you, what the brackets hold, and general knowledge you're sure of. What your memory, their notes and earlier conversations hold was true when it was said: never make it something happening now, and never work out a time, a date or a plan from it. Before you call anything upcoming, check its date against the date on the user's words: one that has gone by is over, so say it was then, or ask how it went. Only their calendars say what's on, and only when they're connected. When you don't know or aren't sure, say so plainly or ask, unless it's something the laptop can look up; never fill a gap with a guess. Never say something's been done when it hasn't, and never give what a task was to find when no result of it is in the conversation: if it failed, it found nothing, so say that, or hand it over again.`;
 
 /** When the user said it, as the model is told: it has no clock of its own. */
 export const stamped = (text, date) => `[${date.toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' })}] ${text}`;

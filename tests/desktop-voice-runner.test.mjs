@@ -604,6 +604,63 @@ test('what Chrome is handed: the user’s words, and what the conversation took 
   ]);
 });
 
+test('“keep going” is the task that just failed, again, with no model in between: in Chrome with the words, so a paused task picks up', async () => {
+  // 2026-11-13: the words went to the talking model, which made "open Calendar and list assignments…" of them, and
+  // the time after, the assignments themselves.
+  const handed = [];
+  let works = false;
+  const browser = { claims: async (text) => /canvas|assignments/i.test(text), run: async (text, meant) => (handed.push([text, meant]), works ? { ok: true, text: 'Two are due: Lab 4 and Quiz 7.' } : { ok: false, text: 'The model returned unsupported actions. The task is paused; say “keep going” to retry.' }) };
+  const logged = [];
+  const { runner } = rig({ browser, log: (...parts) => logged.push(parts.join(' ')) });
+  assert.equal(await runner.knows('keep going.'), false, 'with nothing failed, it’s only talk');
+  const first = await runner.run('open Canvas and read assignments due by the end of the week', { talking: true, said: 'look at all of my assignments and tell me what I have due by the end of this week.' });
+  assert.equal(first.outcome.ok, false);
+  // Now it's his to do, without the talking model.
+  for (const words of ['keep going.', 'Try again', 'retry', 'try now']) assert.equal(await runner.knows(words), true, words);
+  assert.equal(await runner.knows('keep going with the story'), false, 'only the words alone');
+  works = true;
+  const again = await runner.run('keep going.');
+  assert.deepEqual(again.outcome, { ok: true, text: 'Two are due: Lab 4 and Quiz 7.' });
+  assert.deepEqual(handed.at(-1), ['keep going.', 'open Canvas and read assignments due by the end of the week'], 'the words, and what’s to be done again');
+  assert.match(logged.join('\n'), /voice: again: "look at all of my assignments/);
+  // Done, there's nothing left to go on with.
+  assert.equal(await runner.knows('keep going'), false);
+});
+
+test('“try again” gives the assistant the user’s own words back, and a task that failed long ago isn’t gone on with', async () => {
+  const goals = [];
+  let works = false;
+  const assistant = { ready: async () => true, running: false, cancel() {}, run: async (goal, options) => (goals.push([goal, options?.meant || '']), works ? { ok: true, text: 'Sent to the printer.' } : { ok: false, text: 'The print button never came up.' }) };
+  const { runner } = rig({ assistant });
+  const realNow = Date.now;
+  try {
+    await runner.run('print the document in front', { talking: true, said: 'can you print this for me' });
+    works = true;
+    const again = await runner.run('try again');
+    assert.deepEqual(again.outcome, { ok: true, text: 'Sent to the printer.' });
+    assert.deepEqual(goals, [['can you print this for me', 'print the document in front'], ['can you print this for me', 'print the document in front']]);
+    // Failed, then left for longer than he'd go on with it.
+    works = false;
+    await runner.run('print the document in front', { talking: true, said: 'can you print this for me' });
+    const then = realNow();
+    Date.now = () => then + 6 * 60 * 1000;
+    assert.equal(await runner.knows('keep going'), false);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('Chrome saying no tab matched isn’t done: it’s said as not done, not learned, and can be tried again', async () => {
+  // Chrome 0.2.2 answers ok for it (2026-11-13: "close my YouTube and my canvas tabs" was learned from that).
+  const learned = await learnedStore();
+  const browser = { claims: async () => true, run: async () => ({ ok: true, text: 'No open tab matches “YouTube and my canvas”.' }) };
+  const { runner } = rig({ learned, browser });
+  const done = await runner.run('close YouTube and Canvas tabs', { talking: true, said: 'close my YouTube and my canvas tabs.' });
+  assert.deepEqual(done.outcome, { ok: false, text: 'No open tab matches “YouTube and my canvas”.' });
+  assert.equal(await learned.aliasFor('close my YouTube and my canvas tabs.').catch(() => null), null, 'the words stand for nothing');
+  assert.equal(await runner.knows('try again'), true);
+});
+
 test('words the conversation reworded into a command that worked stand for it: next time no model is asked, and Chrome is handed the command', async () => {
   const learned = await learnedStore();
   const handed = [];

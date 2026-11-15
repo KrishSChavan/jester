@@ -244,3 +244,17 @@ test('this computer’s model does both jobs until Settings says otherwise', () 
   assert.deepEqual(localUses({ localModelUses: ['talk'] }), ['talk']);
   assert.deepEqual(localUses({ localModelUses: [] }), []);
 });
+
+test('Claude is held to the desktop agent’s and the planner’s schemas, which it takes (measured live, 2026-11-14)', async () => {
+  const { claudeSchema } = await import('../jester-extension/src/background/model-client.js');
+  const { DESKTOP_SCHEMA } = await import('../desktop/src/main/agent/prompt.js');
+  const { PLAN_SCHEMA } = await import('../desktop/src/main/agent/plan.js');
+  for (const [name, schema] of [['the desktop agent', DESKTOP_SCHEMA], ['the planner', PLAN_SCHEMA]]) {
+    const taken = claudeSchema(schema);
+    assert.ok(taken, `${name}’s schema is one Claude takes`);
+    assert.equal(taken.type, 'object');
+    assert.doesNotMatch(JSON.stringify(taken), /"(?:minimum|maximum|minItems|maxItems)"/, name);
+  }
+  // Either shape of the agent's reply fits the one object Claude is held to.
+  assert.deepEqual(Object.keys(claudeSchema(DESKTOP_SCHEMA).properties).sort(), ['action', 'actions', 'memory', 'task']);
+});

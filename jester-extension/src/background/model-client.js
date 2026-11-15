@@ -94,15 +94,18 @@ export function claudeThinksByDefault(model) {
 const dataUrl = (image) => `data:${image.mimeType};base64,${image.data}`;
 
 /** What Claude's JSON outputs take of JSON Schema: no number, length or count limits, and every object closed. */
-const CLAUDE_SCHEMA_KEYS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'anyOf', 'allOf', 'description', 'title']);
+const CLAUDE_SCHEMA_KEYS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'anyOf', 'allOf', 'description', 'title', '$ref', '$defs']);
+/** Limits Claude's JSON outputs refuse outright (a 400). The hosts check them all anyway: these are left out for it. */
+const CLAUDE_LEFT_OUT = new Set(['minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'pattern', 'minItems', 'maxItems', 'uniqueItems']);
+
 /**
  * Whether Claude can be held to a schema as it stands (`output_config.format`): then its reply is that JSON and
- * nothing else, as Ollama's and Gemini's are. One it can't take (the agents' have `minimum` and `maxItems`, which
- * their hosts check anyway) is asked for in the prompt alone, as before.
+ * nothing else, as Ollama's and Gemini's are.
  */
 export function claudeTakesSchema(schema, depth = 0) {
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema) || depth > 8) return false;
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema) || depth > 12) return false;
   if (Object.keys(schema).some((key) => !CLAUDE_SCHEMA_KEYS.has(key))) return false;
+  if (Object.hasOwn(schema, '$ref')) return typeof schema.$ref === 'string';
   if (schema.type === 'object' || schema.properties) {
     if (schema.additionalProperties !== false) return false;
     if (Object.values(schema.properties || {}).some((property) => !claudeTakesSchema(property, depth + 1))) return false;
@@ -111,7 +114,52 @@ export function claudeTakesSchema(schema, depth = 0) {
   for (const key of ['anyOf', 'allOf']) {
     if (Object.hasOwn(schema, key) && !(Array.isArray(schema[key]) && schema[key].every((part) => claudeTakesSchema(part, depth + 1)))) return false;
   }
+  if (Object.hasOwn(schema, '$defs') && !Object.values(schema.$defs || {}).every((part) => claudeTakesSchema(part, depth + 1))) return false;
   return depth > 0 || schema.type === 'object';
+}
+
+/**
+ * A schema as Claude takes it, or null when it can't be made into one. The limits Claude refuses are left out (the
+ * agents' "at most 3 actions", "ms from 100 to 3000": their hosts check those on every reply, whoever wrote it), and
+ * a reply that may be one of several objects (the agents' {action} or {actions}) becomes one object that may have
+ * the fields of any of them: Claude's wants an object at its root. Held to it, Claude's reply can't be prose, a
+ * fenced block or an action that doesn't exist, which is what "The model returned unsupported actions" was
+ * (2026-11-13, in Chrome, twice in one task).
+ */
+export function claudeSchema(schema) {
+  const without = (value) => {
+    if (Array.isArray(value)) return value.map(without);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).filter(([key]) => !CLAUDE_LEFT_OUT.has(key)).map(([key, inner]) => [key, without(inner)]));
+  };
+  let plain;
+  try {
+    plain = without(schema);
+  } catch {
+    return null;
+  }
+  if (plain && typeof plain === 'object' && !plain.type && Array.isArray(plain.anyOf) && plain.anyOf.length && plain.anyOf.every((part) => part?.type === 'object' && part.additionalProperties === false)) {
+    const { anyOf, ...rest } = plain;
+    // Required only where every shape requires it: the host tells which shape a reply is.
+    const required = anyOf.map((part) => part.required || []).reduce((all, mine) => all.filter((name) => mine.includes(name)));
+    plain = { type: 'object', properties: Object.assign({}, ...anyOf.map((part) => part.properties || {})), required, additionalProperties: false, ...rest };
+  }
+  return claudeTakesSchema(plain) && optionalFields(plain) <= CLAUDE_OPTIONAL_MOST ? plain : null;
+}
+
+/**
+ * The most fields a schema may leave optional, over all its objects, for Claude to compile it: past that the API
+ * answers 400 ("too many optional parameters… limit: 24", or "the compiled grammar is too large"). Measured on
+ * claude-haiku-5-5, 2026-11-14: the desktop agent's schema (17) and its planner's (6) are taken; the browser
+ * agent's (40) isn't, as it stands or as one flat action (52, counted once per place it's used), so that one is
+ * still asked for in the prompt alone.
+ */
+const CLAUDE_OPTIONAL_MOST = 24;
+function optionalFields(node) {
+  if (Array.isArray(node)) return node.reduce((sum, inner) => sum + optionalFields(inner), 0);
+  if (!node || typeof node !== 'object') return 0;
+  const own = node.properties ? Object.keys(node.properties).filter((name) => !(node.required || []).includes(name)).length : 0;
+  return own + Object.values(node).reduce((sum, inner) => sum + optionalFields(inner), 0);
 }
 
 /**
@@ -153,7 +201,8 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
     const thinks = claudeThinksByDefault(config.model);
     const earlier = alternating(history, prompt);
     // The 5 generation can be held to a schema; the ones before it that can are told apart by no rule worth keeping.
-    const held = thinks && claudeTakesSchema(schema) ? { format: { type: 'json_schema', schema } } : {};
+    const takes = thinks ? claudeSchema(schema) : null;
+    const held = takes ? { format: { type: 'json_schema', schema: takes } } : {};
     body = { model: config.model, max_tokens: maxOutputTokens + (thinks ? CLAUDE_THINKING_TOKENS : 0),
       // The same from one request to the next (a persona, an agent's rules), so it's cached: read back at a tenth
       // of the price for the next five minutes. One too short to cache (512 tokens on the 5 generation) just isn't.

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeModelConfig, buildModelRequest, requestModel, parseModelJson, parseRetryAfterMs,
   RateLimitError, ProviderBusyError, ModelTimeoutError, ModelTruncatedError, ModelReplyError, MODEL_REQUEST_LIMITS,
-  claudeThinksByDefault, claudeTakesSchema } from '../jester-extension/src/background/model-client.js';
+  claudeThinksByDefault, claudeTakesSchema, claudeSchema } from '../jester-extension/src/background/model-client.js';
 import { AGENT_RESPONSE_SCHEMA } from '../jester-extension/src/common/agent-response-schema.js';
 
 const key = 'user-secret-api-key';
@@ -67,7 +67,28 @@ test('Claude is held to a schema it can take, and asked in words alone for one i
   ]) assert.equal(claudeTakesSchema(not), false, JSON.stringify(not));
   const sent = (model, schema) => JSON.parse(buildModelRequest(config({ provider: 'anthropic', model }), { system: 'JSON', prompt: 'Hi.', schema }).init.body);
   assert.deepEqual(sent('claude-haiku-5-5', reply).output_config, { effort: 'low', format: { type: 'json_schema', schema: reply } });
-  // The browser agent's own schema has limits: asked for in the prompt, as it was.
+  // The limits Claude refuses are left out for it (the host checks them on every reply), and a reply that's one of
+  // several objects becomes one object with the fields of any: Claude's wants an object at its root.
+  const agent = { anyOf: [
+    { type: 'object', properties: { task: { type: 'string' }, action: { $ref: '#/$defs/wait' } }, required: ['action'], additionalProperties: false },
+    { type: 'object', properties: { task: { type: 'string' }, actions: { type: 'array', items: { $ref: '#/$defs/wait' }, minItems: 1, maxItems: 3 } }, required: ['actions'], additionalProperties: false }
+  ], $defs: { wait: { type: 'object', properties: { action: { type: 'string', enum: ['wait'] }, ms: { type: 'integer', minimum: 100, maximum: 3000 } }, required: ['action', 'ms'], additionalProperties: false } } };
+  assert.deepEqual(claudeSchema(agent), {
+    type: 'object',
+    properties: { task: { type: 'string' }, action: { $ref: '#/$defs/wait' }, actions: { type: 'array', items: { $ref: '#/$defs/wait' } } },
+    required: [],
+    additionalProperties: false,
+    $defs: { wait: { type: 'object', properties: { action: { type: 'string', enum: ['wait'] }, ms: { type: 'integer' } }, required: ['action', 'ms'], additionalProperties: false } }
+  });
+  assert.equal(JSON.stringify(agent).includes('minimum'), true, 'the schema given isn’t changed');
+  assert.deepEqual(sent('claude-haiku-5-5', agent).output_config.format.schema, claudeSchema(agent));
+  // One it can't be made to take is asked for in words: an object left open, or more optional fields than Claude
+  // compiles (24; the browser agent's own has 40, and the API answers 400 for it).
+  assert.equal(claudeSchema({ type: 'object', properties: { a: { type: 'string' } } }), null);
+  const wide = (count) => ({ type: 'object', properties: Object.fromEntries(Array.from({ length: count }, (_, i) => [`f${i}`, { type: 'string' }])), required: [], additionalProperties: false });
+  assert.notEqual(claudeSchema(wide(24)), null);
+  assert.equal(claudeSchema(wide(25)), null);
+  assert.equal(claudeSchema(AGENT_RESPONSE_SCHEMA), null);
   assert.deepEqual(sent('claude-haiku-5-5', undefined).output_config, { effort: 'low' });
   assert.equal(Object.hasOwn(sent('claude-sonnet-4-6', reply), 'output_config'), false);
   // An empty system prompt can't carry a cache marker.

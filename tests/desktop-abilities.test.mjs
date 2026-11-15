@@ -64,7 +64,7 @@ test('the prompt never assumes, closes with what he can do, and changes only whe
   // 2026-11-13: a class from the 11-11 and 11-12 conversations became "a class starting in about an hour".
   assert.match(prompt, /was true when it was said: never make it something happening now, and never work out a time, a date or a plan from it\./);
   assert.match(prompt, /Only their calendars say what's on, and only when they're connected\./);
-  assert.match(prompt, /never fill a gap with a guess\. Never say something's been done when it hasn't\./);
+  assert.match(prompt, /never fill a gap with a guess\. Never say something's been done when it hasn't, and never give what a task was to find when no result of it is in the conversation: if it failed, it found nothing, so say that, or hand it over again\./);
   // A date that's gone by is over (Claude Haiku 5.5 called yesterday's midterm "coming up on Friday").
   assert.match(prompt, /Before you call anything upcoming, check its date against the date on the user's words: one that has gone by is over, so say it was then, or ask how it went\./);
   // Not knowing what's meant, he asks rather than guesses, and never asks and does at once.

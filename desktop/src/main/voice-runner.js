@@ -30,6 +30,16 @@ const FRONT_TRIES = 33;
 const SETTLE_MS = 400;
 /** A search's results take about this long to appear, before the assistant looks. */
 const SEARCH_LOAD_MS = 1500;
+/**
+ * "Keep going", "try again": the task that just failed, again, for this long after it did. Without it the words went
+ * to the talking model, which on 2026-11-13 made a new command of them ("open Calendar and list assignments…")
+ * and, the time after, the assignments themselves ("the History essay due Thursday…"), which nothing had read.
+ * As the extension reads them (service-worker.js CONTINUE).
+ */
+export const AGAIN = /^\W*(?:keep (?:going|at it|trying)|carry on|continue|go on|resume|try (?:it |that )?(?:again|now)|retry|do (?:it|that) again)\W*$/i;
+const AGAIN_MS = 5 * 60 * 1000;
+/** Chrome 0.2.2 reports this as done. Nothing was: it isn't said as done, nor learned as a way of doing it. */
+const CAME_TO_NOTHING = /^No open tab matches\b/i;
 /** Spotify's results are looked for this often, this many times (~6 s), and a press confirmed as long again. */
 const PLAY_POLL_MS = 300;
 const PLAY_LOOKS = 20;
@@ -209,6 +219,13 @@ export function createVoiceRunner({
   const ok = (text, front) => ({ ok: true, text, ...(front ? { front } : {}) });
   const bad = (text) => ({ ok: false, text });
   let catalog = null;
+  /** The last task the assistant or Chrome didn't get done: {text, said, at}, for "keep going". */
+  let failed = null;
+  /** Notes how a task for the assistant or Chrome ended, and gives the outcome back. */
+  const ended = (outcome, text, said) => {
+    if (outcome) failed = outcome.ok ? null : { text, said: said || '', at: Date.now() };
+    return outcome;
+  };
 
   const needsInput = (command) =>
     INPUT.has(command.kind) ||
@@ -541,9 +558,16 @@ export function createVoiceRunner({
   }
 
   /** @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say */
-  async function runSentence(text, depth = 0, { said = '', ...context } = {}) {
+  async function runSentence(text, depth = 0, { said = '', again = '', ...context } = {}) {
     // A new command ends a task still running (the assistant hears "stop" and its answers first).
     if (depth === 0 && assistant?.running) await assistant.cancel();
+    // "Keep going": what just failed, again, as it was asked. In Chrome the words go along, so a task it paused a
+    // moment ago picks up where it stopped; one it's let go of is begun again from what was meant.
+    if (depth === 0 && failed && AGAIN.test(text) && Date.now() - failed.at < AGAIN_MS) {
+      const again = failed;
+      log('voice: again:', JSON.stringify(again.said || again.text));
+      return runSentence(again.text, depth + 1, { ...context, talking: true, said: again.said, again: text });
+    }
     // A phrase the user taught stands for its sentence.
     const taught = depth === 0 && learned ? await learned.phrase(text).catch(() => null) : null;
     if (taught) {
@@ -584,11 +608,13 @@ export function createVoiceRunner({
     }
     if (unknown && browser && ((await browser.claims(text)) || (!!said && (await browser.claims(said))))) {
       // The user's own words, and what the conversation took them to mean: Chrome hasn't heard what came before ("try now").
-      const meant = said && gist(said) !== gist(text) ? text : '';
-      log('voice: Chrome’s to do:', JSON.stringify(said || text), meant ? `(meaning ${JSON.stringify(meant)})` : '');
-      const done = await browser.run(said || text, meant);
-      log('voice: Chrome', done ? `${done.ok ? 'did it' : 'didn’t'}: ${JSON.stringify(done.text)}` : 'stopped');
-      return { steps, outcome: done && (done.ok ? ok(done.text || 'Done.') : bad(done.text || 'That didn’t work in Chrome.')) };
+      const meant = again ? text : said && gist(said) !== gist(text) ? text : '';
+      const words = again || said || text;
+      log('voice: Chrome’s to do:', JSON.stringify(words), meant ? `(meaning ${JSON.stringify(meant)})` : '');
+      const done = await browser.run(words, meant);
+      const did = !!done?.ok && !CAME_TO_NOTHING.test(done.text || '');
+      log('voice: Chrome', done ? `${did ? 'did it' : 'didn’t'}: ${JSON.stringify(done.text)}` : 'stopped');
+      return { steps, outcome: ended(done && (did ? ok(done.text || 'Done.') : bad(done.text || 'That didn’t work in Chrome.')), text, said) };
     }
     if (unknown) {
       // A question's answer is the assistant's to find: a way learned for the command it came as would do it and tell nothing.
@@ -606,7 +632,7 @@ export function createVoiceRunner({
         note = `The way this was done before stopped at step ${replayed.step + 1}: ${replayed.detail}.`;
         done = known.steps.slice(0, replayed.step);
       }
-      if (await assistantReady()) return { steps, outcome: await assisted(text, note, done, { said }) };
+      if (await assistantReady()) return { steps, outcome: ended(await assisted(text, note, done, { said }), text, said) };
       // The assistant could, given a model: say where to add one.
       const partly = done.length ? `The saved way did ${done.length} step${done.length > 1 ? 's' : ''}, then stopped` : 'Nothing was done';
       if (assistant) return { steps, outcome: bad(`“${unknown.text.replace(/[.!?]+$/, '')}” needs a model for actions: choose one in Jester’s Settings › Models. ${partly}.`) };
@@ -669,6 +695,8 @@ export function createVoiceRunner({
     },
     /** Whether a sentence is one Jester can do with no model. Does nothing, and stops nothing running. */
     async knows(text) {
+      // "Keep going", with a task just failed to go on with: its own, not the talking model's to make something of.
+      if (failed && AGAIN.test(text) && Date.now() - failed.at < AGAIN_MS) return true;
       if (learned && (await learned.phrase(text).catch(() => null))) return true;
       const apps = (await freshApps()).flatMap((app) => app.names);
       if (!parseSequence(text, { apps, platform, talking: true }).some((step) => step.kind === 'unknown')) return true;
