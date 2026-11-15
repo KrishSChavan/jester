@@ -60,7 +60,10 @@ front window fills its display.
 | `scripts/hear-check.mjs` | `npm run hear-check`: his own speech service on audio from files: a made-up voice learned from use, or (`kept`) what he wasn't sure of, scored against the real voiceprint. |
 | `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
-| `scripts/speed-check.mjs` | `npm run speed-check`: how soon his voice starts after he hears you, with the real model and Puter's real voice, against how it was. |
+| `scripts/speed-check.mjs` | `npm run speed-check`: how soon his voice starts after he hears you, with the real model and his real voice, against how it was. |
+| `scripts/voice-check.mjs` | `npm run voice-check`: his real voice making the kinds of line he says: how soon the first sound is ready, and each read back by his own recognizer. `-- --play` to hear it, `-- --voice lewis` for another. |
+| `src/main/kokoro.js` | His own voice from the main process's side: starts `voice/service.js` when there's a line to make, lets it go after three idle minutes. |
+| `src/main/voice/` | `service.js`: Kokoro through sherpa-onnx, in a process of its own, a WAV per line. `voices.js`: the voices Settings offers, and the model's config. |
 | `scripts/vault-eval.mjs` | How well memory finds things in a vault: a sample vault and the questions it's scored on. |
 | `spikes/` | Phase 0 experiments, and `link-live.mjs`, the link end to end in a throwaway Chrome. |
 
@@ -74,7 +77,7 @@ cd desktop
 npm install
 node node_modules/electron/install.js   # Electron 44 downloads its binary on first use
 npm run driver                           # needs Rust: https://rustup.rs
-npm run models                           # speech and voice models, ~175 MB, into models/
+npm run models                           # hearing and voice models, ~510 MB, into models/
 ```
 
 `npm run models` downloads what's too big for git, skipping anything already
@@ -85,6 +88,7 @@ there. Run it on every new checkout, and again after pulling a new model:
 | `vad` | 1 MB | Finds where speech starts and stops |
 | `voice` | 40 MB | Tells the user's voice from anyone else's; without it, he listens to everyone |
 | `parakeet-110m` | 130 MB | Turns speech into text |
+| `kokoro` | 334 MB | His own voice (Kokoro v1.0); without it, he speaks with the computer's |
 
 To add one that isn't in the default set, name it: `npm run models --
 parakeet-0.6b` (the Accurate recognizer, ~650 MB) or `npm run models --
@@ -369,8 +373,9 @@ turns, came to about a cent, 163 right, a median turn of 1.0 s.
 How soon he starts to answer (2026-11-14). Measured on Haiku 5.5 with his real
 prompt, a spoken turn's time went: 0.6 s for the pause that ends an utterance,
 about 0.9 s before Claude's first word and 1.3 s to its last, and 0.4 s for
-Puter's voice whatever the line's length (so a voice on this computer would
-save next to nothing). Three things changed:
+the voice he had then (a hosted one, Puter's, whatever the line's length; his
+own voice since 2026-11-15 takes 0.3–0.45 s for a first sentence: His voice,
+below). Three things changed:
 
 - His reply isn't held to its schema when it's Claude talking (`plain`,
   model-client.js). The schema cost half a second before the first word: 0.37 s
@@ -415,19 +420,23 @@ save next to nothing). Three things changed:
 `npm run speed-check -- --spoken` says each line aloud (macOS `say`, into the
 real speech service at the speed it's said) and times from the last word to the
 first sound of his voice, through the real model: on Haiku 5.5 a median 1.04 s
-thinking ahead and 1.37 s without, sooner in 6 lines of 6. Puter's allowance ran
-out around that run, so the voice's part of those times isn't certain: a fetched
-line took 0.35–0.45 s that night, a refusal 0.1–0.2 s, so with Puter answering
-they may be up to 0.3 s more either way. The run before it, with Puter answering,
-had his voice at 1.1–1.35 s thinking ahead on the lines whose reply wasn't slow.
-Before any of this it was about 2.4 s (0.7 s to hear and read it, then 1.7 s).
+thinking ahead and 1.37 s without, sooner in 6 lines of 6. That was with the
+hosted voice, whose allowance ran out around that run, so its part of those
+times isn't certain (a fetched line took 0.35–0.45 s that night, a refusal
+0.1–0.2 s); the run before it, with that voice answering, had him at 1.1–1.35 s
+thinking ahead on the lines whose reply wasn't slow. Before any of this it was
+about 2.4 s (0.7 s to hear and read it, then 1.7 s).
 
-Puter's voice is left out of speed-check unless asked for (`-- --voice`): a
-free account has about 31,000 characters a month, and a run with the voice
-fetches 2,500–7,000 of them.
+With his own voice (Kokoro, 2026-11-15, three runs): a median 1.33–1.50 s
+thinking ahead and 1.71–1.78 s without, sooner in 18 lines of 18. From his first
+sentence being written to its sound took 0.32–0.45 s on five lines of six; the
+sixth, a long opening sentence, took 0.85–0.9 s made whole, which is why an
+opening sentence over 60 characters is now made in two (`spokenPieces`). The
+runs differ from each other by as much as the voices do: Claude's first word
+moves by 0.2 s from one run to the next.
 
-`npm run speed-check` says each line both ways, with the saved model and Puter's
-real voice (fetched, not played): on Haiku 5.5 his voice started a median 1.0 s
+`npm run speed-check` says each line both ways, with the saved model and his
+real voice (made, not played; the hosted one, when these were measured): on Haiku 5.5 his voice started a median 1.0 s
 after he heard the words, where it had been 1.7 s, and the slow turns of 2–3.5 s
 went. On qwen3.5:9b, 0.7 s where it was 0.9 s. It starts from the words being
 heard, so the head start from a pause comes on top. Every spoken turn now writes
@@ -716,12 +725,39 @@ chunk over `engine.js`; `orb.js` imports its short export names.
 
 #### His voice
 
-His voice (`speaker.js`) is the computer's own until Puter is connected, and again
-whenever Puter fails. `puter.js` makes the call Puter's script makes, from the main
-process, so no remote code runs in the app; signing in goes through the browser,
-as Puter's Node package does. It isn't unlimited: Puter's source gives a free
-account $0.50 a month, or about 31,000 characters at this voice's price, and it
-answers 402 past that. Only what he says goes to Puter.
+His voice is his own, made on this computer: Kokoro v1.0 (82 M parameters,
+Apache-2.0) through sherpa-onnx, the library that hears for him. Nothing he says
+is sent anywhere, and there's no account and no allowance. Until 2026-11-15 it
+was a hosted voice (Puter) with a free monthly allowance of about 31,000
+characters, which a night of timing runs used up; that's why it's gone.
+
+- `voice/service.js` runs the model in a utilityProcess, so making a line stalls
+  neither the main process nor the one that listens. `kokoro.js` starts it when
+  his name is heard (warmUp) or there's a line to make, and lets it go after
+  three idle minutes: it holds about 1 GB loaded and takes 0.4–0.7 s to load.
+- `speaker.js` gives it a line a piece at a time (`spokenPieces`): each sentence,
+  and an opening sentence over 60 characters as two, cut at a comma or, with
+  none, before a joining word ("by", "because", "which"), with the quiet trimmed
+  so it runs on. Each piece is made while the one before plays. Kokoro takes
+  about 110 ms plus 7 ms a character on an M4 Pro, eight threads (two threads:
+  2.5 times that; Core ML was slower than four), so a whole long sentence would
+  be most of a second before any sound.
+- `forEar` first puts what's written for the eye the way it's said: Kokoro reads
+  signs literally ("$12.50" was "dollar twelve point five zero", "Nov 15" "Nove
+  fifteenth", "7-9 PM" "seven dash nine"). What's shown on screen is untouched.
+- Without the model (`npm run models -- kokoro`), when the service won't start
+  (twice running: left alone for ten minutes), or when a piece fails, the
+  computer's own voice says it (`say`, Daniel; PowerShell's on Windows): he is
+  never silent.
+- Settings › Assistant and voice › Jester's voice picks one of ten of the model's
+  54 voices (`voices.js`; George, British, by default) and plays a line in it. A
+  British voice reads from the British pronunciation list and an American from
+  the American, so changing accent reloads the model.
+
+`npm run voice-check` makes ten kinds of line with the real model and has his own
+recognizer read each back: on 2026-11-15 all ten came back with their words, the
+first sound ready in a median 0.36 s (0.16 s for "Done.", 0.57 s the slowest).
+Whether he sounds pleasant only an ear can say: `npm run voice-check -- --play`.
 
 ### Tasks on the real computer
 

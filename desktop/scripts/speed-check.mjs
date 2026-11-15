@@ -1,7 +1,7 @@
 /**
  * How long he takes to start answering, from his words being heard to the first sound of his voice: the app's own
- * conversation (conversation.js), the saved model he talks through, and Puter's real voice, with the sound thrown
- * away rather than played. Every line is said to him both ways, so the difference is this run's own:
+ * conversation (conversation.js), the saved model he talks through, and his real voice (Kokoro, on this computer),
+ * with the sound thrown away rather than played. Every line is said to him both ways, so the difference is this run's own:
  *
  *   before   as the app asked until 2026-11-14: the whole reply waited for, Claude held to the reply's schema
  *   now      the reply read as it's written, his first sentence said while the rest comes, Claude asked plainly
@@ -10,7 +10,7 @@
  *   npm run speed-check -- saved:anthropic      one provider's saved models
  *   npm run speed-check -- ollama:qwen3.5:9b    one Ollama model
  *   npm run speed-check -- --rounds 3           each line three times each way (once by default)
- *   npm run speed-check -- --voice              with Puter's real voice fetched for each line (see the cost below)
+ *   npm run speed-check -- --no-voice           the model's part alone, without his voice making each line
  *   npm run speed-check -- --spoken             said aloud instead (macOS `say`, into his real speech service at the
  *                                               speed it's said): from the last word to his voice, with and without
  *                                               starting on the reply at a pause that may be the end (thinkAhead)
@@ -19,15 +19,14 @@
  * says "heard … after the last word" for each real turn), and what his memory and the weather take, which have no
  * vault or calendars here.
  *
- * Saved models' keys and the Puter sign-in are sealed with the Mac's keychain, so this runs in Electron, as Jester:
- * macOS may ask to let it use "Jester Safe Storage". Neither is ever printed. A run is 14 short requests to each
+ * Saved models' keys are sealed with the Mac's keychain, so this runs in Electron, as Jester: macOS may ask to let
+ * it use "Jester Safe Storage". They're never printed. A run is 14 short requests to each
  * model.
  *
- * Puter's voice is left out unless asked for (--voice), and then a run fetches some 20 lines, 2,500–7,000 characters
- * of a free account's 31,000 a month: on 2026-11-15 a night of these runs used up what the user had left, and he
- * spoke in the Mac's own voice until the month turned. Without it the voice's part isn't in the times (it was
- * 0.35–0.45 s a line, whatever its length, when measured). With it, a refusal from Puter is said, never timed as
- * if it were the voice.
+ * His voice is made for real: it's on this computer, so a run costs nothing but the model's requests. (Until
+ * 2026-11-15 it was a service with a monthly allowance, which a night of these runs used up: its numbers in the
+ * README are from then.) Without its model downloaded (npm run models -- kokoro) the voice's part isn't in the
+ * times, and the run says so.
  */
 
 import { execFileSync, spawn } from 'node:child_process';
@@ -62,7 +61,7 @@ if (!process.versions.electron) {
   const { askModel, createConversation, LOCAL_KEEP_ALIVE, ollamaModels, pickModel } = await import('../src/main/conversation.js');
   const { createModelJob } = await import('../src/main/model-jobs.js');
   const { createSpeaker } = await import('../src/main/speaker.js');
-  const { synthesize } = await import('../src/main/puter.js');
+  const { startKokoro } = await import('../src/main/kokoro.js');
   const { normaliseConnection, PROVIDERS } = await import('../../jester-extension/src/common/credentials.js');
 
   // Jester's keychain entry, but never its profile: the app may be running on that.
@@ -70,14 +69,8 @@ if (!process.versions.electron) {
   app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'jester-speed-check-')));
   const roundsAt = process.argv.indexOf('--rounds');
   const ROUNDS = roundsAt > 0 ? Math.max(1, Number(process.argv[roundsAt + 1]) || 1) : 1;
-  const VOICE = process.argv.includes('--voice');
-  /** Puter refusing (its allowance run out, signed out): said once, since the times after it have no voice in them. */
-  let refused = '';
-  const voiceTrouble = (trouble) => {
-    if (!trouble || refused) return;
-    refused = trouble;
-    console.log(`   ! Puter’s voice refused (${trouble}): from here the voice’s part isn’t in the times.`);
-  };
+  /** His own voice, made for real and never played; null with --no-voice, and it says null to each line without its model. */
+  const kokoro = process.argv.includes('--no-voice') ? null : startKokoro({ fork: (file) => utilityProcess.fork(file, [], { serviceName: 'Jester voice (speed-check)', stdio: 'pipe' }) });
   const args = process.argv.slice(2).filter((arg, i, all) => !arg.startsWith('--') && all[i - 1] !== '--rounds' && !arg.endsWith('.mjs'));
   const wanted = args.length ? args : ['saved'];
 
@@ -139,9 +132,9 @@ if (!process.versions.electron) {
 
   /**
    * Each line said aloud to his real speech service, at the speed it's said, and answered by the app's conversation
-   * through the model and Puter's voice: how long after the last word his voice begins, thinking ahead and not.
+   * through the model and his voice: how long after the last word his voice begins, thinking ahead and not.
    */
-  async function spoken(connection, token) {
+  async function spoken(connection) {
     if (process.platform !== 'darwin') throw new Error('--spoken needs macOS’s `say`');
     const local = connection.provider === 'ollama';
     const job = createModelJob({ job: 'talk', saved: async () => (local ? [] : [{ ...connection, uses: ['talk'] }]), local: async () => ({ model: local ? connection.model : '', uses: ['talk'] }), keepAlive: LOCAL_KEEP_ALIVE, markLimited: async () => undefined });
@@ -163,7 +156,7 @@ if (!process.versions.electron) {
       };
       const conversation = createConversation({
         chat: (request) => askModel({ ...request, request: job }),
-        speaker: createSpeaker({ token: async () => (refused ? null : token), onTrouble: voiceTrouble, synthesize, play: sound, stopPlaying: () => undefined, system: { say: sound, stop: () => undefined } }),
+        speaker: createSpeaker({ voice: kokoro, play: sound, stopPlaying: () => undefined, system: { say: sound, stop: () => undefined } }),
         memory: { add: () => undefined, current: () => [], idleFor: () => 0, startNew: () => [] },
         recollections: { keep: async () => undefined, relevant: () => [] },
         commands: { knows: async () => false, risky: async () => false, run: async () => ({ outcome: null }) },
@@ -223,12 +216,15 @@ if (!process.versions.electron) {
   app.whenReady().then(async () => {
     const list = await targets().catch((err) => (console.log(`Couldn't read the saved models: ${err.message}`), []));
     if (!list.length) console.log('No model to check: tick Talking on one in Settings › Models, or name one (ollama:qwen3.5:9b).');
-    const token = VOICE ? unsealed('puterToken') : null;
-    console.log(token ? 'Voice: Puter’s, fetched for real and not played.' : `Voice: none (${VOICE ? 'Puter isn’t signed in' : 'add --voice for Puter’s, which spends its monthly allowance'}): only the model’s part is timed.`);
+    const voiced = kokoro?.state === 'ready';
+    console.log(voiced ? 'Voice: his own (Kokoro), made for real and not played.' : `Voice: none (${kokoro ? 'Kokoro isn’t downloaded: npm run models -- kokoro' : '--no-voice'}): only the model’s part is timed.`);
+    // Loaded before anything's timed, as it is in the app by the time he's been spoken to.
+    if (voiced) await kokoro.sound('Ready.').catch((err) => console.log(`   ! his voice isn’t starting (${err.message}): its part isn’t in the times.`));
     const summary = [];
     if (process.argv.includes('--spoken')) {
-      for (const connection of list) summary.push(await spoken(connection, token).catch((err) => `${name(connection)}: ${err.message}`));
+      for (const connection of list) summary.push(await spoken(connection).catch((err) => `${name(connection)}: ${err.message}`));
       if (summary.length > 1 || summary.some((line) => !line.includes('said aloud:'))) console.log(`\n${summary.join('\n')}`);
+      kokoro?.stop();
       return app.quit();
     }
     for (const connection of list) {
@@ -246,9 +242,7 @@ if (!process.versions.electron) {
         let started = 0;
         let said = '';
         const speaker = createSpeaker({
-          token: async () => (refused ? null : token),
-          onTrouble: voiceTrouble,
-          synthesize,
+          voice: kokoro,
           play: async () => {
             if (!Number.isFinite(at.sound)) at.sound = performance.now() - started;
           },
@@ -312,6 +306,7 @@ if (!process.versions.electron) {
       summary.push(line);
     }
     if (summary.length > 1) console.log(`\n${summary.join('\n')}`);
+    kokoro?.stop();
     app.quit();
   });
 }

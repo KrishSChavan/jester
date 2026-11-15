@@ -315,16 +315,17 @@ test('his name heard, what a turn waits on is got ready; and a turn says how lon
   assert.match(logged.find((line) => line.startsWith('turn:')), /^turn: heard 684 ms after the last word · /);
 });
 
-test('the voice says when its sound starts, and a line prepared ahead is fetched once and played without a wait', async () => {
+test('the voice says when its sound starts, and a line prepared ahead is made once and played without a wait', async () => {
   const fetched = [];
   const played = [];
   const order = [];
   const speaker = createSpeaker({
-    token: async () => 'token',
-    synthesize: async (text) => {
-      fetched.push(text);
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      return { bytes: new Uint8Array([text.length]), type: 'audio/mpeg' };
+    voice: {
+      sound: async (text) => {
+        fetched.push(text);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { bytes: new Uint8Array([text.length]), type: 'audio/wav' };
+      }
     },
     play: async (bytes) => {
       order.push('play');
@@ -344,9 +345,9 @@ test('the voice says when its sound starts, and a line prepared ahead is fetched
   await speaker.say('Something else.');
   await speaker.say('Never said.');
   assert.deepEqual(fetched.filter((text) => text === 'Never said.').length, 2);
-  // With no Puter, the computer's own voice still reports its start, once.
+  // Without his own voice, the computer's still reports its start, once.
   const starts = [];
-  const plain = createSpeaker({ token: async () => null, synthesize: async () => null, play: async () => undefined, stopPlaying: () => undefined, system: { say: async () => undefined, stop: () => undefined } });
+  const plain = createSpeaker({ voice: null, play: async () => undefined, stopPlaying: () => undefined, system: { say: async () => undefined, stop: () => undefined } });
   await plain.say('Hello.', { onSound: () => starts.push(1) });
   assert.deepEqual(starts, [1]);
 });

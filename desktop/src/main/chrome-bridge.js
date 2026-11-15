@@ -21,7 +21,8 @@ const WORKER_URL = `${EXT_ROOT}src/background/service-worker.js`;
 /**
  * Keys only the main process reads: the model connections, API keys and all,
  * what Jester has learned (learned.js), which holds what was typed, the
- * key that proves a watch is yours (watch.js), the Puter sign-in (puter.js), the
+ * key that proves a watch is yours (watch.js), the sign-in to the voice service an
+ * earlier version used (`puterToken`: main.js removes it at launch), the
  * user's voiceprint (voiceprint.js), and their calendars' links, each of which
  * reads that calendar (calendars.js).
  * Pages never see them, through storage or its change events, and they're

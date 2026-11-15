@@ -11,8 +11,9 @@ import { createRecollections, KEPT_MS } from '../desktop/src/main/recollections.
 import { createVault } from '../desktop/src/main/vault.js';
 import { createVaultMemory } from '../desktop/src/main/vault-memory.js';
 import { averageVoice, judged, likeness, sounds, TEACHING_LINES } from '../desktop/src/main/voiceprint.js';
-import { createSpeaker, spokenLine, SPOKEN_CHARS } from '../desktop/src/main/speaker.js';
-import { PuterError, signInToPuter, synthesize } from '../desktop/src/main/puter.js';
+import { createSpeaker, forEar, runsOn, spokenLine, spokenPieces, SPOKEN_CHARS } from '../desktop/src/main/speaker.js';
+import { startKokoro } from '../desktop/src/main/kokoro.js';
+import { DEFAULT_VOICE, kokoroConfig, kokoroThreads, trimmed, voiceNamed, VOICES, wav } from '../desktop/src/main/voice/voices.js';
 
 test('his name, and what the recognizer really writes for it', () => {
   for (const [heard, rest] of [
@@ -1281,74 +1282,239 @@ test('what is spoken is made for the ear, and kept short', () => {
   assert.ok(long.length <= SPOKEN_CHARS && long.endsWith('.'));
 });
 
-function voices({ token = 'tok', synth } = {}) {
-  const log = { played: [], system: [], trouble: [], synths: 0 };
-  let time = 0;
+function voices({ sound } = {}) {
+  const log = { played: [], system: [], made: [], lines: [] };
   const speaker = createSpeaker({
-    token: async () => token,
-    synthesize: synth || (async () => (log.synths += 1, { bytes: new Uint8Array([1]), type: 'audio/mpeg' })),
+    voice: sound === null ? null : { sound: sound || (async (text) => (log.made.push(text), { bytes: new Uint8Array([text.length]), type: 'audio/wav' })) },
     play: async (bytes, type) => void log.played.push(type),
     stopPlaying: () => undefined,
     system: { say: async (text) => void log.system.push(text), stop: () => undefined },
-    onTrouble: (trouble) => log.trouble.push(trouble),
-    now: () => time
+    log: (...parts) => log.lines.push(parts.join(' '))
   });
-  return { speaker, log, pass: (ms) => (time += ms) };
+  return { speaker, log };
 }
 
-test('Puter speaks when connected, and the computer does otherwise', async () => {
+test('his own voice speaks when it’s there, and the computer’s does otherwise', async () => {
   const on = voices();
   await on.speaker.say('hi');
-  assert.deepEqual(on.log.played, ['audio/mpeg']);
+  assert.deepEqual(on.log.played, ['audio/wav']);
   assert.deepEqual(on.log.system, []);
-  const off = voices({ token: null });
-  await off.speaker.say('hi');
-  assert.deepEqual(off.log.system, ['hi']);
-  const down = voices({ synth: async () => { throw new TypeError('fetch failed'); } });
+  // No voice of his own at all (a self-test), its model not downloaded (null), or it failed: never silent.
+  const none = voices({ sound: null });
+  await none.speaker.say('hi');
+  assert.deepEqual(none.log.system, ['hi']);
+  const missing = voices({ sound: async () => null });
+  await missing.speaker.say('hi');
+  assert.deepEqual(missing.log.system, ['hi']);
+  const down = voices({ sound: async () => { throw new Error('The voice stopped'); } });
   await down.speaker.say('hi');
   assert.deepEqual(down.log.system, ['hi']);
+  assert.match(down.log.lines[0], /The voice stopped/);
 });
 
-test('out of credits, Puter rests rather than delaying every line', async () => {
-  let asked = 0;
-  const v = voices({ synth: async () => { asked += 1; throw new PuterError('Puter’s free allowance has run out for this month.', 'no_credits'); } });
-  await v.speaker.say('one');
-  await v.speaker.say('two');
-  assert.equal(asked, 1);
-  assert.deepEqual(v.log.system, ['one', 'two']);
-  assert.match(v.log.trouble[0], /allowance/);
-  v.pass(3600000);
-  await v.speaker.say('three');
-  assert.equal(asked, 2);
+test('a line is made and played a sentence at a time, and a long first sentence in two', () => {
+  assert.deepEqual(spokenPieces('Done.'), ['Done.']);
+  assert.deepEqual(spokenPieces('It’s ten past four. Your exam is at nine! Shall I set an alarm?'), ['It’s ten past four.', 'Your exam is at nine!', 'Shall I set an alarm?']);
+  // Not a sentence's end: a title, a time of day, a figure.
+  assert.deepEqual(spokenPieces('Dr. Patel rang at 4 p.m. about version 3.5 of the form.'), ['Dr. Patel rang at 4 p.m. about version 3.5 of the form.']);
+  // A long opening sentence would be most of a second before any sound: its first clause comes first.
+  assert.deepEqual(spokenPieces('I’ve put milk and eggs on your shopping list, and the weather looks clear until this evening. Anything else?'), [
+    'I’ve put milk and eggs on your shopping list,',
+    'and the weather looks clear until this evening.',
+    'Anything else?'
+  ]);
+  // No comma that leaves enough either side: before a joining word, where a breath might come, and that piece runs on.
+  const breath = spokenPieces('Dynamic programming is a way of solving a big problem by breaking it into smaller ones that overlap.');
+  assert.deepEqual(breath, ['Dynamic programming is a way of solving a big problem', 'by breaking it into smaller ones that overlap.']);
+  assert.deepEqual(breath.map(runsOn), [true, false]);
+  assert.equal(runsOn('I’ve put milk and eggs on your shopping list,'), false);
+  // A joining word near where the cut's wanted beats a comma far past it.
+  assert.deepEqual(spokenPieces('Dynamic programming breaks a complex problem into overlapping subproblems, solves each once and stores the answers.'), [
+    'Dynamic programming breaks a complex problem',
+    'into overlapping subproblems, solves each once and stores the answers.'
+  ]);
+  // Nowhere to cut: it's said whole. And only the opening sentence is ever cut: the rest are made while he talks.
+  const whole = 'Supercalifragilisticexpialidocious antidisestablishmentarianism floccinaucinihilipilification.';
+  assert.deepEqual(spokenPieces(whole), [whole]);
+  const later = 'The second sentence here is a long one and it goes on for quite a while without a comma.';
+  assert.deepEqual(spokenPieces(`Right. ${later}`), ['Right.', later]);
+  assert.deepEqual(spokenPieces('  '), []);
 });
 
-test('Puter is called as its client calls it, and its refusals are told apart', async () => {
-  let sent;
-  const audio = await synthesize('hi', 'tok', { fetchImpl: async (url, init) => ((sent = { url, init }), new Response(new Uint8Array([7, 8]), { headers: { 'content-type': 'audio/mpeg' } })) });
-  assert.deepEqual([...audio.bytes], [7, 8]);
-  assert.equal(sent.url, 'https://api.puter.com/drivers/call');
-  const body = JSON.parse(sent.init.body);
-  assert.deepEqual([body.interface, body.driver, body.method, body.auth_token, body.args.text], ['puter-tts', 'ai-tts', 'synthesize', 'tok', 'hi']);
-  const refusal = (status) => synthesize('hi', 'tok', { fetchImpl: async () => new Response('{"message":"no"}', { status, headers: { 'content-type': 'application/json' } }) });
-  await assert.rejects(refusal(401), (err) => err.code === 'signed_out');
-  await assert.rejects(refusal(402), (err) => err.code === 'no_credits');
-  await assert.rejects(refusal(500), (err) => err.code === 'refused');
-  const inline = await synthesize('hi', 'tok', { fetchImpl: async () => new Response(JSON.stringify({ result: 'data:audio/mpeg;base64,AQI=' }), { headers: { 'content-type': 'application/json' } }) });
-  assert.deepEqual([...inline.bytes], [1, 2]);
+test('the quiet before a piece is cut, and the quiet after one that runs on', () => {
+  const rate = 1000;
+  const samples = new Float32Array(300);
+  samples.fill(0.5, 100, 200);
+  // 15 ms of the quiet before is kept; all of the quiet after, unless it runs on: then 30 ms.
+  assert.equal(trimmed(samples, rate).length, 215);
+  assert.equal(trimmed(samples, rate, true).length, 145);
+  assert.equal(trimmed(new Float32Array(50), rate, true).length, 50, 'all quiet: left as it came');
+  const bytes = wav(new Float32Array([0, 1, -1]), 24000);
+  const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  assert.deepEqual([view.toString('ascii', 0, 4), view.toString('ascii', 8, 16), view.readUInt32LE(24), view.readUInt16LE(34), view.readUInt32LE(40)], ['RIFF', 'WAVEfmt ', 24000, 16, 6]);
+  assert.deepEqual([view.readInt16LE(44), view.readInt16LE(46), view.readInt16LE(48)], [0, 32767, -32767]);
 });
 
-test('signing in takes the token from the browser, and only with the right state', async () => {
-  const token = await signInToPuter(async (url) => {
-    const signIn = new URL(url);
-    assert.equal(signIn.searchParams.get('action'), 'authme');
-    const back = new URL(signIn.searchParams.get('redirectURL'));
-    assert.equal(back.hostname, '127.0.0.1');
-    const forged = new URL(back);
-    forged.searchParams.set('state', 'wrong');
-    forged.searchParams.set('token', 'stolen');
-    assert.equal((await fetch(forged)).status, 400);
-    back.searchParams.set('token', 'the-token');
-    assert.equal((await fetch(back)).status, 200);
+test('what’s written for the eye is put the way it’s said, before his voice is given it', () => {
+  const said = (text, as) => assert.equal(forEar(text), as);
+  said('That costs $12.50, about 15% less.', 'That costs 12 dollars 50, about 15% less.');
+  said('It’s $5, or $1,200 a year, or $1 a day.', 'It’s 5 dollars, or 1,200 dollars a year, or 1 dollar a day.');
+  said('Only $0.99, or £3.05, or €1.5 million.', 'Only 99 cents, or 3 pounds and 5 pence, or 1.5 million euros.');
+  said('It’s 72°F now and 18°C in London, 40° in the oven.', 'It’s 72 degrees Fahrenheit now and 18 degrees Celsius in London, 40 degrees in the oven.');
+  said('You walked 1,200 steps and 3.5 km at 6 km/h.', 'You walked 1,200 steps and 3.5 kilometres at 6 kilometres an hour.');
+  said('The meeting is at 10:30 AM on Nov 15, 2026.', 'The meeting is at 10:30 AM on November 15, 2026.');
+  said('Due Fri, 3rd Dec. Then Sat, Jan. 4.', 'Due Friday, 3rd December Then Saturday, January 4.');
+  said('Open 24/7, from 7-9 PM, pages 3–5.', 'Open twenty-four seven, from 7 to 9 PM, pages 3 to 5.');
+  said('Call 555-0132, or 814-555-0132.', 'Call 5 5 5, 0 1 3 2, or 8 1 4, 5 5 5, 0 1 3 2.');
+  said('No. 3, i.e. #4, e.g. this vs. that, etc.', 'number 3, that is, number 4, for example, this versus that, et cetera');
+  said('Mail sam@example.com & see example.org.', 'Mail sam at example dot com and see example dot org.');
+  // Words that only look like one of those are left alone.
+  const plain = 'The sun sat low in May, and I may march on. No. I said no.';
+  said(plain, plain);
+  said('It ended 3-2 on 2026-11-15.', 'It ended 3 to 2 on November 15, 2026.');
+  // What he's given to say comes in pieces already put that way.
+  assert.deepEqual(spokenPieces('That’s $5. Due Nov 15.'), ['That’s 5 dollars.', 'Due November 15.']);
+});
+
+test('each piece is made while the one before plays, and one that fails leaves the rest to the computer’s voice', async () => {
+  const order = [];
+  let release;
+  const speaker = createSpeaker({
+    voice: {
+      sound: async (text) => {
+        order.push(`make ${text}`);
+        if (text === 'Three.') throw new Error('no-sound');
+        return { bytes: new Uint8Array([1]), type: 'audio/wav' };
+      }
+    },
+    play: async () => {
+      order.push('play');
+      if (order.filter((step) => step === 'play').length === 1) await new Promise((resolve) => (release = resolve));
+    },
+    stopPlaying: () => undefined,
+    system: { say: async (text) => void order.push(`system ${text}`), stop: () => undefined }
   });
-  assert.equal(token, 'the-token');
+  const said = speaker.say('One. Two. Three. Four.');
+  await new Promise((resolve) => setImmediate(resolve));
+  // The first is still playing, and the second is already being made.
+  assert.deepEqual(order, ['make One.', 'play', 'make Two.']);
+  release();
+  await said;
+  assert.deepEqual(order, ['make One.', 'play', 'make Two.', 'play', 'make Three.', 'system Three. Four.']);
+});
+
+test('something new to say stops what was being made', async () => {
+  const signals = [];
+  const played = [];
+  const speaker = createSpeaker({
+    voice: { sound: (text, { signal } = {}) => new Promise((resolve) => (signals.push(signal), setTimeout(() => resolve({ bytes: new Uint8Array([text.length]), type: 'audio/wav' }), 5))) },
+    play: async (bytes) => void played.push(bytes[0]),
+    stopPlaying: () => undefined,
+    system: { say: async () => undefined, stop: () => undefined }
+  });
+  const first = speaker.say('The first thing.');
+  const second = speaker.say('Second.');
+  await Promise.all([first, second]);
+  assert.equal(signals[0].aborted, true);
+  assert.deepEqual(played, [7]);
+});
+
+/** A voice service that isn't one: what it was sent, and a way to answer as it would. */
+function fakeService() {
+  const children = [];
+  const fork = () => {
+    const handlers = {};
+    const child = { sent: [], killed: false, postMessage: (message) => child.sent.push(message), on: (name, handler) => (handlers[name] = handler), kill: () => (child.killed = true), tell: (message) => handlers.message(message), exit: (code) => handlers.exit(code) };
+    children.push(child);
+    return child;
+  };
+  return { fork, children };
+}
+
+test('Kokoro is started when there’s a line to make, in the accent of the voice chosen, and gives back its sound', async () => {
+  const service = fakeService();
+  let voice = 'george';
+  const logged = [];
+  const kokoro = startKokoro({ fork: service.fork, voice: () => voice, installed: () => true, log: (...parts) => logged.push(parts.join(' ')) });
+  assert.equal(kokoro.state, 'ready');
+  assert.equal(kokoro.loaded, false);
+  const asked = kokoro.sound('Good evening.');
+  const [child] = service.children;
+  assert.deepEqual(child.sent, [{ type: 'start', accent: 'gb' }, { type: 'say', id: 1, text: 'Good evening.', sid: 26 }]);
+  child.tell({ type: 'ready', loadMs: 420, accent: 'gb' });
+  child.tell({ type: 'sound', id: 1, bytes: new Uint8Array([1, 2]), mime: 'audio/wav', seconds: 1.2, tookMs: 250 });
+  assert.deepEqual(await asked, { bytes: new Uint8Array([1, 2]), type: 'audio/wav', seconds: 1.2, tookMs: 250 });
+  assert.match(logged.join('\n'), /voice loaded: Kokoro \(gb\), 420 ms/);
+  // An American voice reads from another pronunciation list: the service is started afresh for it.
+  voice = 'michael';
+  const next = kokoro.sound('Hello.');
+  assert.equal(child.killed, true);
+  assert.deepEqual(service.children[1].sent, [{ type: 'start', accent: 'us' }, { type: 'say', id: 2, text: 'Hello.', sid: 16 }]);
+  service.children[1].tell({ type: 'error', id: 2, detail: 'no-sound' });
+  await assert.rejects(next, /no-sound/);
+  kokoro.stop();
+  assert.equal(service.children[1].killed, true);
+});
+
+test('a line that’s no longer wanted is dropped, and one that never comes is given up on', async () => {
+  const service = fakeService();
+  const kokoro = startKokoro({ fork: service.fork, installed: () => true, lineMs: 20 });
+  const stop = new AbortController();
+  const dropped = kokoro.sound('Never mind.', { signal: stop.signal });
+  stop.abort();
+  assert.equal(await dropped, null);
+  assert.deepEqual(service.children[0].sent.at(-1), { type: 'drop', id: 1 });
+  await assert.rejects(kokoro.sound('Anyone there?'), /took too long/);
+  assert.deepEqual(service.children[0].sent.at(-1), { type: 'drop', id: 2 });
+  kokoro.stop();
+});
+
+test('without its model Kokoro is never started, one that keeps dying is left alone a while, and an idle one is let go', async () => {
+  const none = fakeService();
+  const missing = startKokoro({ fork: none.fork, installed: () => false });
+  assert.equal(missing.state, 'missing');
+  assert.equal(await missing.sound('hi'), null);
+  missing.warm();
+  assert.equal(none.children.length, 0);
+
+  const service = fakeService();
+  let time = 0;
+  const kokoro = startKokoro({ fork: service.fork, installed: () => true, now: () => time });
+  const first = kokoro.sound('one');
+  service.children[0].exit(1);
+  await assert.rejects(first, /stopped/);
+  const second = kokoro.sound('two');
+  service.children[1].tell({ type: 'error', detail: 'load: no such file' });
+  await assert.rejects(second, /stopped/);
+  // Twice in a row: not a third time, for ten minutes. The speaker falls back on null at once.
+  assert.equal(kokoro.state, 'resting');
+  assert.equal(await kokoro.sound('three'), null);
+  assert.equal(service.children.length, 2);
+  time += 10 * 60 * 1000;
+  assert.equal(kokoro.state, 'ready');
+  kokoro.warm();
+  assert.equal(service.children.length, 3);
+  kokoro.stop();
+
+  const brief = fakeService();
+  const idle = startKokoro({ fork: brief.fork, installed: () => true, idleMs: 15 });
+  idle.warm();
+  assert.equal(idle.loaded, true);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(idle.loaded, false);
+  assert.equal(brief.children[0].killed, true);
+});
+
+test('the voices Settings offers are the model’s own, and a setting that names none is the default', () => {
+  assert.equal(voiceNamed('nobody').id, DEFAULT_VOICE);
+  assert.equal(voiceNamed(undefined).id, DEFAULT_VOICE);
+  assert.equal(voiceNamed('michael').sid, 16);
+  assert.equal(new Set(VOICES.map((voice) => voice.sid)).size, VOICES.length);
+  assert.ok(VOICES.every((voice) => ['gb', 'us'].includes(voice.accent) && voice.sid >= 0 && voice.sid < 54));
+  const config = kokoroConfig('us', { dir: '/models/kokoro', threads: 4 });
+  assert.equal(config.model.kokoro.lexicon, '/models/kokoro/lexicon-us-en.txt');
+  assert.equal(kokoroConfig('gb', { dir: '/models/kokoro', threads: 4 }).model.kokoro.lexicon, '/models/kokoro/lexicon-gb-en.txt');
+  assert.equal(config.model.numThreads, 4);
+  // Four cores are left for everything else, and never fewer than two used.
+  assert.deepEqual([4, 8, 10, 12, 16].map(kokoroThreads), [2, 4, 6, 8, 8]);
 });

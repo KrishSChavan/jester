@@ -27,7 +27,7 @@
  *   JESTER_NO_LINK=1          no link to the Chrome extension
  */
 
-import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell } from 'electron';
+import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, utilityProcess } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { format } from 'node:util';
@@ -60,7 +60,7 @@ import { createSteady, steerBy } from './pointer-math.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
-import { signInToPuter, synthesize } from './puter.js';
+import { startKokoro } from './kokoro.js';
 import { createRecollections } from './recollections.js';
 import { createSituation } from './situation.js';
 import { createSpeaker, systemVoice } from './speaker.js';
@@ -75,6 +75,7 @@ import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault
 import { createVaultIndex } from './vault-index.js';
 import { createVaultMemory, secretIn } from './vault-memory.js';
 import { createVoicePage } from './voice-page.js';
+import { VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
@@ -193,6 +194,8 @@ let locationSource = '';
 /** The weather now where the user is, in a line for Settings. */
 let weatherNote = '';
 let speaker = null;
+/** His own voice, made on this computer (kokoro.js). */
+let kokoro = null;
 let voicePage = null;
 /** The model he talks through (model-jobs.js). */
 let talking = null;
@@ -208,15 +211,12 @@ const CHROME_SCOPES = new Set(['video', 'page', 'browser', 'window']);
 let listening = false;
 /** Why it's closed for the moment, whatever the setting says: 'locked', 'suspended'. */
 const away = new Set();
-let puterConnected = false;
 /** The user's voice, once taught. */
 let voiceprint = null;
 /** Other ways the user's been heard to sound, learned from use (voiceprint.js). */
 let voiceLearned = [];
 /** Teaching him a voice: the takes so far, and what ends it. */
 let teaching = null;
-/** Why Puter's voice isn't being used, when it's connected. */
-let puterTrouble = '';
 let quitting = false;
 let engine = { state: 'off', detail: '' };
 let permissions = [];
@@ -370,8 +370,8 @@ function desktopState() {
       listening,
       wanted: !!settings?.continuousAssistant,
       problem: settings?.continuousAssistant ? voiceProblem() : '',
-      puter: puterConnected,
-      puterTrouble,
+      // His voice: Kokoro's when its model is there ('ready'), and the computer's own otherwise.
+      voice: { state: kokoro?.state || 'missing', chosen: voiceNamed(settings?.jesterVoice).id, choices: VOICES.map(({ id, name, about }) => ({ id, name, about })) },
       knowsYou: !!voiceprint,
       teaching: teaching ? { line: TEACHING_LINES[teaching.takes.length], done: teaching.takes.length, of: TEACHING_LINES.length } : null
     },
@@ -409,8 +409,7 @@ async function refresh() {
   speech?.setModel(settings.speechModel);
   speech?.setEnabled(settings.enabled && settings.voiceEnabled);
   watch?.setEnabled(settings.enabled && !!settings.watchEnabled);
-  const { puterToken, voiceprint: print, voiceLearned: known } = await storage.local.get(['puterToken', 'voiceprint', 'voiceLearned']);
-  puterConnected = !!puterToken;
+  const { voiceprint: print, voiceLearned: known } = await storage.local.get(['voiceprint', 'voiceLearned']);
   voiceprint = print || null;
   voiceLearned = voiceprint && Array.isArray(known) ? known : [];
   speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned);
@@ -922,6 +921,8 @@ function warmUp() {
   if (Date.now() - warmedAt < WARM_EVERY_MS) return;
   warmedAt = Date.now();
   vaultIndex?.warm().catch((err) => log('couldn’t get the notes’ search ready:', err.message));
+  // His voice too: half a second to load, and he'll want it within a few.
+  if (listening) kokoro?.warm();
 }
 
 /** The voice shortcut, gesture or menu item: start listening, or finish. */
@@ -1186,14 +1187,12 @@ function listenToPages() {
       case 'jester/desktop-sleep':
         sleep(message.on === true);
         return { ok: true };
-      case 'jester/desktop-puter':
+      // Settings' voice row: a line in the voice chosen, for the page to play. Never through the speakers he listens by.
+      case 'jester/desktop-voice':
         try {
-          if (message.op === 'connect') {
-            await storage.local.set({ puterToken: await signInToPuter((url) => shell.openExternal(url)) });
-            speaker.connected();
-          } else await storage.local.remove('puterToken');
-          await refresh();
-          return { ok: true };
+          const made = await kokoro?.sound('Hello. I’m Jester, and this is how I sound.');
+          if (!made) return { ok: false, error: kokoro?.state === 'missing' ? 'His voice isn’t downloaded yet.' : 'His voice isn’t starting just now.' };
+          return { ok: true, type: made.type, base64: Buffer.from(made.bytes).toString('base64') };
         } catch (err) {
           return { ok: false, error: err.message };
         }
@@ -1266,6 +1265,7 @@ function selfTest(capture) {
     log('selftest: camera view —', await page(`(() => { const img = document.getElementById('camera-preview'); return img.hidden ? 'not shown' : img.naturalWidth + '×' + img.naturalHeight; })()`));
     log('selftest: voice row —', await page(`(() => { const box = document.getElementById('voiceEnabled'); return (box.checked ? '☑ ' : '☐ ') + (box.disabled ? '(disabled) ' : '') + document.getElementById('voice-hint').textContent; })()`));
     log('selftest: speech model row —', await page(`(() => { const select = document.getElementById('speechModel'); return [...select.options].map((o) => (o.selected ? '▸' : '') + o.text + (o.disabled ? ' [off]' : '')).join(' | ') + ' — ' + document.getElementById('speech-model-hint').textContent; })()`));
+    log('selftest: his voice row —', await page(`(async () => { const select = document.getElementById('jesterVoice'); const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-voice', op: 'hear' }); return (select.hidden ? '(no picker) ' : [...select.options].map((o) => (o.selected ? '▸' : '') + o.text).join(' | ') + ' — ') + document.getElementById('jester-voice-hint').textContent + ' — a line in it: ' + (reply?.ok ? reply.type + ', ' + Math.round(reply.base64.length * 0.75 / 1024) + ' KB' : reply?.error); })()`));
     // The assistant's models: listed, and a model saved without a key refused
     // before anything is stored (so no keychain is touched).
     log('selftest: assistant models —', await page(`document.getElementById('connections').textContent.replace(/\\s+/g, ' ').trim()`));
@@ -1615,18 +1615,19 @@ async function start() {
     }
   });
   voicePage = createVoicePage({ log });
+  kokoro = startKokoro({
+    fork: (file) => utilityProcess.fork(file, [], { serviceName: 'Jester voice', stdio: 'pipe' }),
+    voice: () => settings?.jesterVoice,
+    log
+  });
+  // The sign-in to the voice service he used before this one: nothing uses it now.
+  storage.local.remove('puterToken').catch(() => undefined);
   speaker = createSpeaker({
-    token: async () => (await storage.local.get('puterToken')).puterToken || null,
-    synthesize,
+    // A self-test is never heard: the fake mic would hear it, and so would the room.
+    voice: env.JESTER_FAKE_MEDIA ? null : kokoro,
     play: (bytes, type) => voicePage.play(bytes, type),
     stopPlaying: () => voicePage.stop(),
-    // A self-test is never heard: the fake mic would hear it, and so would the room.
     system: systemVoice({ muted: !!env.JESTER_FAKE_MEDIA }),
-    onTrouble: (trouble) => {
-      if (trouble === puterTrouble) return;
-      puterTrouble = trouble;
-      refresh();
-    },
     log
   });
   talking = createModelJob({ job: 'talk', local: localModel, keepAlive: LOCAL_KEEP_ALIVE, log, ...modelHooks, onSelected: ({ provider, model }) => log('talking through:', provider, model) });
@@ -1851,6 +1852,7 @@ if (!app.requestSingleInstanceLock()) {
     watch?.close();
     linkTransport?.close();
     vaultIndex?.close();
+    kokoro?.stop();
     calendars?.stop();
     spend?.flush().catch(() => undefined);
   });

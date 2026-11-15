@@ -243,7 +243,7 @@ function renderPictures() {
 
 /** The always-on assistant: whether it can listen, and how he sounds. */
 function renderContinuous() {
-  const { listening, problem, puter, puterTrouble, knowsYou, teaching } = desktop?.continuous || {};
+  const { listening, problem, voice, knowsYou, teaching } = desktop?.continuous || {};
   $('continuousAssistant').checked = !!settings.continuousAssistant;
   $('continuousAssistant').disabled = !settings.enabled || !settings.voiceEnabled;
   $('continuous-hint').textContent = problem || (listening
@@ -257,12 +257,17 @@ function renderContinuous() {
     : knowsYou
       ? 'He only listens to you. Anyone else is ignored before their words are even worked out, and you can talk on without saying his name.'
       : 'Read five sentences so he can tell you from everyone else. What’s kept describes your voice and can’t be played back. It stays on this computer.';
-  $('puter-connect').textContent = puter ? 'Disconnect' : 'Connect Puter';
-  $('puter-hint').textContent = puterTrouble
-    ? `${puterTrouble} Using this computer’s voice until then.`
-    : puter
-      ? 'Puter speaks for him, so what he says goes to Puter. Its free allowance is small: past it, this computer’s voice takes over.'
-      : 'This computer’s voice, for now. Connect a free Puter account for a better one. What he says then goes to Puter.';
+  const select = $('jesterVoice');
+  const there = voice?.state !== 'missing';
+  select.replaceChildren(...(voice?.choices || []).map((choice) => new Option(`${choice.name} (${choice.about})`, choice.id)));
+  select.value = voice?.chosen || '';
+  select.hidden = !there;
+  $('jester-voice-hear').hidden = !there;
+  $('jester-voice-hint').textContent = !there
+    ? 'This computer’s voice, for now. His own is a 334 MB download: in desktop/ run: npm run models -- kokoro'
+    : voice.state === 'resting'
+      ? 'His own voice isn’t starting, so this computer’s speaks for now. It’s tried again in a few minutes.'
+      : 'His own voice, made on this computer: nothing he says is sent anywhere, and there’s no account or allowance.';
 }
 
 /** What Ollama said it has, the last time it was asked. */
@@ -969,15 +974,19 @@ for (const use of ['talk', 'act']) {
     save({ localModelUses: ['talk', 'act'].filter((job) => uses.has(job)) });
   });
 }
-$('puter-connect').addEventListener('click', async () => {
-  const button = $('puter-connect');
-  const op = desktop?.continuous?.puter ? 'disconnect' : 'connect';
+$('jesterVoice').addEventListener('change', (event) => save({ jesterVoice: event.target.value }));
+/** The line being played for "Hear it". */
+let sample = null;
+$('jester-voice-hear').addEventListener('click', async () => {
+  const button = $('jester-voice-hear');
   button.disabled = true;
-  if (op === 'connect') button.textContent = 'Waiting for your browser…';
-  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-puter', op });
+  sample?.pause();
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-voice', op: 'hear' });
   button.disabled = false;
-  $('puter-error').textContent = reply?.ok === false ? reply.error : '';
-  renderContinuous();
+  $('jester-voice-error').textContent = reply?.ok ? '' : reply?.error || 'Couldn’t make the sound.';
+  if (!reply?.ok) return;
+  sample = new Audio(`data:${reply.type};base64,${reply.base64}`);
+  sample.play().catch(() => undefined);
 });
 $('voice-print-teach').addEventListener('click', () =>
   chrome.runtime.sendMessage({ type: 'jester/desktop-voiceprint', op: desktop?.continuous?.teaching ? 'cancel' : 'teach' }));

@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 const RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/';
 /** Their spelling. */
 const VOICE_RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/';
+const TTS_RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/';
 
 export const MODELS = {
   vad: { file: 'silero_vad.onnx' },
@@ -24,7 +25,9 @@ export const MODELS = {
   'moonshine-tiny': { archive: 'sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2' },
   kroko: { archive: 'sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2' },
   'parakeet-110m': { archive: 'sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2' },
-  'parakeet-0.6b': { archive: 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2' }
+  'parakeet-0.6b': { archive: 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2' },
+  // Jester's own voice (Kokoro v1.0, Apache-2.0): 334 MB to fetch, 360 MB unpacked.
+  kokoro: { archive: 'kokoro-multi-lang-v1_0.tar.bz2', release: TTS_RELEASE }
 };
 const DEFAULT_SET = ['vad', 'voice', 'moonshine-tiny'];
 
@@ -50,7 +53,7 @@ async function fetchModel(key) {
   const folder = path.join(dir, model.archive.replace(/\.tar\.bz2$/, ''));
   if (fs.existsSync(folder)) return folder;
   const archive = path.join(dir, model.archive);
-  await download(model.archive, archive);
+  await download(model.archive, archive, model.release);
   execFileSync('tar', ['-xjf', archive, '-C', dir]);
   fs.rmSync(archive);
   return folder;
