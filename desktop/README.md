@@ -414,9 +414,17 @@ save next to nothing). Three things changed:
 
 `npm run speed-check -- --spoken` says each line aloud (macOS `say`, into the
 real speech service at the speed it's said) and times from the last word to the
-first sound of his voice, through the real model and Puter's voice: on Haiku 5.5
-a median 1.04 s thinking ahead and 1.37 s without, sooner in 6 lines of 6. Before
-any of this it was about 2.4 s (0.7 s to hear and read it, then 1.7 s).
+first sound of his voice, through the real model: on Haiku 5.5 a median 1.04 s
+thinking ahead and 1.37 s without, sooner in 6 lines of 6. Puter's allowance ran
+out around that run, so the voice's part of those times isn't certain: a fetched
+line took 0.35–0.45 s that night, a refusal 0.1–0.2 s, so with Puter answering
+they may be up to 0.3 s more either way. The run before it, with Puter answering,
+had his voice at 1.1–1.35 s thinking ahead on the lines whose reply wasn't slow.
+Before any of this it was about 2.4 s (0.7 s to hear and read it, then 1.7 s).
+
+Puter's voice is left out of speed-check unless asked for (`-- --voice`): a
+free account has about 31,000 characters a month, and a run with the voice
+fetches 2,500–7,000 of them.
 
 `npm run speed-check` says each line both ways, with the saved model and Puter's
 real voice (fetched, not played): on Haiku 5.5 his voice started a median 1.0 s

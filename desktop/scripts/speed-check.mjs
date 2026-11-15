@@ -10,7 +10,7 @@
  *   npm run speed-check -- saved:anthropic      one provider's saved models
  *   npm run speed-check -- ollama:qwen3.5:9b    one Ollama model
  *   npm run speed-check -- --rounds 3           each line three times each way (once by default)
- *   npm run speed-check -- --no-voice           without Puter: only the model's part
+ *   npm run speed-check -- --voice              with Puter's real voice fetched for each line (see the cost below)
  *   npm run speed-check -- --spoken             said aloud instead (macOS `say`, into his real speech service at the
  *                                               speed it's said): from the last word to his voice, with and without
  *                                               starting on the reply at a pause that may be the end (thinkAhead)
@@ -21,7 +21,13 @@
  *
  * Saved models' keys and the Puter sign-in are sealed with the Mac's keychain, so this runs in Electron, as Jester:
  * macOS may ask to let it use "Jester Safe Storage". Neither is ever printed. A run is 14 short requests to each
- * model and about 20 lines to Puter's voice (some 2,500 characters of its monthly allowance).
+ * model.
+ *
+ * Puter's voice is left out unless asked for (--voice), and then a run fetches some 20 lines, 2,500–7,000 characters
+ * of a free account's 31,000 a month: on 2026-11-15 a night of these runs used up what the user had left, and he
+ * spoke in the Mac's own voice until the month turned. Without it the voice's part isn't in the times (it was
+ * 0.35–0.45 s a line, whatever its length, when measured). With it, a refusal from Puter is said, never timed as
+ * if it were the voice.
  */
 
 import { execFileSync, spawn } from 'node:child_process';
@@ -64,7 +70,14 @@ if (!process.versions.electron) {
   app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'jester-speed-check-')));
   const roundsAt = process.argv.indexOf('--rounds');
   const ROUNDS = roundsAt > 0 ? Math.max(1, Number(process.argv[roundsAt + 1]) || 1) : 1;
-  const VOICE = !process.argv.includes('--no-voice');
+  const VOICE = process.argv.includes('--voice');
+  /** Puter refusing (its allowance run out, signed out): said once, since the times after it have no voice in them. */
+  let refused = '';
+  const voiceTrouble = (trouble) => {
+    if (!trouble || refused) return;
+    refused = trouble;
+    console.log(`   ! Puter’s voice refused (${trouble}): from here the voice’s part isn’t in the times.`);
+  };
   const args = process.argv.slice(2).filter((arg, i, all) => !arg.startsWith('--') && all[i - 1] !== '--rounds' && !arg.endsWith('.mjs'));
   const wanted = args.length ? args : ['saved'];
 
@@ -150,7 +163,7 @@ if (!process.versions.electron) {
       };
       const conversation = createConversation({
         chat: (request) => askModel({ ...request, request: job }),
-        speaker: createSpeaker({ token: async () => token, synthesize, play: sound, stopPlaying: () => undefined, system: { say: sound, stop: () => undefined } }),
+        speaker: createSpeaker({ token: async () => (refused ? null : token), onTrouble: voiceTrouble, synthesize, play: sound, stopPlaying: () => undefined, system: { say: sound, stop: () => undefined } }),
         memory: { add: () => undefined, current: () => [], idleFor: () => 0, startNew: () => [] },
         recollections: { keep: async () => undefined, relevant: () => [] },
         commands: { knows: async () => false, risky: async () => false, run: async () => ({ outcome: null }) },
@@ -211,7 +224,7 @@ if (!process.versions.electron) {
     const list = await targets().catch((err) => (console.log(`Couldn't read the saved models: ${err.message}`), []));
     if (!list.length) console.log('No model to check: tick Talking on one in Settings › Models, or name one (ollama:qwen3.5:9b).');
     const token = VOICE ? unsealed('puterToken') : null;
-    console.log(token ? 'Voice: Puter’s, fetched for real and not played.' : 'Voice: none (Puter isn’t signed in, or --no-voice): only the model’s part is timed.');
+    console.log(token ? 'Voice: Puter’s, fetched for real and not played.' : `Voice: none (${VOICE ? 'Puter isn’t signed in' : 'add --voice for Puter’s, which spends its monthly allowance'}): only the model’s part is timed.`);
     const summary = [];
     if (process.argv.includes('--spoken')) {
       for (const connection of list) summary.push(await spoken(connection, token).catch((err) => `${name(connection)}: ${err.message}`));
@@ -233,7 +246,8 @@ if (!process.versions.electron) {
         let started = 0;
         let said = '';
         const speaker = createSpeaker({
-          token: async () => token,
+          token: async () => (refused ? null : token),
+          onTrouble: voiceTrouble,
           synthesize,
           play: async () => {
             if (!Number.isFinite(at.sound)) at.sound = performance.now() - started;
