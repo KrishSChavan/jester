@@ -3,11 +3,15 @@
  * and actions, which work their apps. A saved model does the jobs ticked for
  * it, tried in the order saved and paced to its plan as in the extension
  * (model-pool.js). This computer's own model (Ollama) does a job it's ticked
- * for when none of the saved ones can: none is set for it, or all of them are
- * out of requests for longer than is worth waiting. A free plan's per-minute
- * window is still waited out: a few seconds cost less than loading 8 GB of
- * local model into a full Mac. A request with a picture goes only to models
- * that read pictures, this computer's included.
+ * for when none of the saved ones can: none is set for it, all of them are
+ * out of requests for longer than is worth waiting, or the one asked failed
+ * (2026-11-13: Groq's gpt-oss-120b answered "Oh, that class already happened"
+ * with a 400, "Failed to generate JSON", which Ollama's schema can't give).
+ * Only a failure the user has to put right in Settings, a key refused or a
+ * model that isn't there, is theirs to see rather than covered for. A free
+ * plan's per-minute window is still waited out: a few seconds cost less than
+ * loading 8 GB of local model into a full Mac. A request with a picture goes
+ * only to models that read pictures, this computer's included.
  */
 
 import { createPooledModelClient } from '../../../jester-extension/src/background/model-pool.js';
@@ -18,6 +22,9 @@ import { loadConnections, normaliseConnection } from '../../../jester-extension/
 export const LOCAL_USES = Object.freeze(['talk', 'act']);
 /** The saved models have given up for now, rather than failed. */
 const UNAVAILABLE = new Set(['all_models_rate_limited', 'model_pool_retry_ready']);
+/** Failures only Settings puts right: the key refused, the model or its address not found (model-client.js). */
+const SETTINGS_WRONG = new Set([401, 403, 404]);
+const theirsToFix = (err) => err?.code === 'http_error' && SETTINGS_WRONG.has(err.status);
 
 /** What this computer's model may do, from the settings. */
 export const localUses = (settings) => (Array.isArray(settings?.localModelUses) ? settings.localModelUses : LOCAL_USES);
@@ -66,8 +73,9 @@ export function createModelJob({ job, local, keepAlive, saved = loadConnections,
       try {
         return await savedPool(options);
       } catch (err) {
-        if (!UNAVAILABLE.has(err?.code) || options.signal?.aborted || !(await localFits())) throw err;
-        log(`${job === 'talk' ? 'talking' : 'actions'}: the saved models are out for now (${err.message}), so this computer’s takes it`);
+        if (theirsToFix(err) || options.signal?.aborted || !(await localFits())) throw err;
+        const why = UNAVAILABLE.has(err?.code) ? 'are out for now' : 'failed';
+        log(`${job === 'talk' ? 'talking' : 'actions'}: the saved models ${why} (${err.message}), so this computer’s takes it`);
       }
     }
     if (!(await localFits())) {
