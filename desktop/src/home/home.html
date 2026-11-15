@@ -20,6 +20,9 @@
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5.5M6 11.5l6-6 6 6" /></symbol>
       <symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 5.5L8 12l6.5 6.5" /></symbol>
       <symbol id="i-forward" viewBox="0 0 24 24"><path d="M9.5 5.5L16 12l-6.5 6.5" /></symbol>
+      <symbol id="i-tasks" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4" /><path d="M8.5 12.2l2.4 2.4 4.6-5" /></symbol>
+      <symbol id="i-tick" viewBox="0 0 24 24"><path d="M6 12.5l4 4 8-9" /></symbol>
+      <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7" /><path d="M12 13.5V9.5M9.5 3h5M12 3v3.5" /></symbol>
       <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" /></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5L2.5 20h19z" /><path d="M12 10v4.5M12 17.4v.1" /></symbol>
       <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-3 8-7 9.5-4-1.5-7-5.1-7-9.5V6z" /><path d="M9 12l2 2 4-4" /></symbol>
@@ -37,9 +40,14 @@
       <!-- The orb, and talking to him. Chats are to the left of it, Settings to the right. -->
       <section id="main" class="screen shown" data-screen="main" aria-label="Jester">
         <header class="top main-top">
-          <button id="to-chats" class="chip" type="button" data-go="chats" title="Earlier chats">
-            <svg class="icon-svg"><use href="#i-chats" /></svg><span>Chats</span>
-          </button>
+          <div class="lefts">
+            <button id="to-chats" class="chip" type="button" data-go="chats" title="Earlier chats">
+              <svg class="icon-svg"><use href="#i-chats" /></svg><span>Chats</span>
+            </button>
+            <button id="to-tasks" class="chip" type="button" data-go="tasks" title="Your to-do list, reminders and timers">
+              <svg class="icon-svg"><use href="#i-tasks" /></svg><span>Tasks</span><b id="tasks-count" class="count" hidden></b>
+            </button>
+          </div>
           <button id="light" class="light" type="button"><i></i><span id="light-text" aria-live="polite" aria-atomic="true">Starting…</span></button>
           <button id="to-settings" class="icon" type="button" data-go="settings" aria-label="Settings" title="Settings">
             <svg class="icon-svg"><use href="#i-gear" /></svg>
@@ -82,6 +90,26 @@
           <p id="chats-none" class="empty" hidden>No chats yet. Once a conversation with Jester is over, it’s kept here, word for word, for a week.</p>
           <p class="note">Kept on this computer for a week, then gone. A line that looks like a password or a card number is left out. Deleting a chat here deletes its words and the sentence he remembers it by; what’s already in your Obsidian vault (Jester › Conversations, About me) stays until you delete it there.</p>
         </div>
+      </section>
+
+      <!-- Tasks: the to-do list, reminders and timers he keeps. Only the user ticks one off. -->
+      <section id="tasks" class="screen" data-screen="tasks" aria-labelledby="tasks-title" inert>
+        <header class="top">
+          <h1 id="tasks-title">Tasks</h1>
+          <button class="icon" type="button" data-go="main" aria-label="Back to Jester" title="Back to Jester"><svg class="icon-svg"><use href="#i-forward" /></svg></button>
+        </header>
+        <div class="scroll">
+          <div id="task-list" class="task-list"></div>
+          <p id="tasks-none" class="empty" hidden>Nothing on your list. Tell Jester “remind me to call the dentist at three”, “add stamps to my to-do list” or “set a timer for ten minutes”, or add one below.</p>
+          <p class="note">Only you tick things off: here, or by telling him it’s done. A reminder is said when it’s due, or once you’re back at the computer, and stays here until it’s ticked. Kept on this computer; what’s ticked off goes after a week.</p>
+        </div>
+        <footer class="bottom">
+          <form id="task-add" class="type">
+            <label class="unseen" for="task-text">Add a task</label>
+            <input id="task-text" type="text" placeholder="Add a task" autocomplete="off" spellcheck="true" maxlength="200" />
+            <button class="send" type="submit" aria-label="Add"><svg class="icon-svg"><use href="#i-send" /></svg></button>
+          </form>
+        </footer>
       </section>
 
       <!-- One chat, to read again or carry on. -->

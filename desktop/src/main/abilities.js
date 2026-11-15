@@ -34,6 +34,7 @@
  * @property {boolean} [voice]  a voiceprint knows the user's voice (voiceprint.js)
  * @property {boolean} [gestures]  Gestures is on in the menu bar
  * @property {boolean} [watch]  an Apple Watch is paired (watch.js)
+ * @property {boolean} [tasks]  he keeps their to-do list, reminders and timers (tasks.js)
  * @property {string} [computer]  'Mac', or 'computer' elsewhere
  */
 
@@ -57,6 +58,11 @@ export const ABILITIES = Object.freeze([
     on: (state) => !!state.notes,
     can: () => 'Keep the user’s notes in their Obsidian vault: make a note, add to one or open one, and remember what they ask you to. You also learn lasting things about them as you talk, kept in its About me note, which is theirs to read or change, and you forget what they ask you to. What’s recalled from it comes in the brackets.',
     off: 'Obsidian notes, and remembering what they ask you to: no vault is chosen (Settings › Memory). Until then a note is the laptop’s, in its own apps.'
+  },
+  {
+    id: 'tasks',
+    on: (state) => !!state.tasks,
+    can: () => 'Keep their to-do list, remind them of something at a time or on a day, and run timers. A reminder is said aloud when it’s due, or as soon as they’re back at the computer. It stays on the list until they say it’s done: only they tick things off. Reminders are one-off: none repeats yet.'
   },
   {
     id: 'where',

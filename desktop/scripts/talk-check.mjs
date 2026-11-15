@@ -185,6 +185,7 @@ if (run && !process.versions.electron) {
   const { askedToRemember, askModel, claimsToForget, LOCAL_KEEP_ALIVE, ollamaModels, pickModel } = await import('../src/main/conversation.js');
   const { mayAskToForget, verbatim } = await import('../src/main/vault-memory.js');
   const { moodOf } = await import('../src/main/mood.js');
+  const { createTasks, reminderText, whenAsked, whenOf } = await import('../src/main/tasks.js');
   const { createModelJob } = await import('../src/main/model-jobs.js');
   const { costOf, dollars, tokensOf } = await import('../src/main/spend.js');
   const { normaliseConnection } = await import('../../jester-extension/src/common/credentials.js');
@@ -252,7 +253,8 @@ if (run && !process.versions.electron) {
     { text: "huh, I don't remember that", history: [['you', 'what did we talk about last week?'], ['jester', 'You asked me to open your Canvas calendar.']] },
     { text: 'remember when we planned that trip to Boston?' },
     { text: 'add eggs to my grocery list', note: { title: /grocery/i, add: /eggs/i } },
-    { text: 'put call the landlord on my to-do list', note: { title: /to.?do/i, add: /landlord/i } },
+    // Their to-do list is his own now (tasks.js), not a note: step 8.
+    { text: 'put call the landlord on my to-do list', task: { op: 'add', text: /landlord/i, when: null } },
     { text: 'open my grocery list note', note: { title: /grocery/i, open: true } },
     { text: "when's my midterm?", context: RECALLED, say: /friday|13/i },
     { text: "what's on my grocery list?", context: RECALLED, say: /eggs/i },
@@ -380,7 +382,37 @@ if (run && !process.versions.electron) {
     { text: 'should I take a break?', context: SITTING, say: /two hours|2 hours|five hours|5 hours|1:15|a while|long/i, sayNot: WRONG_HOURS, maxWords: 50 },
     { text: 'how long have I been at this?', sayNot: /\b(?:\d+|one|two|three|four|five|six|an?|half an?|a few|several|couple of)\s+(?:hours?|minutes?)\b|\bsince \d/i }
   ].map((want) => ({ ...want, self: true }));
-  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES];
+  // Step 8: their to-do list, reminders and timers. What "task" should hold for each, with times worked out from now;
+  // a timer in plain words never reaches a model (tasks.js direct), so those here are the ones put another way.
+  const dayAt = (days, hour, minute = 0) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + days, hour, minute).getTime();
+  const LIST = `[${['The user’s to-do list, reminders and timers, which you keep. Nothing on it is done until they say so:', '- Call the dentist (reminder tomorrow at 9:00 AM)', '- Submit homework 5 (for Friday)', '- Buy stamps', 'Ticked off today: Email Sarah.'].join('\n')}]`;
+  const REMINDED = [['jester', 'Reminder: call your mom.']];
+  const LIST_REMINDED = LIST.replace('\n- Call the dentist', `\n- Call your mom (reminder at ${new Date(date.getTime() - 60000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}, already given)\n- Call the dentist`);
+  const fivePm = date.getHours() < 17 ? dayAt(0, 17) : dayAt(1, 17);
+  const TASK_CASES = [
+    { text: 'remind me to call my mom tomorrow at 3 pm', task: { op: 'add', text: /mom/i, when: dayAt(1, 15) } },
+    { text: 'remind me in twenty minutes to check the oven', task: { op: 'add', text: /oven/i, when: date.getTime() + 20 * 60000 } },
+    { text: 'remind me at 5 pm to leave for the gym', task: { op: 'add', text: /gym/i, when: fivePm } },
+    { text: 'add buy stamps to my to-do list', task: { op: 'add', text: /stamps/i, when: null } },
+    { text: 'put finishing the lab report on my to-do list for the day after tomorrow', task: { op: 'add', text: /lab report/i, when: dayAt(2, 0), allDay: true } },
+    { text: 'I need you to time my break, fifteen minutes', task: { op: 'timer', when: date.getTime() + 15 * 60000 } },
+    { text: 'I called the dentist', context: LIST, task: { op: 'done', text: /dentist/i } },
+    { text: 'take the stamps off my list', context: LIST, task: { op: 'remove', text: /stamps/i } },
+    { text: 'push the dentist reminder to tomorrow at 2 pm', context: LIST, task: { op: 'move', text: /dentist/i, when: dayAt(1, 14) } },
+    { text: 'snooze that for ten minutes', history: REMINDED, context: LIST_REMINDED, task: { op: 'move', when: date.getTime() + 10 * 60000 } },
+    { text: 'ok, done', history: REMINDED, context: LIST_REMINDED, task: { op: 'done' } },
+    // Asked what's on it, he answers from it, and sets nothing.
+    { text: 'what’s on my to-do list?', context: LIST, say: /dentist/i, maxWords: 50 },
+    { text: 'what do I still have to do this week?', context: LIST, say: /dentist|homework|stamps/i, maxWords: 50 },
+    // Nothing asked for, nothing made: least of all a tick.
+    { text: 'I should really call the dentist at some point', context: LIST },
+    { text: 'what time is it?', context: LIST },
+    { text: 'ugh, I have so much to do this week' },
+    // A shopping list is still a note, and one that repeats isn't something he can do yet.
+    { text: 'add milk to my shopping list', note: { title: /shopping/i, add: /milk/i } },
+    { text: 'remind me every morning at 8 to take my vitamins', say: /can['’]?t|cannot|not yet|one[- ]off|one[- ]time|only once|don['’]?t repeat|doesn['’]?t repeat|just once|a single|aren['’]?t available|not available/i, repeats: true }
+  ].map((want) => ({ ...want, self: true, tasks: true }));
+  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES, ...TASK_CASES];
   // --only live|memory|old|facts|self: just those.
   const onlyAt = process.argv.indexOf('--only');
   const ONLY = onlyAt > 0 ? process.argv[onlyAt + 1] : '';
@@ -400,7 +432,7 @@ if (run && !process.versions.electron) {
   function problems(reply, want) {
     const found = [];
     // `written`: a command for the laptop or a note of his own, one or the other.
-    if (want.written) return reply.do || reply.note?.add ? [] : ['nothing written: no "do" and no "note"'];
+    if (want.written) return reply.do || reply.note?.add || (reply.task?.op === 'add' && taskBook.asked(want.text, '', 'add', reply.task.text)) ? [] : ['nothing written: no "do", no "note" and no task'];
     if (want.forgetting) return reply.picked ? [reply.picked] : [];
     if (!want.doAny && !!reply.do !== !!want.do) found.push(want.do ? 'no "do"' : '"do" set');
     const kept = keptOf(reply, want);
@@ -422,12 +454,41 @@ if (run && !process.versions.electron) {
     const forgets = (!!reply.forget || claimsToForget(reply.say)) && !reply.do && mayAskToForget(want.text);
     if (want.forget && !forgets) found.push('no "forget"');
     else if (!want.forget && forgets) found.push('"forget" set, unasked');
+    // A task counts as the app counts it: one is made only when their words ask (tasks.js asked).
+    const lastHis = (want.history || []).at(-1)?.[0] === 'jester' ? want.history.at(-1)[1] : '';
+    // …and a model's timer for what was a reminder or a snooze is taken as what it was, and its time checked against
+    // what they said (tasks.js apply, whenAsked).
+    let task = reply.task && (!['add', 'timer'].includes(reply.task.op) || taskBook.asked(want.text, lastHis, reply.task.op, reply.task.text)) ? { ...reply.task } : null;
+    if (task?.op === 'timer' && /\bremind/i.test(want.text)) task = { ...task, op: 'add', text: /timer/i.test(task.text || '') || !task.text ? reminderText(want.text) : task.text };
+    else if (task?.op === 'timer' && /\b(?:snooze|again)\b/i.test(want.text) && /^Reminder/.test(lastHis)) task = { ...task, op: 'move' };
+    // Asked for one that repeats, he says he can't, or sets the once and the app says it's only the once.
+    if (want.repeats) return task?.op === 'add' || want.say.test(reply.say) ? [] : ['neither said he can’t repeat one, nor set it once'];
+    if (want.task) {
+      if (!task) found.push(reply.task ? '"task" given, but their words don’t ask for one' : 'no "task"');
+      else {
+        if (task.op !== want.task.op) found.push(`"task" is ${task.op}, not ${want.task.op}`);
+        if (want.task.text && !want.task.text.test(task.text || '')) found.push(`"task" names ${JSON.stringify(task.text || '')}`);
+        if (want.task.when !== undefined) {
+          const when = task.op === 'timer' ? whenOf(task, date.getTime()) : whenAsked(task, want.text, lastHis, date.getTime(), task.text || '');
+          if (want.task.when === null ? when : !when || when === 'past' || when === 'unclear' || Math.abs(when.due - want.task.when) > 90000 || !!when.allDay !== !!want.task.allDay)
+            found.push(`"task" is for ${when && when !== 'past' ? `${new Date(when.due).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}${when.allDay ? ' (the day)' : ''}` : when || 'no time'}, not ${want.task.when === null ? 'no time' : new Date(want.task.when).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}`);
+        }
+      }
+    } else if (task && ['add', 'timer'].includes(task.op)) found.push(`"task" set, unasked: ${task.op}`);
+    // A done, remove or move nobody asked for is left undone by the app unless their words are about a task: here
+    // none of the cases' words are, so it only counts when they sound like asking (tasks.js apply).
+    else if (task && /\b(?:done|did|finished|cancel|remove|delete|snooze|move|push)\b/i.test(want.text)) found.push(`"task" set, unasked: ${task.op}`);
     const words = String(reply.say).split(/\s+/).filter(Boolean).length;
+    // What he says for a task is the app's line, not the model's.
+    if (want.task) return found.filter((problem) => !/"say"/.test(problem));
     if (want.maxWords && words > want.maxWords) found.push(`"say" runs to ${words} words, over ${want.maxWords}`);
     return found;
   }
 
   const kind = (want) => (want.remember ? 'KEEP' : want.note ? 'NOTE' : want.do ? 'DO' : want.live ? 'DAY' : want.facts ? 'FACT' : want.self ? 'SELF' : 'TALK');
+
+  /** A task book for its rules alone (whether words ask for a task): nothing's kept in it. */
+  const taskBook = createTasks({ file: path.join(app.getPath('userData'), 'tasks.json'), clock: { add: () => undefined, remove: () => undefined } });
 
   /** The saved models, unsealed as the app does it. */
   function savedModels() {
@@ -536,7 +597,7 @@ if (run && !process.versions.electron) {
               // As the app asks when it's spoken to: told his first sentence as soon as it's written. --held: Claude
               // held to the reply's schema, as it was before 2026-11-14, to compare.
               let first = null;
-              reply = await askModel({ request: HELD ? (options) => job({ ...options, plain: false }) : job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', mood: moodOf(want.text, history, date.getTime()), situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, date, onFirst: (sentence) => (first = { sentence, ms: Date.now() - started - paced }) });
+              reply = await askModel({ request: HELD ? (options) => job({ ...options, plain: false }) : job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', mood: moodOf(want.text, history, date.getTime()), situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, tasks: true, date, onFirst: (sentence) => (first = { sentence, ms: Date.now() - started - paced }) });
               if (first) {
                 firsts.push(first.ms);
                 // What he'd have begun saying has to be how what he says begins.
@@ -559,9 +620,9 @@ if (run && !process.versions.electron) {
         right.filled += filled;
         console.log(`${ok}/${TRIALS} ${kind(want).padEnd(4)} ${want.text.slice(0, 72)}${want.can ? `  (connected: ${Object.keys({ ...want.can, ...want.liveNow }).filter((key) => ({ ...want.can, ...want.liveNow })[key]).join(', ') || 'nothing'})` : ''}${want.context ? '  (with what was recalled)' : ''}${want.steering ? '  (an invitation gives orders)' : ''}${want.remember ? `  ("remember" filled ${filled}/${TRIALS})` : ''}`);
         // --show: what he said each time, right or wrong, for reading how he puts it.
-        if (process.argv.includes('--show')) for (const out of outs.filter((out) => out.ok)) console.log(`        said: ${JSON.stringify(out.say)}${out.do ? `  do ${JSON.stringify(out.do)}` : ''}`);
+        if (process.argv.includes('--show')) for (const out of outs.filter((out) => out.ok)) console.log(`        said: ${JSON.stringify(out.say)}${out.do ? `  do ${JSON.stringify(out.do)}` : ''}${out.task ? `  task ${JSON.stringify(out.task)}` : ''}`);
         for (const out of outs.filter((out) => !out.ok)) {
-          const reply = `say ${JSON.stringify(out.say)}  do ${JSON.stringify(out.do)}${out.remember ? `  remember ${JSON.stringify(out.remember)}` : ''}${out.note ? `  note ${JSON.stringify(out.note)}` : ''}`;
+          const reply = `say ${JSON.stringify(out.say)}  do ${JSON.stringify(out.do)}${out.remember ? `  remember ${JSON.stringify(out.remember)}` : ''}${out.note ? `  note ${JSON.stringify(out.note)}` : ''}${out.task ? `  task ${JSON.stringify(out.task)}` : ''}`;
           console.log(`        ${out.error ? `error: ${out.error}` : `${out.wrong.join(', ')}: ${reply}`}`);
         }
       }

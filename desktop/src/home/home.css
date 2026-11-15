@@ -252,9 +252,24 @@ button:disabled {
   padding: 0 16px;
 }
 
-.main-top #to-chats {
+.main-top .lefts {
   justify-self: start;
+  display: flex;
+  gap: 8px;
   margin-left: calc(var(--inset-l) - 16px);
+}
+
+/* How many tasks are open, on the button that shows them. */
+.chip .count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ring) 30%, transparent);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
 }
 
 .main-top #to-settings {
@@ -708,6 +723,125 @@ body.opening .hint {
 #chat-title {
   font-weight: 500;
   color: var(--dim);
+}
+
+/* ——— Tasks ——— */
+
+.task-list h2 {
+  margin: 18px 6px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.task-list h2:first-child {
+  margin-top: 6px;
+}
+
+.task-list h2.late {
+  color: var(--warn);
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 6px 7px 10px;
+  border-radius: 12px;
+}
+
+.task-item:hover {
+  background: var(--raised);
+}
+
+.task-item .words {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-item .title {
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.task-item .when {
+  color: var(--faint);
+  font-size: 12px;
+}
+
+.task-item.late .when {
+  color: var(--warn);
+}
+
+.task-item.done .title {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+
+/* The box to tick: the user's, and nobody else's. */
+.task-item .tick {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1.6px solid var(--edge-hi);
+  border-radius: 8px;
+  background: transparent;
+  color: transparent;
+}
+
+.task-item .tick:hover {
+  border-color: var(--ring);
+  color: var(--dim);
+}
+
+.task-item .tick[aria-checked='true'] {
+  border-color: var(--ring-fill);
+  background: var(--ring-fill);
+  color: var(--text);
+}
+
+.task-item .tick .icon-svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 2.4;
+}
+
+.task-item .glyph {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--orb);
+}
+
+.task-item .left {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-item .icon {
+  width: 32px;
+  height: 32px;
+  opacity: 0;
+}
+
+.task-item:hover .icon,
+.task-item .icon:focus-visible {
+  opacity: 1;
+}
+
+.task-item .icon .icon-svg {
+  width: 17px;
+  height: 17px;
 }
 
 #chat-scroll .lines {

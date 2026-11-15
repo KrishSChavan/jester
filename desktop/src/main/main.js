@@ -68,6 +68,7 @@ import { createSituation } from './situation.js';
 import { createSpeaker, systemVoice } from './speaker.js';
 import { startSpeech } from './speech.js';
 import { createStopButton } from './stop-button.js';
+import { createTasks } from './tasks.js';
 import { createTeller, SETTLE_MS } from './tell.js';
 import { createTray } from './tray.js';
 import { createWatch } from './watch.js';
@@ -204,6 +205,8 @@ let voicePage = null;
 let presence = null;
 let clock = null;
 let teller = null;
+/** Their to-do list, reminders and timers (tasks.js). */
+let tasks = null;
 /** The model he talks through (model-jobs.js). */
 let talking = null;
 /** The Chrome extension, linked (chrome-link.js), and where Chrome finds the relay to it. */
@@ -1129,6 +1132,14 @@ function listenToPages() {
         conversation.forget();
         keeper.forgetAll();
         return { ok: true };
+      // His window's Tasks panel: the list, a task added by hand, one ticked off or put back, one removed.
+      // Ticking off here is the user's own click: the only other way is their saying so (tasks.js).
+      case 'jester/tasks': {
+        if (message.op === 'add') tasks.add({ text: String(message.text ?? '').slice(0, 200) });
+        else if (message.op === 'done') tasks.done(String(message.id ?? ''), message.on !== false);
+        else if (message.op === 'remove') tasks.remove(String(message.id ?? ''));
+        return { ok: true, count: tasks.count, ...tasks.list() };
+      }
       // His clock, for his own window: what's on it, a line to tell them at a time, and taking one off.
       case 'jester/desktop-clock': {
         if (message.op === 'add') {
@@ -1709,13 +1720,25 @@ async function start() {
   });
   calendars = createCalendars({ storage: storage.local, log, onChange: showDay });
   calendars.start().catch((err) => log('calendar: couldn’t start:', err.message));
+  // His clock, and what's kept on it: the user's to-do list, reminders and timers.
+  clock = createClock({ file: path.join(app.getPath('userData'), 'jobs.json'), log });
+  tasks = createTasks({
+    file: path.join(app.getPath('userData'), 'tasks.json'),
+    clock,
+    log,
+    // His window's Tasks panel, and the count on its button.
+    onChange: () => post({ type: 'jester/tasks-changed', count: tasks.count })
+  });
+  // A clock file lost or set aside mustn't lose a reminder: each is put back on it.
+  tasks.reschedule();
   situation = createSituation({
     whereabouts,
     weather,
     calendars,
     units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()),
     computer: process.platform === 'darwin' ? 'Mac' : 'computer',
-    presence
+    presence,
+    tasks
   });
   recollections = createRecollections({
     file: path.join(app.getPath('userData'), 'recollections.json'),
@@ -1782,6 +1805,8 @@ async function start() {
     },
     // Where the user is, the weather there and their calendars, once connected in Settings.
     situation,
+    // Their to-do list, reminders and timers.
+    tasks,
     // The rest of what's connected, read each turn, so what he says he can do is what's true now (abilities.js).
     abilities: async () => ({
       chrome: !!chromeLink?.linked,
@@ -1795,9 +1820,7 @@ async function start() {
     show: showConversation,
     log
   });
-  // Things with a time on them (clock.js), and telling the user when one comes (tell.js): said if they're here,
-  // held until they're back if they aren't.
-  clock = createClock({ file: path.join(app.getPath('userData'), 'jobs.json'), log });
+  // Telling the user when something's time comes (tell.js): said if they're here, held until they're back if not.
   teller = createTeller({
     where: () => presence.where,
     // With the mic closed he has no voice: it's written, on the pill and in his window.
@@ -1809,6 +1832,16 @@ async function start() {
     log
   });
   clock.on('say', teller.say);
+  // A reminder's time, or a timer's end: told like any line, and only then counted as given.
+  clock.on('task', async (job, info) => {
+    const id = job.payload?.id;
+    const text = tasks.ringLine(id);
+    // Ticked off or removed meanwhile: there's nothing to say.
+    if (!text) return undefined;
+    const answer = await teller.say({ ...job, payload: { text, late: tasks.ringLine(id, info.meant) } }, info);
+    if (!answer) tasks.rang(id);
+    return answer;
+  });
   presence.start();
   // What came due while he wasn't running is told once he's had a moment to start, not as he does.
   setTimeout(() => {

@@ -567,6 +567,13 @@ test('telling: here, it’s said; late, with when it was for; and the log never 
   assert.deepEqual(w.logs, ['telling: a line', 'telling: a line, 55 min late', 'telling: a line']);
 });
 
+test('telling: told late, a job’s own words for that are used', async () => {
+  const w = telling();
+  await w.teller.say({ payload: { text: 'Reminder: stretch.', late: 'Reminder, from 3:05 PM: stretch.' } }, { late: 55 * MIN, meant: at(15, 5) });
+  await w.teller.say({ payload: { text: 'Reminder: stretch.', late: 'Reminder, from 3:05 PM: stretch.' } }, { late: 1000, meant: at(15, 59) });
+  assert.deepEqual(w.said, ['Reminder, from 3:05 PM: stretch.', 'Reminder: stretch.']);
+});
+
 test('telling: away, it’s held; mid-sentence, tried again in a moment; nothing to say is done with', async () => {
   const w = telling({ where: 'away' });
   assert.deepEqual(await w.teller.say({ payload: { text: 'Held.' } }, {}), { hold: true });

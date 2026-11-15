@@ -57,6 +57,8 @@ front window fills its display.
 | `src/main/clock.js` | His clock: things to do at a time, kept in `jobs.json`, and done on waking when they came due while the computer slept. |
 | `src/main/presence.js` | Whether the user's at the computer (here, near, away), the day's first sit-down, and how long they've sat. |
 | `src/main/tell.js` | Telling them something when its time comes: said if they're there, held until they're back if they aren't. |
+| `src/main/tasks.js` | Their to-do list, reminders and timers: `tasks.json`, a clock job for each one with a time, and the rule that only they tick one off. |
+| `src/home/tasks.js` | The Tasks panel in his window: timers counting down, what's open by when, what's ticked off. |
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models): paid before free, and who covers for one that fails. |
 | `src/main/spend.js` | What the saved models' replies have cost this month, as near as their token counts say. |
 | `scripts/live-check.mjs` | `npm run live-check`: the real app on a scratch profile with scripted model servers, typed to and read back. |
@@ -1267,6 +1269,110 @@ started is told late, one due behind a locked screen is held and told after the
 unlock, the first sit-down is logged once, and the sitting reaches the model
 only when asked: 9 of 9.
 
+## Their to-do list, reminders and timers
+
+Step 8. He keeps a to-do list (`tasks.js`, `tasks.json` in the app's own folder),
+and anything on it with a time is a job on his clock:
+
+| | |
+| --- | --- |
+| a task | something to do, with no time. It stays until they tick it off or remove it. |
+| a reminder | a task with a time. He says "Reminder: …" when it comes (held until they're back if they're away, `tell.js`), and it stays on the list, marked as given, until they say it's done. |
+| a day's task | a task for a day and no time. Nothing rings. |
+| a timer | so many minutes from now. He says it's up, and it's gone. |
+
+**Timers are the clock's, on the user's own words, with no model asked**
+(`tasks.direct`): "set a timer for ten minutes", "start a 5 minute timer", "set a
+pasta timer for 8 minutes", "how long is left on the timer?", "cancel the timer".
+That's at once, and the same with any model or none. The whole sentence has to
+be the asking. One that only mentions a timer ("my oven has a ten minute
+timer"), denies one ("don't set a timer…"), asks about one, or asks for more
+besides ("stop the music and set a timer for five minutes") is the model's to
+make sense of, as is one put another way ("time my break, fifteen minutes"):
+the first version matched anywhere in a sentence, and "don't stop the timer"
+cancelled it.
+
+**Everything else is the model's "task"** in its reply: `{"op":"add","text":…}`
+with `"at":"YYYY-MM-DD HH:MM"` (or just the date) or `"in"` minutes; `timer`;
+`done`; `remove`; `move`. Three rules keep that honest:
+
+- *What he says back is how it went, from what was kept, never the model's own
+  line*: "Okay, I’ll remind you tomorrow at 3:00 PM: Call your mom." is read off
+  the task as stored, so the time he says is the time on the clock, and a wrong
+  one is heard and corrected. A model that says "I'll remind you" and sets
+  nothing is caught (`TASK_CLAIM`): "Sorry, that didn’t get set."
+- *A task is made only when the user's words ask for one* (`tasks.asked`:
+  "remind me", a timer, "on my to-do list"…, a yes to his own offer of one, or
+  any answer to his own question about one). "To do" alone is a verb, a
+  question about the list isn't an addition to it, and a shopping list is a
+  note. One nobody asked for isn't made, and he isn't heard to agree to it:
+  "That isn’t on your list yet: want me to add it?"
+- *The time is checked against what they said* (`whenAsked`). A model's time
+  counts only when their words hold one, outside what the task itself is ("buy a
+  dinner gift"). "In twenty minutes" is theirs as they said it; a day they
+  named plainly ("tomorrow", "on Friday") is that day, whatever date the model
+  worked out; a day with no time of day is the day, and nothing rings; a time
+  already gone today is this evening's if it was written without AM or PM, or
+  tomorrow's, unless they said today. A time they gave that can't be read is
+  asked for, not dropped.
+- *Only the user ticks one off.* The model can ask for `done`, and it's done only
+  when the user's own words are about that task (`bears`): they hold at least
+  half its telling words and the last of them, which is what it's of ("I
+  emailed Sarah" is about "Email Sarah"; "I called the dentist" is not about
+  "Call the bank"), and they aren't a question or a not-yet ("did I call the
+  dentist?", "I still need to…", "I'll… tomorrow"). Or they're a few plain words
+  ("okay, done", "snooze ten minutes", "yes", "at six") said right after its
+  reminder, or to a line of his that named it and nothing else. The same for
+  removing one and changing its time, which also have to be asked for in so
+  many words. When the model picks one task and their words are about another,
+  theirs is the one meant. A pick their words don't bear out changes nothing:
+  "Do you mean “Buy stamps”? Say which one and I’ll tick it off.", or, when
+  their words weren't asking for anything of the kind, just his answer. The
+  other way to tick one is the box in the Tasks panel, which is the user's click.
+
+The list reaches the model, in the brackets, when their words may be about it
+(`TASK_WORDS`), and for three minutes after a reminder so "done" or "snooze ten
+minutes" has something to be about. Otherwise it isn't told, and isn't brought
+up. His first sentence isn't said ahead on those turns: what's said is what was
+set. The `tasks:` lines in the log say what was done to the list ("tasks: added
+one with a time"), never what's on it; what he said is in the log like anything
+he says. Reminders are one-off for now: none repeats.
+
+**The Tasks panel** is beside Chats, top left, and slides in from the left as
+Chats does; its button carries how many are open. Timers count down by the main
+process's clock; open tasks are under Overdue, Today, Tomorrow, Later and No
+date; what was ticked off stays for a week and can be put back. A task can be
+added there by hand (with no time: times are asked of him).
+
+Measured (2026-11-15, `npm run talk-check -- --only self --match "remind|to-do|…"`,
+3 tries a case, 18 cases; `--show` prints what he said and the task he gave).
+Claude Haiku 5.5: 51 of 51 once the prompt said that "I called the dentist" *is*
+them ticking it off (it had asked "want me to tick that off?" 3 times in 3),
+and 54 of 54 at the end. qwen3.5:9b: **0 of 33** on anything needing "task" with
+the first wording, which described its shape and never showed it in a reply: it
+put "task", "add" or the JSON itself in "do". With a whole reply for an example
+it set "task" nearly every time, and its remaining mistakes were of four kinds,
+each now put right by the app from the user's own words rather than argued
+with in the prompt: a timer for what was a reminder ("remind me in twenty
+minutes to…": taken as the reminder, with what it's of read from their words);
+a time nobody gave ("add buy stamps to my to-do list", set for that very
+minute); the wrong day for "tomorrow"; and 5:48 for 5:48 PM. A "task" put in
+"do" as JSON is taken as the task, and his saying one's done or removed with
+no "task" set is acted on when their words ask for exactly that
+(`saidDone`, `saidDrop`). At the end: 52 of 54.
+
+Every talk case on Haiku with the longer prompt: 344 of 348, for 4 cents, the four
+misses old ones (the weather in a joke, twice).
+
+`npm run live-check -- tasks` runs it in the real app on a scratch profile (add
+`--shots <folder>` for pictures of his window): 16 of 16.
+
+A second reading found eleven ways it went wrong, each now a test: nearly all of
+them the app taking words for more than they said (the timer shortcuts above;
+a task ticked by "did I call the dentist yet?"; "done" about the dishes ticking
+the reminder just given), and his own questions ("When should it be?") having no
+answer the rules would accept.
+
 ## Weather, location and calendars
 
 Settings › Weather and calendars tells Jester the user's day: where they are, the
@@ -1660,6 +1766,16 @@ models decode in under 35 ms.
     without touching anything: no `away`. Ask him "how long have I been at
     this?" and compare with what you know. While a long task of his works with
     your hands off the Mac, no `presence: here (keys or mouse)` should appear.
+
+12. **Reminders and timers, out loud** (typed and scripted in the checks, never
+    spoken or heard): say "Jester, set a timer for one minute", and a minute
+    later he should say it's up, unasked, over whatever else is quiet. Say
+    "Jester, remind me in two minutes to stretch", lock the Mac for five, and
+    unlock it: about eight seconds later, "Reminder, from …: stretch."
+    Then "done", and the Tasks panel (top left of his window) should show it
+    ticked off. The log has `tasks: a timer for 1 minute`, `telling: a line`,
+    `telling: they’re away, so a line is held until they’re back`, and
+    `tasks: one ticked off, by their saying so`.
 
 ## Things learned the hard way
 

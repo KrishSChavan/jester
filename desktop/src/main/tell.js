@@ -48,7 +48,7 @@ export function createTeller({ where, announce, release, held, settleMs = SETTLE
   let settling = null;
 
   return {
-    /** The clock's handler for "say" jobs: {payload: {text}}. */
+    /** The clock's handler for "say" jobs: {payload: {text, late?}}. */
     async say(job, { late = 0, meant = now() } = {}) {
       const text = String(job?.payload?.text ?? '').trim().slice(0, MOST_CHARS);
       // Nothing to say is done with, not tried again.
@@ -57,7 +57,9 @@ export function createTeller({ where, announce, release, held, settleMs = SETTLE
         if (!job.heldAt) log('telling: they’re away, so a line is held until they’re back');
         return { hold: true };
       }
-      const said = announce(late >= LATE_MS ? lateLine(text, meant, now()) : text);
+      // Told late, it says when it was for: in the job's own words for that (payload.late), if it has them.
+      const tardy = String(job.payload.late ?? '').trim().slice(0, MOST_CHARS);
+      const said = announce(late >= LATE_MS ? tardy || lateLine(text, meant, now()) : text);
       if (!said) return { retryIn: busyMs };
       // Cut off as the screen locked or the lid closed: nobody heard it out, so it's still to tell.
       if ((await said) === false) {

@@ -7,6 +7,7 @@
  *
  *   npm run live-check              every scenario
  *   npm run live-check -- models    only the ones named
+ *   npm run live-check -- tasks --shots <folder>    with pictures of his window saved there
  *
  * Nothing of the user's is touched: no camera or mic (JESTER_FAKE_MEDIA), no
  * real input (JESTER_DRIVER_DRY), no keychain (safeStorage is stubbed, so the
@@ -24,6 +25,10 @@
  *   clock    a line due while he wasn't running is told when he starts, saying when it was for; one due while the
  *            screen's locked is held, and told a moment after it's unlocked; unlocking is the day's first sit-down
  *            once; and asked how long they've been at it, the model is given when they sat down.
+ *   tasks    a timer set, asked after and cancelled on the user's own words with no model asked; a reminder the
+ *            model asks for said back from what was kept, told when it's due, and ticked off by "done"; a wrong
+ *            pick ticking nothing; a task nobody asked for not made; the list reaching the model when asked; and
+ *            the Tasks panel: its rows, a box ticked by a click, and the count on its button.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -72,7 +77,9 @@ if (!process.versions.electron) {
   BrowserWindow.prototype.show = quietly;
   BrowserWindow.prototype.focus = () => undefined;
 
-  const wanted = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
+  const shotsAt = process.argv.indexOf('--shots');
+  const SHOTS = shotsAt > 0 ? path.resolve(process.argv[shotsAt + 1] || '') : '';
+  const wanted = process.argv.slice(2).filter((arg, i, all) => !arg.startsWith('-') && all[i - 1] !== '--shots');
   const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const results = [];
   const check = (name, ok, detail = '') => {
@@ -169,15 +176,89 @@ if (!process.versions.electron) {
     }
   };
 
+  /** A picture of his window as it stands, for looking at (--shots). Drawn opaque for the moment it takes. */
+  async function shot(name) {
+    if (!SHOTS) return;
+    fs.mkdirSync(SHOTS, { recursive: true });
+    home.setOpacity(1);
+    await pause(700);
+    fs.writeFileSync(path.join(SHOTS, `${name}.png`), (await home.webContents.capturePage()).toPNG());
+    home.setOpacity(0.02);
+  }
+  const taskFile = () => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(scratch, 'tasks.json'), 'utf8')).tasks;
+    } catch {
+      return [];
+    }
+  };
+
   const SCENARIOS = {
+    /** Step 8: timers on their own words, reminders through the model, only the user ticking off, and the panel. */
+    async tasks({ paid }) {
+      paid.answer = () => ({ say: 'This should not be said.', do: '', new: false });
+      const asked = paid.requests.length;
+      const set = await type('set a timer for ten minutes');
+      const left = await type('how long is left on the timer?');
+      check('a timer is set and asked after on their own words, with no model asked', set === '10 minutes, starting now.' && /^(?:10 minutes|9 minutes \d+ seconds) left on your 10 minute timer\.$/.test(left) && paid.requests.length === asked, `${set} · ${left} · model asked ${paid.requests.length - asked}`);
+      check('and it’s on his clock', jobs()?.some((job) => job.kind === 'task') && taskFile().length === 1, JSON.stringify(jobs()));
+      const cancelled = await type('cancel the timer');
+      check('cancelled, it’s off the clock', /^Cancelled, with .+ left\.$/.test(cancelled) && !jobs()?.some((job) => job.kind === 'task') && taskFile().length === 0, `${cancelled} · ${JSON.stringify(jobs())}`);
+
+      // A reminder: the model gives the task, and what he says is what was kept, not the model's own line.
+      paid.answer = () => ({ say: 'Sure, I’ll remind you in an hour.', do: '', new: false, task: { op: 'add', text: 'call your mom', in: 5 } });
+      const before = his().length;
+      const kept = await type('remind me in two seconds to call my mom');
+      check('a reminder is said back from what was kept, and its time from what they said, not the model’s five minutes', /^Okay, I’ll remind you at \d+:\d\d [AP]M: Call your mom\.$/.test(kept), kept);
+      check('his prompt says how to ask for one, and that only they tick things off', /set "task" in your reply, leave "do" empty/.test(lastSystem(paid)) && /only they tick things off/.test(lastSystem(paid)));
+      const rang = await until('the reminder', () => his().slice(before).find((line) => /^Reminder:/.test(line)), 10000).catch((err) => err.message);
+      check('when it’s due he says so', rang === 'Reminder: call your mom.', rang);
+      check('and it stays on the list, marked as given', taskFile().length === 1 && Number.isFinite(taskFile()[0].told) && !taskFile()[0].done, JSON.stringify(taskFile()));
+      paid.answer = () => ({ say: 'Okay', do: '', new: false, task: { op: 'done' } });
+      const done = await type('done');
+      check('“done” right after it ticks it off', done === 'Ticked off: Call your mom.' && Number.isFinite(taskFile()[0]?.done), `${done} · ${JSON.stringify(taskFile())}`);
+      check('and the model was shown the list for it', /The user’s to-do list, reminders and timers, which you keep/.test(lastSaid(paid)), lastSaid(paid).slice(0, 200));
+
+      // Two by hand, in the panel's own way; then the model picks the wrong one to tick.
+      await inPage(`await chrome.runtime.sendMessage({ type: 'jester/tasks', op: 'add', text: 'Buy stamps' }); await chrome.runtime.sendMessage({ type: 'jester/tasks', op: 'add', text: 'Email Sarah' });`);
+      paid.answer = () => ({ say: 'Okay', do: '', new: false, task: { op: 'done', text: 'stamps' } });
+      const wrong = await type('I finished the laundry');
+      check('a wrong pick ticks nothing, and he asks', wrong === 'Do you mean “Buy stamps”? Say which one and I’ll tick it off.' && taskFile().filter((task) => task.done).length === 1, `${wrong}`);
+      paid.answer = () => ({ say: 'Paris.', do: '', new: false, task: { op: 'add', text: 'learn capitals' } });
+      const paris = await type('what’s the capital of France?');
+      check('a task nobody asked for isn’t made', paris === 'Paris.' && taskFile().length === 3 && /a task nobody asked for wasn’t made/.test(logLines()), `${paris} · ${taskFile().length} tasks`);
+      paid.answer = () => ({ say: 'I’ll remind you at six to water the plants.', do: '', new: false });
+      const claimed = await type('remind me to water the plants at 6');
+      check('saying it’s set with nothing set is owned up to', claimed === 'Sorry, that didn’t get set. Tell me again: what, and when?', claimed);
+      check('the log says what was done to the list, never what’s on it', /tasks: added one with a time/.test(logLines()) && /tasks: one ticked off, by their saying so/.test(logLines()) && !/stamps|Sarah|your mom/.test(logLines().split('\n').filter((line) => /tasks:|"task"/.test(line)).join('\n')));
+
+      // The panel: a timer and a day's task for the look of it, then a box ticked by a click.
+      await type('set a pasta timer for 8 minutes');
+      paid.answer = () => ({ say: 'Okay', do: '', new: false, task: { op: 'add', text: 'submit homework 5', at: new Date(Date.now() + 3 * 864e5).toLocaleDateString('en-CA') } });
+      await type('add submitting homework 5 to my list for three days from now');
+      const badge = await inPage(`const b = document.getElementById('tasks-count'); return b.hidden ? '' : b.textContent;`);
+      check('the button says how many are open', badge === '3', badge);
+      await inPage(`window.jesterHome.go('tasks', { instant: true });`);
+      const rows = await until('the panel’s rows', () => inPage(`const rows = [...document.querySelectorAll('#task-list > *')].map((el) => el.tagName === 'H2' ? '# ' + el.textContent : el.querySelector('.title').textContent + (el.querySelector('.when') ? ' | ' + el.querySelector('.when').textContent : '')); return rows.length > 5 ? rows : null;`));
+      check('the panel shows the timer counting down, what’s open by when, and what’s ticked off', rows[0] === '# Timers' && /^Pasta timer \| \d:\d\d left$/.test(rows[1]) && rows.includes('# Later') && rows.some((row) => /^Submit homework 5 \| On \w+/.test(row)) && rows.includes('# No date') && rows.includes('Buy stamps') && rows.includes('# Ticked off') && rows.at(-1) === 'Call your mom', JSON.stringify(rows));
+      await shot('tasks');
+      await inPage(`[...document.querySelectorAll('#task-list .task-item')].find((row) => row.querySelector('.title').textContent === 'Buy stamps').querySelector('.tick').click();`);
+      await until('the tick kept', () => taskFile().find((task) => task.text === 'Buy stamps')?.done);
+      const after = await until('the panel drawn again', () => inPage(`const row = [...document.querySelectorAll('#task-list .task-item')].find((el) => el.querySelector('.title').textContent === 'Buy stamps'); return row?.classList.contains('done') ? document.getElementById('tasks-count').textContent : null;`));
+      check('a box ticked by a click is ticked, and the count drops', after === '2', after);
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      await shot('main');
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+    },
+
     /** Step 7: the clock catching up, a line held while they're away, the first sit-down, and how long they've sat. */
     async clock({ paid }) {
       const late = await until('the line due before he started', () => his().find((line) => /stand up and stretch/.test(line)), 20000).catch((err) => err.message);
       check('a line due an hour before he started is told once he has, saying when it was for', /^This was for (?:yesterday at )?\d+:\d\d [AP]M: Time to stand up and stretch\.$/.test(late), late);
       check('the log says they’re here, and that it’s the day’s first sit-down', /presence: here \(keys or mouse\), the day’s first sit-down/.test(logLines()), logLines().split('\n').filter((line) => /presence:|clock:|telling:/.test(line)).join(' | '));
       check('and that a line was told and how late, never what it said', /telling: a line, 6\d min late/.test(logLines()) && !/stretch/.test(logLines()));
-      await until('the job gone from the clock', () => jobs()?.length === 0).catch(() => undefined);
-      check('told, it’s off the clock', jobs()?.length === 0, JSON.stringify(jobs()));
+      await until('the job gone from the clock', () => jobs()?.filter((job) => job.kind === 'say').length === 0).catch(() => undefined);
+      check('told, it’s off the clock', jobs()?.filter((job) => job.kind === 'say').length === 0, JSON.stringify(jobs()));
 
       // The screen locks; a line comes due behind it.
       powerMonitor.emit('lock-screen');
@@ -188,7 +269,7 @@ if (!process.versions.electron) {
       await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-clock', op: 'add', job: { kind: 'say', inMs: 300, payload: { text: 'Your laundry is done.' } } });`);
       await until('the line held', () => /telling: they’re away, so a line is held until they’re back/.test(logLines()));
       await pause(1500);
-      check('due behind a locked screen, a line is held, not said', his().length === before && jobs()?.[0]?.held === true, `${his().length - before} said · ${JSON.stringify(jobs())}`);
+      check('due behind a locked screen, a line is held, not said', his().length === before && jobs()?.find((job) => job.kind === 'say')?.held === true, `${his().length - before} said · ${JSON.stringify(jobs())}`);
       powerMonitor.emit('unlock-screen');
       keys.idle = 0;
       const told = await until('the held line told', () => (his().length > before ? his().at(-1) : null), 8000).catch((err) => err.message);

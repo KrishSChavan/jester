@@ -160,9 +160,11 @@ const ago = (ms) => {
  * @param {() => 'fahrenheit'|'celsius'} deps.units
  * @param {string} [deps.computer]  "Mac", or "computer": what he says the location is from
  * @param {{lines:() => string}} [deps.presence]  when they sat down at the computer (presence.js)
+ * @param {{wanted:(text:string) => boolean, lines:() => string}} [deps.tasks]  their to-do list, reminders and timers
+ *   (tasks.js): told when their words may be about them
  * @param {() => number} [deps.now]
  */
-export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', presence = null, now = Date.now }) {
+export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', presence = null, tasks = null, now = Date.now }) {
   function whereLine(here, asked, at) {
     if (!here) {
       const { problem } = whereabouts.state();
@@ -199,11 +201,12 @@ export function createSituation({ whereabouts, weather, calendars, units, comput
     /** What's connected, for his prompt: what he can speak to as fact. */
     live: () => ({ where: whereabouts.connected, calendars: calendars.connected }),
     /**
-     * What to tell him with what the user said.
+     * What to tell him with what the user said. `last`: his line before it, when he said one: their words may be the
+     * answer to a question of his about their list.
      * @returns {Promise<{block:string, untrusted:boolean, summary:string}>}  untrusted: it holds calendar events,
      *   which are other people's words; summary: for dev.log, with no place or event in it
      */
-    async brief(text) {
+    async brief(text, { last = '' } = {}) {
       const at = now();
       const asked = asksAbout(text);
       const lines = [];
@@ -238,6 +241,10 @@ export function createSituation({ whereabouts, weather, calendars, units, comput
           lines.push(sitting);
           summary.push('how long they’ve sat');
         }
+      }
+      if (tasks?.wanted(text, last)) {
+        lines.push(tasks.lines());
+        summary.push('their list');
       }
       let untrusted = false;
       if (calendars.connected) {

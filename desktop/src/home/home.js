@@ -11,6 +11,7 @@ import { ENGINE, MSG } from '../ext/src/common/constants.js';
 import { chatElements, createChats, dividerElement, lineElement } from './chats.js';
 import { createOrb, ORB_STATES } from './orb.js';
 import { createScreens } from './screens.js';
+import { createTasksPanel } from './tasks.js';
 import { onRender, save, showing, startSettings, state } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
@@ -319,6 +320,9 @@ function drawVoice(voice) {
 // Picked up, the chat's under the orb, and the box to type in has the focus (screens.js data-autofocus).
 const chats = createChats({ go: (screen) => screens.go(screen), onPickedUp: () => screens.go('main') });
 
+// The to-do list, reminders and timers, to the left of the orb beside Chats.
+const tasksPanel = createTasksPanel();
+
 const screens = createScreens({
   root: $('screens'),
   onChange: (screen) => {
@@ -327,6 +331,7 @@ const screens = createScreens({
     chrome.runtime.sendMessage({ type: 'jester/home-screen', screen }).catch(() => undefined);
     showing(screen);
     chats.shown(screen);
+    tasksPanel.shown(screen);
     history.replaceState(null, '', `#${screen}`);
   }
 });
@@ -391,6 +396,9 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
     case 'jester/chats-changed':
       chats.changed(screens.current);
+      break;
+    case 'jester/tasks-changed':
+      tasksPanel.changed(screens.current, message.count);
       break;
     // Opened again from the menu bar or the Dock: to the screen asked for, with the intro if it wasn't on screen.
     case 'jester/home-go':
