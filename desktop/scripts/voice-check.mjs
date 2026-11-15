@@ -7,6 +7,7 @@
  *   npm run voice-check                    every line: how long until its first sound, and what the recognizer heard
  *   npm run voice-check -- --voice lewis   another of the voices (voice/voices.js)
  *   npm run voice-check -- --play          played aloud as well (macOS), for a person's ear
+ *   npm run voice-check -- --pace 0.93     at the pace he takes with someone low (1.08: in a hurry; mood.js)
  *   npm run voice-check -- "Any line."     a line of your own
  *
  * Nothing is sent anywhere and it costs nothing: both models run here. Reading it
@@ -43,7 +44,8 @@ if (!process.versions.electron) {
   const flags = process.argv.slice(2);
   const flag = (name) => flags.includes(name);
   const named = (name) => (flags.includes(name) ? flags[flags.indexOf(name) + 1] : undefined);
-  const own = flags.filter((arg, index) => !arg.startsWith('--') && flags[index - 1] !== '--voice');
+  const own = flags.filter((arg, index) => !arg.startsWith('--') && !['--voice', '--pace'].includes(flags[index - 1]));
+  const pace = Number(named('--pace')) || 1;
 
   /** The kinds of thing he says: short, long, with figures, names and a list. `hear`: what must be heard back. */
   const LINES = own.length
@@ -108,7 +110,7 @@ if (!process.versions.electron) {
           hearing.postMessage({ type: 'transcribe', samples });
         });
 
-      console.log(`Jester’s voice: Kokoro, ${chosen.name} (${chosen.about}), ${kokoroThreads()} threads${hearing ? `; read back by ${model}` : '; no recognizer to read it back'}`);
+      console.log(`Jester’s voice: Kokoro, ${chosen.name} (${chosen.about}), ${kokoroThreads()} threads${pace === 1 ? '' : `, at ${pace} of his usual pace`}${hearing ? `; read back by ${model}` : '; no recognizer to read it back'}`);
       const began = performance.now();
       await kokoro.sound('Hello.');
       console.log(`   loaded, and a first word made, in ${Math.round(performance.now() - began)} ms\n`);
@@ -121,7 +123,7 @@ if (!process.versions.electron) {
         let seconds = 0;
         const sounds = [];
         for (const piece of pieces) {
-          const sound = await kokoro.sound(piece, { tight: runsOn(piece) });
+          const sound = await kokoro.sound(piece, { tight: runsOn(piece), speed: pace });
           if (!first) first = performance.now() - started;
           seconds += sound.seconds;
           sounds.push(sound);

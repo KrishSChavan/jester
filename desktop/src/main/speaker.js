@@ -201,9 +201,9 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
   let ahead = null;
 
   /** A piece's sound, or null when his own voice can't make it: never a rejection. */
-  const made = (piece, signal) =>
+  const made = (piece, signal, pace = 1) =>
     Promise.resolve()
-      .then(() => (voice ? voice.sound(piece, { signal, tight: runsOn(piece) }) : null))
+      .then(() => (voice ? voice.sound(piece, { signal, tight: runsOn(piece), ...(pace === 1 ? {} : { speed: pace }) }) : null))
       .catch((err) => {
         if (!signal?.aborted) log('Jester’s voice:', err.message);
         return null;
@@ -211,10 +211,10 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
 
   return {
     /**
-     * `onSound`: called as the sound starts, once.
+     * `onSound`: called as the sound starts, once. `pace`: how fast, against his usual 1 (his own voice only).
      * @returns {Promise<void>} once it's been said, or stopped
      */
-    async say(text, { onSound = () => undefined } = {}) {
+    async say(text, { onSound = () => undefined, pace = 1 } = {}) {
       controller?.abort();
       const mine = new AbortController();
       controller = mine;
@@ -230,9 +230,9 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
         }
       };
       const pieces = spokenPieces(text);
-      const early = ahead?.text === pieces[0] ? ahead.made : null;
+      const early = ahead?.text === pieces[0] && ahead.pace === pace ? ahead.made : null;
       ahead = null;
-      let next = pieces.length ? early || made(pieces[0], signal) : null;
+      let next = pieces.length ? early || made(pieces[0], signal, pace) : null;
       for (let index = 0; index < pieces.length; index++) {
         const sound = await next;
         if (signal.aborted) return;
@@ -242,7 +242,7 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
           await system.say(pieces.slice(index).join(' '));
           return;
         }
-        next = index + 1 < pieces.length ? made(pieces[index + 1], signal) : null;
+        next = index + 1 < pieces.length ? made(pieces[index + 1], signal, pace) : null;
         begin();
         try {
           await play(sound.bytes, sound.type);
@@ -256,9 +256,9 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
       }
     },
     /** A line that's about to be said, after the one being said now: its start is made meanwhile, so no gap. */
-    prepare(text) {
+    prepare(text, { pace = 1 } = {}) {
       const [first] = spokenPieces(text);
-      ahead = first ? { text: first, made: made(first) } : null;
+      ahead = first ? { text: first, pace, made: made(first, undefined, pace) } : null;
     },
     stop() {
       ahead = null;

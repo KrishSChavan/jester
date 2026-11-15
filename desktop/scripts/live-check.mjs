@@ -18,6 +18,9 @@
  * Scenarios:
  *   stale    a conversation summed up yesterday reaches the model as yesterday's, with the line that says what it
  *            called upcoming has likely happened, and the rule against calling a date gone by upcoming.
+ *   self     what he's asked to remember is kept in the vault and "forget that" takes it back out; "what do you know
+ *            about me?" reaches the model with all of About me; a named thing is forgotten by the model's pick from
+ *            numbered lists; and someone in a hurry is said to be, in the brackets before their words.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -40,13 +43,19 @@ if (!process.versions.electron) {
   const child = spawn(electron, [here, ...process.argv.slice(2)], { stdio: 'inherit', env });
   child.on('exit', (code) => process.exit(code ?? 1));
 } else {
-  const { app, BrowserWindow, safeStorage } = await import('electron');
+  const { app, BrowserWindow, safeStorage, shell } = await import('electron');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-live-'));
   Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1' });
   // Sealed keys are kept as written: the keychain is never asked.
   safeStorage.isEncryptionAvailable = () => true;
   safeStorage.encryptString = (text) => Buffer.from(String(text), 'utf8');
   safeStorage.decryptString = (sealed) => Buffer.from(sealed).toString('utf8');
+  // A note he's asked to forget goes to the trash: here, nowhere near the user's own.
+  const trashed = [];
+  shell.trashItem = async (file) => {
+    trashed.push(file);
+    fs.rmSync(file);
+  };
   // His window, where nobody will notice it.
   const quietly = function () {
     this.setOpacity(0.02);
@@ -139,7 +148,55 @@ if (!process.versions.electron) {
   /** The system prompt of the last request a model server took. */
   const lastSystem = (server) => server.requests.at(-1)?.messages?.[0]?.content || '';
 
+  const vaultDir = path.join(scratch, 'vault');
+  const inVault = (rel) => path.join(vaultDir, rel);
+  const lastSaid = (server) => server.requests.at(-1)?.messages?.at(-1)?.content || '';
+
   const SCENARIOS = {
+    /** Step 6: remembering and taking it back, what he knows, forgetting a named thing, and how they sound. */
+    async self({ paid }) {
+      const { createVault } = await import(path.join(desktop, 'src/main/vault.js'));
+      await until('the vault opened', () => fs.existsSync(inVault('Jester/About me.md')), 20000);
+      const kept = () => (fs.existsSync(inVault('Jester/Remembered')) ? fs.readdirSync(inVault('Jester/Remembered')) : []);
+      paid.answer = () => ({ say: 'I’ll remember that.', do: '', new: false, remember: 'my locker combination is 12-34-56' });
+      await type('my locker combination is 12-34-56, remember that');
+      check('asked to remember, a note is made in the vault', kept().length === 1 && /12-34-56/.test(fs.readFileSync(inVault(`Jester/Remembered/${kept()[0]}`), 'utf8')), kept().join(', '));
+      const asked = paid.requests.length;
+      const back = await type('forget that');
+      check('“forget that” takes it back out, to the trash, with no model asked', kept().length === 0 && trashed.length === 1 && paid.requests.length === asked && /^Done\. I’ve taken “.+” back out of your notes\.$/.test(back), `${JSON.stringify(back)} · kept ${kept().length} · trashed ${trashed.length} · model asked ${paid.requests.length - asked}`);
+
+      createVault({ root: vaultDir }).updateAboutMe({ add: [{ section: 'School and work', fact: 'Studies computer science at Penn State' }, { section: 'People', fact: 'Roommate is Alex Chen' }, { section: 'Preferences', fact: 'Likes pineapple on pizza' }] });
+      paid.answer = () => ({ say: 'You study computer science at Penn State.', do: '', new: false });
+      await type('what do you know about me?');
+      const given = lastSaid(paid);
+      check('asked what he knows, the model is given all of About me by section', /Everything you’ve learned about the user \(the About me note in their vault\):\nSchool and work: Studies computer science at Penn State\nPeople: Roommate is Alex Chen\nPreferences: Likes pineapple on pizza/.test(given), given.slice(0, 400));
+      check('and his prompt says how to answer it', /Asked what you know or remember about them, pick the three or four things that matter most/.test(lastSystem(paid)));
+
+      // The forgetting model picks by number from what it's shown: here, whichever line says the roommate.
+      paid.answer = (request) => {
+        const shown = request?.messages?.at(-1)?.content || '';
+        if (!/asked Jester to forget/.test(request?.messages?.[0]?.content || '')) return { say: 'This should not be said.', do: '', new: false };
+        const at = Number(/^(\d+)\. Roommate is Alex Chen$/m.exec(shown.split('What they asked Jester to remember:')[0])?.[1]);
+        return { what: 'that your roommate is Alex', facts: at ? [at] : [], notes: [], summaries: [], earlier: [] };
+      };
+      const forgot = await type('forget that my roommate is Alex');
+      const about = fs.readFileSync(inVault('Jester/About me.md'), 'utf8');
+      check('a named thing is forgotten: gone from About me, the rest kept, and he says what went', forgot === 'Done. I’ve forgotten “Roommate is Alex Chen”.' && !/Alex/.test(about) && /Penn State/.test(about) && /pineapple/.test(about), `${JSON.stringify(forgot)}\n${about}`);
+      check('the log says how much was forgotten, never what', /memory: forgot 1 fact\(s\), 0 note\(s\)/.test(logLines()) && !/forgot.*Alex/.test(logLines()));
+      const everything = await type('forget everything about me');
+      check('everything at once isn’t done on one sentence', /^Everything is more than I’ll throw away on one sentence/.test(everything) && /Penn State/.test(fs.readFileSync(inVault('Jester/About me.md'), 'utf8')), everything);
+
+      // Settings › Memory: how much he knows, counted when the page opens.
+      await inPage(`document.querySelector('[data-go="settings/memory"]')?.click();`);
+      const row = await until('the count of what he knows', () => inPage(`const hint = document.getElementById('known-hint'); return !document.getElementById('known-row').hidden && hint.textContent ? hint.textContent : '';`)).catch((err) => err.message);
+      check('Settings › Memory says how much he knows', /^2 things learned from talking with you\. Ask him/.test(row), row);
+
+      paid.answer = () => ({ say: 'Twelve.', do: '', new: false });
+      await type('quick, what’s 15 percent of 80?');
+      check('someone in a hurry is said to be, in the brackets before their words', /How they sound: in a hurry\.\]\n\[\w+day, /.test(lastSaid(paid)), lastSaid(paid).slice(0, 300));
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+    },
+
     /** What was summed up yesterday is yesterday's when he's told it (2026-11-13: "a class starting in about an hour"). */
     async stale({ paid }) {
       await type('what’s up?');
@@ -148,7 +205,7 @@ if (!process.versions.electron) {
       check('yesterday’s summary reaches the model saying how old it is', !!line, system.split('Earlier conversations')[1]?.slice(0, 400) || 'no earlier conversations in the prompt');
       check('with the line that what it called upcoming has likely happened', /by now it has most likely happened\./.test(system));
       check('and the rule to check a date against the day', /Before you call anything upcoming, check its date against the date on the user's words/.test(system));
-      check('the user’s words carry the date and time', /^\[\w+day, \w+ \d+, \d{4} at \d+:\d\d.[AP]M\] what’s up\?$/.test(paid.requests.at(-1)?.messages?.at(-1)?.content || ''), paid.requests.at(-1)?.messages?.at(-1)?.content);
+      check('the user’s words carry the date and time', /(?:^|\n)\[\w+day, \w+ \d+, \d{4} at \d+:\d\d.[AP]M\] what’s up\?$/.test(paid.requests.at(-1)?.messages?.at(-1)?.content || ''), paid.requests.at(-1)?.messages?.at(-1)?.content);
     },
 
     /** Paid before free, a failing one covered for and left alone, and Settings saying so. */
@@ -184,13 +241,14 @@ if (!process.versions.electron) {
       storageFile,
       JSON.stringify({
         // This computer's model unticked: with Ollama running, a test would load the user's own.
-        settings: { enabled: false, voiceEnabled: false, continuousAssistant: false, watchEnabled: false, localModelUses: [], cameraDeviceId: '', longRange: false },
+        settings: { enabled: false, voiceEnabled: false, continuousAssistant: false, watchEnabled: false, localModelUses: [], cameraDeviceId: '', longRange: false, memoryVault: vaultDir },
         // The free one saved first: only its plan puts it second.
         modelConnections: [model('free', free, 'free'), model('paid', paid, 'paid')]
       })
     );
     // A conversation summed up 31 hours ago, as recollections.js keeps it: the sentence that became a class "in about an hour".
     fs.writeFileSync(path.join(scratch, 'recollections.json'), JSON.stringify({ conversations: [{ at: Date.now() - 31 * 3600000, summary: 'Provided current weather, time, and advised attending the upcoming class.', chat: 'earlier-chat' }] }));
+    fs.mkdirSync(path.join(vaultDir, '.obsidian'), { recursive: true });
     await import(path.join(desktop, 'src/main/main.js'));
     await app.whenReady();
     home = await until('his window', () => BrowserWindow.getAllWindows().find((win) => /\/home\/home\.html/.test(win.webContents.getURL()) && !win.webContents.isLoading()), 30000);

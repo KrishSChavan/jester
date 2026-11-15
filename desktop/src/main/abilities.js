@@ -17,7 +17,7 @@
  * agent/actions.js, no secrets typed from agent/prompt.js (qwen3.5:9b, told only
  * that it asks before buying, said it couldn't book a flight or order food, 4 of
  * 4; told it can, short of the card number, it said so, 4 of 4), calendars' reach from calendars.js (7 days back, 90 ahead),
- * remembering from vault-memory.js (no vault, no remembering), earlier
+ * remembering, learning about them and forgetting from vault-memory.js (no vault, no remembering), earlier
  * conversations from recollections.js (a week).
  *
  * Pure: the state in, the prompt's lines out. The prompt changes only when a
@@ -55,7 +55,7 @@ export const ABILITIES = Object.freeze([
   {
     id: 'notes',
     on: (state) => !!state.notes,
-    can: () => 'Keep the user’s notes in their Obsidian vault: make a note, add to one or open one, and remember what they ask you to. What’s recalled from it comes in the brackets.',
+    can: () => 'Keep the user’s notes in their Obsidian vault: make a note, add to one or open one, and remember what they ask you to. You also learn lasting things about them as you talk, kept in its About me note, which is theirs to read or change, and you forget what they ask you to. What’s recalled from it comes in the brackets.',
     off: 'Obsidian notes, and remembering what they ask you to: no vault is chosen (Settings › Memory). Until then a note is the laptop’s, in its own apps.'
   },
   {

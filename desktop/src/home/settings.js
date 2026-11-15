@@ -626,6 +626,9 @@ function renderChrome() {
 /** macOS keeps Jester out of the vault: since it was chosen, or since it was opened (its search says so). */
 const vaultDenied = (memory) => memory?.problem === 'denied' || (!!memory?.root && memory.search?.error === 'denied');
 
+/** What he knows, as last counted: later news of the app comes without the count. */
+let knownShown = null;
+
 /** The vault Jester remembers in, and how well it can search it. */
 function renderMemory() {
   const memory = desktop?.memory || {};
@@ -655,6 +658,13 @@ function renderMemory() {
   // Read again opens the vault again too, so it's how to try once macOS lets Jester in.
   $('vault-reindex').hidden = !memory.root && !denied;
   $('vault-reindex').textContent = denied ? 'Try again' : 'Read again';
+  // What he's learned and been asked to keep: counts only, and the note itself is the user's to open.
+  $('known-row').hidden = !memory.root;
+  const things = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+  if (memory.known) knownShown = memory.known;
+  if (knownShown && memory.root) {
+    $('known-hint').textContent = `${knownShown.facts ? `${things(knownShown.facts, 'thing', 'things')} learned from talking with you` : 'Nothing learned yet: he picks things up as you talk'}${knownShown.kept ? `, and ${things(knownShown.kept, 'thing', 'things')} you asked him to remember` : ''}. Ask him “what do you know about me?”, or say “forget that…” and what: he takes it out, and a note you’d asked him to keep goes to the Trash.`;
+  }
   $('vault-search').textContent = !memory.root
     ? 'Once there’s a vault: by meaning, with nomic-embed-text in Ollama, or by words without it.'
     : memory.reading || !search
@@ -908,6 +918,8 @@ export function showing(screen) {
   }
   // Ollama's models, asked again where they're shown: Settings' list (its Models line) and the Models page.
   if (screen === 'settings' || screen === 'settings/models') renderChatModels();
+  // How much he knows about them, counted when the Memory page is opened.
+  if (screen === 'settings/memory') vaultOp('known').catch(() => undefined);
 }
 
 $('enabled').addEventListener('change', (event) => save({ enabled: event.target.checked }));
@@ -919,7 +931,7 @@ $('continuousAssistant').addEventListener('change', (event) => save({ continuous
 $('agentScreenshots').addEventListener('change', (event) => save({ agentScreenshots: event.target.checked }));
 $('keepUnsureSpeech').addEventListener('change', (event) => save({ keepUnsureSpeech: event.target.checked }));
 $('memoryConversations').addEventListener('change', (event) => save({ memoryConversations: event.target.checked }));
-for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], ['vault-open', 'open'], ['vault-privacy', 'privacy'], ['vault-reindex', 'reindex']]) {
+for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], ['vault-open', 'open'], ['known-open', 'about'], ['vault-privacy', 'privacy'], ['vault-reindex', 'reindex']]) {
   $(id).addEventListener('click', () => vaultOp(op));
 }
 $('vault-use').addEventListener('click', (event) => vaultOp('use', event.currentTarget.dataset.path));

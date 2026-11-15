@@ -679,7 +679,7 @@ function openVault() {
   indexedAs = '';
   if (root) {
     try {
-      const opened = createVault({ root });
+      const opened = createVault({ root, trash: (file) => shell.trashItem(file) });
       opened.ensureLayout();
       vault = opened;
       log('memory: vault', root);
@@ -775,6 +775,17 @@ function memoryState() {
     detected: obsidianVaults(),
     conversations: settings?.memoryConversations !== false
   };
+}
+
+/** How many things he's learned about the user, and how many they asked him to keep: for Settings › Memory. */
+function knownCounts() {
+  if (!vault) return null;
+  try {
+    return { facts: vault.aboutMe().facts.length, kept: vault.listNotes().filter((note) => note.rel.startsWith(`${PATHS.remembered}/`)).length };
+  } catch (err) {
+    log('memory: couldn’t count what’s known:', err.message);
+    return null;
+  }
 }
 
 /**
@@ -1122,10 +1133,12 @@ function listenToPages() {
           if (found) await saveSettings({ memoryVault: found.path });
         } else if (message.op === 'remove') await stopUsingVault();
         else if (message.op === 'open' && vault) await shell.openExternal(`obsidian://open?vault=${encodeURIComponent(vault.name)}`);
+        else if (message.op === 'about' && vault) await shell.openExternal(vault.openUrl(PATHS.aboutMe));
         else if (message.op === 'privacy') await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders');
         else if (message.op === 'reindex') refreshVault({ retry: true });
         await refresh();
-        return desktopState();
+        // How much he knows, counted only when Settings asks: it walks the vault.
+        return { ...desktopState(), memory: { ...memoryState(), known: knownCounts() } };
       // Settings' Weather and calendars. A calendar's link goes in and never comes back out.
       case 'jester/desktop-day':
         try {
@@ -1722,6 +1735,7 @@ async function start() {
       ready: () => !!vault,
       recall: (text, history) => vaultMemory.recall(text, { history }),
       remember: (request) => vaultMemory.remember(request),
+      forget: (request) => vaultMemory.forget(request),
       note: (request) => vaultMemory.note(request)
     },
     // Where the user is, the weather there and their calendars, once connected in Settings.

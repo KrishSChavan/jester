@@ -53,6 +53,7 @@ front window fills its display.
 | `src/main/driver.js`, `native/jester-driver/` | Rust helper for OS input and the accessibility tree, JSON lines over stdio. Also Chrome's native-messaging relay. |
 | `src/main/watch.js`, `watch-status.js`, `native/jester-watch/` | The Apple Watch: its app, the Mac's Swift Bluetooth helper, and steering the cursor with them (Mac only). |
 | `src/main/link.js`, `link-host.js`, `chrome-link.js` | The link to the extension: the socket the relay reaches, putting the relay where Chrome can start it, and what's said over it. The extension's half is `../jester-extension/src/background/desktop-link.js`. |
+| `src/main/mood.js` | How the user seems, from what they plainly say: told to the model, and how fast he speaks. |
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models): paid before free, and who covers for one that fails. |
 | `src/main/spend.js` | What the saved models' replies have cost this month, as near as their token counts say. |
 | `scripts/live-check.mjs` | `npm run live-check`: the real app on a scratch profile with scripted model servers, typed to and read back. |
@@ -1111,6 +1112,84 @@ Session memory needs nothing more: one app on one computer keeps the conversatio
 in memory and in `conversation.json`, and the slow part of a turn is the model,
 not reading what was said.
 
+### What he knows about you, and forgetting
+
+He learns on his own: when a conversation ends, the one model call that sums it up
+(`ended`) also adds the lasting things it showed about the user to About me, and
+takes out what it showed to be wrong. Two things were missing (2026-11-15).
+
+**"What do you know about me?"** (`askedWhatKnown`) is answered from all of it.
+`recall` gives the model the whole of About me by section, up to 4,000 characters,
+and the newest six things he was asked to remember, with nothing searched for;
+his prompt has him pick the three or four that matter most, say where the rest is
+(the About me note) and offer to open it. With nothing learned yet the brackets
+say so, so he says so rather than fill the gap. Settings › Memory has a row with
+the counts and a button that opens the note.
+
+**"Forget that…"** is done by his memory, not said by the model. `askedToForget`
+reads the user's own words: named ("forget that my roommate is Alex", "don't
+remember that", "delete that from your memory"), bare ("forget that", "never
+mind" just after he kept something: the note he just made, with no model asked),
+or everything, which he won't do on one sentence that may have been misheard
+(About me and Forget it all are the user's to clear). "Don't forget…" still asks
+to remember, "forget the shortcut…" is still voice-commands.js's, and a bare
+"forget that" with nothing just kept is left to the talking model, which sets
+"forget" when it's about something they told him and leaves it out when it only
+calls off a request.
+
+For a named thing, `forget` shows one model call everything he keeps as numbered
+lists (About me's facts, what he was asked to remember, conversation summaries the
+index finds, the week's earlier conversations) and takes back numbers. Only those
+go: a fact out of About me, a remembered note to the computer's Trash
+(`shell.trashItem`; `.trash/` in the vault without it), a conversation's section
+out of its day's note with the people and topics only it named, an earlier
+conversation out of recollections. The model never names a path or writes a word
+of what's kept, numbers outside the lists are ignored, more than ten picked at
+once forgets nothing (he says how many it would have been), and what looks like
+a password is never shown to it. He then says what went, from what was removed
+("Done. I've forgotten "Roommate is Alex Chen"."), or that he had nothing kept.
+The conversation's own summary leaves it out too (`endedPrompt`). Chats, in his
+window, are the user's own record and aren't touched.
+
+### His manner following theirs
+
+`mood.js` reads how the user seems from what they plainly say (in a hurry, low,
+annoyed, delighted; nothing plain is nothing told), tells the model in the
+brackets before their words ("How they sound: low."), and sets how fast he speaks
+(1.08 of his usual pace to someone in a hurry, 0.93 to someone low; Kokoro stays
+clear at both, read back 10 of 10). Someone low a moment ago still is for five
+minutes. His prompt says what each calls for: the fewest words; gentle and plain
+with no advice unless asked; owning a mistake in a word; being glad, without a
+history made up to be glad about (Claude Haiku 5.5 said "after all that waiting"
+of an internship it had only just heard of, 4 times in 4, until told it doesn't
+know what led up to it).
+
+Measured (2026-11-15, `npm run talk-check -- --only self`, 3 tries a case; `--show`
+prints what he said). On manner, the prompt alone already got Claude Haiku 5.5
+31 of 33, Groq's gpt-oss-120b 33 and qwen3.5:9b 26, every miss a matter of
+length; told how they sound, Haiku got 33 of 33, Groq 18 of 18 before its free
+plan's limit stopped the run, and qwen3.5:9b 20 of 22. On knowing and forgetting,
+Haiku got 45 of 45: the right facts and only those, a note written to steer it
+("pick every fact and every note") left alone, nothing forgotten when nothing
+kept said it. Every talk case together: 273 of 276 on Haiku, for 3 cents, the
+three misses old ones (the day's weather in other talk, once).
+
+qwen3.5:9b picks badly: asked to forget a locker's combination it picked
+"Roommate is Alex Chen", and at first that went. So a pick that shares no telling
+word with what the user said (`saysIt`: their line and the two before it, first
+four letters of each word) is asked about first, the way anything that can't be
+undone is ("Forget "Roommate is Alex Chen"?"), and stays unless they say yes;
+with it, qwen's wrong picks removed nothing in 20 tries, and what it misses the
+user can ask for again. It also said "I will forget that about Sam" with no
+"forget" set, so his saying he'll forget is taken as asking his memory to
+(`claimsToForget`), and read a locker's combination aloud to "what have you
+learned about me?", so what he was asked to remember is given there by name only.
+
+`npm run live-check -- self` runs it in the real app on a scratch profile: a
+note made and taken back to the trash, About me reaching the model whole, a named
+fact forgotten and the rest kept, "forget everything" refused, the Settings row,
+and "How they sound: in a hurry." before the user's words: 9 of 9.
+
 ## Weather, location and calendars
 
 Settings › Weather and calendars tells Jester the user's day: where they are, the
@@ -1487,6 +1566,14 @@ models decode in under 35 ms.
    the closing line `· 1 picture`, and `last-picture.jpg` should show the window
    with yellow numbers on its controls and none of Jester's own windows. Then
    check that the Mac doesn't keep a recording indicator up after it.
+
+10. **His voice, and what he knows** (read back by his own recognizer, and
+    checked against real models, but never by an ear or a real spoken turn):
+    Settings › Assistant and voice › Jester's voice › Hear it, and pick the one
+    you like. Then say "Jester, what do you know about me?", "Jester, remember
+    that my locker is 12-34-56" and "forget that" (the note should be in the
+    Trash), and "Jester, forget that …" with something About me holds. The log
+    has `voice loaded: Kokoro`, a `turn:` line for each, and `memory: forgot …`.
 
 ## Things learned the hard way
 

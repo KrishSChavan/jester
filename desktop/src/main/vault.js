@@ -691,7 +691,13 @@ function better(a, b) {
  * @param {typeof nodeFs} [options.fs]
  * @param {() => number} [options.now]
  */
-export function createVault({ root, fs = nodeFs, now = Date.now }) {
+/**
+ * @param {object} options
+ * @param {string} options.root  the vault's folder
+ * @param {(file:string) => Promise<void>} [options.trash]  puts a file in the computer's trash (Electron's
+ *   shell.trashItem); without it a forgotten note goes to `.trash/` at the vault's root, where Obsidian keeps its own
+ */
+export function createVault({ root, fs = nodeFs, now = Date.now, trash = null }) {
   if (typeof root !== 'string' || !root) throw new Error('A vault needs a folder.');
   const base = path.resolve(root);
   const name = path.basename(base);
@@ -1009,6 +1015,80 @@ export function createVault({ root, fs = nodeFs, now = Date.now }) {
       const data = { type: 'remembered', created: isoTime(date), tags: ['jester/remembered'], topics: labels(topics, true) };
       put(rel, writeFrontmatter(data, `# ${named}\n\n${quote}\n\nSaid to Jester on ${longDate(date)} at ${clock(date)}.\n`));
       return rel;
+    },
+
+    /**
+     * What the user asked Jester to remember, newest first: each note's name and the words kept in it.
+     * @returns {{rel:string, title:string, text:string}[]}
+     */
+    remembered(most = 60) {
+      return listNotes()
+        .filter((note) => note.rel.startsWith(`${PATHS.remembered}/`))
+        .flatMap((note) => {
+          try {
+            const { title, data, body } = read(note.rel);
+            const words = body.split('\n').filter((line) => line.startsWith('>')).map((line) => line.replace(/^>\s?/, '')).join('\n').trim();
+            // When it was said, as the note has it; a note with no time of its own, by when its file last changed.
+            const at = Date.parse(data.created);
+            return words ? [{ rel: note.rel, title, text: words, at: Number.isFinite(at) ? at : note.mtimeMs }] : [];
+          } catch {
+            return [];
+          }
+        })
+        .sort((a, b) => b.at - a.at)
+        .slice(0, most)
+        .map(({ rel, title, text }) => ({ rel, title, text }));
+    },
+
+    /**
+     * Takes a note the user asked Jester to remember back out of the vault, to the computer's trash (or `.trash/` in
+     * the vault): asked to forget it, he no longer reads it, and the user can still get it back. Only a note in
+     * Jester/Remembered, and never a link to a file elsewhere.
+     * @returns {Promise<string>} the note that went
+     */
+    async forgetRemembered(rel) {
+      const clean = relPath(rel);
+      if (!clean || !clean.startsWith(`${PATHS.remembered}/`) || !/\.md$/i.test(clean)) throw Object.assign(new Error(`“${rel}” isn’t something Jester was asked to remember.`), { code: 'not_remembered' });
+      present();
+      const file = abs(clean);
+      const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+      if (!stat) throw Object.assign(new Error(`“${clean}” isn’t there any more.`), { code: 'ENOENT' });
+      if (stat.isSymbolicLink()) throw Object.assign(new Error(`“${clean}” is a link to a file elsewhere, so Jester won’t remove it.`), { code: 'read_only', rel: clean, linked: true });
+      if (trash) {
+        await trash(file);
+        return clean;
+      }
+      const bin = path.join(base, '.trash');
+      fs.mkdirSync(bin, { recursive: true });
+      let to = path.join(bin, path.basename(file));
+      for (let n = 2; fs.existsSync(to); n++) to = path.join(bin, `${path.basename(file, '.md')} ${n}.md`);
+      fs.renameSync(file, to);
+      return clean;
+    },
+
+    /**
+     * Takes one conversation's section out of its day's note: the heading as the note has it ("1:05 PM · PSU Canvas"),
+     * and its lines down to the next. The rest of the note stays as it is.
+     * @returns {boolean} whether there was one
+     */
+    removeConversation({ rel, heading } = {}) {
+      const clean = relPath(rel);
+      if (!clean || !clean.startsWith(`${PATHS.conversations}/`)) throw Object.assign(new Error(`“${rel}” isn’t one of Jester’s conversation notes.`), { code: 'not_conversations' });
+      const old = textOf(clean);
+      if (old === null) return false;
+      const eol = eolOf(old);
+      const lines = old.split(/\r?\n/);
+      const wanted = `## ${String(heading ?? '').trim()}`;
+      const from = lines.findIndex((line) => line.trim() === wanted);
+      if (from < 0 || wanted === '## ') return false;
+      let to = lines.findIndex((line, index) => index > from && /^##\s/.test(line));
+      if (to < 0) to = lines.length;
+      const rest = [...lines.slice(0, from), ...lines.slice(to)];
+      const kept = rest.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s*$/, '\n');
+      // The day's topics and people are its conversations' together: someone only that one named goes with it.
+      const named = (label) => labels(rest.flatMap((line) => (line.startsWith(`${label}: `) ? line.slice(label.length + 2).split(',').map((item) => item.trim()).filter((item) => item && item !== 'none') : [])), label === 'Topics');
+      put(clean, withProperties(eol === '\n' ? kept : kept.replace(/\n/g, eol), { topics: named('Topics'), people: named('People') }));
+      return true;
     },
 
     /**

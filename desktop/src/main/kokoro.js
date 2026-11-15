@@ -122,10 +122,11 @@ export function startKokoro({ fork, voice = () => undefined, installed = kokoroI
       if (load()) rest();
     },
     /**
-     * A line's sound. `tight`: it runs on into the next with no pause written, so none is left at its end.
+     * A line's sound. `tight`: it runs on into the next with no pause written, so none is left at its end. `speed`:
+     * how fast against his usual 1, kept between 0.88 and 1.15.
      * @returns {Promise<{bytes:Uint8Array, type:string, seconds:number, tookMs:number}|null>} null when Kokoro isn't there
      */
-    sound(text, { signal, tight = false } = {}) {
+    sound(text, { signal, tight = false, speed = 1 } = {}) {
       const child = load();
       if (!child || signal?.aborted) return Promise.resolve(null);
       lines += 1;
@@ -146,7 +147,9 @@ export function startKokoro({ fork, voice = () => undefined, installed = kokoroI
           settle(id, 'reject', new Error('The voice took too long'));
         }, lineMs);
         waiting.set(id, { resolve: done(resolve), reject: done(reject), limit });
-        child.postMessage({ type: 'say', id, text, sid: chosen.sid, ...(tight ? { tight: true } : {}) });
+        // Never far from his usual: a voice sped up or slowed much isn't his.
+        const pace = Math.min(1.15, Math.max(0.88, Number(speed) || 1));
+        child.postMessage({ type: 'say', id, text, sid: chosen.sid, ...(tight ? { tight: true } : {}), ...(pace === 1 ? {} : { speed: pace }) });
         rest();
       });
     },
