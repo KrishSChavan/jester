@@ -559,7 +559,7 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, listenAfresh = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, listenAfresh = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
@@ -647,9 +647,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * pill's copy cut short). `ok`: false shows it there as something that went wrong.
    * @returns {Promise<void>} once said
    */
-  function say(text, { written = false, ok = true, clock = null, card = null } = {}) {
-    // `card`: what the line is about (a timer, a reminder, a note), for his window to show with it.
-    const more = card ? [{ card }] : [];
+  function say(text, { written = false, ok = true, clock = null, card = null, untrusted = false } = {}) {
+    // `card`: what the line is about (a timer, a reminder, a note), for his window to show with it. `untrusted`: it
+    // holds other people's words (a calendar's titles).
+    const more = card || untrusted ? [{ ...(card ? { card } : {}), ...(untrusted ? { untrusted: true } : {}) }] : [];
     if (written) {
       const line = writtenLine(text);
       if (!line) return Promise.resolve();
@@ -1010,7 +1011,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     pace = paceFor(moodOf(text, memory.current(), now()));
     if (typed) typedTurn = mine;
     // Typed to, he writes back; spoken to, he speaks.
-    const answer = (line, { ok = true, card = null } = {}) => say(line, { written: typed, ok, card });
+    const answer = (line, { ok = true, card = null, untrusted = false } = {}) => say(line, { written: typed, ok, card, untrusted });
     /** What was kept this turn, as a card: the note he was asked to remember. */
     const keptCard = () => (lastKept?.turn === mine && lastKept.rel ? { kind: 'remembered', rel: lastKept.rel, title: lastKept.title } : null);
     // What came before is over, unless a task it asked for is still at work: then this is still that conversation
@@ -1025,6 +1026,19 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     answering += 1;
     try {
       // A timer set, cancelled or asked after: the clock's, on their own words, with no model to wait for.
+      // Asked for the day's brief or its wrap-up in so many words: the same one he gives unasked (briefs.js).
+      const brief = briefs?.asked(text) || '';
+      if (brief) {
+        begun?.controller.abort();
+        show({ phase: 'thinking', task: '', step: '' });
+        const made = await briefs.compose(brief);
+        if (stale()) return;
+        await answer(made.text || (brief === 'evening' ? 'Nothing to wrap up: nothing was on your list or your calendar today.' : 'Nothing to brief you on: your calendar and your list are empty.'), { card: made.card, untrusted: made.untrusted });
+        // Asked for and given, it isn't given again unasked the same day.
+        if (made.text) await Promise.resolve(briefs.given?.(brief)).catch(() => undefined);
+        if (!stale() && knowsYou() && !typed) stayOpen();
+        return;
+      }
       tasks?.touched?.({ fresh: true });
       const timed = tasks ? await tasks.direct(text) : '';
       if (timed) {
@@ -1036,7 +1050,9 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       }
       if (await commands.knows(text)) {
         begun?.controller.abort();
-        if (!stale()) await act(text, { overheard, stale, answer, typed });
+        // After a line that held someone else's words (a calendar's titles, in a brief), a command that could do harm
+        // asks first, as if it had been overheard.
+        if (!stale()) await act(text, { overheard: overheard || history.some((entry) => entry.untrusted), stale, answer, typed });
         return;
       }
       if (stale()) return void begun?.controller.abort();
@@ -1165,7 +1181,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // The model's command drops and changes details, so the user's own words go with it. Given the user's notes, or
       // their calendars' events (someone else's invitation, as often as not), the command may be one of those's rather
       // than theirs, so what could do harm asks first, as if overheard.
-      if (reply.do) return void (await act(reply.do, { overheard: overheard || theirs || around.untrusted, stale, before: spoken, said: text, answer, typed }));
+      if (reply.do) return void (await act(reply.do, { overheard: overheard || theirs || around.untrusted || history.some((entry) => entry.untrusted), stale, before: spoken, said: text, answer, typed }));
       await spoken;
       // Without a voiceprint anyone could carry on from here, and he'd answer his own echo. Typed to, nobody's talking.
       if (!stale() && knowsYou() && !typed) stayOpen();
@@ -1308,7 +1324,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      *   lid closed), so nobody heard it to the end. null when now isn't the moment: he's mid-sentence or mid-task,
      *   they're talking, or he's waiting on what they'll say next
      */
-    announce(text, { written = false, card = null } = {}) {
+    announce(text, { written = false, card = null, untrusted = false } = {}) {
       // His name heard, with the rest still being said: unless it never came.
       const lookingUp = wokenEarly && now() - wokenAt < WOKEN_MS;
       if (answering || talking || acting || pending || lookingUp || assistant.asking || assistant.running || now() < openUntil || now() < quietUntil) return null;
@@ -1320,7 +1336,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       pace = 1;
       const mine = turns;
       const reset = resets;
-      const told = Promise.resolve(say(text, { written, card })).then(() => {
+      const told = Promise.resolve(say(text, { written, card, untrusted })).then(() => {
         if (reset !== resets && !written) return false;
         if (mine === turns && !written && knowsYou()) stayOpen();
         return true;

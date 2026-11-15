@@ -51,15 +51,18 @@ function keptLine(entry, fallbackAt, { follows = '' } = {}) {
   if (entry?.hidden) return { who, text, at, hidden: true };
   const short = text.split(/\s+/).filter(Boolean).length <= ANSWER_WORDS;
   const secret = secretIn(text) || (who === 'you' && short ? follows : '');
-  return { who, text: secret ? `Left out: this held ${secret}.` : text, at, ...(secret ? { hidden: true } : {}), ...(!secret && cardOf(entry?.card) ? { card: cardOf(entry.card) } : {}) };
+  // Kept too: that it held someone else's words (a calendar's titles), so a chat picked up again is as careful.
+  return { who, text: secret ? `Left out: this held ${secret}.` : text, at, ...(secret ? { hidden: true } : {}), ...(!secret && cardOf(entry?.card) ? { card: cardOf(entry.card) } : {}), ...(entry?.untrusted ? { untrusted: true } : {}) };
 }
 
 /** A line's card as it's kept: what it's of and where to find it, each a short string, and nothing else. */
 export function cardOf(card) {
-  if (!card || typeof card !== 'object' || !['task', 'note', 'remembered'].includes(card.kind)) return null;
+  if (!card || typeof card !== 'object' || !['task', 'note', 'remembered', 'brief'].includes(card.kind)) return null;
   const short = (value, most) => (typeof value === 'string' && value ? value.slice(0, most) : undefined);
   const kept = { kind: card.kind, id: short(card.id, 40), type: short(card.type, 12), text: short(card.text, 200), title: short(card.title, 120), rel: short(card.rel, 300), snippet: short(card.snippet, 160) };
-  return Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined));
+  // A brief's card is its facts, a line each.
+  const lines = card.kind === 'brief' && Array.isArray(card.lines) ? card.lines.filter((line) => typeof line === 'string' && line).slice(0, 8).map((line) => line.slice(0, 160)) : [];
+  return { ...Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined)), ...(lines.length ? { lines } : {}) };
 }
 
 /** The secret a line leaves the user's next line to give: '' for none. */

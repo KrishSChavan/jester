@@ -38,6 +38,7 @@ import { screenText } from './agent/screen.js';
 import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
+import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS, briefAsked } from './briefs.js';
 import { createChromeLink } from './chrome-link.js';
 import { createClock } from './clock.js';
 import { createCalendars } from './calendars.js';
@@ -57,7 +58,7 @@ import { PROVIDERS } from '../../../jester-extension/src/common/credentials.js';
 import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
-import { createPresence, macScreenKeptAwake } from './presence.js';
+import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
 import { missingNeeded } from './permission-list.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
@@ -207,6 +208,12 @@ let clock = null;
 let teller = null;
 /** Their to-do list, reminders and timers (tasks.js). */
 let tasks = null;
+/** The morning brief, the evening wrap-up and check-ins before what's on the calendar (briefs.js). */
+let briefs = null;
+/** The day each brief was last given, so it's given once: {morning, evening}, by presence.js's day. */
+let briefDays = {};
+/** Check-ins already said, by their id, with when each one's event starts: not put back on the clock meanwhile. */
+let checkinsTold = {};
 /** The model he talks through (model-jobs.js). */
 let talking = null;
 /** The Chrome extension, linked (chrome-link.js), and where Chrome finds the relay to it. */
@@ -430,6 +437,7 @@ async function refresh() {
   updateListening();
   openVault();
   followLocation();
+  syncBriefs();
   tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState(), watch: watch?.state }));
   post(desktopState());
 }
@@ -869,6 +877,59 @@ function startInput() {
     driver = null;
     log(err.message);
   }
+}
+
+/** A brief's been given, unasked or asked for: not again today. */
+async function briefGiven(which) {
+  briefDays = { ...briefDays, [which === 'evening' ? 'evening' : 'morning']: dayOf(Date.now()) };
+  await storage.local.set({ briefDays }).catch(() => undefined);
+}
+
+/**
+ * The model that words a brief: only a paid one, and only if it's the one that answers. A paid model resting is
+ * covered for by a free one or this computer's (model-jobs.js), and qwen3.5:9b gave a wrap-up "seventy-five degree
+ * weather" and a three o'clock call "this evening": what a model makes up in words can't be caught, so those say
+ * the facts plainly instead.
+ */
+async function briefWriter(options) {
+  const first = (await talking.savedOnes())[0];
+  if (first?.plan !== 'paid') throw new Error('no paid model to word it');
+  const reply = await talking(options);
+  if (reply?.provider !== first.provider || reply?.model !== first.model) throw new Error('the paid model didn’t answer');
+  return reply;
+}
+
+/**
+ * They've sat down: if the morning's brief hasn't been given today and it's still that part of the day, it's put on
+ * the clock for a few seconds from now, so it isn't the first thing they hear as the screen unlocks.
+ */
+function queueMorningBrief() {
+  if (!clock || settings?.briefMorning === false) return;
+  const at = Date.now();
+  // Not in the small hours, which are still yesterday's day. JESTER_MORNING_ENDS: for a check run in the evening.
+  const hour = new Date(at).getHours();
+  if ((hour < DAY_STARTS && !env.JESTER_MORNING_ENDS) || hour >= (Number(env.JESTER_MORNING_ENDS) || MORNING_ENDS) || briefDays.morning === dayOf(at)) return;
+  clock.add({ id: 'brief-morning', kind: 'brief', inMs: (Number(env.JESTER_SETTLE_MS) || SETTLE_MS) + 2000, keepFor: MORNING_KEEP_MS, payload: { which: 'morning' } });
+}
+
+/**
+ * The evening wrap-up's place on the clock, at the hour Settings names, and a check-in for each thing on the calendar
+ * in the next day: put on, moved or taken off as the settings and the calendar change. Asked every few minutes.
+ */
+function syncBriefs() {
+  if (!clock || !briefs) return;
+  const jobs = clock.list();
+  const evening = jobs.find((job) => job.id === 'brief-evening');
+  const hour = /^([01]?\d|2[0-3]):[0-5]\d$/.test(settings?.eveningAt || '') ? settings.eveningAt : EVENING_AT;
+  if (settings?.briefEvening === false) evening && clock.remove('brief-evening');
+  else if (evening?.daily !== hour) clock.add({ id: 'brief-evening', kind: 'brief', daily: hour, keepFor: EVENING_KEEP_MS, payload: { which: 'evening' } });
+  const lead = Number(settings?.checkInMinutes) > 0 ? Math.min(Number(settings.checkInMinutes), 120) : CHECKIN_MIN;
+  const wanted = settings?.checkIns === false ? [] : briefs.checkins(lead);
+  const ids = new Set(wanted.map((job) => job.id));
+  for (const job of jobs.filter((item) => item.kind === 'checkin' && !ids.has(item.id))) clock.remove(job.id);
+  // One already said is done with, though its event is still to come and would be found again each time.
+  for (const [id, start] of Object.entries(checkinsTold)) if (!(start > Date.now())) delete checkinsTold[id];
+  for (const job of wanted) if (!checkinsTold[job.id] && jobs.find((item) => item.id === job.id)?.at !== job.at) clock.add({ ...job, kind: 'checkin' });
 }
 
 /** macOS drops synthetic input silently until Accessibility is allowed. */
@@ -1607,7 +1668,9 @@ async function start() {
     file: path.join(app.getPath('userData'), 'presence.json'),
     tickMs: Number(env.JESTER_TICK_MS) || undefined,
     log,
-    onChange: (where) => teller?.moved(where)
+    onChange: (where) => teller?.moved(where),
+    // The day's first sit-down is when the morning brief belongs: and any later one, until it's been given.
+    onArrive: () => queueMorningBrief()
   });
   pointer = createPointer({
     driver: {
@@ -1737,7 +1800,8 @@ async function start() {
     log,
     onChange: showDay
   });
-  calendars = createCalendars({ storage: storage.local, log, onChange: showDay });
+  // A calendar read again may have moved a class: the check-ins before each follow it.
+  calendars = createCalendars({ storage: storage.local, log, onChange: () => (showDay(), syncBriefs()) });
   calendars.start().catch((err) => log('calendar: couldn’t start:', err.message));
   // His clock, and what's kept on it: the user's to-do list, reminders and timers.
   clock = createClock({ file: path.join(app.getPath('userData'), 'jobs.json'), log });
@@ -1826,6 +1890,8 @@ async function start() {
     situation,
     // Their to-do list, reminders and timers.
     tasks,
+    // The day's brief and its wrap-up, when they ask for one.
+    briefs: { asked: briefAsked, compose: (kind) => briefs.compose(kind), given: (kind) => briefGiven(kind) },
     // The rest of what's connected, read each turn, so what he says he can do is what's true now (abilities.js).
     abilities: async () => ({
       chrome: !!chromeLink?.linked,
@@ -1844,7 +1910,7 @@ async function start() {
     where: () => presence.where,
     // With the mic closed he has no voice: it's written, on the pill and in his window.
     // Not across the lines being read to teach him their voice, or anyone mid-sentence.
-    announce: (text, card) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening, card })),
+    announce: (text, card, more) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening, card, untrusted: more?.untrusted === true })),
     release: () => clock.release(),
     held: () => clock.held,
     settleMs: Number(env.JESTER_SETTLE_MS) || undefined,
@@ -1861,6 +1927,48 @@ async function start() {
     if (!answer) tasks.rang(id);
     return answer;
   });
+  // The morning brief and the evening wrap-up (briefs.js): composed when it's time to say one, and counted as given
+  // only once it's been said. Away, it's held; too late to be worth it, the clock drops it.
+  briefs = createBriefs({ whereabouts, weather, calendars, tasks, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
+  ({ briefDays = {}, checkinsTold = {} } = await storage.local.get(['briefDays', 'checkinsTold']));
+  let composed = null;
+  /** Times a brief found a connected source not ready (the network just after waking), and waited. */
+  let unreadyTries = 0;
+  clock.on('brief', async (job) => {
+    const which = job.payload?.which === 'evening' ? 'evening' : 'morning';
+    const today = dayOf(Date.now());
+    if (settings?.[which === 'evening' ? 'briefEvening' : 'briefMorning'] === false || briefDays[which] === today) return undefined;
+    if (presence.where === 'away') return { hold: true };
+    // Made once, and kept while he waits for a quiet moment to say it.
+    if (!composed || composed.which !== which || composed.day !== today || Date.now() - composed.at > 10 * 60_000) composed = { which, day: today, at: Date.now(), ...(await briefs.compose(which)) };
+    // Nothing to say because the weather hadn't come yet: asked again in a minute, a few times, before it's let go.
+    if (!composed.text && composed.unready && unreadyTries < 4) {
+      unreadyTries += 1;
+      composed = null;
+      return { retryIn: 60_000 };
+    }
+    const answer = composed.text ? await teller.say({ ...job, payload: { text: composed.text, card: composed.card, untrusted: composed.untrusted } }) : undefined;
+    if (!answer) {
+      log(`brief: the ${which} one ${composed.text ? 'given' : 'had nothing to say'}`);
+      composed = null;
+      unreadyTries = 0;
+      await briefGiven(which);
+    }
+    return answer;
+  });
+  // A word before each thing on the calendar: the calendar's own, and the clock's sum, never a model's.
+  clock.on('checkin', async (job) => {
+    if (settings?.checkIns === false) return undefined;
+    const text = briefs.checkinLine(job.payload || {});
+    const answer = text ? await teller.say({ ...job, payload: { text, untrusted: true } }) : undefined;
+    if (text && !answer) {
+      checkinsTold = { ...checkinsTold, [job.id]: job.payload.start };
+      await storage.local.set({ checkinsTold }).catch(() => undefined);
+    }
+    return answer;
+  });
+  syncBriefs();
+  setInterval(syncBriefs, 5 * 60_000).unref?.();
   presence.start();
   // What came due while he wasn't running is told once he's had a moment to start, not as he does.
   setTimeout(() => {

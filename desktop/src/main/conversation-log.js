@@ -146,11 +146,13 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
     expire: () => expire(),
     /**
      * @param {'you'|'jester'} who
-     * @param {{card?:object}} [more]  card: what the line is about, for his window to show with it (cards.js)
+     * @param {{card?:object, untrusted?:boolean}} [more]  card: what the line is about, for his window to show with it
+     *   (cards.js); untrusted: it holds someone else's words (a calendar's titles), so what's asked after it is
+     *   treated as carefully as if they'd been read out
      */
-    add(who, text, { card = null } = {}) {
+    add(who, text, { card = null, untrusted = false } = {}) {
       expire(who === 'jester');
-      data.entries.push({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation, chat: data.chat, ...(card ? { card } : {}) });
+      data.entries.push({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation, chat: data.chat, ...(card ? { card } : {}), ...(untrusted ? { untrusted: true } : {}) });
       write();
       changed();
     },
@@ -181,7 +183,9 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
         const who = entry?.who === 'jester' ? 'jester' : 'you';
         // A line kept as only that it held a secret stays so: it's a placeholder, not the user's words.
         const hidden = entry?.hidden ? { hidden: true } : {};
-        data.entries.push({ at: String(entry?.at ?? new Date(now()).toISOString()), who, text: String(entry?.text ?? ''), conversation: data.conversation, chat: data.chat, earlier: true, ...hidden });
+        // What a line was about, and whether it held someone else's words, come back with it.
+        const more = { ...(entry?.card && typeof entry.card === 'object' ? { card: entry.card } : {}), ...(entry?.untrusted ? { untrusted: true } : {}) };
+        data.entries.push({ at: String(entry?.at ?? new Date(now()).toISOString()), who, text: String(entry?.text ?? ''), conversation: data.conversation, chat: data.chat, earlier: true, ...hidden, ...more });
       }
       write();
       changed();

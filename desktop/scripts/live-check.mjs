@@ -30,6 +30,9 @@
  *            pick ticking nothing; a task nobody asked for not made; the list reaching the model when asked; and
  *            cards: a timer's under his line and on the shelf, a reminder's with Snooze, a note's with Open; and the
  *            Tasks screen: its cards, a box ticked by a click, and the count on its button.
+ *   brief    a word before something on a calendar, by the clock's sum; the morning brief on sitting down, once, in
+ *            the model's words when they keep to the facts and plainly when they don't; the evening's when asked;
+ *            each with its card, and marked as holding a calendar's words.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -55,7 +58,11 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, powerMonitor, safeStorage, shell } = await import('electron');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-live-'));
   // Presence looks every quarter second, and what's held is told half a second after they're back.
-  Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1', JESTER_TICK_MS: '250', JESTER_SETTLE_MS: '500' });
+  Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1', JESTER_TICK_MS: '250', JESTER_SETTLE_MS: '500', JESTER_MORNING_ENDS: '24' });
+  // A calendar this script serves, at an address nothing else answers: read through the app's own fetch.
+  const feed = { url: 'https://calendar.jester.test/feed.ics', text: '' };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => (String(input?.url ?? input).startsWith(feed.url) ? new Response(feed.text, { status: 200, headers: { 'content-type': 'text/calendar' } }) : realFetch(input, init));
   // Whether anyone's at the keys is this script's to say, not the real computer's: seconds since the last one.
   const keys = { idle: 1 };
   powerMonitor.getSystemIdleTime = () => keys.idle;
@@ -237,7 +244,7 @@ if (!process.versions.electron) {
       await inPage(`window.jesterHome.go('main', { instant: true });`);
       await type('set a pasta timer for 8 minutes');
       const cardsIn = (where) => inPage(`return [...document.querySelectorAll('${where} .card')].map((el) => [el.querySelector('.label').textContent, el.querySelector('.title').textContent, el.querySelector('.detail')?.textContent || '', [...el.querySelectorAll('.act')].map((b) => b.title).join('+')].join(' | '));`);
-      const onLine = await until('a card on his line', async () => (await cardsIn('#live-lines li:last-child')).find((card) => /^Timer/.test(card)));
+      const onLine = await until('a card on his line', async () => (await cardsIn('#live-lines li:last-child')).find((card) => /^Timer.*left/.test(card))).catch(async () => (await cardsIn('#live-lines li:last-child')).join(' / '));
       check('what he set is a card under his line, counting down, with a way to cancel it', /^Timer \| Pasta timer \| \d:\d\d left \| Cancel$/.test(onLine), onLine);
       const shelf = await until('the shelf', async () => (await cardsIn('#shelf')).find((card) => /Pasta/.test(card)));
       check('and on the shelf over the orb while it runs', /^Timer \| Pasta timer \| \d:\d\d left \| Cancel$/.test(shelf) && !(await inPage(`return document.getElementById('shelf').hidden;`)), shelf);
@@ -247,10 +254,11 @@ if (!process.versions.electron) {
       const beforeRing = his().length;
       await type('remind me in two seconds to stretch');
       const ring = await until('the reminder', () => his().slice(beforeRing).find((line) => /^Reminder:/.test(line)), 10000).catch((err) => err.message);
-      const given = await until('the reminder’s card', async () => (await cardsIn('#live-lines li:last-child')).find((card) => /^Reminder/.test(card))).catch((err) => err.message);
+      const given = await until('the reminder’s card', async () => (await cardsIn('#live-lines li:last-child')).find((card) => /^Reminder.*reminded/.test(card))).catch(async () => (await cardsIn('#live-lines li:last-child')).join(' / '));
       check('a reminder told comes with its card: tick it, snooze it or remove it', ring === 'Reminder: stretch.' && /^Reminder \| Stretch \| At \d+:\d\d [AP]M · reminded \| Snooze 10 min\+Remove$/.test(given), `${ring} · ${given}`);
       await shot('main');
-      await inPage(`[...document.querySelectorAll('#live-lines li:last-child .card .act')].find((b) => b.title === 'Snooze 10 min').click();`);
+      check('told once, not twice', his().filter((line) => line === 'Reminder: stretch.').length === 1, his().slice(beforeRing).join(' | '));
+      await until('Snooze on its card', () => inPage(`const button = [...document.querySelectorAll('#live-lines .card')].filter((el) => el.querySelector('.title').textContent === 'Stretch').flatMap((el) => [...el.querySelectorAll('.act')]).find((b) => b.title === 'Snooze 10 min'); if (button) button.click(); return !!button;`));
       const snoozed = await until('the snooze kept', () => {
         const task = taskFile().find((item) => item.text === 'Stretch');
         return task && !task.told && task.due > Date.now() + 9 * 60000 ? task : null;
@@ -282,6 +290,76 @@ if (!process.versions.electron) {
       await inPage(`[...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.title').textContent === 'Pasta timer').querySelector('.act').click();`);
       const gone = await until('the timer gone', async () => (taskFile().some((task) => task.timer) ? null : await cardsIn('#live-lines'))).catch((err) => [err.message]);
       check('Cancel on a timer’s card cancels it, and its cards say it’s over', gone.some((card) => /^Timer \| Pasta timer \| Finished \| $/.test(card)) && (await cardsIn('#shelf')).every((card) => !/Pasta/.test(card)), JSON.stringify(gone));
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+    },
+
+    /** Step 9: a word before a class, the morning brief on sitting down, and the evening's when asked. */
+    async brief({ paid }) {
+      const setting = (patch) => inPage(`const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: { ...settings, ...${JSON.stringify(patch)} } });`);
+      const entries = () => said().filter((entry) => entry.who === 'jester');
+      const stamp = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+      // A seminar that starts fifteen minutes and a few seconds from now: the word before it is due in those seconds.
+      const start = Math.ceil((Date.now() + 15 * 60000 + 6000) / 1000) * 1000;
+      feed.text = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//jester//live-check//EN', 'BEGIN:VEVENT', 'UID:seminar-1', `DTSTAMP:${stamp(Date.now())}`, `DTSTART:${stamp(start)}`, `DTEND:${stamp(start + 3600000)}`, 'SUMMARY:Seminar', 'LOCATION:Room 1', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
+      const added = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-day', op: 'calendar-add', url: ${JSON.stringify(feed.url)}, name: 'School' });`);
+      check('a calendar is connected', added?.ok === true, JSON.stringify(added?.error || added));
+      const before = entries().length;
+      await setting({ checkIns: true });
+      await until('the check-in on his clock', () => jobs()?.some((job) => job.kind === 'checkin'), 8000).catch(() => undefined);
+      const due = jobs()?.find((job) => job.kind === 'checkin');
+      check('a word before it is put on his clock, fifteen minutes ahead', due?.at === start - 15 * 60000 && due.keepFor === 15 * 60000, JSON.stringify(due));
+      const word = await until('the check-in', () => entries().slice(before).find((entry) => /starts in/.test(entry.text)), 15000).catch((err) => ({ text: err.message }));
+      check('and said when it comes, by the clock’s own sum, marked as holding a calendar’s words', /^Seminar starts in 1[45] minutes, at Room 1\.$/.test(word.text) && word.untrusted === true, JSON.stringify(word));
+
+      // Said, it isn't put back on his clock for being still to come: whatever makes him look at the calendar again.
+      await setting({ checkInMinutes: 15 });
+      await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-day', op: 'calendar-refresh' });`);
+      await pause(2500);
+      check('and said once: it isn’t put back on the clock for the class being still to come', entries().filter((entry) => /starts in/.test(entry.text)).length === 1 && !jobs()?.some((job) => job.kind === 'checkin'), `${entries().filter((entry) => /starts in/.test(entry.text)).length} said · ${JSON.stringify(jobs()?.filter((job) => job.kind === 'checkin'))}`);
+      // The morning brief: on sitting down, once, in the model's words when they keep to the facts.
+      const clockOf = (ms) => new Date(ms).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }).replace(/\s/g, ' ');
+      const asked = [];
+      paid.answer = (request) => {
+        const system = request?.messages?.[0]?.content || '';
+        if (!/morning brief|wrap-up of the day/.test(system)) return { say: 'Hello from paid.', do: '', new: false };
+        asked.push({ system, facts: request.messages.at(-1).content });
+        return { say: `Morning. Seminar is at ${clockOf(start)} in Room 1.` };
+      };
+      await setting({ briefMorning: true });
+      const beforeBrief = entries().length;
+      powerMonitor.emit('lock-screen');
+      keys.idle = 600;
+      await until('away', () => /presence: away \(locked\)/.test(logLines().split('\n').slice(-6).join('\n')));
+      powerMonitor.emit('unlock-screen');
+      keys.idle = 0;
+      const brief = await until('the morning brief', () => entries().slice(beforeBrief).find((entry) => /^Morning\./.test(entry.text)), 15000).catch((err) => ({ text: err.message }));
+      check('sat down, he gives the morning brief, in the model’s words', brief.text === `Morning. Seminar is at ${clockOf(start)} in Room 1.` && brief.untrusted === true, JSON.stringify(brief));
+      check('from the facts alone, which the model is told are information', asked.length === 1 && new RegExp(`On their calendar today: Seminar at ${clockOf(start).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, at Room 1\\.`).test(asked[0].facts) && /Use only the facts below/.test(asked[0].system), asked[0]?.facts);
+      check('with its card: the day’s facts, a line each', brief.card?.kind === 'brief' && /^Today, /.test(brief.card.title) && brief.card.lines?.some((line) => /Seminar/.test(line)), JSON.stringify(brief.card));
+      const drawn = await until('the brief’s card in his window', () => inPage(`const card = [...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.label')?.textContent === 'Brief'); return card ? [...card.querySelectorAll('.facts li')].map((li) => li.textContent) : null;`)).catch((err) => [err.message]);
+      check('drawn in his window', drawn.some((line) => /^On their calendar today: Seminar at /.test(line)), JSON.stringify(drawn));
+      await shot('brief');
+      powerMonitor.emit('lock-screen');
+      keys.idle = 600;
+      await pause(600);
+      powerMonitor.emit('unlock-screen');
+      keys.idle = 0;
+      await pause(4000);
+      check('and only once a day', entries().filter((entry) => /^Morning\./.test(entry.text)).length === 1 && /brief: the morning one given/.test(logLines()), `${entries().filter((entry) => /^Morning\./.test(entry.text)).length} briefs`);
+
+      // Asked for, with a model that makes a time up: the facts are said plainly instead.
+      paid.answer = (request) => (/morning brief/.test(request?.messages?.[0]?.content || '') ? { say: 'Morning. Seminar is at 3:07 AM, and it’s 99 degrees.' } : { say: 'Hello from paid.', do: '', new: false });
+      const plainly = await type('brief me');
+      check('a model that makes a time up isn’t said: the facts are, plainly', new RegExp(`^(?:Morning|Afternoon)\\. You’ve got Seminar at ${clockOf(start).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, at Room 1\\.`).test(plainly) && /said something the facts don’t/.test(logLines()), plainly);
+      paid.answer = (request) => (/wrap-up of the day/.test(request?.messages?.[0]?.content || '') ? { say: 'That’s the day done.' } : { say: 'Hello from paid.', do: '', new: false });
+      const wrap = await type('wrap up my day');
+      check('the evening’s, when asked', wrap === 'That’s the day done.' || /^Nothing to wrap up/.test(wrap), wrap);
+      await inPage(`window.jesterHome.go('settings/assistant', { instant: true });`);
+      const switches = await until('the switches', () => inPage(`const on = (id) => document.getElementById(id)?.checked; return document.getElementById('eveningAt')?.value ? [on('briefMorning'), on('briefEvening'), on('checkIns'), document.getElementById('eveningAt').value] : null;`));
+      check('Settings has their switches, as they stand, and the evening’s hour', JSON.stringify(switches) === JSON.stringify([true, false, true, '21:00']), JSON.stringify(switches));
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      // Off again, and the calendar gone: the scenarios after this are left alone.
+      await setting({ briefMorning: false, checkIns: false });
       paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
     },
 
@@ -406,7 +484,8 @@ if (!process.versions.electron) {
       storageFile,
       JSON.stringify({
         // This computer's model unticked: with Ollama running, a test would load the user's own.
-        settings: { enabled: false, voiceEnabled: false, continuousAssistant: false, watchEnabled: false, localModelUses: [], cameraDeviceId: '', longRange: false, memoryVault: vaultDir },
+        // His briefs and check-ins are off until their own scenario: nothing he says unasked lands in another's.
+        settings: { enabled: false, voiceEnabled: false, continuousAssistant: false, watchEnabled: false, localModelUses: [], cameraDeviceId: '', longRange: false, memoryVault: vaultDir, briefMorning: false, briefEvening: false, checkIns: false },
         // The free one saved first: only its plan puts it second.
         modelConnections: [model('free', free, 'free'), model('paid', paid, 'paid')]
       })
@@ -420,7 +499,10 @@ if (!process.versions.electron) {
     await app.whenReady();
     home = await until('his window', () => BrowserWindow.getAllWindows().find((win) => /\/home\/home\.html/.test(win.webContents.getURL()) && !win.webContents.isLoading()), 30000);
     await until('his window’s script', () => inPage(`return typeof chrome?.runtime?.sendMessage === 'function';`).catch(() => false));
-    for (const [name, scenario] of Object.entries(SCENARIOS)) {
+    // The clock's first: the line due before he started is told as soon as he's free, which mustn't be in the
+    // middle of another scenario's talk.
+    const order = ['clock', ...Object.keys(SCENARIOS).filter((name) => name !== 'clock')];
+    for (const [name, scenario] of order.map((name) => [name, SCENARIOS[name]])) {
       if (wanted.length && !wanted.includes(name)) continue;
       console.log(`\n=== ${name} ===`);
       try {

@@ -287,6 +287,19 @@
               <span><strong>Keep what he wasn’t sure of</strong><small>When a voice sounds nearly like yours but isn’t taken as yours, its sound is kept on this computer, the newest 200, so how he tells your voice can be tuned to it. Never sent anywhere; turning this off stops it, and the folder is yours to delete.</small></span>
               <input type="checkbox" id="keepUnsureSpeech" />
             </label>
+            <label class="row">
+              <span><strong>Morning brief</strong><small>When you first sit down at this computer for the day, he tells you the weather, what’s on your calendar, what’s due and what’s on your list. Once a day, a few seconds after you’re back, and not after five in the afternoon. Ask for it any time: “brief me”.</small></span>
+              <input type="checkbox" id="briefMorning" />
+            </label>
+            <div class="row">
+              <span><strong>Evening wrap-up</strong><small>At this time he tells you what got ticked off, what’s still open and what tomorrow starts with. If you’re away he keeps it until you’re back, for three hours. Ask for it any time: “wrap up my day”.</small></span>
+              <input type="time" id="eveningAt" aria-label="When the evening wrap-up is given" />
+              <input type="checkbox" id="briefEvening" aria-label="Evening wrap-up" />
+            </div>
+            <label class="row">
+              <span><strong>A word before what’s on your calendar</strong><small>Fifteen minutes before each class or event with a time, he says it’s coming and where. Needs a calendar connected (Weather and calendars).</small></span>
+              <input type="checkbox" id="checkIns" />
+            </label>
             <div class="row">
               <span><strong>Jester’s voice</strong><small id="jester-voice-hint"></small><small id="jester-voice-error" class="error" role="alert"></small></span>
               <span class="buttons">

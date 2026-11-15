@@ -57,6 +57,7 @@ front window fills its display.
 | `src/main/clock.js` | His clock: things to do at a time, kept in `jobs.json`, and done on waking when they came due while the computer slept. |
 | `src/main/presence.js` | Whether the user's at the computer (here, near, away), the day's first sit-down, and how long they've sat. |
 | `src/main/tell.js` | Telling them something when its time comes: said if they're there, held until they're back if they aren't. |
+| `src/main/briefs.js` | The morning brief, the evening wrap-up and a word before what's on the calendar: the day's facts, said by the model and checked against them, or said plainly. |
 | `src/main/tasks.js` | Their to-do list, reminders and timers: `tasks.json`, a clock job for each one with a time, and the rule that only they tick one off. |
 | `src/home/cards.js` | Cards: a timer, a reminder, a task or a note as a thing to look at and act on, on his line in the chat, on the shelf over the orb, and in the Tasks screen. |
 | `src/home/tasks.js` | The Tasks screen in his window: every timer, reminder and task as a card, by when it's for, and the notes he's made lately. |
@@ -1399,6 +1400,70 @@ a task ticked by "did I call the dentist yet?"; "done" about the dishes ticking
 the reminder just given), and his own questions ("When should it be?") having no
 answer the rules would accept.
 
+## The morning brief, the evening wrap-up, and a word before class
+
+Step 9: what he tells the user unasked, by the day (`briefs.js`). Each is a
+switch in Settings › Assistant and voice, on unless turned off.
+
+- **The morning brief**, when they first sit down at the computer for the day
+  (`presence.js`'s first sit-down; any later one, until it's been given; not
+  after five in the afternoon). A few seconds after they're back, so it isn't
+  the first thing they hear as the screen unlocks: the weather, what's on their
+  calendar for the rest of today, what's due (a class site's deadlines are
+  all-day events), and their list: overdue, today's, and how many have no date.
+- **The evening wrap-up**, at nine (Settings has the hour): what got ticked off
+  today, what's still open, what tomorrow starts with and what's due then, the
+  weather tomorrow, and how long they sat. Away, he keeps it until they're
+  back, for three hours; after that it's tomorrow's business.
+- **A word before what's on the calendar**, fifteen minutes before each thing
+  with a time: "CMPSC 465 Lecture starts in 15 minutes, at Westgate E201." The
+  calendar's own words and the clock's sum, never a model's; said late, it says
+  how long there is by then, and once the thing has begun, nothing.
+
+"Brief me" and "wrap up my day" give the same ones, asked for.
+
+**The facts come first, and what a model says of them is checked against them.**
+`factLines` gathers the day as lines; the model he talks through says them his
+way in three to five sentences; and `strays` reads what it wrote: every clock
+time must be one of the facts' (whole: "4:52" pieced together from a 4:00 and a
+52° is caught), and every number at all, in words or digits, a measure always
+and a count above three. One that strays isn't said: the facts are, plainly
+(`plain`), as they are with no model. Only a paid model writes one at all.
+Measured (2026-11-15, `npm run talk-check -- --only self --match "morning
+brief|evening wrap"`, a made-up day, 6 tries each): Claude Haiku 5.5 kept to the
+facts 12 of 12, once two faults of the facts' own were mended (an overdue task
+said only "at 9:00 AM", which it took for this morning: now "due yesterday at
+9:00 AM"; and its "one thing ticked off" counted as a number made up). qwen3.5:9b
+gave a wrap-up "that seventy-five degree weather", a lecture "from four to
+five", and "calling the dentist this evening" for a three o'clock: the first two
+are caught now that numbers in words are read, and the third never could be,
+which is why a free model's brief is the plain one.
+
+Each comes with its card in his window (the facts, a line each), and is in the
+conversation like anything he says, so "thanks" or "move the dentist to
+tomorrow" follows on. A line that held a calendar's titles is marked as someone
+else's words (`untrusted`): for the rest of that conversation a command that
+could do harm asks first, as it does after any calendar's been told.
+
+`npm run live-check -- brief` runs it in the real app on a scratch profile, with
+a calendar the script serves: the check-in on his clock and said when it comes
+(and once), the brief on unlocking the screen and only once, a model that makes
+a time up replaced by the plain facts, the card, and the switches: 12 of 12.
+
+A second reading found twelve faults, each now a test or a live check. The ones
+worth knowing: a check-in already said was put back on the clock at the next
+look at the calendar, and said again every five minutes until class (what's
+been said is remembered until its event starts); "remind me to send the brief
+to Sam" was taken for "brief me" (the whole sentence has to be the asking); a
+chat picked back up from Chats lost its cards and that it held a calendar's
+words; a measure was checked against any number in the facts, so the 30 of
+"10:30" let "a 30 percent chance of rain" through (a measure is checked against
+the facts' measures, a length of time against their lengths, and a time against
+theirs in the same half of the day); a paid model that was resting was covered
+for by the free one, which then wrote the brief (the reply has to be the paid
+model's own); and the evening's "today" was the calendar's, so a wrap-up after
+midnight had nothing in it.
+
 ## Weather, location and calendars
 
 Settings › Weather and calendars tells Jester the user's day: where they are, the
@@ -1802,6 +1867,15 @@ models decode in under 35 ms.
     ticked off. The log has `tasks: a timer for 1 minute`, `telling: a line`,
     `telling: they’re away, so a line is held until they’re back`, and
     `tasks: one ticked off, by their saying so`.
+
+13. **What he says unasked** (the lock, the idle count and the calendar are
+    scripted in the checks; nothing of it has been heard): tomorrow morning,
+    unlock the Mac and wait ten seconds: the morning brief, once, with its card
+    under the orb. At nine in the evening, the wrap-up. Fifteen minutes before a
+    class on a connected calendar, a word about it. The log has `brief: the
+    morning one given`, `telling: a line`, and never what was said. If he talks
+    over a call or a film, that's the next step's to fix: turn the three
+    switches off in Settings › Assistant and voice meanwhile.
 
 ## Things learned the hard way
 

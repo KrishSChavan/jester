@@ -41,6 +41,8 @@ export function cardView(card, state = {}) {
     const kept = card.kind === 'remembered';
     return { label: kept ? 'Remembered' : 'Note', title: String(card.title || 'A note'), detail: kept ? '' : String(card.snippet || ''), icon: kept ? 'i-book' : 'i-note', tick: null, tone: '', actions: card.rel ? ['open'] : [] };
   }
+  // A brief's card is its facts, a line each: nothing to do to it.
+  if (card?.kind === 'brief') return { label: 'Brief', title: String(card.title || 'Today'), detail: '', lines: Array.isArray(card.lines) ? card.lines.map(String) : [], icon: /evening/i.test(card.title || '') ? 'i-moon' : 'i-sun', tick: null, tone: '', actions: [] };
   const id = String(card?.id ?? '');
   const timer = (state.timers || []).find((task) => task.id === id);
   if (timer) return { label: 'Timer', title: timer.text, detail: '', icon: 'i-timer', tick: null, tone: '', actions: ['cancel'], due: timer.due, span: timer.timer };
@@ -115,7 +117,12 @@ function took(list) {
   if (!list?.ok) return;
   state = list;
   skew = list.now - Date.now();
-  for (const el of document.querySelectorAll('.card')) if (el.card) fill(el);
+  for (const el of document.querySelectorAll('.card')) {
+    if (!el.card) continue;
+    // The list has been asked since this card was made: what it doesn't hold is gone, not merely not here yet.
+    el.settled = true;
+    fill(el);
+  }
   for (const watcher of watchers) watcher(state);
   counting();
 }
@@ -137,7 +144,10 @@ async function act(action, card) {
 
 function fill(el) {
   const card = el.card;
-  const view = cardView(card, state);
+  let view = cardView(card, state);
+  // His line can reach the page before the list that holds what it made: until the list's been asked again, a card
+  // that isn't in it is shown as what it's of, and not as finished.
+  if (view.gone && !el.settled) view = { ...view, detail: '', tone: '', gone: false };
   el.className = `card${el.dataset.compact ? ' compact' : ''}${view.tone ? ` ${view.tone}` : ''}${view.due ? ' timer' : ''}`;
   const parts = [];
   if (view.tick === null) {
@@ -181,6 +191,16 @@ function fill(el) {
     detail.textContent = view.detail;
     words.append(detail);
   }
+  if (view.lines?.length) {
+    const list = document.createElement('ul');
+    list.className = 'facts';
+    for (const line of view.lines) {
+      const item = document.createElement('li');
+      item.textContent = line;
+      list.append(item);
+    }
+    words.append(list);
+  }
   parts.push(words);
   const acts = document.createElement('div');
   acts.className = 'acts';
@@ -210,9 +230,16 @@ export function cardElement(card, { compact = false } = {}) {
   el.card = card;
   if (compact) el.dataset.compact = '1';
   fill(el);
-  // Once it's on the page: a timer on it starts the count.
+  // Once it's on the page: a timer on it starts the count. One the list doesn't hold yet asks for the list.
   queueMicrotask(counting);
+  if (card?.kind === 'task' && cardView(card, state).gone) settle();
   return el;
+}
+
+/** The list asked for once, for however many cards were made before it arrived. */
+let settling = null;
+function settle() {
+  settling ||= refreshCards().finally(() => (settling = null));
 }
 
 /** The list as it stands, asked afresh: at the start, and whenever main.js says it changed. */

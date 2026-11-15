@@ -911,6 +911,22 @@ body.opening .hint {
   height: 16px;
 }
 
+/* A brief's facts, a line each. */
+.card .facts {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.card:has(.facts) {
+  align-items: flex-start;
+}
+
 /* On a line of the chat: under what he said of it. */
 .line.carded .card {
   width: min(420px, 100%);
@@ -1208,6 +1224,20 @@ small {
 }
 
 /* A row's switch: a checkbox standing on its own in the row. */
+/* A time of day, beside the switch it belongs to. */
+.row > input[type='time'] {
+  flex: none;
+  height: 32px;
+  margin-right: 10px;
+  padding: 0 8px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 9px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  color-scheme: dark;
+}
+
 .row > input[type='checkbox'] {
   appearance: none;
   position: relative;

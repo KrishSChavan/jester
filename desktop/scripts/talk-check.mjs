@@ -186,6 +186,7 @@ if (run && !process.versions.electron) {
   const { mayAskToForget, verbatim } = await import('../src/main/vault-memory.js');
   const { moodOf } = await import('../src/main/mood.js');
   const { createTasks, reminderText, whenAsked, whenOf } = await import('../src/main/tasks.js');
+  const { createBriefs } = await import('../src/main/briefs.js');
   const { createModelJob } = await import('../src/main/model-jobs.js');
   const { costOf, dollars, tokensOf } = await import('../src/main/spend.js');
   const { normaliseConnection } = await import('../../jester-extension/src/common/credentials.js');
@@ -412,7 +413,12 @@ if (run && !process.versions.electron) {
     { text: 'add milk to my shopping list', note: { title: /shopping/i, add: /milk/i } },
     { text: 'remind me every morning at 8 to take my vitamins', say: /can['’]?t|cannot|not yet|one[- ]off|one[- ]time|only once|don['’]?t repeat|doesn['’]?t repeat|just once|a single|aren['’]?t available|not available/i, repeats: true }
   ].map((want) => ({ ...want, self: true, tasks: true }));
-  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES, ...TASK_CASES];
+  // Step 9: the brief he gives unasked, said by this model from the day's facts and kept only if it keeps to them.
+  const BRIEF_CASES = [
+    { text: '(the morning brief, on sitting down)', briefing: 'morning', say: /4(?::00)?\s*(?:pm|p\.m\.)?|four/i },
+    { text: '(the evening wrap-up)', briefing: 'evening', say: /10(?::00)?|ten|lab/i }
+  ].map((want) => ({ ...want, self: true }));
+  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES, ...TASK_CASES, ...BRIEF_CASES];
   // --only live|memory|old|facts|self: just those.
   const onlyAt = process.argv.indexOf('--only');
   const ONLY = onlyAt > 0 ? process.argv[onlyAt + 1] : '';
@@ -434,6 +440,8 @@ if (run && !process.versions.electron) {
     // `written`: a command for the laptop or a note of his own, one or the other.
     if (want.written) return reply.do || reply.note?.add || (reply.task?.op === 'add' && taskBook.asked(want.text, '', 'add', reply.task.text)) ? [] : ['nothing written: no "do", no "note" and no task'];
     if (want.forgetting) return reply.picked ? [reply.picked] : [];
+    // A brief: the model's words are his only when they kept to the facts; then they should hold the day's.
+    if (want.briefing) return [...(reply.picked ? [reply.picked] : []), ...(want.say && !want.say.test(reply.say) ? ['"say" misses it'] : []), ...(String(reply.say).split(/\s+/).length > 95 ? ['too long'] : [])];
     if (!want.doAny && !!reply.do !== !!want.do) found.push(want.do ? 'no "do"' : '"do" set');
     const kept = keptOf(reply, want);
     if (want.remember && !want.remember.test(kept)) found.push(kept ? `kept the wrong words, ${JSON.stringify(kept)}` : 'nothing kept');
@@ -571,7 +579,32 @@ if (run && !process.versions.electron) {
           try {
             const history = (want.history || []).map(([who, said]) => ({ who, text: said }));
             let reply;
-            if (want.forgetting) {
+            if (want.briefing) {
+              // The app's own brief, over a made-up day (rain, a lecture at four, homework due, a list), with this
+              // model saying it: what's judged is whether its words were kept, which they are only when every time
+              // and temperature in them is one of the facts' (briefs.js faithful).
+              const logs = [];
+              const day = (days, hour, minute = 0) => new Date(date.getFullYear(), date.getMonth(), date.getDate() + days, hour, minute).getTime();
+              const morning = new Date(date.getFullYear(), date.getMonth(), date.getDate(), want.briefing === 'evening' ? 21 : 8, 42).getTime();
+              const events = [
+                { uid: 'a', title: 'CMPSC 465 Lecture', place: 'Westgate E201', start: day(0, 16), end: day(0, 17, 15), allDay: false },
+                { uid: 'b', title: 'Homework 5 due [CMPSC 465]', place: '', start: day(0, 0), end: day(1, 0), allDay: true },
+                { uid: 'c', title: 'PHYS 212 Lab', place: 'Osmond 104', start: day(1, 10), end: day(1, 11, 50), allDay: false }
+              ];
+              const list = { open: [{ id: '1', text: 'Pay rent', due: day(-1, 9), overdue: true }, { id: '2', text: 'Call the dentist', due: day(0, 15) }, { id: '3', text: 'Buy stamps' }, { id: '5', text: 'Renew passport', due: day(1, 11) }], done: [{ id: '9', text: 'Book flights', done: day(0, 13) }] };
+              const briefs = createBriefs({
+                whereabouts: { connected: true, here: async () => ({ lat: 40.8, lon: -77.9 }) },
+                weather: { forecast: async () => ({ units: 'fahrenheit', current: { temperature: 47.6, code: 61 }, daily: { code: [61, 2], high: [52.2, 55], low: [39, 41], chance: [80, 10] } }) },
+                calendars: { connected: true, between: (from, to) => events.filter((event) => event.start < to && event.end > from) },
+                tasks: { list: () => list },
+                presence: { state: () => ({ satToday: 5 * 3600000 }) },
+                request: job,
+                now: () => morning,
+                log: (...parts) => logs.push(parts.join(' '))
+              });
+              const out = await briefs.compose(want.briefing);
+              reply = { say: out.text, do: '', remember: '', note: null, picked: logs.length ? logs.join('; ') : '' };
+            } else if (want.forgetting) {
               // The app's own forgetting, over what he keeps (LEARNED, KEPT, two earlier conversations), with this
               // model picking: what went is what's judged.
               const went = { facts: [], notes: [], earlier: [] };
