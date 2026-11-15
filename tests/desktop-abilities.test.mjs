@@ -65,6 +65,10 @@ test('the prompt never assumes, closes with what he can do, and changes only whe
   assert.match(prompt, /was true when it was said: never make it something happening now, and never work out a time, a date or a plan from it\./);
   assert.match(prompt, /Only their calendars say what's on, and only when they're connected\./);
   assert.match(prompt, /never fill a gap with a guess\. Never say something's been done when it hasn't\./);
+  // A date that's gone by is over (Claude Haiku 5.5 called yesterday's midterm "coming up on Friday").
+  assert.match(prompt, /Before you call anything upcoming, check its date against the date on the user's words: one that has gone by is over, so say it was then, or ask how it went\./);
+  // Not knowing what's meant, he asks rather than guesses, and never asks and does at once.
+  assert.match(prompt, /When you can't tell who or what they mean \(which person, which "it" or "that"\), ask one short question and leave "do" empty, rather than guess\. A request that's only loose \("play some music"\) isn't unclear: hand it over as it is\. Never ask whether to do a thing and do it in the same reply\./);
   // What he can do is after the rules, and the earlier conversations after it.
   const withEarlier = personaPrompt(DATE, [{ at: DATE.getTime() - 3600000, summary: 'Talked about a CMPSC 465 lecture.' }], { notes: true });
   assert.ok(withEarlier.indexOf('Never assume') < withEarlier.indexOf('What you can do, all of it') && withEarlier.indexOf('What you can do, all of it') < withEarlier.indexOf('Earlier conversations'));

@@ -490,13 +490,35 @@ function queryFor(said, history) {
   return theirs.length ? `${plain(theirs.at(-1).text)} ${said}` : said;
 }
 
-/** A note's day, from the date its name starts with: "Monday, November 9". */
+/**
+ * How long before `now` a day was, in words: "today", "yesterday", "3 days ago", "2 weeks ago", "5 months ago". A
+ * model given only "Thursday" can take it for the one coming (2026-11-13: a Thursday summary's "the upcoming class"
+ * became "a class starting in about an hour" on Friday), so what's recalled says how old it is.
+ * @param {Date|number} then
+ * @param {Date|number} now
+ */
+export function ago(then, now) {
+  const start = (value) => {
+    const date = new Date(value);
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  };
+  const days = Math.round((start(now) - start(then)) / 86400000);
+  if (!(days > 0)) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 14) return `${days} days ago`;
+  if (days < 60) return `${Math.round(days / 7)} weeks ago`;
+  if (days < 365) return `${Math.round(days / 30)} months ago`;
+  const years = Math.round(days / 365);
+  return years === 1 ? 'a year ago' : `${years} years ago`;
+}
+
+/** A note's day, from the date its name starts with, and how long ago that was: "Monday, November 9 (4 days ago)". */
 function dayOf(rel, date, weekday) {
   const match = /(\d{4})-(\d{2})-(\d{2})/.exec(nameOf(rel));
   if (!match) return '';
   const day = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
   const year = day.getFullYear() === date.getFullYear() ? {} : { year: 'numeric' };
-  return day.toLocaleDateString('en-US', { ...(weekday ? { weekday: 'long' } : {}), month: 'long', day: 'numeric', ...year });
+  return `${day.toLocaleDateString('en-US', { ...(weekday ? { weekday: 'long' } : {}), month: 'long', day: 'numeric', ...year })} (${ago(day, date)})`;
 }
 
 /** A part of a note as one line: no headings, and its lines run together ("- eggs - milk"). */
@@ -806,7 +828,10 @@ function endedPrompt(date, known, picked = null) {
     'Reply with JSON: {"title":"…","summary":"…","topics":["…"],"people":["…"],"facts":{"add":[{"section":"…","fact":"…"}],"remove":["…"]}}',
     '"title": what it was about, in at most 6 words, like "Opening PSU Canvas".',
     '"summary": one sentence of at most 30 words. Keep names, plans and decisions, but never a password, PIN, code, card number or key. ' +
-      'Call the user "the user" or "they": never "he" or "she".',
+      'Call the user "the user" or "they": never "he" or "she". ' +
+      // 2026-11-12's "advised attending the upcoming class", read the next evening, became "a class starting in about an hour".
+      'It will be read on another day, so write it in the past tense, and say when a thing was by its date or its time on the clock: ' +
+      'never "upcoming", "soon", "later", "in an hour", "today", "tonight" or "tomorrow", not even to repeat what was said.',
     '"topics": one to four lowercase words or short phrases, like "canvas" or "school".',
     '"people": the names of the people the user talked about. Never Jester or the user.',
     '"facts" "add": only lasting things the user said about themselves, the people in their life, their preferences, routines and plans. ' +

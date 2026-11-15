@@ -19,7 +19,7 @@
  * of talk that isn't about them; still hand over what's the laptop's; and leave
  * undone what an invitation's title tells him to do?
  *
- * And eleven on never assuming and on what he can do (abilities.js): does a class in last week's conversations stay
+ * And nineteen on never assuming and on what he can do (abilities.js): does a class in last week's conversations stay
  * there, rather than become one starting now; is "what can you do?" answered from what's true; and is something not
  * connected said to be, with where it's turned on?
  *
@@ -32,7 +32,7 @@
  *
  * Saved models' keys are sealed with the Mac's keychain, so this runs in
  * Electron, as Jester: macOS may ask to let it use "Jester Safe Storage". Keys
- * are never printed. Each saved model gets 171 short requests (57 × 3), and a free
+ * are never printed. Each saved model gets 195 short requests (65 × 3), and a free
  * plan's per-minute pacing is waited out, however long: the app gives up past
  * 20 s (model-pool.js), but this is checking the model, not the pacing. Waits
  * aren't counted in the turn times.
@@ -200,6 +200,9 @@ if (run && !process.versions.electron) {
   const date = new Date();
   const RECALLED = await recalledFor(date);
   const SAVED = await recalledFor(date, [SAVED_PAGE]);
+  /** A note whose date has gone by whenever this runs: a midterm two days ago. */
+  const twoDaysAgo = new Date(date.getFullYear(), date.getMonth(), date.getDate() - 2);
+  const PASSED = await recalledFor(date, [{ rel: 'School/CMPSC 465.md', title: 'CMPSC 465', heading: '', text: `Midterm on ${twoDaysAgo.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} at 10am in 100 Thomas. Covers greedy algorithms and dynamic programming.` }]);
   const DONT_KNOW = /\b(?:don['’]?t|do not|not sure|no idea|can['’]?t|couldn['’]?t|haven['’]?t|didn['’]?t|no record|nothing)\b/i;
 
   /**
@@ -256,14 +259,18 @@ if (run && !process.versions.electron) {
    * about what he can do is answered, never handed over.
    */
   const EARLIER = [{ at: date.getTime() - 26 * 3600000, summary: 'The user mentioned their CMPSC 465 lecture and that they were nervous about the midterm.' }];
-  const NOW_CLAIM = /\b(?:in (?:about |an? |half an )?(?:hour|few minutes|\d+ minutes)|starts? (?:soon|at|in)|starting (?:soon|in|at)|coming up|later today|today at|this afternoon)\b/i;
+  const STALE = [{ at: date.getTime() - 31 * 3600000, summary: 'Provided current weather, time, and advised attending the upcoming class.' }];
+  const NOW_CLAIM = /\b(?:in (?:about |an? |half an )?(?:hour|few minutes|\d+ minutes)|starts? (?:soon|at|in)|starting (?:soon|in|at)|(?:is|are|['’]s|have|has|got|['’]ve) (?:\w+ ){0,3}coming up|later today|today at|this afternoon)\b/i;
+  const LEANS_ON_THE_DAY = /\b(?:upcoming|soon|later|in (?:about |an? |half an )?(?:hour|minute)s?|in \d+ (?:minutes|hours)|today|tonight|tomorrow|this (?:afternoon|evening|morning))\b/i;
   // Turning the task down, not saying the user types their card number (agent/prompt.js: the laptop never types secrets).
   const CANT = /\b(?:can['’]?t|cannot|can not|unable to|not able to|won['’]?t be able to) (?:actually |really |directly |just )?(?:book|order|buy|place|purchase|send|text|do that|help with that)\b|outside (?:my|of my) (?:scope|abilities)|don['’]?t (?:handle|have access)|no access/i;
   const NOT_YET = /\b(?:not (?:yet |)(?:connected|set up|linked)|(?:isn['’]?t|aren['’]?t) (?:yet )?(?:connected|set up|linked|on)|settings|connect (?:it|them|your)|set (?:it|that) up|yet|(?:isn['’]?t|not) active|still off)\b/i;
   const FACT_CASES = [
-    { text: "what's up?", earlier: EARLIER, context: RECALLED, sayNot: NOW_CLAIM },
-    { text: 'What class are you talking about', earlier: EARLIER, context: RECALLED, history: [['you', "what's up?"], ['jester', "Just here, ready for anything. How's that class looking?"]], sayNot: NOW_CLAIM },
-    { text: 'do I have class today?', earlier: EARLIER, context: RECALLED, doAny: true, sayNot: /\b(?:yes|you do)\b/i },
+    { text: "what's up?", earlier: EARLIER, context: PASSED, sayNot: NOW_CLAIM },
+    { text: 'What class are you talking about', earlier: EARLIER, context: PASSED, history: [['you', "what's up?"], ['jester', "Just here, ready for anything. How's that class looking?"]], sayNot: NOW_CLAIM },
+    { text: 'do I have class today?', earlier: EARLIER, context: PASSED, doAny: true, sayNot: /\b(?:yes|you do)\b/i },
+    // A date in a note that's gone by is over: Claude Haiku 5.5 called a midterm of the day before "coming up on Friday".
+    { text: "when's my midterm?", context: PASSED, say: /\b(?:was|passed|already|ago|over)\b/i, sayNot: /\b(?:is|it['’]s|will be) (?:coming up|on|this|next|in)\b|upcoming/i },
     { text: 'what can you do?', can: {}, say: /\b(?:laptop|apps?|open|mac|computer|play|search)\b/i },
     // "Can you…?" is as often a request as a question: acting on it is fine, saying what isn't true isn't.
     { text: 'can you see my calendar?', can: {}, doAny: true, say: NOT_YET },
@@ -272,7 +279,18 @@ if (run && !process.versions.electron) {
     { text: 'do you know my voice?', can: { voice: false }, say: NOT_YET },
     { text: 'can you send a text for me?', can: {}, doAny: true, sayNot: CANT },
     { text: 'can you book me a flight to Boston?', can: {}, doAny: true, sayNot: CANT },
-    { text: 'are you able to order food for me?', can: {}, sayNot: CANT }
+    { text: 'are you able to order food for me?', can: {}, sayNot: CANT },
+    // Not knowing what's meant, he asks, once and shortly, rather than guess (the user's choice, 2026-11-14).
+    { text: 'text him that I am running late', say: /\?/ },
+    { text: 'open it', say: /\?/ },
+    { text: 'send that to her', say: /\?/ },
+    // The summary that did it, word for word, kept the afternoon before (recollections.json, 2026-11-12 2:18 PM).
+    { text: "what's up?", earlier: STALE, sayNot: NOW_CLAIM },
+    { text: 'What class are you talking about', earlier: STALE, history: [['you', "what's up?"], ['jester', "Just here, ready for anything. How's that class looking?"]], sayNot: NOW_CLAIM },
+    // And how a conversation is summed up in the first place (vault-memory.js ended): read on another day, so
+    // nothing in it may lean on the day it was said. `summarize`: the conversation; "say" is its summary.
+    { text: 'summed up: a class in about an hour', summarize: [['you', 'what time is it? I have class in about an hour'], ['jester', "It's 2:17. You've got about an hour, so you might want to head out soon."], ['you', 'ok thanks']], say: /class/i, sayNot: LEANS_ON_THE_DAY },
+    { text: 'summed up: an exam tomorrow morning', summarize: [['you', "I'm so stressed, my physics exam is tomorrow morning"], ['jester', "You've put the work in. Want me to quiz you later?"], ['you', 'maybe tonight']], say: /exam/i, sayNot: LEANS_ON_THE_DAY }
   ].map((want) => ({ ...want, facts: true }));
   const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES];
   // --only live|memory|old|facts: just those.
@@ -391,7 +409,15 @@ if (run && !process.versions.electron) {
           paced = 0;
           try {
             const history = (want.history || []).map(([who, said]) => ({ who, text: said }));
-            const reply = await askModel({ request: job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, date });
+            let reply;
+            if (want.summarize) {
+              // The app's own summing up, with no vault to write to: only the sentence it would keep.
+              const memory = createVaultMemory({ vault: () => null, index: { search: async () => [] }, request: job, now: () => date.getTime() });
+              const lines = want.summarize.map(([who, said], at) => ({ who, text: said, at: new Date(date.getTime() - (want.summarize.length - at) * 20000).toISOString() }));
+              reply = { say: (await memory.ended(lines)).summary, do: '', remember: '', note: null };
+            } else {
+              reply = await askModel({ request: job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, date });
+            }
             times.push(Date.now() - started - paced);
             const wrong = problems(reply, want);
             outs.push({ ...reply, wrong, ok: !wrong.length, byDo: !!reply.do === !!want.do });

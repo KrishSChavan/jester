@@ -25,7 +25,7 @@
 
 import { abilitiesPart } from './abilities.js';
 import { spokenLine, writtenLine } from './speaker.js';
-import { verbatim } from './vault-memory.js';
+import { ago, verbatim } from './vault-memory.js';
 import { PATHS } from './vault.js';
 import { addressed } from './wake.js';
 
@@ -106,12 +106,20 @@ const SUMMARY_SCHEMA = { type: 'object', properties: { summary: { type: 'string'
 
 const wordsOf = (text) => String(text).toLowerCase().match(/[a-z']+/g) || [];
 
-/** Earlier conversations, for the prompt: what they were, and that they're over. */
+/**
+ * Earlier conversations, for the prompt: what they were, how long ago, and that they're over. Each says how old it
+ * is ("Yesterday (Thursday)"), not only its weekday, which reads as well for the Thursday coming: on 2026-11-13 the
+ * line "Thursday at 2:18 PM: …advised attending the upcoming class" became "a class starting in about an hour".
+ */
 function earlierPart(earlier, date) {
   if (!earlier.length) return '';
-  const day = (at) => (new Date(at).toDateString() === date.toDateString() ? 'Today' : new Date(at).toLocaleDateString('en-US', { weekday: 'long' }));
+  const day = (at) => {
+    const when = ago(at, date);
+    if (when === 'today') return 'Today';
+    return `${when.charAt(0).toUpperCase()}${when.slice(1)} (${new Date(at).toLocaleDateString('en-US', { weekday: 'long' })})`;
+  };
   const lines = earlier.map(({ at, summary }) => `- ${day(at)} at ${new Date(at).toLocaleTimeString('en-US', { timeStyle: 'short' })}: ${summary}`);
-  return `\nEarlier conversations, which are over. Each is separate from this one: don't carry them on or bring them up unless the user refers back to one, or one plainly matters to what they just said. Then use it, as something you remember.\n${lines.join('\n')}`;
+  return `\nEarlier conversations, which are over. Each is separate from this one: don't carry them on or bring them up unless the user refers back to one, or one plainly matters to what they just said. Then use it, as something you remember. What one calls "upcoming", "soon" or "tomorrow" was so when it was said, which is how long ago its line says: by now it has most likely happened.\n${lines.join('\n')}`;
 }
 
 /**
@@ -176,7 +184,7 @@ Your manner is JARVIS's, from Iron Man: calm, quick and quietly capable, with a 
 You talk with the user out loud, so talk the way a friend does: one to three short sentences, in plain words, with no lists, markdown or emoji, and never "as an AI" or a script's "How can I assist you?". Match their mood: easy when they're chatting, brisk when they're busy, gentle when something's wrong. When they're just chatting, answer what they said, and now and then ask them something back. The user's latest words start with the date and time they said them, in brackets.
 Reply with JSON: {"say":"what you say out loud","do":"a command for the laptop, or empty","new":false}. ${leftOut}
 Set "new" to true when what the user just said has nothing to do with the conversation so far, so a different subject has begun. Set it to false when it carries on from what you were talking about, or when there's nothing before it.
-Fill in "do" whenever the user wants something done on the laptop: an app, site or bookmark opened, something played or written, or something looked up on it and told back to them, like what's due on a class site or whether an email came. The laptop sees its own screen and does all of that, so never say you can't: hand it over. "do" is one plain command holding all of it, like "play Gunna on Spotify" or "open Notes and write down milk", in the user's own words, with every detail they gave: their times and dates as they said them, and a site or bookmark by the name they used, never a web address they didn't say. Then "say" is a few words like "On it", and never claims it's done: the laptop reports that itself. A question about what you can do isn't a request: answer it.
+Fill in "do" whenever the user wants something done on the laptop: an app, site or bookmark opened, something played or written, or something looked up on it and told back to them, like what's due on a class site or whether an email came. The laptop sees its own screen and does all of that, so never say you can't: hand it over. "do" is one plain command holding all of it, like "play Gunna on Spotify" or "open Notes and write down milk", in the user's own words, with every detail they gave: their times and dates as they said them, and a site or bookmark by the name they used, never a web address they didn't say. Then "say" is a few words like "On it", and never claims it's done: the laptop reports that itself. A question about what you can do isn't a request: answer it. When you can't tell who or what they mean (which person, which "it" or "that"), ask one short question and leave "do" empty, rather than guess. A request that's only loose ("play some music") isn't unclear: hand it over as it is. Never ask whether to do a thing and do it in the same reply.
 To search the internet, set "do" to "search the web for" and the words. That opens the results in the browser for the user to read. ${liveLine}${notesLine}
 Asked to remember something ("remember this", "remember that…", "don't forget…"), copy the words to keep into "remember", word for word but never the asking itself: for just "remember this" or "remember that", the user's own words before it. Leave "do" empty, and say you'll remember it.
 For anything else, just talk, as a friend would, and leave "do" empty. Answer general questions from what you know, like how to boil an egg, and give your own view when they ask for one.
@@ -190,8 +198,11 @@ ${abilitiesPart({ ...can, notes, where: !!live.where, calendars: !!live.calendar
  * the 11-11 and 11-12 conversations, said "You have a class starting in about an hour, the one we mentioned earlier",
  * with no calendar connected: a class mentioned once became one starting now. So what's remembered is said to be
  * what was true then, and a time worked out from it is named as what's never done.
+ *
+ * A date in a note is checked against the day (2026-11-14): Claude Haiku 5.5, given a note's "Midterm on Friday,
+ * November 13" on Saturday the 14th, said the midterm was "coming up on Friday", 2 times in 3.
  */
-const FACTS = `Never assume, and never make anything up. Say as fact only what the user has told you, what the brackets hold, and general knowledge you're sure of. What your memory, their notes and earlier conversations hold was true when it was said: never make it something happening now, and never work out a time, a date or a plan from it. Only their calendars say what's on, and only when they're connected. When you don't know or aren't sure, say so plainly or ask, unless it's something the laptop can look up; never fill a gap with a guess. Never say something's been done when it hasn't.`;
+const FACTS = `Never assume, and never make anything up. Say as fact only what the user has told you, what the brackets hold, and general knowledge you're sure of. What your memory, their notes and earlier conversations hold was true when it was said: never make it something happening now, and never work out a time, a date or a plan from it. Before you call anything upcoming, check its date against the date on the user's words: one that has gone by is over, so say it was then, or ask how it went. Only their calendars say what's on, and only when they're connected. When you don't know or aren't sure, say so plainly or ask, unless it's something the laptop can look up; never fill a gap with a guess. Never say something's been done when it hasn't.`;
 
 /** When the user said it, as the model is told: it has no clock of its own. */
 export const stamped = (text, date) => `[${date.toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' })}] ${text}`;

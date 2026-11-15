@@ -378,12 +378,39 @@ is built by vault-memory.js's own recall(). Keys stay sealed: it runs as
 Jester in Electron, so macOS may ask to let it use "Jester Safe Storage", and it
 never prints them. `-- ollama:qwen3.5:9b` checks one local model; `-- saved-all`
 every saved one, ticked or not. On qwen3.5:2b (2026-11-07, one try each): 16 of 19,
-a median turn of 0.4 s. `-- --only facts` runs eleven on never assuming and on
-what he can do (2026-11-13): a class in last week's conversations kept there
-rather than made one starting now, "what can you do?", and "can you…?" with
-connectors on and off. On qwen3.5:9b, two tries each: the class kept in the past
-6 of 6; booking a flight or ordering food 4 of 4 once told the laptop can, short
-of the card number (0 of 4 before).
+a median turn of 0.4 s. `-- saved:anthropic` checks the saved models of one
+provider, and each saved model's run ends with its tokens (how many were read
+from the cache) and what it cost. `-- --only facts` runs nineteen on never
+assuming and on what he can do (2026-11-13): a class in last week's
+conversations kept there rather than made one starting now, "what can you do?",
+and "can you…?" with connectors on and off. On qwen3.5:9b, two tries each: the
+class kept in the past 6 of 6; booking a flight or ordering food 4 of 4 once
+told the laptop can, short of the card number (0 of 4 before).
+
+#### What's remembered goes stale
+
+The class that wasn't (2026-11-13) came from a sentence kept the afternoon
+before: "Provided current weather, time, and advised attending the upcoming
+class." It reached the model as "- Thursday at 2:18 PM: …", and "Thursday" reads
+as well for the one coming. Three things changed (2026-11-14):
+
+- a conversation is summed up in the past tense, with when a thing was by its
+  date or its time on the clock, never "upcoming", "soon" or "tomorrow"
+  (`vault-memory.js` `endedPrompt`);
+- what's recalled says how old it is: "- Yesterday (Thursday) at 2:18 PM: …" for
+  an earlier conversation, "Conversation on Monday, November 9 (4 days ago)" for
+  one from the vault (`ago`);
+- his prompt has him check a date against the day before calling anything
+  upcoming. Without that line Claude Haiku 5.5, given a note's "Midterm on
+  Friday, November 13" on Saturday the 14th, said it was "coming up on Friday",
+  2 times in 3; with it, 0 in 12.
+
+Not knowing who or what is meant ("text him…", "open it"), he asks one short
+question rather than guess (the user's choice); a request that's only loose
+("play some music") is handed over as it is. Told only to ask when he can't tell
+what's wanted, Claude asked "what are you in the mood for?" 3 times in 3.
+Claude Haiku 5.5 over all 65 cases, three tries each: 189 of 195 before that
+last change, and 33 of 33 on the ones it touched after.
 
 ### The continuous assistant
 

@@ -16,6 +16,8 @@
  * His window opens faint, unfocused and click-through, so it's in nobody's way.
  *
  * Scenarios:
+ *   stale    a conversation summed up yesterday reaches the model as yesterday's, with the line that says what it
+ *            called upcoming has likely happened, and the rule against calling a date gone by upcoming.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -134,27 +136,43 @@ if (!process.versions.electron) {
     return lines.at(-1).text;
   }
 
+  /** The system prompt of the last request a model server took. */
+  const lastSystem = (server) => server.requests.at(-1)?.messages?.[0]?.content || '';
+
   const SCENARIOS = {
+    /** What was summed up yesterday is yesterday's when he's told it (2026-11-13: "a class starting in about an hour"). */
+    async stale({ paid }) {
+      await type('what’s up?');
+      const system = lastSystem(paid);
+      const line = /^- (?:Yesterday|2 days ago) \(\w+day\) at [^\n]*: Provided current weather, time, and advised attending the upcoming class\.$/m.exec(system)?.[0];
+      check('yesterday’s summary reaches the model saying how old it is', !!line, system.split('Earlier conversations')[1]?.slice(0, 400) || 'no earlier conversations in the prompt');
+      check('with the line that what it called upcoming has likely happened', /by now it has most likely happened\./.test(system));
+      check('and the rule to check a date against the day', /Before you call anything upcoming, check its date against the date on the user's words/.test(system));
+      check('the user’s words carry the date and time', /^\[\w+day, \w+ \d+, \d{4} at \d+:\d\d.[AP]M\] what’s up\?$/.test(paid.requests.at(-1)?.messages?.at(-1)?.content || ''), paid.requests.at(-1)?.messages?.at(-1)?.content);
+    },
+
     /** Paid before free, a failing one covered for and left alone, and Settings saying so. */
     async models({ paid, free }) {
+      const was = { paid: paid.requests.length, free: free.requests.length };
+      const counts = () => `paid ${paid.requests.length - was.paid}, free ${free.requests.length - was.free}`;
       const first = await type('hello there');
-      check('a paid model answers first, though the free one was saved first', first === 'Hello from paid.' && paid.requests.length === 1 && free.requests.length === 0, `he said ${JSON.stringify(first)}; paid ${paid.requests.length}, free ${free.requests.length}`);
-      check('the persona prompt reaches the model with what he can do', /What you can do, all of it/.test(paid.requests[0]?.messages?.[0]?.content || ''));
+      check('a paid model answers first, though the free one was saved first', first === 'Hello from paid.' && counts() === 'paid 1, free 0', `he said ${JSON.stringify(first)}; ${counts()}`);
+      check('the persona prompt reaches the model with what he can do', /What you can do, all of it/.test(lastSystem(paid)));
       paid.answer = () => ({ status: 500 });
       const second = await type('and again');
-      check('a paid model that fails is covered for by the free one', second === 'Hello from free.' && paid.requests.length === 2 && free.requests.length === 1, `he said ${JSON.stringify(second)}; paid ${paid.requests.length}, free ${free.requests.length}`);
+      check('a paid model that fails is covered for by the free one', second === 'Hello from free.' && counts() === 'paid 2, free 1', `he said ${JSON.stringify(second)}; ${counts()}`);
       check('the log says who failed and who took it', /talking: custom paid-model failed \(.*500.*\), so custom free-model takes it/.test(logLines()), logLines().split('\n').filter((line) => /talking:/.test(line)).join(' | '));
       const third = await type('once more');
-      check('down, it’s left alone the next turn', third === 'Hello from free.' && paid.requests.length === 2 && free.requests.length === 2, `paid ${paid.requests.length}, free ${free.requests.length}`);
+      check('down, it’s left alone the next turn', third === 'Hello from free.' && counts() === 'paid 2, free 2', counts());
       const listed = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-connections', op: 'list' });`);
       const spend = Object.fromEntries((listed.connections || []).map((connection) => [connection.model, connection.spend?.requests ?? 0]));
-      check('Settings is told the order and what each has answered', listed.paidFirst === true && spend['paid-model'] === 1 && spend['free-model'] === 2, JSON.stringify({ paidFirst: listed.paidFirst, spend }));
+      check('Settings is told the order and what each has answered', listed.paidFirst === true && spend['paid-model'] === was.paid + 1 && spend['free-model'] === was.free + 2, JSON.stringify({ paidFirst: listed.paidFirst, spend }));
       check('no key is in what Settings is told', !JSON.stringify(listed).includes('scratch-key'));
       home.webContents.reload();
       await until('his window, loaded again', () => !home.webContents.isLoading());
       const page = await until('Settings › Models, drawn', () => inPage(`const jobs = document.getElementById('job-talk')?.textContent || ''; const rows = document.getElementById('connections')?.textContent || ''; return rows.includes('free-model') && jobs ? { jobs, rows } : null;`));
       check('Settings › Models names the paid model first for talking', /paid-model, then .*free-model/.test(page.jobs), page.jobs);
-      check('and says what each has answered this month', /paid-model.*1 reply this month/.test(page.rows) && /free-model.*2 replies this month/.test(page.rows), page.rows);
+      check('and says what each has answered this month', /paid-model.*\d+ repl(?:y|ies) this month/.test(page.rows) && /free-model.*2 replies this month/.test(page.rows), page.rows);
     }
   };
 
@@ -171,6 +189,8 @@ if (!process.versions.electron) {
         modelConnections: [model('free', free, 'free'), model('paid', paid, 'paid')]
       })
     );
+    // A conversation summed up 31 hours ago, as recollections.js keeps it: the sentence that became a class "in about an hour".
+    fs.writeFileSync(path.join(scratch, 'recollections.json'), JSON.stringify({ conversations: [{ at: Date.now() - 31 * 3600000, summary: 'Provided current weather, time, and advised attending the upcoming class.', chat: 'earlier-chat' }] }));
     await import(path.join(desktop, 'src/main/main.js'));
     await app.whenReady();
     home = await until('his window', () => BrowserWindow.getAllWindows().find((win) => /\/home\/home\.html/.test(win.webContents.getURL()) && !win.webContents.isLoading()), 30000);

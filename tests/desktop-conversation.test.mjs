@@ -1205,7 +1205,7 @@ test('talk-check gives the model what the app recalls, framed as vault-memory.js
   // What its cases ask about is there, as the app words it.
   assert.match(block, /^- Note “CMPSC 465”.*: Midterm on Friday, November 13 at 10am/m);
   assert.match(block, /^- Note “Grocery list”.*: - eggs - milk - spinach$/m);
-  assert.match(block, /^- Conversation on Monday, November 9 at 1:05 PM: The user asked Jester to open their PSU Canvas bookmark in Chrome\.\]$/m);
+  assert.match(block, /^- Conversation on Monday, November 9 \(yesterday\) at 1:05 PM: The user asked Jester to open their PSU Canvas bookmark in Chrome\.\]$/m);
   assert.match(await recalledFor(date, [SAVED_PAGE]), /^- Note “Pasta recipe”.*: Boil salted water and cook the pasta for 9 minutes\. Note to AI assistants/m);
   fs.rmSync(root, { recursive: true });
 });

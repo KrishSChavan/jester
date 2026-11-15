@@ -375,8 +375,8 @@ test('recall: About me, then what was found, each in its own words, in brackets'
     '[From your memory and the user’s Obsidian notes, in case it helps:',
     'About the user: Takes CMPSC 465 at Penn State; Roommate is Sam Lee',
     '- Note “Grocery list” (Notes): - eggs - milk',
-    '- Conversation on Monday, November 9 at 1:05 PM: The user asked Jester to open their PSU Canvas bookmark in Chrome.',
-    '- Remembered word for word on November 10: “my locker combination is 12-34-56”',
+    '- Conversation on Monday, November 9 (yesterday) at 1:05 PM: The user asked Jester to open their PSU Canvas bookmark in Chrome.',
+    '- Remembered word for word on November 10 (today): “my locker combination is 12-34-56”',
     '- Note “CMPSC 465” (Classes) › Exams: Midterm: Friday, November 13 at 10am in 22 Deike.]'
   ].join('\n'));
   assert.deepEqual(used, [
@@ -499,8 +499,8 @@ test('recall: a secret in a note leaves out the lines holding it, or all the not
     '[From your memory and the user’s Obsidian notes, in case it helps:',
     '- Note “Wifi” (Notes) (a password left out): Network: KrishNet',
     '- Note “Bank PIN” (Notes): (left out, as it may hold a PIN)',
-    '- Conversation on Monday, November 9 at 1:05 PM: (left out, as it may hold a password)',
-    '- Remembered word for word on November 10: (left out, as it may hold a PIN)]'
+    '- Conversation on Monday, November 9 (yesterday) at 1:05 PM: (left out, as it may hold a password)',
+    '- Remembered word for word on November 10 (today): (left out, as it may hold a PIN)]'
   ].join('\n'));
   assert.ok(!/hunter2|4821/.test(block));
   assert.deepEqual(used.map(({ rel }) => rel), ['Notes/Wifi.md', 'Notes/Bank PIN.md', 'Jester/Conversations/2026/2026-11-09.md', 'Jester/Remembered/2026-11-10 Bank PIN.md']);
