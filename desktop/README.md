@@ -53,7 +53,9 @@ front window fills its display.
 | `src/main/driver.js`, `native/jester-driver/` | Rust helper for OS input and the accessibility tree, JSON lines over stdio. Also Chrome's native-messaging relay. |
 | `src/main/watch.js`, `watch-status.js`, `native/jester-watch/` | The Apple Watch: its app, the Mac's Swift Bluetooth helper, and steering the cursor with them (Mac only). |
 | `src/main/link.js`, `link-host.js`, `chrome-link.js` | The link to the extension: the socket the relay reaches, putting the relay where Chrome can start it, and what's said over it. The extension's half is `../jester-extension/src/background/desktop-link.js`. |
-| `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models). |
+| `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models): paid before free, and who covers for one that fails. |
+| `src/main/spend.js` | What the saved models' replies have cost this month, as near as their token counts say. |
+| `scripts/live-check.mjs` | `npm run live-check`: the real app on a scratch profile with scripted model servers, typed to and read back. |
 | `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
 | `scripts/vault-eval.mjs` | How well memory finds things in a vault: a sample vault and the questions it's scored on. |
@@ -318,7 +320,9 @@ should start plain Electron (not yet seen).
 ### Models: talking and actions
 
 Settings › Models gives each saved model two boxes, Talking and Actions, and
-`model-jobs.js` keeps a job to the models ticked for it, in the order saved, so
+`model-jobs.js` keeps a job to the models ticked for it, paid ones first and then
+free ones, each in the order saved (the settings' `paidModelsFirst: false` is the
+order saved alone), so
 one model can talk and another act without using up each other's free requests
 (Gemini's free plan allows a few hundred requests a day, and a chatty evening
 would leave none for the tasks). A model saved before this was a choice acts and
@@ -331,11 +335,29 @@ boxes, both ticked to start with, and takes a job only when no saved model can:
 none is ticked for it, or every one is out of requests for longer than the pool
 will wait (`all_models_rate_limited`). It isn't simply last in line: the pool
 skips a model that's waiting out a free plan's minute, and the next in line would
-then be 7.6 GB of local model loaded to save three seconds. A saved model that
-fails is covered for too (2026-11-13: Groq's gpt-oss-120b answered a turn with a
-400, "Failed to generate JSON", which Jester said aloud), unless only Settings
-can put it right: a refused key (401, 403) or a model that isn't there (404) is
-the user's to see. So is a turn they've moved on from.
+then be 7.6 GB of local model loaded to save three seconds.
+
+A saved model that fails is covered for by the next one ticked for the job, and
+after them by this computer's (2026-11-13: Groq's gpt-oss-120b answered a turn
+with a 400, "Failed to generate JSON", which Jester said aloud). The pool names
+the connection a failure came from and leaves out the ones a caller has seen
+fail (`skip`); `model-jobs.js` asks again without it. One that's down (too slow,
+a 5xx, no network) is left alone for a minute, and one out of credit (Anthropic's
+402, or its 400 "credit balance is too low") for an hour, with a toast saying
+who's taken over, so later turns don't wait on it again. A refused key (401,
+403) or a model that isn't there (404) is the user's to see, since only Settings
+puts it right. So is a turn they've moved on from.
+
+Claude is asked as its current models want (2026-11-14, `model-client.js`): the
+system prompt as a cached block, read back at a tenth of the price for five
+minutes (512 tokens is the least the 5 generation caches; his prompt is about
+1,800), and the reply held to its schema with `output_config.format` when the
+schema is one Claude takes as it stands (`claudeTakesSchema`: his reply's is;
+the agents' have `minimum` and `maxItems`, so they're asked for in words, as
+before). `spend.js` adds up what each saved model's replies cost, by their own
+token counts at the listed price, and Settings › Models shows it by the model:
+an estimate, for a month. On Claude Haiku 5.5 the whole of talk-check, 171
+turns, came to about a cent, 163 right, a median turn of 1.0 s.
 
 Talking through a cloud model needed the conversation's earlier turns sent to
 every provider, not only the OpenAI-compatible ones: `model-client.js` now gives

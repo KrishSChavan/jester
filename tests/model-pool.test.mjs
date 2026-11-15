@@ -188,3 +188,26 @@ test('a local model gets time to load, and a remote one keeps its deadline',asyn
   await createPooledModelClient({...fixture([local]),clock:()=>0,request})({...options,maxElapsedMs:2000});
   assert.deepEqual(budgets,[30000,10000,2000]);
 });
+
+test('a failure names the connection it came from, and a caller’s skipped ones are left out',async()=>{
+  const h=fixture([config('a','anthropic'),config('b')]);
+  const asked=[];
+  const client=createPooledModelClient({...h,request:async({config:used})=>{
+    asked.push(used.model);
+    if(used.model==='model-a') throw Object.assign(new Error('anthropic returned 500'),{code:'http_error',status:500});
+    return {json:result,model:used.model,usage:null,timings:{}};
+  }});
+  await assert.rejects(client(options),(err)=>err.connectionId==='a'&&err.provider==='anthropic'&&err.model==='model-a');
+  assert.deepEqual(asked,['model-a'],'the pool itself never rotates on a failure that isn’t a limit');
+  const covered=await client({...options,skip:new Set(['a'])});
+  assert.equal(covered.connectionId,'b');
+  assert.deepEqual(asked,['model-a','model-b']);
+  // Everyone skipped: nobody to ask, said as the pool says a turn's models are used up.
+  await assert.rejects(client({...options,skip:new Set(['a','b'])}),(err)=>err.code==='model_pool_retry_ready');
+});
+
+test('running out of time names the connection that was too slow',async()=>{
+  const h=fixture([config('a')]);
+  const client=createPooledModelClient({...h,request:({signal})=>new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason)))});
+  await assert.rejects(client({...options,maxElapsedMs:30}),(err)=>err.code==='model_timeout'&&err.connectionId==='a'&&err.model==='model-a');
+});

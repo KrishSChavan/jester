@@ -97,6 +97,8 @@ export function createPooledModelClient({
     });
     const totals = {requestMs:0,retryWaitMs:0,attempts:0};
     let requestStartedAt = null;
+    /** The connection a request is out to: the one that was too slow, if time runs out. */
+    let inFlight = null;
     const aggregate = (timings) => {
       totals.requestMs += Number.isFinite(timings?.requestMs) && timings.requestMs >= 0
         ? timings.requestMs : clock()-requestStartedAt;
@@ -114,7 +116,9 @@ export function createPooledModelClient({
         if (!connections.length) throw Object.assign(new Error('Connect a model in Settings before continuing.'), {code:'model_pool_empty'});
         if (!connections.some(fits(options))) throw Object.assign(new Error(
           'None of your saved models can read screenshots. Add one that can, such as Gemini, in Settings.'), {code:'no_vision_model'});
-        const candidates = connections.filter(connection => !tried.has(connection.id) && !(connection.cooldownUntil > now()) && fits(options)(connection));
+        // `skip`: connections the caller has seen fail and is covering for (Jester Desktop's model-jobs.js).
+        const candidates = connections.filter(connection => !tried.has(connection.id) && !options.skip?.has?.(connection.id)
+          && !(connection.cooldownUntil > now()) && fits(options)(connection));
         let selected = null;
         for (const connection of candidates) {
           if (!(await governor.waitMs(connection, estimate))) { selected = connection; break; }
@@ -146,6 +150,7 @@ export function createPooledModelClient({
         if (requestBudget <= 0) throw new ModelTimeoutError();
         totals.attempts++;
         requestStartedAt = clock();
+        inFlight = selected;
         try {
           const result = await request({...options,signal,config,maxElapsedMs:requestBudget,
             timeoutMs:Math.min(requestBudget,options.timeoutMs || requestBudget),maxRetries:0,maxRetryWaitMs:0});
@@ -156,7 +161,10 @@ export function createPooledModelClient({
         } catch (error) {
           if (requestStartedAt !== null) aggregate(error.timings);
           aborted(signal);
-          if (error?.code !== 'rate_limit' || error?.status !== 429) throw error;
+          // Which connection failed, for a caller that covers for it with the next.
+          if (error?.code !== 'rate_limit' || error?.status !== 429) {
+            throw error instanceof Error ? Object.assign(error, { connectionId: selected.id, provider: error.provider || selected.provider, model: selected.model }) : error;
+          }
           await governor.record(selected, { inputTokens: estimate, rateLimits: error.rateLimits });
           const providerDelay = Number.isFinite(error.retryAfterMs) && error.retryAfterMs >= 0
             ? error.retryAfterMs : error.retryable === false ? 24*60*60*1000 : 60000;
@@ -172,6 +180,9 @@ export function createPooledModelClient({
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
       failure.timings = timings();
+      if (failure.code === 'model_timeout' && inFlight && !failure.connectionId) {
+        Object.assign(failure, { connectionId: inFlight.id, provider: inFlight.provider, model: inFlight.model });
+      }
       throw failure;
     } finally {
       clearTimeout(timer);

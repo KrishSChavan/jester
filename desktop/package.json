@@ -13,7 +13,8 @@
     "watch": "node scripts/build-watch.mjs",
     "launcher": "node scripts/make-launcher.mjs",
     "models": "node scripts/fetch-models.mjs vad voice parakeet-110m",
-    "talk-check": "node scripts/talk-check.mjs"
+    "talk-check": "node scripts/talk-check.mjs",
+    "live-check": "node scripts/live-check.mjs"
   },
   "dependencies": {
     "ical.js": "2.2.1",

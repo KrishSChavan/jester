@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeModelConfig, buildModelRequest, requestModel, parseModelJson, parseRetryAfterMs,
   RateLimitError, ProviderBusyError, ModelTimeoutError, ModelTruncatedError, ModelReplyError, MODEL_REQUEST_LIMITS,
-  claudeThinksByDefault } from '../jester-extension/src/background/model-client.js';
+  claudeThinksByDefault, claudeTakesSchema } from '../jester-extension/src/background/model-client.js';
 import { AGENT_RESPONSE_SCHEMA } from '../jester-extension/src/common/agent-response-schema.js';
 
 const key = 'user-secret-api-key';
@@ -42,12 +42,45 @@ test('provider adapters send the selected model and parse native response format
     } else if (item.provider === 'anthropic') {
       assert.equal(sent.init.headers['x-api-key'], key);
       assert.equal(sent.init.headers['anthropic-version'], '2023-06-01');
-      assert.equal(sent.body.system, 'Return JSON.');
+      // Cached: the same from one request to the next, read back at a tenth of the price.
+      assert.deepEqual(sent.body.system, [{ type: 'text', text: 'Return JSON.', cache_control: { type: 'ephemeral' } }]);
     } else if (item.provider === 'google') {
       assert.equal(sent.init.headers['x-goog-api-key'], key);
       assert.equal(sent.body.generationConfig.responseMimeType, 'application/json');
     } else assert.equal(sent.init.headers.authorization, `Bearer ${key}`);
   }
+});
+
+test('Claude is held to a schema it can take, and asked in words alone for one it can’t', () => {
+  const reply = { type: 'object', properties: { say: { type: 'string' }, do: { type: 'string' }, new: { type: 'boolean' },
+    note: { type: 'object', properties: { title: { type: 'string' }, open: { type: 'boolean' } }, required: ['title'], additionalProperties: false } },
+    required: ['say', 'do', 'new'], additionalProperties: false };
+  assert.equal(claudeTakesSchema(reply), true);
+  // Limits on numbers, lengths and counts aren't taken, nor an object left open, nor anything unknown.
+  for (const not of [
+    { type: 'object', properties: { n: { type: 'integer', minimum: 1 } }, required: ['n'], additionalProperties: false },
+    { type: 'object', properties: { list: { type: 'array', items: { type: 'string' }, maxItems: 3 } }, additionalProperties: false },
+    { type: 'object', properties: { inner: { type: 'object', properties: { a: { type: 'string' } } } }, additionalProperties: false },
+    { type: 'object', properties: { a: { type: 'string' } } },
+    { type: 'object', properties: { a: { oneOf: [{ type: 'string' }] } }, additionalProperties: false },
+    { type: 'string' }, null, [], 'object'
+  ]) assert.equal(claudeTakesSchema(not), false, JSON.stringify(not));
+  const sent = (model, schema) => JSON.parse(buildModelRequest(config({ provider: 'anthropic', model }), { system: 'JSON', prompt: 'Hi.', schema }).init.body);
+  assert.deepEqual(sent('claude-haiku-5-5', reply).output_config, { effort: 'low', format: { type: 'json_schema', schema: reply } });
+  // The browser agent's own schema has limits: asked for in the prompt, as it was.
+  assert.deepEqual(sent('claude-haiku-5-5', undefined).output_config, { effort: 'low' });
+  assert.equal(Object.hasOwn(sent('claude-sonnet-4-6', reply), 'output_config'), false);
+  // An empty system prompt can't carry a cache marker.
+  assert.equal(JSON.parse(buildModelRequest(config({ provider: 'anthropic', model: 'claude-haiku-5-5' }), { system: '', prompt: 'Hi.' }).init.body).system, '');
+});
+
+test('a provider’s own name for a failure comes with it, and never its key', async () => {
+  const failing = (status, body) => requestModel({ env: { provider: 'anthropic', model: 'claude-haiku-5-5', key }, system: 'S', prompt: 'P',
+    fetchImpl: async () => (typeof body === 'string' ? new Response(body, { status }) : jsonResponse(body, status)) });
+  await assert.rejects(failing(400, { type: 'error', error: { type: 'invalid_request_error', message: `Your credit balance is too low to access the Anthropic API. ${key}` } }),
+    (err) => err.code === 'http_error' && err.status === 400 && err.type === 'invalid_request_error' && /credit balance is too low/.test(err.message) && !err.message.includes(key));
+  await assert.rejects(failing(402, { type: 'error', error: { type: 'billing_error', message: 'Billing problem.' } }), (err) => err.status === 402 && err.type === 'billing_error');
+  await assert.rejects(failing(500, 'not json'), (err) => err.status === 500 && !Object.hasOwn(err, 'type'));
 });
 
 test('legacy Groq configuration remains usable without replacing an explicit model', () => {

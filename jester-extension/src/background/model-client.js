@@ -93,6 +93,27 @@ export function claudeThinksByDefault(model) {
 
 const dataUrl = (image) => `data:${image.mimeType};base64,${image.data}`;
 
+/** What Claude's JSON outputs take of JSON Schema: no number, length or count limits, and every object closed. */
+const CLAUDE_SCHEMA_KEYS = new Set(['type', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const', 'anyOf', 'allOf', 'description', 'title']);
+/**
+ * Whether Claude can be held to a schema as it stands (`output_config.format`): then its reply is that JSON and
+ * nothing else, as Ollama's and Gemini's are. One it can't take (the agents' have `minimum` and `maxItems`, which
+ * their hosts check anyway) is asked for in the prompt alone, as before.
+ */
+export function claudeTakesSchema(schema, depth = 0) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema) || depth > 8) return false;
+  if (Object.keys(schema).some((key) => !CLAUDE_SCHEMA_KEYS.has(key))) return false;
+  if (schema.type === 'object' || schema.properties) {
+    if (schema.additionalProperties !== false) return false;
+    if (Object.values(schema.properties || {}).some((property) => !claudeTakesSchema(property, depth + 1))) return false;
+  } else if (Object.hasOwn(schema, 'additionalProperties')) return false;
+  if (Object.hasOwn(schema, 'items') && !claudeTakesSchema(schema.items, depth + 1)) return false;
+  for (const key of ['anyOf', 'allOf']) {
+    if (Object.hasOwn(schema, key) && !(Array.isArray(schema[key]) && schema[key].every((part) => claudeTakesSchema(part, depth + 1)))) return false;
+  }
+  return depth > 0 || schema.type === 'object';
+}
+
 /**
  * Earlier turns of a conversation ({role: 'user'|'assistant', content}), as
  * the APIs that want them to alternate and start with the user take them: two
@@ -131,12 +152,17 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
     headers['anthropic-dangerous-direct-browser-access'] = 'true';
     const thinks = claudeThinksByDefault(config.model);
     const earlier = alternating(history, prompt);
-    body = { model: config.model, max_tokens: maxOutputTokens + (thinks ? CLAUDE_THINKING_TOKENS : 0), system,
+    // The 5 generation can be held to a schema; the ones before it that can are told apart by no rule worth keeping.
+    const held = thinks && claudeTakesSchema(schema) ? { format: { type: 'json_schema', schema } } : {};
+    body = { model: config.model, max_tokens: maxOutputTokens + (thinks ? CLAUDE_THINKING_TOKENS : 0),
+      // The same from one request to the next (a persona, an agent's rules), so it's cached: read back at a tenth
+      // of the price for the next five minutes. One too short to cache (512 tokens on the 5 generation) just isn't.
+      system: typeof system === 'string' && system.trim() ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] : system,
       messages: [...earlier.turns, { role: 'user', content: pictures.length ? [...pictures.map((image) =>
         ({ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } })),
       { type: 'text', text: earlier.prompt }] : earlier.prompt }],
       // Low effort keeps each step quick and cheap: a step picks one control, not a plan.
-      ...(thinks ? { output_config: { effort: 'low' } } : {}) };
+      ...(thinks ? { output_config: { effort: 'low', ...held } } : {}) };
   } else if (config.protocol === 'gemini') {
     headers['x-goog-api-key'] = config.key;
     const earlier = alternating(history, prompt);
@@ -426,13 +452,19 @@ export function parseRetryAfterMs(headers, body, now = Date.now()) {
 
 function httpError(config, status, body) {
   let detail = '';
-  try { detail = JSON.parse(body)?.error?.message || ''; } catch { /* no provider detail */ }
+  let type = '';
+  try {
+    const told = JSON.parse(body)?.error;
+    detail = told?.message || '';
+    type = typeof told?.type === 'string' ? told.type.slice(0, 60) : '';
+  } catch { /* no provider detail */ }
   if (config.key) detail = String(detail).split(config.key).join('[redacted]');
   detail = String(detail).replace(/\s+/g, ' ').slice(0, 220);
   const message = status === 401 || status === 403 ? `${config.provider} rejected the API key. Check Settings.`
     : status === 404 ? `The provider could not find model "${config.model}" or its API endpoint. Check Settings.`
       : `${config.provider} returned ${status}${detail ? `: ${detail}` : ''}`;
-  return Object.assign(new Error(message), { code: 'http_error', status, retryable: false });
+  // `type`: the provider's own name for it ("billing_error"), for a caller that covers for some failures and not others.
+  return Object.assign(new Error(message), { code: 'http_error', status, retryable: false, ...(type ? { type } : {}) });
 }
 
 export async function requestModel({ env, config = normalizeModelConfig(env), system, prompt, signal,

@@ -51,6 +51,8 @@ import { createLearned } from './learned.js';
 import { startLink } from './link.js';
 import { installLinkHost, linkOrigins } from './link-host.js';
 import { createModelJob, localUses } from './model-jobs.js';
+import { createSpend } from './spend.js';
+import { PROVIDERS } from '../../../jester-extension/src/common/credentials.js';
 import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
@@ -169,6 +171,8 @@ let recollections = null;
 /** The conversation going on, word for word (conversation-log.js), and what becomes of each once it's over (chat-keeper.js). */
 let conversationLog = null;
 let keeper = null;
+/** What the saved models have cost this month (spend.js). */
+let spend = null;
 /** Taught phrases, learned tasks and shortcuts (learned.js). */
 let learned = null;
 /** The Obsidian vault Jester keeps its memory in (vault.js), its search (vault-index.js), and the memory between them. */
@@ -537,6 +541,27 @@ function resumeChat(id, text) {
     .finally(() => over.length && keeper.sumUp(over));
   return { ok: true };
 }
+
+/** The saved models as Settings lists them (keys masked), each with what it's cost this month, and the order they're tried in. */
+async function connectionsWithSpend() {
+  const listed = await assistant.connections.list();
+  const connections = await Promise.all((listed.connections || []).map(async (connection) => ({ ...connection, spend: await spend.of(connection) })));
+  return { ...listed, connections, paidFirst: modelHooks.paidFirst() };
+}
+
+/**
+ * What both jobs' models share (model-jobs.js): paid ones first unless the settings say as saved, what each reply
+ * cost, and a word on the screen when one has run out of credit, which nothing else would tell the user.
+ */
+const modelHooks = {
+  paidFirst: () => settings?.paidModelsFirst !== false,
+  onUsed: (used) => void spend?.record(used).catch((err) => log('spend: couldn’t count a reply:', err.message)),
+  onFailed: ({ provider, model, kind, next }) => {
+    if (kind !== 'credit') return;
+    const name = PROVIDERS[provider]?.label || provider;
+    overlays?.toast(`${name} is out of credit`, { tone: 'warn', detail: next ? `${next === 'this computer' ? 'This computer’s model' : next} takes over for now. ${model} is tried again in an hour.` : 'Add credit, or tick another model in Settings › Models.' });
+  }
+};
 
 /** This computer's model (Ollama): the one chosen, or the best that's there. */
 async function chatModel() {
@@ -1013,9 +1038,9 @@ function listenToPages() {
           if (message.op === 'save') await assistant.connections.save(message.input || {});
           else if (message.op === 'remove') await assistant.connections.remove(String(message.id));
           else if (message.op === 'uses') await assistant.connections.uses(String(message.id), message.uses);
-          return { ok: true, ...(await assistant.connections.list()) };
+          return { ok: true, ...(await connectionsWithSpend()) };
         } catch (err) {
-          return { ok: false, error: err.message, ...(await assistant.connections.list()) };
+          return { ok: false, error: err.message, ...(await connectionsWithSpend()) };
         }
       // Settings' models: what Ollama has, and which one is this computer's.
       case 'jester/desktop-ollama':
@@ -1488,6 +1513,7 @@ async function start() {
   // A dry run describes `open`, `osascript` and `shortcuts` too, rather than running them.
   const runTool = env.JESTER_DRIVER_DRY ? async (file, args) => (log('dry run: would run', file, JSON.stringify(args)), '') : runFile;
   stopButton = createStopButton({ onStop: stopAutomation });
+  spend = createSpend({ storage: storage.local, log });
   assistant = createAssistant({
     driver: input,
     openApp: (name) => voiceRunner.openApp(name),
@@ -1511,7 +1537,8 @@ async function start() {
     log,
     logScreens: !!env.JESTER_LOG_SCREENS,
     // Tasks go to this computer's model when no saved one can take them.
-    localModel
+    localModel,
+    modelHooks
   });
   // Taught phrases, learned tasks and shortcuts, kept with the app's settings, and listed in the vault's Routines note.
   learned = createLearned({ storage: storage.local, onChange: writeRoutinesNote });
@@ -1552,7 +1579,7 @@ async function start() {
     },
     log
   });
-  talking = createModelJob({ job: 'talk', local: localModel, keepAlive: LOCAL_KEEP_ALIVE, log, onSelected: ({ provider, model }) => log('talking through:', provider, model) });
+  talking = createModelJob({ job: 'talk', local: localModel, keepAlive: LOCAL_KEEP_ALIVE, log, ...modelHooks, onSelected: ({ provider, model }) => log('talking through:', provider, model) });
   vaultIndex = createVaultIndex({ vault: () => vault, file: vaultIndexFile(), log, onRefreshed: vaultRead });
   vaultMemory = createVaultMemory({
     vault: () => vault,
@@ -1770,5 +1797,6 @@ if (!app.requestSingleInstanceLock()) {
     linkTransport?.close();
     vaultIndex?.close();
     calendars?.stop();
+    spend?.flush().catch(() => undefined);
   });
 }

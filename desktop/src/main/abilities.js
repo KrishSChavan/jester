@@ -68,7 +68,7 @@ export const ABILITIES = Object.freeze([
     id: 'calendars',
     on: (state) => !!state.calendars,
     can: () => 'Read their calendars, all combined, from a week back to three months ahead. You can’t change them: the laptop can add an event in their calendar app.',
-    off: 'Their calendars (Settings › Weather and calendars), so you don’t know what’s on them: the laptop can open their calendar app and look.'
+    off: 'Their calendars (Settings › Weather and calendars), so you don’t know what’s on them: asked what’s on them, have the laptop open their calendar app and look, with "do".'
   },
   {
     id: 'chrome',

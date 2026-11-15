@@ -160,6 +160,7 @@ if (run && !process.versions.electron) {
   const { askedToRemember, askModel, LOCAL_KEEP_ALIVE, ollamaModels, pickModel } = await import('../src/main/conversation.js');
   const { verbatim } = await import('../src/main/vault-memory.js');
   const { createModelJob } = await import('../src/main/model-jobs.js');
+  const { costOf, dollars, tokensOf } = await import('../src/main/spend.js');
   const { normaliseConnection } = await import('../../jester-extension/src/common/credentials.js');
   const { PROVIDERS } = await import('../../jester-extension/src/common/credentials.js');
 
@@ -191,7 +192,9 @@ if (run && !process.versions.electron) {
     ["what's 15 percent of 80?", false],
     ['thanks, that is all', false],
     ['play some music', true],
-    ['write down that I need to call mom', true]
+    // With a vault it's his own note as rightly as the laptop's (Claude Haiku 5.5 makes the note, Groq's gpt-oss-120b
+    // hands it over): either, so long as something's written.
+    ['write down that I need to call mom', true, undefined, { written: true }]
   ];
 
   const date = new Date();
@@ -271,7 +274,7 @@ if (run && !process.versions.electron) {
     { text: 'can you book me a flight to Boston?', can: {}, doAny: true, sayNot: CANT },
     { text: 'are you able to order food for me?', can: {}, sayNot: CANT }
   ].map((want) => ({ ...want, facts: true }));
-  const ALL = [...CASES.map(([text, wantDo, history]) => ({ text, do: wantDo, history, old: true })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES];
+  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES];
   // --only live|memory|old|facts: just those.
   const onlyAt = process.argv.indexOf('--only');
   const ONLY = onlyAt > 0 ? process.argv[onlyAt + 1] : '';
@@ -290,6 +293,8 @@ if (run && !process.versions.electron) {
   /** What's wrong with a reply: none when it's right. */
   function problems(reply, want) {
     const found = [];
+    // `written`: a command for the laptop or a note of his own, one or the other.
+    if (want.written) return reply.do || reply.note?.add ? [] : ['nothing written: no "do" and no "note"'];
     if (!want.doAny && !!reply.do !== !!want.do) found.push(want.do ? 'no "do"' : '"do" set');
     const kept = keptOf(reply, want);
     if (want.remember && !want.remember.test(kept)) found.push(kept ? `kept the wrong words, ${JSON.stringify(kept)}` : 'nothing kept');
@@ -329,6 +334,9 @@ if (run && !process.versions.electron) {
     for (const arg of wanted) {
       if (arg === 'saved' || arg === 'saved-all') {
         for (const connection of savedModels()) if (arg === 'saved-all' || connection.uses.includes('talk')) found.push(connection);
+      } else if (arg.startsWith('saved:')) {
+        // saved:anthropic: the saved models of one provider, ticked for talking or not.
+        for (const connection of savedModels()) if (connection.provider === arg.slice('saved:'.length)) found.push(connection);
       } else if (arg === 'local') {
         const model = pickModel((await ollamaModels()).models);
         if (model) found.push({ id: 'ollama-local', ...normaliseConnection({ provider: 'ollama', model }) });
@@ -348,12 +356,23 @@ if (run && !process.versions.electron) {
     for (const connection of list) {
       const local = connection.provider === 'ollama';
       let paced = 0;
+      /** What the run cost, by the replies' own counts (spend.js): and how much of the prompt was read from the cache. */
+      const spent = { usd: 0, priced: false, input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
       const job = createModelJob({
         job: 'talk',
         saved: async () => (local ? [] : [{ ...connection, uses: ['talk'] }]),
         local: async () => ({ model: local ? connection.model : '', uses: ['talk'] }),
         keepAlive: LOCAL_KEEP_ALIVE,
         markLimited: async () => undefined,
+        onUsed: (used) => {
+          const tokens = tokensOf(used.usage);
+          for (const key of ['input', 'cacheRead', 'cacheWrite', 'output']) spent[key] += tokens[key];
+          const usd = costOf(used);
+          if (usd !== null) {
+            spent.usd += usd;
+            spent.priced = true;
+          }
+        },
         maxPaceMs: Infinity,
         onPacing: async ({ waitMs }) => {
           paced += waitMs;
@@ -408,6 +427,7 @@ if (run && !process.versions.electron) {
       ].filter(Boolean);
       const line = `${name(connection)}: ${parts.join(' · ')} · turn median ${times[times.length >> 1] ?? '-'} ms, slowest ${times.at(-1) ?? '-'} ms${failed ? ` · ${failed} failed` : ''}`;
       console.log(`--- ${line}`);
+      if (!local) console.log(`    tokens: ${spent.input + spent.cacheWrite} in at full price (${spent.cacheWrite} of them written to the cache), ${spent.cacheRead} read from the cache, ${spent.output} out${spent.priced ? ` · ${dollars(spent.usd)}` : ''}`);
       summary.push(line);
     }
     if (summary.length > 1) console.log(`\n${summary.join('\n')}`);

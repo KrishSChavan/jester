@@ -289,6 +289,10 @@ const localUses = () => (Array.isArray(settings?.localModelUses) ? settings.loca
 
 /** The saved models, as last listed: for saying who does each job. */
 let savedModels = [];
+/** Paid models are tried before free ones (model-jobs.js), unless the settings say as saved. */
+let paidFirst = true;
+/** The saved models in the order a job tries them. */
+const inOrder = (models) => (paidFirst ? [...models.filter((model) => model.plan === 'paid'), ...models.filter((model) => model.plan !== 'paid')] : models);
 
 const modelName = (connection) => `${PROVIDERS[connection.provider]?.label || connection.provider} · ${connection.model}`;
 
@@ -300,9 +304,9 @@ function renderJobs() {
   const here = ollama?.chosen ? `this computer’s ${ollama.chosen}` : 'this computer’s, once Ollama is running';
   const first = (text) => text.charAt(0).toUpperCase() + text.slice(1);
   for (const job of ['talk', 'act']) {
-    const saved = savedModels.filter((connection) => connection.uses?.includes(job)).map(modelName);
+    const saved = inOrder(savedModels.filter((connection) => connection.uses?.includes(job))).map(modelName);
     const parts = saved.length ? [saved.join(', then ')] : [];
-    if (local.includes(job)) parts.push(saved.length ? `${here} when ${saved.length > 1 ? 'they’re' : 'it’s'} out of requests` : here);
+    if (local.includes(job)) parts.push(saved.length ? `${here} when ${saved.length > 1 ? 'none of them can' : 'it can’t'}` : here);
     $(`job-${job}`).textContent = parts.length ? first(parts.join('; ')) : job === 'talk' ? 'Nothing: he can’t talk. Tick Talking on a model below.' : 'Nothing: commands Jester doesn’t know won’t work. Tick Actions on a model below.';
   }
 }
@@ -365,9 +369,19 @@ function useBox(label, checked, onChange) {
   return wrap;
 }
 
+/** What a model has cost this month, as near as Jester can tell (spend.js): dollars where its price is known. */
+function spentLine(spend) {
+  if (!spend?.requests) return '';
+  const replies = `${spend.requests.toLocaleString()} ${spend.requests === 1 ? 'reply' : 'replies'} this month`;
+  if (spend.usd === null) return ` · ${replies}`;
+  const about = spend.usd <= 0 ? '$0.00' : spend.usd < 0.01 ? 'under 1¢' : `about $${spend.usd.toFixed(2)}`;
+  return ` · ${about} for ${replies}`;
+}
+
 function renderConnections(reply) {
   const saved = reply?.connections || [];
   savedModels = saved;
+  paidFirst = reply?.paidFirst !== false;
   $('connection-error').textContent = reply?.ok === false ? reply.error : '';
   renderJobs();
   renderIndex();
@@ -382,7 +396,7 @@ function renderConnections(reply) {
       const detail = document.createElement('small');
       const resting = connection.cooldownUntil > Date.now() ? ` · resting until ${new Date(connection.cooldownUntil).toLocaleTimeString()}` : '';
       const plan = connection.provider === 'ollama' ? '' : ` · ${connection.plan === 'free' ? 'Free' : 'Paid'}`;
-      detail.textContent = `${connection.masked}${plan}${resting}`;
+      detail.textContent = `${connection.masked}${plan}${resting}${spentLine(connection.spend)}`;
       text.append(name, detail);
       const controls = document.createElement('span');
       controls.className = 'controls';
@@ -820,7 +834,7 @@ function renderIndex() {
     [where, calendarCount ? `${calendarCount} calendar${calendarCount === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ') || 'Off',
     whereBad || calendarsBad ? 'warn' : ''
   );
-  const talker = savedModels.find((connection) => connection.uses?.includes('talk'));
+  const talker = inOrder(savedModels).find((connection) => connection.uses?.includes('talk'));
   aside('sum-models', talker ? talker.model : localUses().includes('talk') && ollama?.chosen ? ollama.chosen : savedModels.length ? `${savedModels.length} saved` : '');
   aside('sum-chrome', desktop?.chrome?.linked ? 'Linked' : 'Not linked');
   aside('sum-gestures', settings.windowedBindingsEnabled ? 'Two sets' : '');

@@ -60,8 +60,10 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *   and whether it reads pictures (model-jobs.js)
  * @param {Function} [deps.picture]  a picture of the window read, its controls numbered (window-shot.js), for when
  *   the window's words aren't enough
+ * @param {{paidFirst?:Function, onFailed?:Function, onUsed?:Function}} [deps.modelHooks]  model-jobs.js's: the order
+ *   the saved models are tried in, one that failed and who covers for it, and what a reply cost
  */
-export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }) }) {
+export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }), modelHooks = {} }) {
   const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, picture, quietly, exclude, platform });
   /** The models set for actions in Settings, and this computer's for when they can't. */
   const model = createModelJob({
@@ -69,6 +71,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     local: localModel,
     keepAlive: LOCAL_KEEP_ALIVE,
     log,
+    ...modelHooks,
     onSelected: ({ provider, model: id }) => log('assistant model:', provider, id),
     onLimited: ({ provider, model: id, readyAt }) => log('assistant model limited:', provider, id, 'until', new Date(readyAt).toLocaleTimeString()),
     onPacing: ({ waitMs }) => working(`Waiting ${Math.ceil(waitMs / 1000)} s for the model’s per-minute limit`)
