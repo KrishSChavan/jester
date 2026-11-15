@@ -793,7 +793,7 @@ const longDate = (date) => date.toLocaleDateString('en-US', { dateStyle: 'full' 
 const clock = (date) => `${date.getHours() % 12 || 12}:${String(date.getMinutes()).padStart(2, '0')} ${date.getHours() < 12 ? 'AM' : 'PM'}`;
 
 /** What the model's told, to sum up a conversation: its day, and what Jester knows already. */
-function endedPrompt(date, known) {
+function endedPrompt(date, known, picked = null) {
   const day = longDate(date);
   const friday = new Date(date);
   friday.setDate(date.getDate() + ((12 - date.getDay()) % 7 || 7));
@@ -801,7 +801,8 @@ function endedPrompt(date, known) {
   for (const { section, fact } of known) bySection.set(section, [...(bySection.get(section) || []), plain(fact)]);
   const listed = cut([...bySection].map(([section, facts]) => `${section}:\n${facts.map((fact) => `- ${fact}`).join('\n')}`).join('\n'), KNOWN_CHARS);
   return [
-    `You keep the memory of Jester, a voice assistant. The conversation below, between the user and Jester, is over. It began on ${day} at ${clock(date)}.`,
+    `You keep the memory of Jester, a voice assistant. The conversation below, between the user and Jester, is over. It began on ${day} at ${clock(date)}.` +
+      (picked ? ` It was picked up again on ${longDate(picked)}: a line in brackets names the day the lines after it were said, and a date they give is from that day.` : ''),
     'Reply with JSON: {"title":"…","summary":"…","topics":["…"],"people":["…"],"facts":{"add":[{"section":"…","fact":"…"}],"remove":["…"]}}',
     '"title": what it was about, in at most 6 words, like "Opening PSU Canvas".',
     '"summary": one sentence of at most 30 words. Keep names, plans and decisions, but never a password, PIN, code, card number or key. ' +
@@ -819,17 +820,34 @@ function endedPrompt(date, known) {
   ].join('\n');
 }
 
-/** The conversation as the model reads it: the latest of it, when it's long. */
+/** The day a line was said, or '' when it can't be told. */
+function saidOn(entry) {
+  const ms = typeof entry?.at === 'number' ? entry.at : Date.parse(entry?.at);
+  return Number.isFinite(ms) ? longDate(new Date(ms)) : '';
+}
+
+/**
+ * The conversation as the model reads it: the latest of it, when it's long. One said over more than one day (a chat
+ * picked up again) names each day before its lines, so "Friday" is read from the day it was said.
+ */
 function transcriptOf(entries) {
-  const lines = entries.map((entry) => `${yours(entry) ? 'User' : 'Jester'}: ${cut(plain(entry.text), 1500)}`);
+  const lines = entries.map((entry) => ({ text: `${yours(entry) ? 'User' : 'Jester'}: ${cut(plain(entry.text), 1500)}`, day: saidOn(entry) }));
+  const dated = new Set(lines.map((line) => line.day).filter(Boolean)).size > 1;
   const kept = [];
   let total = 0;
-  for (const line of lines.reverse()) {
-    if (kept.length && total + line.length > SAID_CHARS) break;
+  for (const line of [...lines].reverse()) {
+    if (kept.length && total + line.text.length > SAID_CHARS) break;
     kept.unshift(line);
-    total += line.length + 1;
+    total += line.text.length + 1;
   }
-  return [...(kept.length < lines.length ? ['(Earlier lines left out.)'] : []), ...kept].join('\n');
+  const said = [];
+  let day = '';
+  for (const line of kept) {
+    if (dated && line.day && line.day !== day) said.push(`[${line.day}]`);
+    day = line.day || day;
+    said.push(line.text);
+  }
+  return [...(kept.length < lines.length ? ['(Earlier lines left out.)'] : []), ...said].join('\n');
 }
 
 /** When it began: its first line's time. */
@@ -988,10 +1006,18 @@ export function createVaultMemory({
      * @param {{who:string, text:string, at?:string|number}[]} entries
      * @returns {Promise<{summary:string, title?:string}>}  the summary, for recollections.js
      */
-    async ended(entries) {
+    /**
+     * `wanted`: asked again just before anything's written to the vault, so a conversation deleted or forgotten while
+     * the model summed it up isn't kept there after all.
+     */
+    async ended(entries, { wanted = () => true } = {}) {
       const lines = listOf(entries).filter((entry) => plain(entry?.text));
       if (!lines.some(yours)) return { summary: '' };
-      const at = startOf(lines, now);
+      // A chat carried on (conversation-log.js restore) is summed up whole, but kept in the vault as what went on
+      // today: its own section, at the time it was picked up, rather than a second one at the time it began.
+      const fresh = lines.filter((entry) => !entry.earlier);
+      const continued = fresh.length > 0 && fresh.length < lines.length;
+      const at = startOf(continued ? fresh : lines, now);
       let known = [];
       try {
         known = listOf(current()?.aboutMe()?.facts).filter((item) => plain(item?.fact));
@@ -999,7 +1025,7 @@ export function createVaultMemory({
         log('memory: couldn’t read About me:', err.message);
       }
       const { json } = await request({
-        system: endedPrompt(new Date(at), known),
+        system: continued ? endedPrompt(new Date(startOf(lines, now)), known, new Date(at)) : endedPrompt(new Date(at), known),
         prompt: transcriptOf(lines),
         schema: ENDED_SCHEMA,
         maxOutputTokens: ENDED_TOKENS
@@ -1013,10 +1039,15 @@ export function createVaultMemory({
         log('memory: couldn’t tell whether conversations are kept:', err.message);
       }
       if (!keep) return { summary: kept.summary, title: kept.title };
+      if (!wanted()) {
+        log('memory: that conversation was deleted meanwhile: nothing kept in the vault');
+        return { summary: kept.summary, title: kept.title };
+      }
       let wrote = false;
       try {
         const { title, summary, topics, people } = kept;
-        log('memory: kept the conversation in', await vault.addConversation({ at, title, summary, topics, people }));
+        const heading = continued ? `${title || 'A conversation'} (continued)` : title;
+        log('memory: kept the conversation in', await vault.addConversation({ at, title: heading, summary, topics, people }));
         wrote = true;
       } catch (err) {
         log('memory: couldn’t keep the conversation:', err.message);

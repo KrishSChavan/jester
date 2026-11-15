@@ -15,7 +15,7 @@ mic, the extension's gestures with Chrome in front, browser commands done in
 Chrome, and clicks that land on the link aimed at. Phase 0's answers are below.
 
 The menu's Gestures switch (`gesturesEnabled`, on unless set) closes the camera
-and nothing else: voice, the continuous assistant, the watch and the talk window
+and nothing else: voice, the continuous assistant, the watch and his window
 carry on, and Cursor control, which is the camera's, greys out. The engine reports
 off with "Gestures off"; it also wakes a sleeping Jester, as nothing could see ✌️.
 
@@ -33,7 +33,7 @@ front window fills its display.
 | `src/main/main.js` | App entry: one instance, menu-bar only, engine in a hidden window, permissions polled. |
 | `src/main/tray.js`, `tray-menu.js` | The menu-bar menu (`tray-menu.js` decides what it says). |
 | `src/main/permissions.js`, `permission-list.js` | Reading and asking for Camera, Accessibility, Microphone, Screen Recording. |
-| `src/main/windows.js`, `src/settings/` | The engine's hidden window and the Settings window. |
+| `src/main/windows.js`, `src/home/` | The engine's hidden window, and Jester's own: the orb and talking to him, his chats and Settings, in one window (`home.js`, `screens.js`, `chats.js`, `settings.js`, `orb.js`). |
 | `src/main/os-actions.js`, `dispatch.js` | What each action does on each OS, and doing it through the driver. |
 | `src/main/overlay.js`, `src/overlay/` | Click-through windows over every display: hold progress, toasts, the cursor ring, the voice pill. |
 | `src/main/approval.js`, `stop-button.js`, `pill-math.js` | The small windows that do take clicks: the assistant's question, and the × beside the pill. |
@@ -45,7 +45,8 @@ front window fills its display.
 | `src/main/voice-commands.js`, `voice-runner.js`, `apps.js` | What a sentence means, and doing it: actions, apps, volume, keys, typing, clicks, windows, Spotify, Shortcuts. |
 | `src/main/learned.js` | What's taught ("when I say …") and learned (a task the assistant got done, kept to be done again without it, and words the conversation took to mean a command that worked). |
 | `src/main/vault.js`, `vault-index.js`, `vault-memory.js` | Memory, in the user's Obsidian vault: its notes read and written (only in `Jester/` and `Notes/`), searched by words and meaning, and what's kept from a conversation and recalled for one. |
-| `src/main/conversation-log.js`, `recollections.js` | The conversation going on (`conversation.json`), and a sentence for each that's over, kept a week. |
+| `src/main/conversation-log.js`, `chat-archive.js`, `chat-keeper.js`, `recollections.js` | The conversation going on (`conversation.json`), each that's over word for word for a week (`chats.json`, the Chats panel), what's kept when (`chat-keeper.js`), and a sentence for each, kept a week. |
+| `src/main/whereabouts.js`, `weather.js`, `calendars.js`, `situation.js`, `src/where/` | Where the user is (Location Services, or a place they name), the weather there (Open-Meteo), their calendars combined (iCal links, ical.js), and all three in lines for him each turn. |
 | `src/worklets/` | The mic for speech, captured on the audio thread; served to the engine page as `jester://ext/_desktop/worklets/…`. |
 | `src/main/assistant.js`, `src/main/agent/` | The assistant: the screen as the model reads it, and what a step changed (`screen.js`), its actions and how careful each is (`actions.js`), its prompt (`prompt.js`), the loop (`loop.js`), the hands (`host.js`), the numbers drawn on a picture of the window (`marks.js`) and learned tasks done again (`replay.js`). |
 | `src/main/window-shot.js` | A picture of the window the assistant is working in, for a model that reads pictures. |
@@ -53,6 +54,7 @@ front window fills its display.
 | `src/main/watch.js`, `watch-status.js`, `native/jester-watch/` | The Apple Watch: its app, the Mac's Swift Bluetooth helper, and steering the cursor with them (Mac only). |
 | `src/main/link.js`, `link-host.js`, `chrome-link.js` | The link to the extension: the socket the relay reaches, putting the relay where Chrome can start it, and what's said over it. The extension's half is `../jester-extension/src/background/desktop-link.js`. |
 | `src/main/model-jobs.js` | Which of the user's models talks and which acts (Settings › Models). |
+| `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
 | `scripts/vault-eval.mjs` | How well memory finds things in a vault: a sample vault and the questions it's scored on. |
 | `spikes/` | Phase 0 experiments, and `link-live.mjs`, the link end to end in a throwaway Chrome. |
@@ -94,16 +96,16 @@ words alone (below, Memory and Obsidian).
   the Dock or Login Items. It starts the same Electron as `dev:mac` on this
   checkout — the current code, and the permissions already given to
   "Electron" — logging to `~/Library/Logs/Jester/dev.log`; with Jester
-  running, it opens Settings. Its large icon sizes are scaled up from the
+  running, it brings up his window. Its large icon sizes are scaled up from the
   extension's 128 px one.
 - `npm start` — the app. Add `JESTER_LOG=1` to see gestures, cursor frames and CPU.
 - `npm run dev:mac` — the same, launched through `open` so macOS asks for the
   camera and Accessibility on behalf of "Electron" rather than the terminal or
   VS Code. Output: `~/Library/Logs/Jester/dev.log`, echoed to the terminal.
 
-The app lives in the menu bar. Settings opens by itself while Camera or
-Accessibility is missing, and from the menu otherwise; closing it leaves
-Jester running. The engine only gets the camera once macOS has granted it, so
+The app lives in the menu bar. His window opens by itself, on the orb, while
+Camera or Accessibility is missing, saying so, with Settings › Permissions a click
+away (Set up); otherwise it opens from the menu. Closing it leaves Jester running. The engine only gets the camera once macOS has granted it, so
 no prompt ever comes from the hidden window.
 
 For tests and development (see the top of `src/main/main.js`):
@@ -329,8 +331,11 @@ boxes, both ticked to start with, and takes a job only when no saved model can:
 none is ticked for it, or every one is out of requests for longer than the pool
 will wait (`all_models_rate_limited`). It isn't simply last in line: the pool
 skips a model that's waiting out a free plan's minute, and the next in line would
-then be 7.6 GB of local model loaded to save three seconds. A failure that isn't
-a limit (a refused key) is the user's to see, not covered for.
+then be 7.6 GB of local model loaded to save three seconds. A saved model that
+fails is covered for too (2026-11-13: Groq's gpt-oss-120b answered a turn with a
+400, "Failed to generate JSON", which Jester said aloud), unless only Settings
+can put it right: a refused key (401, 403) or a model that isn't there (404) is
+the user's to see. So is a turn they've moved on from.
 
 Talking through a cloud model needed the conversation's earlier turns sent to
 every provider, not only the OpenAI-compatible ones: `model-client.js` now gives
@@ -351,7 +356,12 @@ is built by vault-memory.js's own recall(). Keys stay sealed: it runs as
 Jester in Electron, so macOS may ask to let it use "Jester Safe Storage", and it
 never prints them. `-- ollama:qwen3.5:9b` checks one local model; `-- saved-all`
 every saved one, ticked or not. On qwen3.5:2b (2026-11-07, one try each): 16 of 19,
-a median turn of 0.4 s.
+a median turn of 0.4 s. `-- --only facts` runs eleven on never assuming and on
+what he can do (2026-11-13): a class in last week's conversations kept there
+rather than made one starting now, "what can you do?", and "can you…?" with
+connectors on and off. On qwen3.5:9b, two tries each: the class kept in the past
+6 of 6; booking a flight or ordering food 4 of 4 once told the laptop can, short
+of the card number (0 of 4 before).
 
 ### The continuous assistant
 
@@ -421,14 +431,21 @@ at the door. Five sentences make a voiceprint (`voiceprint.js`, sealed with the 
 keys), and `service.js` compares each utterance to it before decoding it, in about
 8 ms, so nothing anyone else says becomes text at all. TitaNet small was chosen on
 twelve synthetic voices: same voice 0.75-0.9, others 0.2, 2-3% equal error on clips
-up to 1.6 s and 5% on longer ones, against 21% for CAM++ and 6% for ResNet34. The
-thresholds (`MATCH`) are untested on real voices: each refusal logs its score.
+up to 1.6 s and 5% on longer ones, against 21% for CAM++ and 6% for ResNet34.
+Through a MacBook's own mic (dev.log, 2026-11-11 to 13) the real user scored
+0.42-0.74 and the rest of the room (videos, other people) -0.14-0.24, with a 0.31
+and one 0.40 over 20 s; the first bar of 0.6 left him deaf to them for a night at
+0.42-0.51. Now 0.5 (0.4 under 0.9 s) is the user (`MATCH`), and 0.35-0.5 is maybe
+the user (`MAYBE`): decoded, but taken only when it starts with his name, and never
+as a yes to his question or a follow-up without it. Below 0.35 isn't decoded.
+Every score is still logged ("your voice", "maybe your voice", "not your voice").
 Only with a voiceprint does he take what's said after an answer without his name;
 his name alone opens the next 8 seconds either way.
 
 `conversation.json` in the app's data folder holds what was said to him and what
-he said, for the model's context, and is emptied every hour. What's overheard
-isn't kept.
+he said, for the model's context, and is emptied every hour. Each conversation
+that's over is kept word for word for a week in `chats.json`, for the Chats panel
+(below), not for the model. What's overheard isn't kept.
 
 Conversations are told apart: one ends after 5 minutes of quiet, or when the model
 says a new subject has begun (`new` in its reply), but never while a task he handed
@@ -440,20 +457,96 @@ summed up once the vault is open. Up to six of those sentences,
 the ones sharing words with what's being said and then the latest, reach the model
 marked as over and separate, to use only if they matter.
 
-Menu bar › Talk to Jester opens `src/talk/`, his window: an orb that shows what
-he's doing, live captions, a light for whose voice he's listening to,
-what he remembers, a box to type to him (a typed command is on purpose, so it
-doesn't ask first, unless the model handed it back after reading the user's
-notes: Memory and Obsidian, below), and a way to stop him listening. It draws from the same frames
-as the pill, so the two can't disagree; while it's up and not minimized, the
-conversation's frames go only to it, and the pill is left to the assistant's tasks
-(with the × beside it). What a task did is then said in his window, never on the
-pill, so the conversation going on with no task at work ends the task's pill
-(`TASK_OVER`); before that, its last step stayed up for 90 s. The palette is the tokens atop `talk.css`.
+#### His window
+
+`src/home/` is the only window Jester has: Menu bar › Talk to Jester opens it on
+the orb, Settings… on Settings, and Allow… on Settings › Permissions. The Dock or
+a second launch brings it forward as it is, on whatever screen it's on, minimized or
+not (`reopenHome`; back on the orb from minimized, the orb's intro plays), or opens it
+on the orb when it isn't open. It's one strip of screens (`screens.js`): a chat,
+Chats, the orb, Settings, then Settings' pages. Going between them slides the new
+one in from the side it's on and pushes the old one out the other way, so Chats
+comes in from the left, where its button is, and Settings from the right, and back
+slides it all the other way (‹ or ›, Esc, ⌘[; ⌘, opens Settings). Mid-slide,
+nothing takes a click. The window says which screen it shows (`jester/home-screen`).
+The palette is the tokens atop `home.css`: Nightshade, dark only, with the quietest
+words (`--faint`) still 4.6:1 against every ground.
+
+Opened where it wasn't on screen, it starts as a dot of light that the orb spreads
+out of (`orb.intro`, 1.8 s), and the rest comes in after. It waits for main's
+`jester/home-shown`, sent once the window is shown, so its first frames aren't
+spent on a window nobody can see yet: Electron says `visibilityState` is `visible`
+even for a window never shown, so the page can't tell for itself. Shown before its
+page was listening, the page hears so in the answer to its first `jester/home-screen`.
+Not when coming back from Chats or Settings, and not with motion reduced. While
+another screen covers it, the orb draws nothing (`orb.pause`).
+
+The orb's screen draws from the same frames as the pill, so the two can't disagree;
+while it's in front and showing the orb, the conversation's frames go only to it,
+and the pill is left to the assistant's tasks (with the × beside it). In front, not
+merely visible: Electron can't tell a window covered by other apps' from one that's
+seen, so behind them the pill shows the conversation as well. What a
+task did is then said in his window, never on the pill, so the conversation going
+on with no task at work ends the task's pill (`TASK_OVER`); before that, its last
+step stayed up for 90 s. On another of the window's screens, the pill shows the
+conversation as it would with the window closed. Under the orb is the chat going
+on, from the log (`jester/chat`, sent to this window alone as it changes): once a
+chat starts, the orb glides up and shrinks, and when it's over the orb settles back
+and says the chat is in Chats now. Along the top: Chats, a light for whose voice
+he's listening for (a click opens its settings), and Settings. Along the bottom:
+Gestures, Sleep or Wake, the box to type to him (a typed command is on purpose, so
+it doesn't ask first, unless the model handed it back after reading the user's
+notes: Memory and Obsidian, below), and listening on or off. A needed permission
+that isn't allowed shows over the orb, a click from Settings › Permissions.
+
+Typed to, he writes back (`told(text, { typed: true })`): nothing is spoken, and
+the mic isn't held open for more. Written, a reply keeps every character (`writtenLine`,
+not the speech filter's cuts); on the pill it's cut short, and one that went wrong
+shows as such. A question the assistant asks about a typed command is written too,
+mic or no mic (`conversation.typing`); a command said with the shortcut makes them
+spoken again (`spoke()`). Only a whole yes or no typed answers it, its punctuation
+aside ("Yes, please." and "Don’t" do; "ok, what's it sending?" is asked again,
+`assistant.reask`), and a typed "stop" (or "shut up") stops a task. Listening switched
+off doesn't cut a typed turn short, and a typed task's result is written even when
+something's been said since; a conversation that's over (Forget it all, another chat
+picked up) gets nothing more, and Forget it all ends his "Thinking…" too. Spoken to,
+he speaks, as before. What a command said aloud outside the conversation did (the
+shortcut, with listening off: `command` on its answer) is said under the orb, or at
+the end of a chat going on, for a moment.
+
+Chats (`chat-archive.js`, `chats.json`; `chat-keeper.js` decides what's kept when):
+every conversation that's over is in Chats the moment it is, word for word for a
+week (swept every minute), with a line that looks like a password, card number or
+key kept as only that it held one, and so is the user's next short line after one
+that hands a secret over and stops ("my PIN is", then "4821"; "wifi password:"), or
+after his asking for one ("What's the wifi password?"); a question of the user's
+("how do I reset my password?") or a secret named in passing ("my car keys") hides
+nothing after it, nor does a line already left out. It's titled by its sentence from
+`recollections.js` once that's written, after he's answered; deleted or forgotten
+meanwhile, the sentence goes too, and nothing goes to the vault. One can be read,
+deleted (two clicks, the second not within half a second of the first; he forgets
+its sentence too, but what's already in the vault stays), or picked up: `restore`
+makes it the conversation going on again, its lines marked `earlier` (a left-out
+line stays left out), with its quiet counted from then, so it isn't over before
+anything's said, and the model can't split it off as a new subject before the user's
+said a second thing; its own sentence isn't offered to the model as a conversation
+that's over. Nor is any conversation split when something came after the user's line
+while he thought (a typed task's late result): the split would carry the wrong line. Not while he's working on something the conversation going on asked
+for, or waiting on a yes or no: that would land in the wrong chat. Over again, it
+takes its own place among the chats, and its sentence is written afresh from all of
+it, each earlier day named for the model; in the vault it's a section of its own,
+at the time it was picked up, marked "(continued)". Picked up and left alone, it
+keeps its place and its week, and nothing is summed up. Settings › Assistant ›
+Forget it all clears the chats with everything else, and drops what he was answering.
+
+Settings is a list of pages (`settings.js`). Every control kept the id it had in
+the Settings window this replaced, so the self-test still finds them; it goes to
+each page with `window.jesterHome.go`. The camera view is asked for only while
+Activity is showing.
 
 The orb is [thinking-orbs](https://www.npmjs.com/package/thinking-orbs) 0.3.2 (MIT):
 only its React-free engine, vendored in `src/vendor/thinking-orbs/`, drawn by
-`src/talk/orb.js`. Resting is `breathing`, listening `listening`, thinking `working`,
+`src/home/orb.js`. Resting is `breathing`, listening `listening`, thinking `working`,
 speaking `composing`, tinted `--orb`. Each frame is one to two thousand dots, each
 its own fill, so it's drawn 30 times a second, not at a 120 Hz display's rate,
 which kept the GPU process and window server busy. The pill shows a 32 px one with a word
@@ -463,12 +556,16 @@ beside the thinking orb, where the spinner was. Listening for a spoken command
 (the shortcut or a gesture) keeps the bars, which follow the mic. To update it, copy the new package's `dist/index-*.js`
 chunk over `engine.js`; `orb.js` imports its short export names.
 
+#### His voice
+
 His voice (`speaker.js`) is the computer's own until Puter is connected, and again
 whenever Puter fails. `puter.js` makes the call Puter's script makes, from the main
 process, so no remote code runs in the app; signing in goes through the browser,
 as Puter's Node package does. It isn't unlimited: Puter's source gives a free
 account $0.50 a month, or about 31,000 characters at this voice's price, and it
 answers 402 past that. Only what he says goes to Puter.
+
+### Planning and doing a command
 
 Before anything is done, one model call plans the command (`agent/plan.js`):
 up to eight steps — open an app or a link, a menu command, a key, a media key,
@@ -759,6 +856,96 @@ Session memory needs nothing more: one app on one computer keeps the conversatio
 in memory and in `conversation.json`, and the slow part of a turn is the model,
 not reading what was said.
 
+## Weather, location and calendars
+
+Settings › Weather and calendars tells Jester the user's day: where they are, the
+weather there, and every calendar they connect, combined. Nothing is on until they
+choose it there, so macOS's location question only ever comes when they've asked
+for it.
+
+**Where.** Location is Off, This Mac's location, or A place you name. This Mac's
+location is Location Services, read by Chromium's Core Location provider (Electron
+44 has it: `CoreLocationProvider`, `SystemGeolocationSourceApple`) from a hidden
+page of Jester's, `jester://app/where/where.html`, the only page given the
+`geolocation` permission, and only while Settings says so (`locating` in main.js).
+Wi-Fi positioning, to tens of metres. Chosen in Settings, a position is asked for
+at once and waited on for 90 s, since macOS asks first (in a dev build, for
+"Electron": its Info.plist has no location usage string, and whether macOS asks
+without one is unchecked: see below); after that, when he's talked to and the last
+is over 15 minutes old (the turn uses the last one meanwhile), and when the
+computer wakes or unlocks, never on a timer. "Where am I?", "near me" and the like
+wait up to 3 s for a fresh one. One that can't be had isn't tried again for two
+minutes, but Settings' Locate again always tries. A position is named by
+OpenStreetMap's Nominatim (street, town, state; its rules: an app name in the
+User-Agent, no more than one a second) once it's moved 150 m from the last named.
+A place you name is found by Open-Meteo's place search ("State College, PA":
+the state or country after a comma picks among places of that name).
+
+**Weather.** Open-Meteo: free, no key or account, worldwide. It's given the place
+to two decimals (about a kilometre), and a forecast is kept 10 minutes, then still
+used (up to 3 hours old) while a new one is fetched. °F, mph and inches where the
+computer's country uses them (`unitsFor`), or as Settings says. A place asked about
+("what's it like in Chicago tomorrow?") is found by name (`placeAsked`, then the
+place search, which decides whether it's a place at all: "in the afternoon", "in
+here" and "for tomorrow" never get that far).
+
+**Calendars.** Each is connected by its iCal (ICS) link, which every calendar app
+gives: Google's secret address, Outlook's published ICS link, an iCloud public
+calendar, Canvas's calendar feed. A link reads a calendar without signing in, so
+it's the same on Windows, and there's no Google or Microsoft app to register; but
+anyone with it can read that calendar, so links are in `PRIVATE_KEYS` (sealed with
+the keychain, never sent to a page). Settings gets each one's name, site, how many
+events are coming, and how its last read went. Each is read when added (one that
+isn't a calendar, or is a web page, is turned away in words), then every 15
+minutes, one at a time, and again on wake. Google's own feed can lag its calendar
+by hours. A read that fails keeps what the last one gave, and Settings says why.
+
+Events from a week back to 90 days ahead are kept: title, times, place, calendar.
+Never descriptions: they run long, and they're other people's words. ical.js parses
+the feed and expands recurring events, with their skipped dates (EXDATE) and moved
+or cancelled occurrences (RECURRENCE-ID); a zone the feed defines (Outlook's
+"Eastern Standard Time") is ical.js's to convert, one it only names
+("America/Los_Angeles", no VTIMEZONE) is converted with Intl, since ical.js would
+read it as UTC. ical.js steps through a series from its first occurrence: 150
+classes meeting three times a week since 2022 took 2.4 s, on the main process the
+cursor runs on, so a series without a COUNT starts stepping a whole number of its
+periods before the window (`startNear`; 50 ms, the same occurrences, a test
+checks five kinds of rule against the walk from the start). An invitation the
+user declined on a Google calendar is left out (the feed's address says whose it
+is); cancelled ones are too. The same event on two calendars (the same invitation,
+or the same title at the same times) is one, naming both.
+
+**What he's told.** `situation.js` writes it, before what's recalled from the
+vault, in the same bracketed block (an event title's brackets made round, so one
+can't end the block). Every turn: the town, the weather now, today's and
+tomorrow's, and the calendars for the rest of today and tomorrow (ten events at
+most) and the next one after. Words decide when there's more, as they do what's
+recalled: about the weather, the next 12 hours and the week; about their schedule
+("free", "class", "tomorrow", "Friday"…), the week from this morning, or further
+("next week", "this month", "December 3rd", "12/20", "in January"), or from a week
+back ("yesterday", "last Monday"), 40 events at most; about where they are, the
+street and coordinates. A calendar that couldn't be read is said to be missing, so
+he doesn't call the day empty. dev.log gets `knew: here ±35 m, weather, 2 events`,
+never the place or an event.
+
+His prompt then says the brackets hold what's live and to answer from them: the
+weather, never a search for it, and their day, never handed to the laptop, unless
+they ask for an app or site to be opened ("open my Canvas and tell me what's due"
+is still the laptop's). With nothing connected his prompt is word for word what it
+was. A turn told any calendar event is one whose command asks first if it could do
+harm, as a turn told the user's own notes is: an event's title is often someone
+else's words.
+
+What leaves the computer: the position to OpenStreetMap (to name it) and, to the
+kilometre, to Open-Meteo; calendar links to their own sites; and the town, the
+weather and the events above to the model ticked for Talking, with what was said
+(the street only when they ask where they are).
+
+Not done: the Mac's own Calendar app (EventKit would take a usage string Electron's
+dev bundle doesn't have, and a helper app to ask from); writing to a calendar; the
+weather or calendars in tasks the assistant does. Windows' location is Chromium's
+there, untested.
+
 ## The cursor
 
 The engine's cursor frames are fractions of the screen the cursor aims at (the
@@ -937,7 +1124,7 @@ Linked:
   or a spoken yes), and the outcome comes back to be shown or said. The × and
   "stop" stop it. With no Chrome window in view, the last one used comes forward,
   or a new one opens if Chrome has none; the task works in that window's tab even
-  while the app's own window (the talk window, say) keeps the focus.
+  while the app's own window (his window, say) keeps the focus.
   In conversation the extension gets the user's own words and what the
   conversation took them to mean (`meant`), as the app's assistant does: "try now"
   or "keep going" means nothing to Chrome by itself. Its planner uses the words,
@@ -987,8 +1174,8 @@ models decode in under 35 ms.
    "Electron" under Privacy & Security › Accessibility when asked; the check
    clicks only inside its own window and stops if anything else comes to the
    front. Results: the window, the terminal, `spikes/input-report.json`.
-2. **Camera**: `npm run dev:mac`. Settings opens asking for the camera; click
-   Allow…, and the engine starts. Raise an open palm, make a fist, try a few
+2. **Camera**: `npm run dev:mac`. His window opens saying Jester needs the camera;
+   click Set up, then Allow…, and the engine starts. Raise an open palm, make a fist, try a few
    bound gestures: each shows under Activity › Last gesture and in the log.
 3. **Hands** (the Atticus-style actions; the tests cover their logic, not real
    apps): with Spotify installed, say "play Gunna" — it should play with no

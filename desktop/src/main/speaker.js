@@ -31,6 +31,18 @@ export function spokenLine(text) {
 }
 
 /**
+ * A line he writes rather than says (to someone typing to him): read, not heard, so every character stays and
+ * nothing is cut. Only spacing is tidied, and a list run together with " · " reads as sentences, as said.
+ */
+export function writtenLine(text) {
+  return String(text ?? '')
+    .replace(/([.!?…])?[ \t]+·[ \t]+/g, (_, end) => `${end || '.'} `)
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .trim();
+}
+
+/**
  * The OS's own voice. `muted` (tests) writes the speech to a file instead.
  * @returns {{say:(text:string) => Promise<void>, stop:() => void}}
  */

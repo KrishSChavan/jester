@@ -4,7 +4,7 @@
  */
 
 import { GESTURES, MSG } from '../ext/src/common/constants.js';
-import { createOrb, ORB_STATES } from '../talk/orb.js';
+import { createOrb, ORB_STATES } from '../home/orb.js';
 
 const display = Number(new URLSearchParams(location.search).get('display'));
 const $ = (id) => document.getElementById(id);

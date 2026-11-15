@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Jester</title>
+    <link rel="stylesheet" href="home.css" />
+  </head>
+  <body data-state="resting" class="opening">
+    <!-- Icons: 24×24, drawn with a 1.8 stroke in the text's colour. -->
+    <svg class="sprite" aria-hidden="true" focusable="false">
+      <symbol id="i-chats" viewBox="0 0 24 24"><path d="M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9l-4 3.5V17H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" /><path d="M7.5 9h9M7.5 12.5h6" /></symbol>
+      <symbol id="i-gear" viewBox="0 0 24 24"><path d="M9.32 5.53 L10.80 5.10 L10.97 2.66 L13.03 2.66 L13.20 5.10 L14.68 5.53 L16.03 6.27 L17.88 4.66 L19.34 6.12 L17.73 7.97 L18.47 9.32 L18.90 10.80 L21.34 10.97 L21.34 13.03 L18.90 13.20 L18.47 14.68 L17.73 16.03 L19.34 17.88 L17.88 19.34 L16.03 17.73 L14.68 18.47 L13.20 18.90 L13.03 21.34 L10.97 21.34 L10.80 18.90 L9.32 18.47 L7.97 17.73 L6.12 19.34 L4.66 17.88 L6.27 16.03 L5.53 14.68 L5.10 13.20 L2.66 13.03 L2.66 10.97 L5.10 10.80 L5.53 9.32 L6.27 7.97 L4.66 6.12 L6.12 4.66 L7.97 6.27 Z" /><circle cx="12" cy="12" r="3" /></symbol>
+      <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7" /></symbol>
+      <symbol id="i-mic-off" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7M4 4l16 16" /></symbol>
+      <symbol id="i-hand" viewBox="0 0 24 24"><path d="M8 13V7a1.5 1.5 0 0 1 3 0v4.5M11 11.5V5.5a1.5 1.5 0 0 1 3 0v6M14 11.5V7a1.5 1.5 0 0 1 3 0v5.5" /><path d="M17 12.5V10a1.5 1.5 0 0 1 3 0v4.5c0 3.6-2.9 6.5-6.5 6.5h-1.2c-2 0-3.8-1-4.9-2.6l-2.8-4.1a1.6 1.6 0 0 1 2.6-1.8L8 13.6" /></symbol>
+      <symbol id="i-hand-off" viewBox="0 0 24 24"><path d="M8 13V7a1.5 1.5 0 0 1 3 0v4.5M11 11.5V5.5a1.5 1.5 0 0 1 3 0v6M14 11.5V7a1.5 1.5 0 0 1 3 0v5.5" /><path d="M17 12.5V10a1.5 1.5 0 0 1 3 0v4.5c0 3.6-2.9 6.5-6.5 6.5h-1.2c-2 0-3.8-1-4.9-2.6l-2.8-4.1a1.6 1.6 0 0 1 2.6-1.8L8 13.6M3.5 3.5l17 17" /></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 13.2A8.5 8.5 0 1 1 10.8 3.5a6.6 6.6 0 0 0 9.7 9.7z" /></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" /><path d="M12 2.5v2M12 19.5v2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M2.5 12h2M19.5 12h2M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4" /></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5.5M6 11.5l6-6 6 6" /></symbol>
+      <symbol id="i-back" viewBox="0 0 24 24"><path d="M14.5 5.5L8 12l6.5 6.5" /></symbol>
+      <symbol id="i-forward" viewBox="0 0 24 24"><path d="M9.5 5.5L16 12l-6.5 6.5" /></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" /></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5L2.5 20h19z" /><path d="M12 10v4.5M12 17.4v.1" /></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-3 8-7 9.5-4-1.5-7-5.1-7-9.5V6z" /><path d="M9 12l2 2 4-4" /></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></symbol>
+      <symbol id="i-watch" viewBox="0 0 24 24"><rect x="7" y="6" width="10" height="12" rx="3" /><path d="M9 6l.5-3h5l.5 3M9 18l.5 3h5l.5-3M12 10v2.5l1.5 1" /></symbol>
+      <symbol id="i-voice" viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" /></symbol>
+      <symbol id="i-book" viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5z" /><path d="M5 19.5A1.5 1.5 0 0 0 6.5 21H19v-3M9 7.5h6" /></symbol>
+      <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="2" /><path d="M3.5 10h17M8 3v4M16 3v4" /></symbol>
+      <symbol id="i-chip" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" /><path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4" /></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1" /><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" /></symbol>
+      <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4" /></symbol>
+    </svg>
+
+    <div id="screens">
+      <!-- The orb, and talking to him. Chats are to the left of it, Settings to the right. -->
+      <section id="main" class="screen shown" data-screen="main" aria-label="Jester">
+        <header class="top main-top">
+          <button id="to-chats" class="chip" type="button" data-go="chats" title="Earlier chats">
+            <svg class="icon-svg"><use href="#i-chats" /></svg><span>Chats</span>
+          </button>
+          <button id="light" class="light" type="button"><i></i><span id="light-text" aria-live="polite" aria-atomic="true">Starting…</span></button>
+          <button id="to-settings" class="icon" type="button" data-go="settings" aria-label="Settings" title="Settings">
+            <svg class="icon-svg"><use href="#i-gear" /></svg>
+          </button>
+        </header>
+        <div id="banner" class="banner" role="alert" hidden>
+          <svg class="icon-svg"><use href="#i-alert" /></svg>
+          <span id="banner-text"></span>
+          <button id="banner-fix" type="button">Set up</button>
+        </div>
+        <div class="stage">
+          <div id="presence" class="presence">
+            <canvas id="orb" aria-hidden="true"></canvas>
+            <p id="hint" class="hint" aria-live="polite"></p>
+          </div>
+          <div id="live" class="live" aria-label="This chat">
+            <ol id="live-lines" class="lines" aria-live="polite"></ol>
+          </div>
+        </div>
+        <footer class="bottom">
+          <button id="gestures" class="round" type="button" aria-pressed="true" aria-label="Gestures"><svg class="icon-svg"><use href="#i-hand" /></svg></button>
+          <button id="sleep" class="round" type="button"><svg class="icon-svg"><use href="#i-moon" /></svg></button>
+          <form id="type" class="type">
+            <label class="unseen" for="text">Type to him</label>
+            <input id="text" type="text" placeholder="Type to him" autocomplete="off" spellcheck="true" maxlength="2000" data-autofocus />
+            <button id="send" class="send" type="submit" aria-label="Send"><svg class="icon-svg"><use href="#i-send" /></svg></button>
+          </form>
+          <button id="listen" class="round mic" type="button" aria-pressed="false" aria-label="Listening for his name"><svg class="icon-svg"><use href="#i-mic" /></svg></button>
+        </footer>
+      </section>
+
+      <!-- Chats: every conversation that's over, for a week. -->
+      <section id="chats" class="screen" data-screen="chats" aria-labelledby="chats-title" inert>
+        <header class="top">
+          <h1 id="chats-title">Chats</h1>
+          <button class="icon" type="button" data-go="main" aria-label="Back to Jester" title="Back to Jester"><svg class="icon-svg"><use href="#i-forward" /></svg></button>
+        </header>
+        <div class="scroll">
+          <div id="chat-list" class="chat-list"></div>
+          <p id="chats-none" class="empty" hidden>No chats yet. Once a conversation with Jester is over, it’s kept here, word for word, for a week.</p>
+          <p class="note">Kept on this computer for a week, then gone. A line that looks like a password or a card number is left out. Deleting a chat here deletes its words and the sentence he remembers it by; what’s already in your Obsidian vault (Jester › Conversations, About me) stays until you delete it there.</p>
+        </div>
+      </section>
+
+      <!-- One chat, to read again or carry on. -->
+      <section id="chat" class="screen" data-screen="chat" aria-labelledby="chat-title" inert>
+        <header class="top">
+          <h1 id="chat-title">Chat</h1>
+          <button id="chat-delete" class="icon danger" type="button" aria-label="Delete this chat" title="Delete this chat"><svg class="icon-svg"><use href="#i-trash" /></svg><span hidden>Delete</span></button>
+          <button class="icon" type="button" data-go="chats" aria-label="Back to Chats" title="Back to Chats"><svg class="icon-svg"><use href="#i-forward" /></svg></button>
+        </header>
+        <div id="chat-scroll" class="scroll">
+          <ol id="chat-lines" class="lines"></ol>
+        </div>
+        <footer class="bottom">
+          <form id="chat-type" class="type">
+            <label class="unseen" for="chat-text">Carry on this chat</label>
+            <input id="chat-text" type="text" placeholder="Carry on this chat" autocomplete="off" spellcheck="true" maxlength="2000" />
+            <button class="send" type="submit" aria-label="Send"><svg class="icon-svg"><use href="#i-send" /></svg></button>
+          </form>
+          <button id="chat-resume" class="chip strong" type="button" title="Make this the chat going on, to talk or type in">Pick up</button>
+        </footer>
+      </section>
+
+      <!-- Settings: a list of pages, each sliding in from the right. -->
+      <section id="settings" class="screen" data-screen="settings" aria-labelledby="settings-title" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="main" aria-label="Back to Jester" title="Back to Jester"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="settings-title">Settings</h1>
+        </header>
+        <div class="scroll">
+          <div class="hero">
+            <img src="../ext/icons/icon48.png" alt="" width="40" height="40" />
+            <div>
+              <strong>Jester</strong>
+              <p id="status" class="status" role="status"><span class="dot"></span><span id="status-text">Starting…</span></p>
+            </div>
+          </div>
+          <nav class="cards index" aria-label="Settings">
+            <button class="row go" type="button" data-go="settings/permissions"><span class="glyph"><svg class="icon-svg"><use href="#i-shield" /></svg></span><span class="label">Permissions</span><span class="aside" id="sum-permissions"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/controls"><span class="glyph"><svg class="icon-svg"><use href="#i-sliders" /></svg></span><span class="label">Controls</span><span class="aside" id="sum-controls"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/watch" id="go-watch"><span class="glyph"><svg class="icon-svg"><use href="#i-watch" /></svg></span><span class="label">Apple Watch</span><span class="aside" id="sum-watch"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/assistant"><span class="glyph"><svg class="icon-svg"><use href="#i-voice" /></svg></span><span class="label">Assistant and voice</span><span class="aside" id="sum-assistant"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/memory"><span class="glyph"><svg class="icon-svg"><use href="#i-book" /></svg></span><span class="label">Memory</span><span class="aside" id="sum-memory"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/day"><span class="glyph"><svg class="icon-svg"><use href="#i-calendar" /></svg></span><span class="label">Weather and calendars</span><span class="aside" id="sum-day"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/models"><span class="glyph"><svg class="icon-svg"><use href="#i-chip" /></svg></span><span class="label">Models</span><span class="aside" id="sum-models"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/chrome"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Chrome</span><span class="aside" id="sum-chrome"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/gestures"><span class="glyph"><svg class="icon-svg"><use href="#i-hand" /></svg></span><span class="label">Gestures and shortcuts</span><span class="aside" id="sum-gestures"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/activity"><span class="glyph"><svg class="icon-svg"><use href="#i-pulse" /></svg></span><span class="label">Activity</span><span class="aside" id="sum-activity"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+          </nav>
+          <p class="note">Changes save as you make them. Closing this window leaves Jester running in the menu bar.</p>
+        </div>
+      </section>
+
+      <section id="page-permissions" class="screen page" data-screen="settings/permissions" aria-labelledby="permissions-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="permissions-heading">Permissions</h1>
+        </header>
+        <div class="scroll">
+          <p id="permissions-intro" class="intro"></p>
+          <ul id="permissions" class="cards"></ul>
+        </div>
+      </section>
+
+      <section id="page-controls" class="screen page" data-screen="settings/controls" aria-labelledby="controls-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="controls-heading">Controls</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <label class="row">
+              <span><strong>Jester on</strong><small>Off, Jester stops watching and listening: no gestures, cursor, voice commands or watch.</small></span>
+              <input type="checkbox" id="enabled" />
+            </label>
+            <label class="row">
+              <span><strong>Gestures</strong><small>Watch the camera for poses and swipes. Off, the camera’s closed, and voice, the watch and talking to him carry on.</small></span>
+              <input type="checkbox" id="gesturesEnabled" />
+            </label>
+            <label class="row">
+              <span><strong>Cursor control</strong><small>Raise an open palm to aim with your eyes or head; close it to click.</small></span>
+              <input type="checkbox" id="pointerEnabled" />
+            </label>
+            <label class="row">
+              <span><strong>Aim with</strong><small id="pointerAim-hint"></small></span>
+              <select id="pointerAim"></select>
+            </label>
+            <div class="row">
+              <span><strong>Eye calibration</strong><small id="calibration-state">Not calibrated yet.</small></span>
+              <button id="calibrate" type="button">Calibrate…</button>
+            </div>
+            <label class="row">
+              <span><strong>Head speed</strong><small>How far a turn of the head moves the cursor.</small></span>
+              <input type="range" id="headSpeed" min="0.4" max="2.5" step="0.1" />
+            </label>
+            <label class="row">
+              <span><strong>Camera</strong><small id="camera-hint">The camera Jester watches.</small></span>
+              <select id="cameraDeviceId"></select>
+            </label>
+            <label class="row" id="voice-row">
+              <span><strong>Voice commands</strong><small id="voice-hint"></small></span>
+              <input type="checkbox" id="voiceEnabled" />
+            </label>
+            <label class="row" id="speech-model-row">
+              <span><strong>Speech model</strong><small id="speech-model-hint"></small></span>
+              <select id="speechModel"></select>
+            </label>
+            <div class="row">
+              <span><strong>Restart Jester</strong><small>Quit and start again, if something stops responding.</small></span>
+              <button id="restart" type="button">Restart</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-watch" class="screen page" data-screen="settings/watch" aria-labelledby="watch-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="watch-heading">Apple Watch</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <label class="row">
+              <span><strong>Steer with your watch</strong><small id="watch-hint"></small></span>
+              <input type="checkbox" id="watchEnabled" />
+            </label>
+            <div class="row">
+              <span><strong id="watch-pair-title"></strong><small id="watch-pair-hint"></small></span>
+              <div class="actions">
+                <button id="watch-pair" type="button"></button>
+                <button id="watch-cancel" type="button" hidden>Cancel</button>
+              </div>
+            </div>
+            <label class="row">
+              <span><strong>Watch speed</strong><small>How far a turn of the wrist moves the cursor.</small></span>
+              <input type="range" id="watchSpeed" min="0.4" max="2.5" step="0.1" />
+            </label>
+            <label class="row">
+              <span><strong>Reverse up and down</strong><small>If tipping your hand up moves the cursor down.</small></span>
+              <input type="checkbox" id="watchInvertY" />
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-assistant" class="screen page" data-screen="settings/assistant" aria-labelledby="assistant-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="assistant-heading">Assistant and voice</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <label class="row" id="continuous-row">
+              <span><strong>Continuous assistant</strong><small id="continuous-hint"></small></span>
+              <input type="checkbox" id="continuousAssistant" />
+            </label>
+            <label class="row">
+              <span><strong>Pictures of the window</strong><small id="pictures-hint"></small></span>
+              <input type="checkbox" id="agentScreenshots" />
+            </label>
+            <div class="row">
+              <span><strong>Your voice</strong><small id="voice-print-hint"></small></span>
+              <span class="buttons">
+                <button id="voice-print-teach" type="button"></button>
+                <button id="voice-print-forget" type="button" hidden>Forget</button>
+              </span>
+            </div>
+            <div class="row">
+              <span><strong>Jester’s voice</strong><small id="puter-hint"></small><small id="puter-error" class="error" role="alert"></small></span>
+              <button id="puter-connect" type="button"></button>
+            </div>
+            <div class="row">
+              <span><strong>What he remembers</strong><small>Each chat is kept word for word for a week, to read again in Chats or carry on, and as one sentence for him to remember it by: a line that looks like a password or card number is left out. Forget it all clears those. What’s in your vault stays until you delete it there.</small></span>
+              <button id="forget-conversations" type="button">Forget it all</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-memory" class="screen page" data-screen="settings/memory" aria-labelledby="memory-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="memory-heading">Memory</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <div class="row">
+              <span><strong>Obsidian vault</strong><small id="vault-hint"></small><small id="vault-problem" class="error" role="alert"></small></span>
+              <span class="buttons">
+                <button id="vault-use" type="button" hidden></button>
+                <button id="vault-choose" type="button">Choose…</button>
+                <button id="vault-remove" type="button" hidden>Stop using</button>
+                <button id="vault-open" type="button" hidden>Open in Obsidian</button>
+                <button id="vault-privacy" type="button" hidden>Open Privacy Settings</button>
+              </span>
+            </div>
+            <div class="row">
+              <span><strong>Search</strong><small id="vault-search"></small></span>
+              <button id="vault-reindex" type="button" hidden>Read again</button>
+            </div>
+            <label class="row">
+              <span><strong>Remember conversations</strong><small>In your vault, after each one: a summary in Jester › Conversations and what you said about yourself in Jester › About me, word for word only when you say “remember this”, and never passwords or card numbers. (Chats, in this window, keep each conversation word for word on this computer for a week.)</small></span>
+              <input type="checkbox" id="memoryConversations" />
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-day" class="screen page" data-screen="settings/day" aria-labelledby="day-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="day-heading">Weather and calendars</h1>
+        </header>
+        <div class="scroll">
+          <p class="intro">Your day, for Jester to know as he talks with you: where you are, the weather there, and every calendar you connect, combined. Each time you talk to him, the town, today’s weather and your next two days go to the model ticked for Talking with what you say; ask about your week, the forecast or where you are, and he’s told more.</p>
+          <div class="cards">
+            <label class="row">
+              <span><strong>Location</strong><small id="location-hint"></small><small id="location-problem" class="error" role="alert"></small></span>
+              <select id="locationSource">
+                <option value="off">Off</option>
+                <option value="here" id="location-here">This Mac’s location</option>
+                <option value="place">A place you name</option>
+              </select>
+            </label>
+            <form class="row" id="place-form" hidden>
+              <span><strong>Place</strong><small>A town or city, with its state or country if there are others like it: “State College, PA”.</small><small id="place-error" class="error" role="alert"></small></span>
+              <span class="controls">
+                <input id="place-name" type="text" spellcheck="false" autocomplete="off" aria-label="Place" />
+                <button id="place-set" type="submit">Set</button>
+              </span>
+            </form>
+            <div class="row" id="location-actions" hidden>
+              <span><strong>This Mac’s position</strong><small id="location-detail"></small></span>
+              <span class="buttons">
+                <button id="location-again" type="button">Locate again</button>
+                <button id="location-privacy" type="button" hidden>Open Privacy Settings</button>
+              </span>
+            </div>
+            <label class="row">
+              <span><strong>Weather</strong><small id="weather-hint"></small></span>
+              <select id="weatherUnits">
+                <option value="auto">Automatic</option>
+                <option value="fahrenheit">°F, mph</option>
+                <option value="celsius">°C, km/h</option>
+              </select>
+            </label>
+          </div>
+          <div class="cards" id="calendars"></div>
+          <form id="calendar-form" class="cards">
+            <label class="row">
+              <span><strong>Calendar link</strong><small>Its iCal (ICS) address: anyone with it can read that calendar, so it’s kept encrypted on this computer and never shown again.</small></span>
+              <input id="calendar-url" type="password" spellcheck="false" autocomplete="off" placeholder="https://… or webcal://…" />
+            </label>
+            <label class="row">
+              <span><strong>Name</strong><small>Optional: what Jester calls it. Otherwise, the calendar’s own name.</small></span>
+              <input id="calendar-name" type="text" spellcheck="false" autocomplete="off" placeholder="Penn State" />
+            </label>
+            <div class="row">
+              <span id="calendar-error" class="error" role="alert"></span>
+              <button id="calendar-add" type="submit" class="primary">Add calendar</button>
+            </div>
+          </form>
+          <details class="cards help" id="calendar-help">
+            <summary>Where to find a calendar’s link</summary>
+            <dl>
+              <dt>Google Calendar</dt>
+              <dd>On calendar.google.com: ⚙︎ › Settings, then the calendar under “Settings for my calendars” › Integrate calendar › <strong>Secret address in iCal format</strong>. One link per calendar. (A school or work account may have it turned off.)</dd>
+              <dt>Outlook and Microsoft 365</dt>
+              <dd>In Outlook on the web: ⚙︎ › Calendar › Shared calendars › <strong>Publish a calendar</strong>: pick the calendar and “Can view all details”, Publish, then copy the ICS link.</dd>
+              <dt>iCloud</dt>
+              <dd>In the Calendar app, the calendar’s sharing settings › <strong>Public Calendar</strong>, then copy its webcal:// link. Anyone with it can see that calendar.</dd>
+              <dt>Canvas</dt>
+              <dd>Calendar › <strong>Calendar Feed</strong> (at the bottom of the side panel): every course’s due dates, in one link.</dd>
+            </dl>
+            <p>Calendars are read again every 15 minutes, and Google’s link can itself be a few hours behind the calendar. Events a week back to three months ahead are kept: titles, times and places, never descriptions.</p>
+          </details>
+        </div>
+      </section>
+
+      <section id="page-models" class="screen page" data-screen="settings/models" aria-labelledby="models-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="models-heading">Models</h1>
+        </header>
+        <div class="scroll">
+          <p class="intro">A model does two jobs for Jester: <strong>talking</strong> with you, and <strong>actions</strong>, working the app in front step by step on commands he doesn’t know (“play Gunna”, “reply to Sam on Slack”), so the names and text of that window’s controls go to it, and a picture of the window when those aren’t enough and you allow it. Tick what each model does, so one can talk and another act without using up each other’s free requests. A job tries its models in order, then this computer’s when none of them can.</p>
+          <div class="cards" id="model-jobs">
+            <div class="row"><span><strong>Talking</strong><small id="job-talk"></small></span></div>
+            <div class="row"><span><strong>Actions</strong><small id="job-act"></small></span></div>
+          </div>
+          <div class="cards" id="connections"></div>
+          <div class="cards" id="local-model">
+            <div class="row model">
+              <span><strong>This computer (Ollama)</strong><small id="chat-model-hint"></small></span>
+              <span class="controls">
+                <select id="assistantModel" aria-label="This computer’s model"></select>
+                <label class="use"><input type="checkbox" id="local-talk" />Talking</label>
+                <label class="use"><input type="checkbox" id="local-act" />Actions</label>
+              </span>
+            </div>
+          </div>
+          <p class="intro">For actions, Jester asks you first before anything that sends, buys, deletes or changes settings — answer with 👍, the pill’s Allow, or by saying yes — and never types into password fields.</p>
+          <form id="connection-form" class="cards">
+            <label class="row">
+              <span><strong>Provider</strong></span>
+              <select id="connection-provider"></select>
+            </label>
+            <label class="row" id="connection-url-row" hidden>
+              <span><strong>API address</strong><small>An OpenAI-compatible API: https, or http on this computer.</small></span>
+              <input id="connection-url" type="url" placeholder="https://…/v1" spellcheck="false" />
+            </label>
+            <label class="row">
+              <span><strong>Model</strong><small>The model’s ID, as your provider names it.</small></span>
+              <input id="connection-model" type="text" spellcheck="false" autocomplete="off" />
+            </label>
+            <label class="row" id="connection-key-row">
+              <span><strong>API key</strong><small>Stored encrypted on this computer, and never shown again.</small></span>
+              <input id="connection-key" type="password" spellcheck="false" autocomplete="off" />
+            </label>
+            <label class="row" id="connection-plan-row">
+              <span><strong>Plan</strong><small>Free plans are paced to stay under their per-minute limits.</small></span>
+              <select id="connection-plan">
+                <option value="free">Free</option>
+                <option value="paid">Paid</option>
+              </select>
+            </label>
+            <div class="row">
+              <span><strong>Use for</strong><small id="connection-uses-hint">A model that talks hears what you say to him, so it goes to its provider.</small></span>
+              <span class="controls">
+                <label class="use"><input type="checkbox" id="connection-talk" />Talking</label>
+                <label class="use"><input type="checkbox" id="connection-act" checked />Actions</label>
+              </span>
+            </div>
+            <div class="row">
+              <span id="connection-error" class="error" role="alert"></span>
+              <button id="connection-add" type="submit" class="primary">Add model</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section id="page-chrome" class="screen page" data-screen="settings/chrome" aria-labelledby="chrome-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="chrome-heading">Chrome</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <div class="row">
+              <span><strong id="chrome-link-title">Jester in Chrome</strong><small id="chrome-link-hint"></small></span>
+              <span id="chrome-link-state" class="value"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="page-gestures" class="screen page" data-screen="settings/gestures" aria-labelledby="gestures-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="gestures-heading">Gestures and shortcuts</h1>
+        </header>
+        <div class="scroll">
+          <p class="intro" id="gestures-intro">What each pose and swipe does. Hold a pose until its bar fills.</p>
+          <div class="cards" id="bindings-main"></div>
+          <label class="row split cards">
+            <span><strong>Different gestures outside full screen</strong><small>One set while a window fills the screen (a film, a slideshow), another for everything else.</small></span>
+            <input type="checkbox" id="windowedBindingsEnabled" />
+          </label>
+          <div id="windowed-block" hidden>
+            <p class="intro">Outside full screen:</p>
+            <div class="cards" id="bindings-windowed"></div>
+          </div>
+          <h2 id="shortcuts-heading">Your shortcuts</h2>
+          <p class="intro">Any keyboard shortcut, for a gesture to press: bind “Your shortcut 1–3” above. Write it like <code>cmd+shift+4</code> or <code>ctrl+alt+t</code>.</p>
+          <div class="cards" id="shortcuts"></div>
+        </div>
+      </section>
+
+      <section id="page-activity" class="screen page" data-screen="settings/activity" aria-labelledby="activity-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="activity-heading">Activity</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <div class="row"><span><strong>Last gesture</strong></span><span id="last-gesture" class="value">None yet</span></div>
+            <div class="row"><span><strong>Camera</strong></span><span id="camera-stats" class="value">—</span></div>
+            <div class="row column">
+              <span><strong>Camera view</strong><small>What Jester sees, with the hand it finds drawn on it. Shown only here, while this page is open; nothing is saved.</small></span>
+              <img id="camera-preview" alt="Jester's camera view" hidden />
+            </div>
+          </div>
+          <p id="dev-note" class="intro" hidden>Using Chromium's synthetic camera (JESTER_FAKE_MEDIA): no hands will be seen.</p>
+        </div>
+      </section>
+    </div>
+    <script type="module" src="home.js"></script>
+  </body>
+</html>

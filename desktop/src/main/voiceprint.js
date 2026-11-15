@@ -3,9 +3,11 @@
  * a voiceprint: a list of numbers describing the voice, which can't be played back
  * or turned into words. It stays on this computer, sealed with the API keys.
  *
- * The thresholds are from TitaNet small on twelve synthetic voices (README), where
- * the same voice scored 0.75-0.9 and others 0.2. Real voices through a laptop
- * mic will sit somewhere else: every score is logged, to tune these against.
+ * The thresholds started from TitaNet small on twelve synthetic voices (README),
+ * where the same voice scored 0.75-0.9 and others 0.2. Through the MacBook's own
+ * mic (dev.log, 2026-11-11 to 13) the user scored 0.42-0.74, a night at 0.42-0.51
+ * leaving him deaf to them, while the rest of the room (videos, others) scored
+ * -0.14-0.24, with a 0.31 and one long 0.40. Every score is still logged.
  */
 
 /** Long enough each to give the model something to go on, and said the way he'll hear you. */
@@ -19,11 +21,16 @@ export const TEACHING_LINES = [
 /** What's been read must run at least this long to count. */
 export const TEACHING_SECONDS = 1.2;
 
-/** Scores this low are someone else: 1 is identical, 0 unrelated. */
-export const MATCH = 0.6;
+/** Scores at least this are the user: 1 is identical, 0 unrelated. */
+export const MATCH = 0.5;
 /** A word or two gives the model less to go on: "yes" must still be the user's, but it can't score as high. */
-export const SHORT_MATCH = 0.5;
+export const SHORT_MATCH = 0.4;
 export const SHORT_SECONDS = 0.9;
+/**
+ * Below the user's bar but above the room's: maybe them, on a bad night for the mic. Such words are decoded and
+ * count only when they start with his name, never as a "yes" or a follow-up: those are the user's alone.
+ */
+export const MAYBE = 0.35;
 
 const unit = (values) => {
   const size = Math.hypot(...values);
@@ -52,3 +59,6 @@ export function likeness(a, b) {
 
 /** Whether this is the user. Short clips are given a lower bar. */
 export const sounds = (score, seconds) => score >= (seconds < SHORT_SECONDS ? SHORT_MATCH : MATCH);
+
+/** 'you', 'maybe' (only with his name) or 'stranger' (not even decoded). */
+export const judged = (score, seconds) => (sounds(score, seconds) ? 'you' : score >= MAYBE ? 'maybe' : 'stranger');

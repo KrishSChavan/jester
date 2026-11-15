@@ -7,7 +7,7 @@
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
  * Messages in:  start {model} · begin · listen · voiceprint {print} · teaching {on} · audio {samples} · end · abort · transcribe {samples}
- * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, score, seconds, voice?} · stranger {score, seconds} · error {detail}
+ * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · heard {text, decodeMs, score, seconds, unsure?, voice?} · stranger {score, seconds} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
@@ -15,7 +15,8 @@
  * his name, and `wake` says it's there: only that, never the words.
  * Nothing heard this way is saved, whatever JESTER_SAVE_SPEECH says.
  * With a voiceprint set, a voice that isn't the user's is never even decoded:
- * no text of what anyone else says exists, here or anywhere.
+ * no text of what anyone else says exists, here or anywhere. One that's only
+ * maybe theirs (voiceprint.js MAYBE) is, marked `unsure`: it needs his name.
  *
  * JESTER_SAVE_SPEECH=folder keeps each utterance as a WAV with what was
  * heard beside it, for comparing models on a real voice. Off unless set.
@@ -24,7 +25,7 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { sounds, likeness } from '../voiceprint.js';
+import { judged, likeness } from '../voiceprint.js';
 import { wakesEarly } from '../wake.js';
 import { modelDir, SPEECH_MODELS, VAD_MODEL, VOICE_MODEL } from './models.js';
 
@@ -175,10 +176,11 @@ async function hear(samples) {
   const seconds = samples.length / SAMPLE_RATE;
   const voice = voiceprint || teaching ? voiceOf(samples) : null;
   const score = voiceprint ? (voice ? likeness(voice, voiceprint) : 0) : null;
-  if (voiceprint && !teaching && !sounds(score, seconds)) return send({ type: 'stranger', score, seconds });
+  const who = voiceprint && !teaching ? judged(score, seconds) : 'you';
+  if (who === 'stranger') return send({ type: 'stranger', score, seconds });
   const { text, decodeMs } = await decode(samples);
   if (!text || during !== listens) return undefined;
-  return send({ type: 'heard', text, decodeMs, score, seconds, ...(teaching && voice ? { voice: Array.from(voice) } : {}) });
+  return send({ type: 'heard', text, decodeMs, score, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(teaching && voice ? { voice: Array.from(voice) } : {}) });
 }
 
 /** One utterance over, and straight on to the next. */
@@ -200,8 +202,9 @@ async function peek() {
   try {
     const samples = utterance();
     if (voiceprint) {
+      // Only his name wakes him early, so maybe the user's will do.
       const voice = voiceOf(samples);
-      if (!sounds(voice ? likeness(voice, voiceprint) : 0, samples.length / SAMPLE_RATE)) return;
+      if (judged(voice ? likeness(voice, voiceprint) : 0, samples.length / SAMPLE_RATE) === 'stranger') return;
     }
     const { text } = await decode(samples);
     if (state !== during || !wakesEarly(text)) return;

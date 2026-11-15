@@ -7,7 +7,7 @@
  * `npm run dev:mac` does, on this checkout. So it always runs the current
  * code, needs no Node or terminal, and the permissions macOS gave "Electron"
  * (camera, microphone, Accessibility) still apply. With Jester already
- * running, it opens Settings. The log is ~/Library/Logs/Jester/dev.log.
+ * running, it brings up his window. The log is ~/Library/Logs/Jester/dev.log.
  *
  *   npm run launcher                into /Applications (else ~/Applications)
  *   npm run launcher -- <folder>    somewhere else
@@ -75,7 +75,7 @@ if [ ! -d "$ELECTRON" ]; then
   exit 1
 fi
 
-# Running already: bring up its Settings (the app opens them when activated).
+# Running already: bring up his window (the app does when activated).
 if pgrep -f "Electron.app/Contents/MacOS/Electron $DESKTOP\\$" > /dev/null; then
   exec /usr/bin/open -a "$ELECTRON"
 fi

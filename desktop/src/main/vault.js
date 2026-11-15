@@ -58,7 +58,8 @@ const README = [
   '- Notes: notes you asked Jester to make or add to (“add eggs to my grocery list”). Jester changes these only when you ask.',
   '',
   '## What Jester keeps',
-  '- Conversations are kept as summaries and facts, not word for word. Your exact words are kept only when you ask Jester to remember something.',
+  '- In this vault, conversations are kept as summaries and facts, not word for word: your exact words are kept here only when you ask Jester to remember something. ' +
+    '(Outside it, Jester’s Chats keep each conversation word for word on your computer for a week; Forget it all in Jester’s Settings clears them.)',
   '- Jester never keeps passwords, PINs or card numbers here: notes are plain text files.',
   '- Whenever what you say goes to the AI model Jester talks through, what’s in About me and the parts of your notes that look related to it ' +
     'go too: to a cloud provider, if you chose one in Jester’s Settings › Models.',

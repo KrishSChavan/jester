@@ -86,7 +86,7 @@ export function startSpeech({ log = () => undefined } = {}) {
       if (message?.type === 'ready') return log('speech loaded:', message.model, `${message.loadMs} ms`);
       if (message?.type === 'heard') {
         // Every score, for tuning voiceprint.js against a real voice.
-        if (message.score !== null) log(`speech: your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
+        if (message.score !== null) log(`speech: ${message.unsure ? 'maybe your voice, so only with his name' : 'your voice'} (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
         return void listener?.(message.text, message);
       }
       if (message?.type === 'wake') return void waker?.();

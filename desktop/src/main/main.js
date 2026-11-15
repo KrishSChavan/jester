@@ -39,6 +39,9 @@ import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
 import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
 import { createChromeLink } from './chrome-link.js';
+import { createCalendars } from './calendars.js';
+import { createChatArchive } from './chat-archive.js';
+import { createChatKeeper } from './chat-keeper.js';
 import { askModel, createConversation, LOCAL_KEEP_ALIVE, NEW_AFTER_MS, ollamaModels, pickModel, warmOllama } from './conversation.js';
 import { createConversationLog } from './conversation-log.js';
 import { createDispatcher } from './dispatch.js';
@@ -57,11 +60,14 @@ import { openSettings, readPermissions, readStatuses, requestPermission } from '
 import { registerScheme, serveFiles } from './protocol.js';
 import { signInToPuter, synthesize } from './puter.js';
 import { createRecollections } from './recollections.js';
+import { createSituation } from './situation.js';
 import { createSpeaker, systemVoice } from './speaker.js';
 import { startSpeech } from './speech.js';
 import { createStopButton } from './stop-button.js';
 import { createTray } from './tray.js';
 import { createWatch } from './watch.js';
+import { createWeather, unitsFor, weatherLines } from './weather.js';
+import { createWhereabouts } from './whereabouts.js';
 import { trayModel } from './tray-menu.js';
 import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault.js';
 import { createVaultIndex } from './vault-index.js';
@@ -70,7 +76,7 @@ import { createVoicePage } from './voice-page.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
-import { closeSafely, createEngineWindow, showCalibration, showSettings, showTalk, talkWindow } from './windows.js';
+import { closeSafely, createEngineWindow, homeWindow, noteHomeScreen, reopenHome, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
 
 const env = process.env;
 /** Permissions change in System Settings, behind the app's back. */
@@ -160,6 +166,9 @@ let speech = null;
 let voiceRunner = null;
 let conversation = null;
 let recollections = null;
+/** The conversation going on, word for word (conversation-log.js), and what becomes of each once it's over (chat-keeper.js). */
+let conversationLog = null;
+let keeper = null;
 /** Taught phrases, learned tasks and shortcuts (learned.js). */
 let learned = null;
 /** The Obsidian vault Jester keeps its memory in (vault.js), its search (vault-index.js), and the memory between them. */
@@ -170,6 +179,15 @@ let vaultMemory = null;
 let vaultProblem = '';
 /** A read of the vault asked for here (opening it, Read again) is under way: Settings says so, not "0 notes read". */
 let vaultReading = false;
+/** Where the user is, the weather there, their calendars, and all three for him (situation.js). */
+let whereabouts = null;
+let weather = null;
+let calendars = null;
+let situation = null;
+/** The location source last acted on: a new one means a new position. */
+let locationSource = '';
+/** The weather now where the user is, in a line for Settings. */
+let weatherNote = '';
 let speaker = null;
 let voicePage = null;
 /** The model he talks through (model-jobs.js). */
@@ -231,18 +249,98 @@ function mediaAllowed(type) {
   return status.camera === 'granted' || status.microphone === 'granted';
 }
 
+/** The page that asks where this computer is (locateHere), and only while Settings says to use its location. */
+const LOCATE_PAGE = 'jester://app/where/where.html';
+const locating = (url) => String(url || '').startsWith(LOCATE_PAGE) && settings?.locationSource === 'here';
+
 function installMediaPermissions() {
   const own = (url) => /^jester:\/\//.test(url || '');
   // Full screen too: the calibration screen takes the whole display to know
   // exactly where each dot is, and waits on being allowed to.
-  session.defaultSession.setPermissionCheckHandler((_contents, permission, origin, details) =>
-    own(origin) && (permission === 'fullscreen' || (permission === 'media' && mediaAllowed(details.mediaType))));
+  session.defaultSession.setPermissionCheckHandler((contents, permission, origin, details) =>
+    (own(origin) && (permission === 'fullscreen' || (permission === 'media' && mediaAllowed(details.mediaType)))) ||
+    (permission === 'geolocation' && locating(contents?.getURL?.() || details.requestingUrl)));
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback, details) => {
     const types = details.mediaTypes?.length ? details.mediaTypes : ['unknown'];
-    const allowed = own(details.requestingUrl) && (permission === 'fullscreen' || (permission === 'media' && types.every(mediaAllowed)));
+    const allowed =
+      (own(details.requestingUrl) && (permission === 'fullscreen' || (permission === 'media' && types.every(mediaAllowed)))) ||
+      (permission === 'geolocation' && locating(details.requestingUrl));
     if (!allowed) log('refused permission', permission, 'for', details.requestingUrl);
     callback(allowed);
   });
+}
+
+/**
+ * Where this computer is, by a hidden page of Jester's asking Chromium, which asks Location Services on a Mac (its
+ * Core Location provider): precise to tens of metres on Wi-Fi. The first time, macOS asks whether "Electron" (Jester
+ * in development) may know; a position waits for that answer, so it's first asked from Settings (`timeoutMs` 90 s).
+ * The page goes once it has answered.
+ * @returns {Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, code?:number, message?:string}>}
+ */
+async function locateHere({ timeoutMs }) {
+  const page = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false } });
+  let timer;
+  try {
+    await page.loadURL(LOCATE_PAGE);
+    const asking = page.webContents.executeJavaScript(`new Promise((resolve) => navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ ok: true, lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }),
+      (e) => resolve({ ok: false, code: e.code, message: e.message }),
+      { enableHighAccuracy: true, maximumAge: 60000, timeout: ${Math.round(timeoutMs)} }))`);
+    const late = new Promise((resolve) => (timer = setTimeout(resolve, timeoutMs + 5000, { ok: false, code: 3, message: 'no answer' })));
+    return await Promise.race([asking, late]);
+  } finally {
+    clearTimeout(timer);
+    page.destroy();
+  }
+}
+
+/** A new location source from Settings: what was known from the old one goes, and the new one is asked. */
+function followLocation() {
+  if (!whereabouts) return;
+  const chosen = settings?.locationSource || 'off';
+  if (chosen === locationSource) return;
+  const first = !locationSource;
+  locationSource = chosen;
+  if (!first) whereabouts.reset();
+  weatherNote = '';
+  // Chosen in Settings, it's Settings that asks for a position (jester/desktop-day); at launch, it's asked here.
+  if (chosen !== 'off') noteWeather({ fresh: first });
+}
+
+/** The weather where the user is, for Settings: once there's a position. */
+async function noteWeather({ fresh = false } = {}) {
+  try {
+    if (fresh && whereabouts.source === 'here') await whereabouts.locate();
+    const here = await whereabouts.here();
+    if (!here) return;
+    const units = unitsFor(settings?.weatherUnits, app.getLocaleCountryCode());
+    weatherNote = weatherLines(await weather.forecast({ lat: here.lat, lon: here.lon, units }), { now: Date.now(), where: here.town ? `in ${here.town}` : 'there' })[0] || '';
+  } catch (err) {
+    log('weather: none for Settings:', err.message);
+  } finally {
+    post(desktopState());
+  }
+}
+
+/**
+ * A change from Settings' Weather and calendars, saved and taken up at once: what's done next (a position asked for,
+ * the geolocation permission checked) reads `settings`, which the storage change would bring only later.
+ */
+async function saveDay(patch) {
+  await saveSettings(patch);
+  settings = await loadSettings();
+  followLocation();
+}
+
+/** Settings' Weather and calendars section: never a calendar's link, or more of where the user is than the town. */
+function dayState() {
+  return {
+    location: whereabouts?.state() || { source: 'off' },
+    place: settings?.locationPlace?.name ? settings.locationPlace : null,
+    units: settings?.weatherUnits || 'auto',
+    weather: weatherNote,
+    calendars: calendars?.list() || []
+  };
 }
 
 /** A first launch stores the desktop defaults, so every later save starts from them. */
@@ -278,6 +376,7 @@ function desktopState() {
       why: linkHost?.why || ''
     },
     memory: memoryState(),
+    day: dayState(),
     fakeMedia: !!env.JESTER_FAKE_MEDIA
   };
 }
@@ -310,6 +409,7 @@ async function refresh() {
   speech?.setVoiceprint(teaching ? null : voiceprint);
   updateListening();
   openVault();
+  followLocation();
   tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState(), watch: watch?.state }));
   post(desktopState());
 }
@@ -328,7 +428,7 @@ function updateListening() {
   if (on) {
     voicePage.open();
     speech.listen(
-      (text, heard) => (teaching ? tookLine(heard) : conversation.heard(text)),
+      (text, heard) => (teaching ? tookLine(heard) : conversation.heard(text, { unsure: !!heard?.unsure })),
       () => !teaching && conversation.woken()
     );
   } else {
@@ -383,6 +483,59 @@ function showConversation(voice) {
   if (!talk || voice.active === false || voice.done) return post(message);
   postTo(talk.webContents, message);
   if (!assistant.running) for (const win of overlays.windows()) postTo(win.webContents, TASK_OVER);
+}
+
+/** The conversation going on, as his window shows it: what was said before it was picked up marked so, and a line kept as only that it held a secret, too. */
+function currentChat() {
+  return {
+    id: conversationLog.chatId(),
+    lines: conversationLog.entries().map(({ who, text, at, earlier, hidden }) => ({ who, text, at, ...(earlier ? { earlier: true } : {}), ...(hidden ? { hidden: true } : {}) }))
+  };
+}
+
+let chatTimer = null;
+/** Forget it all ended the chat going on: it isn't in Chats, so the window mustn't say it is. */
+let chatForgotten = false;
+/** The conversation going on, to his window (only), once a change has settled: the log says so as it happens. */
+function showChat() {
+  clearTimeout(chatTimer);
+  chatTimer = setTimeout(() => {
+    const win = homeWindow();
+    if (win && conversationLog) postTo(win.webContents, { type: 'jester/chat', chat: currentChat(), forgotten: chatForgotten });
+    chatForgotten = false;
+  }, 0);
+}
+
+/** The Chats panel lists them again. */
+function chatsChanged() {
+  const win = homeWindow();
+  if (win) postTo(win.webContents, { type: 'jester/chats-changed' });
+}
+
+/**
+ * A chat carried on: the conversation going on is over, and in Chats at once, and the chat is the one going on again,
+ * as if it had never stopped. What's typed with it is said to him, typed; the conversation that's over is summed up
+ * once he's answered that (Ollama does one thing at a time). Not while he's at work on something the conversation
+ * going on asked for, or a question of his waits: its result or its answer would land in the wrong chat.
+ */
+function resumeChat(id, text) {
+  const chat = keeper.get(id);
+  if (!chat) return { ok: false, error: 'That chat isn’t kept any more.' };
+  if (assistant.asking) return { ok: false, error: 'Jester is waiting for a yes or no. Answer him first, then pick this chat up.' };
+  if (conversation.acting) return { ok: false, error: 'Jester is still working on what you asked. Pick this chat up once he’s done, or stop him with the × beside his pill.' };
+  let over = [];
+  if (id !== conversationLog.chatId()) {
+    // Whatever he was saying for the conversation going on stops with it.
+    conversation.end();
+    over = conversationLog.restore(chat.lines, id);
+    keeper.keep(over);
+    log('chat carried on:', chat.lines.length, 'lines');
+  }
+  const typed = String(text ?? '').trim().slice(0, 2000);
+  Promise.resolve(typed ? conversation.told(typed, { typed: true }) : undefined)
+    .catch(() => undefined)
+    .finally(() => over.length && keeper.sumUp(over));
+  return { ok: true };
 }
 
 /** This computer's model (Ollama): the one chosen, or the best that's there. */
@@ -723,6 +876,8 @@ let commandCount = 0;
 
 /** A finished utterance, done; the pill says how it went. */
 async function onVoiceCommand(text) {
+  // Said aloud: what's asked about it is asked aloud.
+  conversation.spoke();
   // An answer to the assistant's question, or "stop": the assistant's, not a command.
   if (assistant.heard(text)) return;
   // On purpose, and for him: he answers it as he would anything else, aloud.
@@ -730,7 +885,8 @@ async function onVoiceCommand(text) {
   const mine = ++commandCount;
   const { outcome } = await voiceRunner.run(text);
   if (mine !== commandCount) return;
-  post({ type: MSG.VOICE, voice: outcome ? { phase: 'answer', text: outcome.text, ok: outcome.ok } : { active: false } });
+  // `command`: his window says so too, which a conversation's own answers (in the chat already) aren't.
+  post({ type: MSG.VOICE, voice: outcome ? { phase: 'answer', text: outcome.text, ok: outcome.ok, command: true } : { active: false } });
   voiceHeard?.({ text, outcome });
   voiceHeard = null;
 }
@@ -813,6 +969,7 @@ async function onTrayAction(id, checked) {
     case 'talk':
       return showTalk();
     case 'permissions':
+      return showSettings({ page: 'permissions' });
     case 'settings':
       return showSettings();
     case 'restart':
@@ -870,7 +1027,9 @@ function listenToPages() {
         await refresh();
         return { ok: true };
       case 'jester/desktop-forget':
+        chatForgotten = true;
         conversation.forget();
+        keeper.forgetAll();
         return { ok: true };
       // Settings' Memory section: the vault is only ever chosen, and so first read, from here.
       case 'jester/desktop-memory':
@@ -892,9 +1051,38 @@ function listenToPages() {
         else if (message.op === 'reindex') refreshVault({ retry: true });
         await refresh();
         return desktopState();
-      // The window for talking to him. A sentence typed is a command given on purpose.
+      // Settings' Weather and calendars. A calendar's link goes in and never comes back out.
+      case 'jester/desktop-day':
+        try {
+          if (message.op === 'source' && ['off', 'here', 'place'].includes(message.source)) {
+            await saveDay({ locationSource: message.source });
+            // Chosen here, on purpose: macOS's question comes now, with the user looking, and is waited for.
+            if (message.source === 'here') whereabouts.locate({ patient: true }).then(() => noteWeather());
+          } else if (message.op === 'place') {
+            const place = await weather.findPlace(String(message.text ?? '').slice(0, 120));
+            if (!place) return { ok: false, error: `Couldn’t find “${String(message.text ?? '').trim()}”. Try the town and its state or country, like “State College, PA”.`, ...desktopState() };
+            await saveDay({ locationSource: 'place', locationPlace: place });
+            await noteWeather();
+          } else if (message.op === 'locate') {
+            await whereabouts.locate({ patient: true });
+            await noteWeather();
+          } else if (message.op === 'units' && ['auto', 'fahrenheit', 'celsius'].includes(message.units)) {
+            await saveDay({ weatherUnits: message.units });
+            await noteWeather();
+          } else if (message.op === 'privacy') {
+            await shell.openExternal(process.platform === 'darwin' ? 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices' : 'ms-settings:privacy-location');
+          } else if (message.op === 'calendar-add') {
+            await calendars.add({ url: String(message.url ?? '').slice(0, 4000), name: String(message.name ?? '') });
+          } else if (message.op === 'calendar-remove') await calendars.remove(String(message.id));
+          else if (message.op === 'calendar-rename') await calendars.rename(String(message.id), String(message.name ?? ''));
+          else if (message.op === 'calendar-refresh') await calendars.refresh();
+          return { ok: true, ...desktopState() };
+        } catch (err) {
+          return { ok: false, error: err.message, ...desktopState() };
+        }
+      // His window. A sentence typed is a command given on purpose, and he writes back.
       case 'jester/talk-type':
-        conversation.told(String(message.text).slice(0, 2000));
+        conversation.told(String(message.text).slice(0, 2000), { typed: true });
         return { ok: true };
       // Typing to him: his model loads meanwhile, rather than after they press Return. Only this computer's needs it.
       case 'jester/talk-typing':
@@ -903,8 +1091,26 @@ function listenToPages() {
       case 'jester/talk-listen':
         await saveSettings({ continuousAssistant: message.on === true });
         return { ok: true };
-      case 'jester/talk-earlier':
-        return { conversations: recollections.all() };
+      // His window's Chats: what's over, for a week. One opened again is carried on.
+      case 'jester/chats': {
+        const id = String(message.id ?? '');
+        if (message.op === 'list') return { chats: keeper.list() };
+        if (message.op === 'get') return { chat: keeper.get(id) };
+        if (message.op === 'current') return { chat: currentChat() };
+        if (message.op === 'resume') return resumeChat(id, message.text);
+        // Deleted, it's forgotten: he isn't told of it again either.
+        if (message.op === 'remove') return { ok: keeper.remove(id) };
+        return { ok: false };
+      }
+      // What his window shows: the conversation's frames go to it alone while that's the orb. And whether it's on
+      // screen yet, for the orb's intro: shown before its page had loaded, it missed jester/home-shown.
+      case 'jester/home-screen':
+        noteHomeScreen(message.screen);
+        return { ok: true, shown: !!homeWindow()?.isVisible() };
+      // His window's Sleep and Wake.
+      case 'jester/desktop-sleep':
+        sleep(message.on === true);
+        return { ok: true };
       case 'jester/desktop-puter':
         try {
           if (message.op === 'connect') {
@@ -945,7 +1151,8 @@ function listenToPages() {
 /**
  * JESTER_SELFTEST: open Settings without focus and check its two-way path to
  * the engine — what the page shows, and that its "Jester on" switch stops and
- * restarts the engine. JESTER_CAPTURE adds a picture of the whole page.
+ * restarts the engine. JESTER_CAPTURE adds a picture of Settings, and of some
+ * of its pages and the orb's screen beside it.
  */
 function selfTest(capture) {
   const win = showSettings({ quiet: true });
@@ -959,24 +1166,27 @@ function selfTest(capture) {
     }
     return false;
   };
+  /** One of the window's screens, at once (home/screens.js). */
+  const go = (screen) => page(`window.jesterHome.go(${JSON.stringify(screen)}, { instant: true })`);
   win.webContents.once('did-finish-load', async () => {
     if (capture) {
       await pause(1500);
-      win.setContentSize(win.getContentSize()[0], await page('document.documentElement.scrollHeight'));
-      await pause(400);
       fs.writeFileSync(capture, (await win.webContents.capturePage()).toPNG());
       log('selftest: captured', capture);
-      // The page outgrows the screen: each later section scrolled into view too.
-      for (const section of ['models', 'gestures', 'shortcuts']) {
-        await page(`document.getElementById('${section}-heading').scrollIntoView()`);
-        await pause(300);
-        const file = capture.replace(/\.png$/, `-${section}.png`);
+      // Some of its pages, and the orb's screen beside it.
+      for (const screen of ['settings/permissions', 'settings/controls', 'settings/models', 'settings/gestures', 'main']) {
+        await go(screen);
+        await pause(400);
+        const file = capture.replace(/\.png$/, `-${screen.replace('/', '-')}.png`);
         fs.writeFileSync(file, (await win.webContents.capturePage()).toPNG());
         log('selftest: captured', file);
       }
+      await go('settings');
     }
     await reach('running');
     log('selftest: settings shows', await shows());
+    // The camera view is drawn only while its page is showing.
+    await go('settings/activity');
     await pause(1500);
     log('selftest: camera view —', await page(`(() => { const img = document.getElementById('camera-preview'); return img.hidden ? 'not shown' : img.naturalWidth + '×' + img.naturalHeight; })()`));
     log('selftest: voice row —', await page(`(() => { const box = document.getElementById('voiceEnabled'); return (box.checked ? '☑ ' : '☐ ') + (box.disabled ? '(disabled) ' : '') + document.getElementById('voice-hint').textContent; })()`));
@@ -1005,7 +1215,12 @@ function selfTest(capture) {
     // The assistant, on this app's own Settings window only (never the
     // user's screen): what it reads there, then a whole run with a scripted
     // model, whose click the dry-run driver describes instead of doing.
-    if (env.JESTER_SELFTEST_AGENT) await selfTestAgent();
+    // What the assistant reads of the window is what's on screen: the page with Cursor control.
+    if (env.JESTER_SELFTEST_AGENT) {
+      await go('settings/controls');
+      await pause(500);
+      await selfTestAgent();
+    }
     if (env.JESTER_SELFTEST_APP) await selfTestApp(env.JESTER_SELFTEST_APP);
 
     for (const [action, gesture] of [['VOLUME_UP', 'Thumb_Up'], ['APP_NEXT', 'Victory'], ['SPEED_UP', 'ILoveYou']]) {
@@ -1286,7 +1501,8 @@ async function start() {
     // Jester's own windows (Settings, say) are never the app meant.
     exclude: process.pid,
     // A question can be answered aloud: the mic opens for it, or is open, and he asks it.
-    listen: (label) => (listening ? conversation.ask(label) : !voiceProblem() && engineHost.voice('start')),
+    // Asked of someone typing to him, it's written, mic or no mic.
+    listen: (label) => (listening || conversation.typing ? conversation.ask(label) : !voiceProblem() && engineHost.voice('start')),
     // macOS reads no app's controls while a Jester overlay is up (README): the pill blinks out meanwhile.
     quietly: (task) => overlays.whileHidden(task),
     // A picture of the window, when its words aren't enough: with Screen Recording allowed, and not turned off in Settings.
@@ -1350,10 +1566,35 @@ async function start() {
   // summed up knowing what About me holds, kept in the vault, and kept at all only if Remember conversations is on.
   settings = await loadSettings();
   openVault();
+  // Where the user is, the weather and their calendars: nothing until they're connected in Settings.
+  const showDay = () => post(desktopState());
+  weather = createWeather({ log });
+  whereabouts = createWhereabouts({
+    locate: locateHere,
+    setting: () => ({ source: settings?.locationSource, place: settings?.locationPlace }),
+    log,
+    onChange: showDay
+  });
+  calendars = createCalendars({ storage: storage.local, log, onChange: showDay });
+  calendars.start().catch((err) => log('calendar: couldn’t start:', err.message));
+  situation = createSituation({
+    whereabouts,
+    weather,
+    calendars,
+    units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()),
+    computer: process.platform === 'darwin' ? 'Mac' : 'computer'
+  });
   recollections = createRecollections({
     file: path.join(app.getPath('userData'), 'recollections.json'),
-    // One call sums a conversation up and keeps what's worth keeping in the vault.
-    summarize: async (entries) => (await vaultMemory.ended(entries)).summary,
+    // One call sums a conversation up and keeps what's worth keeping in the vault: not if it's been deleted meanwhile.
+    summarize: async (entries) => (await vaultMemory.ended(entries, { wanted: () => keeper.wanted(entries) })).summary,
+    log
+  });
+  keeper = createChatKeeper({
+    chats: createChatArchive({ file: path.join(app.getPath('userData'), 'chats.json'), log }),
+    recollections,
+    live: () => conversationLog?.chatId() || '',
+    onChats: chatsChanged,
     log
   });
   // A conversation is over once it's gone quiet: kept then, rather than when the hour comes round.
@@ -1362,14 +1603,28 @@ async function start() {
     endAfterMs: NEW_AFTER_MS,
     // Not while a task he handed on is at work, or its result is being said: that's still this conversation.
     busy: () => !!conversation?.acting,
-    onEnded: (entries) => recollections.keep(entries).catch((err) => log('couldn’t keep a conversation:', err.message))
+    onEnded: (entries) => keeper.over(entries),
+    // His window shows the conversation going on, as it goes.
+    onChange: showChat
   });
-  setInterval(memory.expire, LOG_CHECK_MS);
+  conversationLog = memory;
+  // The hour, and the week a chat's kept for, are kept to even with nothing said.
+  setInterval(() => {
+    memory.expire();
+    keeper.sweep();
+  }, LOG_CHECK_MS);
   conversation = createConversation({
     chat: (request) => askModel({ ...request, request: talking }),
     speaker,
     memory,
-    recollections,
+    // What's over is in Chats at once, word for word, and summed up for him once he's answered, whichever way it ended.
+    archive: (entries) => keeper.keep(entries),
+    recollections: {
+      keep: (entries) => keeper.sumUp(entries),
+      // A chat picked up again is the one going on, not one that's over.
+      relevant: (text) => recollections.relevant(text, { except: conversationLog?.chatId() }),
+      forget: () => recollections.forget()
+    },
     listenAfresh: () => speech.listenAfresh(),
     // Only with the mic open: typing to him with it closed, there's nobody to wait for.
     knowsYou: () => !!voiceprint && listening,
@@ -1386,6 +1641,17 @@ async function start() {
       remember: (request) => vaultMemory.remember(request),
       note: (request) => vaultMemory.note(request)
     },
+    // Where the user is, the weather there and their calendars, once connected in Settings.
+    situation,
+    // The rest of what's connected, read each turn, so what he says he can do is what's true now (abilities.js).
+    abilities: async () => ({
+      chrome: !!chromeLink?.linked,
+      pictures: await assistant.canSee(),
+      voice: !!voiceprint,
+      gestures: settings?.gesturesEnabled !== false,
+      watch: !!watch?.state?.paired,
+      computer: process.platform === 'darwin' ? 'Mac' : 'computer'
+    }),
     assistant,
     show: showConversation,
     log
@@ -1395,6 +1661,11 @@ async function start() {
       if (on) away.add(reason);
       else away.delete(reason);
       updateListening();
+      // Back at the computer: it may be somewhere else now, and its calendars hours behind.
+      if (!on) {
+        if (whereabouts.source === 'here') whereabouts.locate().then(() => noteWeather());
+        if (calendars.connected) calendars.refresh().catch(() => undefined);
+      }
     });
   }
 
@@ -1470,7 +1741,9 @@ async function start() {
   if (!globalShortcut.register(VOICE_SHORTCUT, () => onJester('voice'))) log(`${VOICE_SHORTCUT} is taken by another app`);
 
   if (env.JESTER_SELFTEST) selfTest(env.JESTER_CAPTURE && path.resolve(env.JESTER_CAPTURE));
-  else if (env.JESTER_OPEN_SETTINGS || missingNeeded(permissions).length) showSettings();
+  else if (env.JESTER_OPEN_SETTINGS) showSettings();
+  // Something needed isn't allowed: his window says what, and Settings › Permissions is a click away.
+  else if (missingNeeded(permissions).length) showHome();
   // Started from its icon, Jester opens no window: say it's there, once the overlay has loaded.
   else setTimeout(() => overlays.toast('Jester is on', { detail: 'It lives in the menu bar' }), STARTED_TOAST_MS);
 
@@ -1479,14 +1752,15 @@ async function start() {
   if (seconds > 0) setTimeout(() => (BrowserWindow.getAllWindows().forEach((win) => win.destroy()), app.quit()), seconds * 1000);
 }
 
-// One Jester at a time: launching it again opens Settings instead.
+// One Jester at a time: launching it again opens his window instead.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => showSettings());
-  app.on('activate', () => showSettings());
+  // Brought forward as it is: the Dock is clicked often to come back to it, mid-Settings, say.
+  app.on('second-instance', () => reopenHome());
+  app.on('activate', () => reopenHome());
   app.whenReady().then(start);
-  // Closing Settings leaves Jester running in the menu bar.
+  // Closing his window leaves Jester running in the menu bar.
   app.on('window-all-closed', () => undefined);
   app.on('will-quit', () => {
     quitting = true;
@@ -1495,5 +1769,6 @@ if (!app.requestSingleInstanceLock()) {
     watch?.close();
     linkTransport?.close();
     vaultIndex?.close();
+    calendars?.stop();
   });
 }

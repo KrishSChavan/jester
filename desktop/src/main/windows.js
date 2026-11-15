@@ -1,18 +1,19 @@
 /**
- * The app's windows: the hidden one the engine runs in, and Settings.
+ * The app's windows: the hidden one the engine runs in, Jester's own window
+ * (the orb, his chats and Settings, all in one), and the calibration screen.
  */
 
 import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { postTo } from './chrome-bridge.js';
 import { ENGINE_PAGE } from './engine-host.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PRELOAD = path.join(here, '../preload/chrome-shim.cjs');
-const SETTINGS_PAGE = 'jester://app/settings/settings.html';
-const TALK_PAGE = 'jester://app/talk/talk.html';
+const HOME_PAGE = 'jester://app/home/home.html';
 /** Behind the page while it loads: the window never flashes white. */
-const TALK_GROUND = '#08060c';
+const HOME_GROUND = '#08060c';
 
 const pageDefaults = { preload: PRELOAD, contextIsolation: true, sandbox: true };
 
@@ -35,82 +36,128 @@ export function createEngineWindow(log) {
   return win;
 }
 
-let settings = null;
+let home = null;
+/** What the window shows: 'main' (the orb), 'chats', 'chat', 'settings' or 'settings/<page>' (home/screens.js). */
+let homeScreen = 'main';
+
+const showable = (screen) => (/^(main|chats|settings(\/[a-z-]+)?)$/.test(String(screen)) ? String(screen) : 'main');
 
 /**
- * Opens Settings, or brings it forward. While it is open the app shows in
- * the Dock and ⌘-Tab, so it can be found again; otherwise it lives in the
- * menu bar only. `quiet` shows it without taking focus (tests).
+ * Jester shows in the Dock and ⌘-Tab while a window of his own is open (his window, or calibration's), minimized
+ * or not, and leaves once none is. The click-through windows over each display are always "visible", so they don't
+ * count.
  */
-export function showSettings({ quiet = false } = {}) {
-  if (settings && !settings.isDestroyed()) {
-    settings.show();
-    settings.focus();
-    return settings;
-  }
-  settings = new BrowserWindow({
-    width: 560,
-    height: 720,
-    minWidth: 440,
-    minHeight: 480,
-    title: 'Jester',
-    show: false,
-    // Jester lives in the menu bar, so its windows often open inactive: a
-    // first click should press the button, not just bring the window forward.
-    acceptFirstMouse: true,
-    webPreferences: pageDefaults
-  });
-  settings.once('ready-to-show', () => {
-    if (quiet) return settings.showInactive();
-    app.dock?.show();
-    settings.show();
-    settings.focus();
-  });
-  settings.on('closed', () => {
-    settings = null;
-    if (!BrowserWindow.getAllWindows().some((win) => win.isVisible())) app.dock?.hide();
-  });
-  settings.loadURL(SETTINGS_PAGE);
-  return settings;
+function leaveDockIfAlone() {
+  const open = (win) => win && !win.isDestroyed() && (win.isVisible() || win.isMinimized());
+  if (!open(home) && !open(calibration)) app.dock?.hide();
 }
 
-let talk = null;
-
 /**
- * Opens the window for talking to Jester, or brings it forward. Like Settings,
- * it puts him in the Dock while it's open.
+ * Jester's one window: the orb and talking to him, with Chats and Settings
+ * sliding in beside it (src/home/). Opening it puts him in the Dock and ⌘-Tab
+ * while it's open; otherwise he lives in the menu bar only. Opened where it
+ * wasn't on screen, the orb's intro plays, unless it opens on another screen.
+ * `quiet` shows it without taking focus (tests).
+ * @param {{screen?:string, quiet?:boolean}} [options]
  */
-export function showTalk() {
-  if (talk && !talk.isDestroyed()) {
-    talk.show();
-    talk.focus();
-    return talk;
+export function showHome({ screen = 'main', quiet = false } = {}) {
+  const goTo = showable(screen);
+  if (home && !home.isDestroyed()) {
+    const away = !home.isVisible() || home.isMinimized();
+    if (home.isMinimized()) home.restore();
+    const go = { type: 'jester/home-go', screen: goTo, intro: away };
+    postTo(home.webContents, go);
+    // Still loading, the page isn't listening yet: it's told again once it is.
+    if (home.webContents.isLoading()) home.webContents.once('did-finish-load', () => postTo(home.webContents, go));
+    if (quiet) home.showInactive();
+    else {
+      app.dock?.show();
+      home.show();
+      home.focus();
+    }
+    return home;
   }
-  talk = new BrowserWindow({
-    width: 560,
-    height: 680,
-    minWidth: 400,
-    minHeight: 520,
+  homeScreen = goTo;
+  home = new BrowserWindow({
+    width: 600,
+    height: 760,
+    minWidth: 460,
+    minHeight: 560,
     title: 'Jester',
     show: false,
-    backgroundColor: TALK_GROUND,
+    backgroundColor: HOME_GROUND,
+    // Jester lives in the menu bar, so its window often opens inactive: a
+    // first click should press the button, not just bring the window forward.
     acceptFirstMouse: true,
-    // The page draws to the top of the window, around the close button.
+    // The page draws to the top of the window, around the window's own buttons.
     titleBarStyle: 'hidden',
-    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 16, y: 16 } } : { titleBarOverlay: { color: TALK_GROUND, symbolColor: '#a79bbe', height: 48 } }),
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 18, y: 20 } } : { titleBarOverlay: { color: HOME_GROUND, symbolColor: '#a79bbe', height: 56 } }),
     webPreferences: pageDefaults
   });
-  talk.once('ready-to-show', () => {
-    app.dock?.show();
-    talk.show();
-    talk.focus();
+  home.once('ready-to-show', () => {
+    if (quiet) home.showInactive();
+    else {
+      app.dock?.show();
+      home.show();
+      home.focus();
+    }
+    // On screen: the orb's intro can play now, and be seen from its first frame.
+    postTo(home.webContents, { type: 'jester/home-shown' });
   });
-  talk.on('closed', () => {
-    talk = null;
-    if (!BrowserWindow.getAllWindows().some((win) => win.isVisible())) app.dock?.hide();
+  home.on('closed', () => {
+    home = null;
+    homeScreen = 'main';
+    leaveDockIfAlone();
   });
-  talk.loadURL(TALK_PAGE);
-  return talk;
+  home.loadURL(`${HOME_PAGE}#${goTo}`);
+  return home;
+}
+
+/** Settings, in the one window: `page` opens one of its pages ('permissions', say). */
+export function showSettings({ quiet = false, page = '' } = {}) {
+  return showHome({ screen: page ? `settings/${page}` : 'settings', quiet });
+}
+
+/** The orb, and talking to him. */
+export function showTalk() {
+  return showHome({ screen: 'main' });
+}
+
+/**
+ * The Dock icon clicked, or Jester launched again: his window, brought forward as it is, on whatever screen it's
+ * on, minimized or hidden or not. Back from minimized or hidden on the orb, the orb's intro plays, as for any
+ * opening; on another screen, nothing moves. With no window open, it opens on the orb.
+ */
+export function reopenHome() {
+  const win = homeWindow();
+  if (!win) return showHome();
+  const away = !win.isVisible() || win.isMinimized();
+  if (win.isMinimized()) win.restore();
+  // Its own screen, so it stays there; the page plays the intro only if that's the orb.
+  if (away) postTo(win.webContents, { type: 'jester/home-go', screen: homeScreen, intro: true });
+  app.dock?.show();
+  win.show();
+  win.focus();
+  return win;
+}
+
+/** The window says what it shows as it changes (jester/home-screen). */
+export function noteHomeScreen(screen) {
+  homeScreen = String(screen || 'main');
+}
+
+/** The window, if it's open. */
+export function homeWindow() {
+  return home && !home.isDestroyed() ? home : null;
+}
+
+/**
+ * The window, if the user's there with the orb showing: the conversation is shown there, and not on the pill too.
+ * In front: Electron can't tell a window covered by other apps' from one that's seen, and the pill should be where
+ * the conversation's shown then.
+ */
+export function talkWindow() {
+  return home && !home.isDestroyed() && home.isVisible() && !home.isMinimized() && home.isFocused() && homeScreen === 'main' ? home : null;
 }
 
 /**
@@ -128,15 +175,6 @@ export function closeSafely(win) {
   const fallback = setTimeout(destroy, 3000);
   win.once('leave-full-screen', () => setTimeout(destroy, 100));
   win.setFullScreen(false);
-}
-
-export function settingsWindow() {
-  return settings && !settings.isDestroyed() ? settings : null;
-}
-
-/** The talk window, if it's up where the user can see it. */
-export function talkWindow() {
-  return talk && !talk.isDestroyed() && talk.isVisible() && !talk.isMinimized() ? talk : null;
 }
 
 let calibration = null;
@@ -178,7 +216,7 @@ export function showCalibration(display, { quiet = false } = {}) {
   });
   calibration.on('closed', () => {
     calibration = null;
-    if (!BrowserWindow.getAllWindows().some((win) => win.isVisible())) app.dock?.hide();
+    leaveDockIfAlone();
   });
   calibration.loadURL(CALIBRATION_PAGE);
   return calibration;

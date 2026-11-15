@@ -1,10 +1,13 @@
 /**
- * Jester Desktop's Settings window.
+ * Settings, in Jester's window (home.js): a list of pages, each sliding in
+ * from the right. Every control keeps the id it had in the Settings window
+ * this replaced, so main.js's self-test still finds them.
  *
  * Settings live in `chrome.storage.local` exactly as in the extension (the
  * preload's shim carries them to the main process), so the engine picks up a
  * change the way it does in Chrome. Permissions and the engine's state come
- * from the main process as `jester/desktop-state` messages.
+ * from the main process as `jester/desktop-state` messages; the orb's screen
+ * draws from the same two (`state`, `onRender`).
  */
 
 import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings, resumeGlyphs } from '../ext/src/common/constants.js';
@@ -38,13 +41,27 @@ const TIER = { needed: 'Needed', recommended: 'Recommended', optional: 'Optional
 
 let settings = null;
 let desktop = null;
+/** The orb's screen, told whenever either changes. */
+const renderers = new Set();
+
+/** The settings, and how the app says things are, as last heard. */
+export const state = () => ({ settings, desktop });
+
+/** Called with `state()` each time Settings is drawn afresh. */
+export function onRender(listener) {
+  renderers.add(listener);
+}
+
+function told() {
+  for (const listener of renderers) listener(state());
+}
 
 async function readSettings() {
   const { settings: stored } = await chrome.storage.local.get('settings');
   return mergeSettings(stored);
 }
 
-async function save(patch) {
+export async function save(patch) {
   const before = settings;
   settings = mergeSettings({ ...(await readSettings()), ...patch });
   await chrome.storage.local.set({ settings });
@@ -57,6 +74,9 @@ function settingsChanged(before) {
   renderControls();
   renderBindings();
   renderJobs();
+  renderDay();
+  renderIndex();
+  told();
 }
 
 function renderStatus() {
@@ -150,6 +170,8 @@ async function renderCameras() {
 function renderControls() {
   if (!settings) return;
   $('enabled').checked = !!settings.enabled;
+  $('gesturesEnabled').checked = settings.gesturesEnabled !== false;
+  $('gesturesEnabled').disabled = !settings.enabled;
   $('pointerEnabled').checked = !!settings.pointerEnabled;
   $('pointerEnabled').disabled = !settings.enabled;
   renderVoice();
@@ -168,7 +190,7 @@ function renderControls() {
 
 /** Only on a Mac: there's no Apple Watch to steer with on Windows. */
 function renderWatch() {
-  $('watch-section').hidden = platform() !== 'darwin';
+  $('go-watch').hidden = platform() !== 'darwin';
   const watch = desktop?.watch || {};
   const pairing = watchPairing(watch, settings);
   $('watchEnabled').checked = !!settings.watchEnabled;
@@ -259,6 +281,7 @@ async function renderChatModels() {
       ? 'Runs here: what it hears and reads stays on this computer.'
       : 'Ollama has no models yet. In a terminal, run: ollama pull qwen3.5:9b';
   renderJobs();
+  renderIndex();
 }
 
 /** This computer's model's jobs, from the settings: both until unticked. */
@@ -347,6 +370,7 @@ function renderConnections(reply) {
   savedModels = saved;
   $('connection-error').textContent = reply?.ok === false ? reply.error : '';
   renderJobs();
+  renderIndex();
   $('connections').hidden = !saved.length;
   $('connections').replaceChildren(
     ...saved.map((connection) => {
@@ -624,16 +648,182 @@ async function vaultOp(op, path) {
   render();
 }
 
+/** "just now", "4 minutes ago", "2 hours ago". */
+function ago(at) {
+  const minutes = Math.round((Date.now() - at) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+}
+
+/** Why there's no position, and what to do about it. */
+function locationProblem(problem) {
+  const mac = platform() === 'darwin';
+  if (problem === 'denied') {
+    return mac
+      ? 'macOS hasn’t let Jester know where this Mac is. Click Open Privacy Settings, turn on Location Services and Electron (Jester while it’s in development), then Locate again.'
+      : 'Windows hasn’t let Jester know where this computer is. Click Open Privacy Settings, let desktop apps use your location, then Locate again.';
+  }
+  if (problem === 'timeout') return `No position came in time. If ${mac ? 'macOS' : 'Windows'} asked whether Jester may use your location, answer it, then Locate again.`;
+  if (problem === 'unavailable') return `This ${mac ? 'Mac' : 'computer'} couldn’t tell where it is just now (it needs Wi-Fi on to). Locate again, or name a place instead.`;
+  return problem ? `Couldn’t get a position: ${problem}` : '';
+}
+
+/** One connected calendar: its name (his to say, so the user's to change), where it's from, and how its last read went. */
+function calendarRow(calendar) {
+  const row = document.createElement('div');
+  row.className = 'row calendar';
+  const text = document.createElement('span');
+  const title = document.createElement('strong');
+  title.textContent = calendar.name;
+  const detail = document.createElement('small');
+  detail.textContent = calendar.reading
+    ? `${calendar.site} · reading…`
+    : `${calendar.site} · ${calendar.events} upcoming event${calendar.events === 1 ? '' : 's'} in the next three months${calendar.at ? ` · read ${ago(calendar.at)}` : ''}`;
+  const error = document.createElement('small');
+  error.className = 'error';
+  error.textContent = calendar.error;
+  text.append(title, detail, error);
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.value = calendar.name;
+  name.setAttribute('aria-label', `What Jester calls ${calendar.name}`);
+  name.addEventListener('change', () => dayOp({ op: 'calendar-rename', id: calendar.id, name: name.value.trim() }));
+  const buttons = document.createElement('span');
+  buttons.className = 'buttons';
+  if (calendar.error) {
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.textContent = 'Read again';
+    again.addEventListener('click', () => dayOp({ op: 'calendar-refresh' }));
+    buttons.append(again);
+  }
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.textContent = 'Remove';
+  remove.addEventListener('click', () => dayOp({ op: 'calendar-remove', id: calendar.id }));
+  buttons.append(remove);
+  row.append(text, name, buttons);
+  return row;
+}
+
+let shownCalendars = '';
+/** "A place you name" picked, with no place named yet: shown, not saved, until one is. */
+let namingPlace = false;
+
+/** Where the user is, the weather there, and their calendars. */
+function renderDay() {
+  const day = desktop?.day || {};
+  const location = day.location || { source: 'off' };
+  // Main's word for it: it's saved and acted on before main answers, and the page's copy of settings comes after.
+  const source = namingPlace ? 'place' : location.source || settings.locationSource || 'off';
+  const mac = platform() === 'darwin';
+  $('location-here').textContent = mac ? 'This Mac’s location' : 'This computer’s location';
+  $('location-actions').querySelector('strong').textContent = mac ? 'This Mac’s position' : 'This computer’s position';
+  $('locationSource').value = source;
+  const shared = ' Your position goes to OpenStreetMap, to name the street you’re on, and to Open-Meteo, to the nearest kilometre, for the weather.';
+  $('location-hint').textContent =
+    source === 'off'
+      ? 'Off: Jester doesn’t know where you are, so he can’t tell you the weather.'
+      : source === 'place'
+        ? day.place
+          ? `${[day.place.name, day.place.countryCode === 'US' ? day.place.region : day.place.country].filter(Boolean).join(', ')}: the weather there, wherever you are.`
+          : 'Name the place below.'
+        : location.town
+          ? `${location.town}, from ${mac ? 'Location Services' : 'Windows’ location'}.${shared}`
+          : location.locating
+            ? `Finding where this ${mac ? 'Mac' : 'computer'} is… If ${mac ? 'macOS' : 'Windows'} asks whether ${mac ? 'Electron' : 'Jester'} may use your location, allow it.`
+            : `Jester asks ${mac ? 'Location Services' : 'Windows'} where you are when you talk to him, at most every 15 minutes.${shared}`;
+  $('location-problem').textContent = source === 'here' ? locationProblem(location.problem) : '';
+  $('place-form').hidden = source !== 'place';
+  if (document.activeElement !== $('place-name')) $('place-name').value = day.place ? [day.place.name, day.place.countryCode === 'US' ? day.place.region : day.place.country].filter(Boolean).join(', ') : '';
+  $('location-actions').hidden = source !== 'here';
+  $('location-detail').textContent = location.locating
+    ? 'Locating…'
+    : location.at
+      ? `To within ${location.accuracy} m, ${ago(location.at)}.`
+      : 'Not found yet.';
+  $('location-again').disabled = !!location.locating;
+  $('location-privacy').hidden = location.problem !== 'denied';
+  $('weatherUnits').value = day.units || 'auto';
+  $('weather-hint').textContent = source === 'off' ? 'Needs a location.' : day.weather || (source === 'place' && !day.place ? 'Needs a place.' : 'Fetching it…');
+  // Built again only when it's changed, and not while a name's being typed.
+  const calendars = day.calendars || [];
+  const now = JSON.stringify(calendars);
+  if (now !== shownCalendars && !$('calendars').contains(document.activeElement)) {
+    shownCalendars = now;
+    $('calendars').replaceChildren(...calendars.map(calendarRow));
+  }
+}
+
+/** Asks the app to do something about the weather, a place or a calendar: it answers with how things are now. */
+async function dayOp(message) {
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-day', ...message });
+  if (reply?.type === 'jester/desktop-state') desktop = reply;
+  render();
+  return reply || { ok: false, error: 'Jester didn’t answer.' };
+}
+
 function render() {
+  // The app's state can come before the settings are read: it's drawn once they are.
+  if (!settings) return;
   renderStatus();
   renderChrome();
   renderPermissions();
   renderPictures();
   renderMemory();
+  renderDay();
   renderControls();
   renderBindings();
   renderCameraHint();
+  renderIndex();
   $('dev-note').hidden = !desktop?.fakeMedia;
+  told();
+}
+
+/** Set the aside in Settings' list of pages: a word on each, where there's one worth saying. */
+function aside(id, text, tone = '') {
+  $(id).textContent = text;
+  if (tone) $(id).dataset.tone = tone;
+  else delete $(id).dataset.tone;
+}
+
+/** Settings' list of pages, each with how it stands. */
+function renderIndex() {
+  if (!settings) return;
+  const missing = (desktop?.permissions || []).filter((item) => item.tier === 'needed' && !item.granted);
+  aside('sum-permissions', missing.length ? `${missing.length} needed` : desktop?.permissions?.length ? 'All set' : '', missing.length ? 'warn' : '');
+  aside('sum-controls', !settings.enabled ? 'Off' : [settings.gesturesEnabled === false ? 'Gestures off' : 'Gestures on', settings.pointerEnabled ? 'cursor on' : ''].filter(Boolean).join(', '));
+  const watch = desktop?.watch || {};
+  aside('sum-watch', settings.watchEnabled && watch.paired ? 'Steering' : watch.paired ? 'Paired' : '');
+  const continuous = desktop?.continuous || {};
+  aside('sum-assistant', continuous.listening ? (continuous.knowsYou ? 'Listening for you' : 'Listening') : settings.continuousAssistant && continuous.problem ? 'Can’t listen' : 'Not listening', settings.continuousAssistant && continuous.problem ? 'warn' : '');
+  const memory = desktop?.memory || {};
+  const troubled = vaultDenied(memory) || !!memory.problem;
+  // Chosen but not open (macOS keeping Jester out, or the folder gone) is a problem, not "no vault".
+  aside('sum-memory', memory.root ? memory.name || 'Vault' : memory.chosen ? 'Can’t open the vault' : 'No vault', troubled ? 'warn' : '');
+  const day = desktop?.day || {};
+  const location = day.location || {};
+  const source = location.source || settings.locationSource || 'off';
+  const calendarCount = (day.calendars || []).length;
+  const calendarsBad = (day.calendars || []).some((calendar) => calendar.error);
+  const where =
+    source === 'off'
+      ? ''
+      : source === 'place'
+        ? day.place?.name || 'No place named'
+        : location.town || (location.locating ? 'Locating…' : location.problem ? 'Can’t locate' : 'Locating…');
+  const whereBad = (source === 'here' && !location.town && !!location.problem) || (source === 'place' && !day.place);
+  aside(
+    'sum-day',
+    [where, calendarCount ? `${calendarCount} calendar${calendarCount === 1 ? '' : 's'}` : ''].filter(Boolean).join(', ') || 'Off',
+    whereBad || calendarsBad ? 'warn' : ''
+  );
+  const talker = savedModels.find((connection) => connection.uses?.includes('talk'));
+  aside('sum-models', talker ? talker.model : localUses().includes('talk') && ollama?.chosen ? ollama.chosen : savedModels.length ? `${savedModels.length} saved` : '');
+  aside('sum-chrome', desktop?.chrome?.linked ? 'Linked' : 'Not linked');
+  aside('sum-gestures', settings.windowedBindingsEnabled ? 'Two sets' : '');
 }
 
 function gestureName(message) {
@@ -677,14 +867,31 @@ chrome.storage.onChanged.addListener((changes, area) => {
   settingsChanged(before);
 });
 
-// The camera view, asked for while Settings is on screen (as the extension's popup does).
+/**
+ * The camera view, asked for while its page (Activity) is on screen, as the
+ * extension's popup does: the engine draws one only while someone's asking.
+ */
+let previewTimer = null;
 const askForPreview = () => {
   if (document.visibilityState === 'visible') chrome.runtime.sendMessage({ type: 'jester/desktop-preview' }).catch(() => undefined);
 };
-setInterval(askForPreview, 700);
-askForPreview();
+
+/** The window says which screen it shows (screens.js): some pages ask for things only while they're seen. */
+export function showing(screen) {
+  const activity = screen === 'settings/activity';
+  if (activity && !previewTimer) {
+    previewTimer = setInterval(askForPreview, 700);
+    askForPreview();
+  } else if (!activity && previewTimer) {
+    clearInterval(previewTimer);
+    previewTimer = null;
+  }
+  // Ollama's models, asked again where they're shown: Settings' list (its Models line) and the Models page.
+  if (screen === 'settings' || screen === 'settings/models') renderChatModels();
+}
 
 $('enabled').addEventListener('change', (event) => save({ enabled: event.target.checked }));
+$('gesturesEnabled').addEventListener('change', (event) => save({ gesturesEnabled: event.target.checked }));
 $('pointerEnabled').addEventListener('change', (event) => save({ pointerEnabled: event.target.checked }));
 $('voiceEnabled').addEventListener('change', (event) => save({ voiceEnabled: event.target.checked }));
 $('speechModel').addEventListener('change', (event) => save({ speechModel: event.target.value }));
@@ -695,6 +902,43 @@ for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], 
   $(id).addEventListener('click', () => vaultOp(op));
 }
 $('vault-use').addEventListener('click', (event) => vaultOp('use', event.currentTarget.dataset.path));
+$('locationSource').addEventListener('change', (event) => {
+  // The place is asked for before it's chosen: until one's set, there's nothing to tell the weather of.
+  namingPlace = event.target.value === 'place' && !desktop?.day?.place;
+  if (namingPlace) {
+    renderDay();
+    $('place-name').focus();
+    return;
+  }
+  dayOp({ op: 'source', source: event.target.value });
+});
+$('place-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  $('place-set').disabled = true;
+  const reply = await dayOp({ op: 'place', text: $('place-name').value });
+  $('place-set').disabled = false;
+  $('place-error').textContent = reply.ok ? '' : reply.error;
+  if (reply.ok) {
+    namingPlace = false;
+    renderDay();
+  }
+});
+$('location-again').addEventListener('click', () => dayOp({ op: 'locate' }));
+$('location-privacy').addEventListener('click', () => dayOp({ op: 'privacy' }));
+$('weatherUnits').addEventListener('change', (event) => dayOp({ op: 'units', units: event.target.value }));
+$('calendar-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = $('calendar-add');
+  button.disabled = true;
+  button.textContent = 'Reading it…';
+  $('calendar-error').textContent = '';
+  const reply = await dayOp({ op: 'calendar-add', url: $('calendar-url').value, name: $('calendar-name').value });
+  button.disabled = false;
+  button.textContent = 'Add calendar';
+  if (!reply.ok) return void ($('calendar-error').textContent = reply.error);
+  $('calendar-url').value = '';
+  $('calendar-name').value = '';
+});
 // Back from System Settings, a vault macOS kept Jester out of is tried again, as Try again does.
 window.addEventListener('focus', () => vaultDenied(desktop?.memory) && vaultOp('reindex'));
 $('assistantModel').addEventListener('change', async (event) => {
@@ -726,7 +970,6 @@ $('forget-conversations').addEventListener('click', async (event) => {
   await chrome.runtime.sendMessage({ type: 'jester/desktop-forget' });
   event.target.textContent = 'Forgotten';
 });
-renderChatModels();
 window.addEventListener('focus', renderChatModels);
 $('pointerAim').addEventListener('change', (event) => save({ pointerAim: event.target.value }));
 $('headSpeed').addEventListener('change', (event) => save({ headSpeed: Number(event.target.value) }));
@@ -744,13 +987,17 @@ $('restart').addEventListener('click', (event) => {
 $('cameraDeviceId').addEventListener('change', (event) => save({ cameraDeviceId: event.target.value }));
 $('windowedBindingsEnabled').addEventListener('change', (event) => save({ windowedBindingsEnabled: event.target.checked }));
 
-settings = await readSettings();
-desktop = await chrome.runtime.sendMessage({ type: 'jester/desktop-state' });
-buildBindings();
-buildShortcuts();
-buildConnectionForm();
-render();
-connections('list');
-renderCalibration();
-await renderCameras();
-navigator.mediaDevices?.addEventListener?.('devicechange', renderCameras);
+/** Fills Settings in from the app: called once, as the window opens. */
+export async function startSettings() {
+  settings = await readSettings();
+  desktop = await chrome.runtime.sendMessage({ type: 'jester/desktop-state' });
+  buildBindings();
+  buildShortcuts();
+  buildConnectionForm();
+  render();
+  connections('list');
+  renderChatModels();
+  renderCalibration();
+  await renderCameras();
+  navigator.mediaDevices?.addEventListener?.('devicechange', renderCameras);
+}

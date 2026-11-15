@@ -1,8 +1,10 @@
 /**
  * What Jester remembers of conversations that are over: one sentence each, kept
- * for a week. The conversation log, word for word, is still emptied hourly; this
- * is what lets him be asked "what did we say about Boston?" after that, without
- * every new conversation starting out in the shadow of the last.
+ * for a week. The conversation log, word for word, is still emptied hourly (the
+ * Chats panel's copy, chat-archive.js, is the user's to read, not the model's);
+ * this is what lets him be asked "what did we say about Boston?" after that,
+ * without every new conversation starting out in the shadow of the last. Each
+ * sentence knows its chat, so one carried on is summed up again in its place.
  */
 
 import fs from 'node:fs';
@@ -51,24 +53,34 @@ export function createRecollections({ file, summarize, now = Date.now, log = () 
     /**
      * A conversation that's over, in a sentence. With no model to hand, its opening stands for it. Either is given to
      * the model in every prompt for a week, so one that holds a password or card number is kept as only that it was.
+     * @returns {Promise<string>} the sentence kept, which is its chat's title in the Chats panel; '' when none was
      */
     async keep(entries) {
       const said = entries.filter((entry) => entry.who === 'you');
-      if (!said.length) return;
+      if (!said.length) return '';
       const summary = await summarize(entries).catch((err) => {
         log('couldn’t sum up a conversation:', err.message);
         return `The user said: ${said[0].text}`;
       });
       fresh();
-      kept.push({ at: now(), summary: secretIn(summary) ? LEFT_OUT : String(summary).slice(0, 300) });
+      const text = secretIn(summary) ? LEFT_OUT : String(summary).slice(0, 300);
+      // A chat carried on and over again is summed up whole: its sentence takes the place of the one it had.
+      const chat = entries.find((entry) => entry.chat)?.chat;
+      if (chat) kept = kept.filter((item) => item.chat !== chat);
+      kept.push({ at: now(), summary: text, ...(chat ? { chat } : {}) });
       write();
+      return text;
     },
-    /** The ones that share words with what's being said, then the latest, oldest first. */
-    relevant(text) {
+    /**
+     * The ones that share words with what's being said, then the latest, oldest first. `except`: the chat going on,
+     * picked up again, isn't one that's over.
+     */
+    relevant(text, { except = '' } = {}) {
       fresh();
       const words = wordsIn(text);
       const shared = (item) => [...wordsIn(item.summary)].filter((word) => words.has(word)).length;
       return kept
+        .filter((item) => !except || item.chat !== except)
         .map((item, index) => ({ item, index, score: shared(item) }))
         .sort((a, b) => b.score - a.score || b.index - a.index)
         .slice(0, AT_ONCE)
@@ -79,6 +91,12 @@ export function createRecollections({ file, summarize, now = Date.now, log = () 
     all() {
       fresh();
       return [...kept].reverse();
+    },
+    /** A chat deleted from the Chats panel: he no longer remembers it either. */
+    remove(chat) {
+      const before = kept.length;
+      kept = kept.filter((item) => item.chat !== chat);
+      if (kept.length !== before) write();
     },
     forget() {
       kept = [];

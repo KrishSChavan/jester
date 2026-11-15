@@ -101,3 +101,26 @@ test('a new task replacing one leaves one task running', async () => {
   await second;
   assert.equal(assistant.running, false);
 });
+
+test('asked again, the real assistant shows its question again and listens for the answer; with none waiting, nothing', async () => {
+  const shown = [];
+  const heard = [];
+  const assistant = createAssistant({
+    driver: { call: () => Promise.resolve({}) },
+    openApp: async () => ({ ok: true, text: '' }),
+    activate: async () => undefined,
+    openUrl: async () => undefined,
+    dispatch: async () => ({ ok: true, detail: '' }),
+    listen: (label) => heard.push(label),
+    prompt: { show: (text) => shown.push(text), hide: () => undefined },
+    platform: 'darwin'
+  });
+  assert.equal(assistant.reask(), false);
+  const answer = assistant.confirm('Send the email');
+  while (!assistant.asking) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(assistant.reask(), true);
+  assert.deepEqual(shown.slice(-1), ['Send the email? Say yes or no.']);
+  assert.deepEqual(heard, ['Send the email', 'Send the email']);
+  assistant.answer(false);
+  assert.equal(await answer, false);
+});

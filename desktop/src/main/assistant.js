@@ -140,6 +140,9 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     /** Whether a model is set up to take commands. */
     ready: () => model.ready(),
 
+    /** Whether a task could be shown a picture of a window: one can be taken, and a model for actions reads it. */
+    canSee: async () => host.canPicture() && (await model.canSee().catch(() => false)),
+
     /** Whether a question is waiting on the user. */
     get asking() {
       return !!approval;
@@ -290,6 +293,14 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     /** The pill's Allow / Don't. */
     answer(yes) {
       approval?.settle(!!yes);
+    },
+
+    /** Its question, asked again: what came back wasn't a yes or a no. @returns {boolean} whether one's waiting */
+    reask() {
+      if (!approval) return false;
+      prompt.show(`${approval.label}? Say yes or no.`);
+      listen(approval.label);
+      return true;
     },
 
     /** A spoken command, if it's for the assistant: an answer, or "stop". */

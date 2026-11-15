@@ -62,7 +62,7 @@ export function permissionItems(platform, statuses, { listedAs = '' } = {}) {
     });
 }
 
-/** The `needed` ones still missing: while any are, Settings opens by itself. */
+/** The `needed` ones still missing: while any are, Jester's window opens by itself, saying so. */
 export function missingNeeded(items) {
   return items.filter((item) => item.tier === 'needed' && !item.granted);
 }

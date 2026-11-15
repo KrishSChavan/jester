@@ -6,7 +6,7 @@
   --pill-muted: rgba(245, 245, 247, 0.7);
   --warn: #ffb340;
   --fill: #4cc26b;
-  /* Jester's orb, as in the talk window (src/talk/talk.css). */
+  /* Jester's orb, as in his window (src/home/home.css). */
   --orb: #b69cf5;
 }
 
@@ -162,7 +162,7 @@ body {
   display: none;
 }
 
-/* His orb (src/talk/orb.js) and a word for what he's doing: listening when
+/* His orb (src/home/orb.js) and a word for what he's doing: listening when
    he's waiting on the user (`held`: no mic frames to move the bars), thinking,
    and speaking. It's drawn on a canvas of a fixed size, so the pill keeps its
    size and the x beside it stays put. */

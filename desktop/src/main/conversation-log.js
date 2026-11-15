@@ -1,7 +1,9 @@
 /**
  * What's been said to Jester and what he said, as a JSON file on this computer.
- * It holds the conversation's context, and is emptied every hour, so what's said
- * doesn't last word for word. Only what was said to him goes in: not the room.
+ * It holds the conversation's context, and is emptied every hour; what's over
+ * is kept word for word for a week as a chat (chat-archive.js), and as a
+ * sentence for the model (recollections.js). Only what was said to him goes in:
+ * not the room.
  *
  * Entries belong to numbered conversations, so what's over can be told from what's
  * still going on. A conversation is over once it's been quiet for `endAfterMs`
@@ -12,10 +14,15 @@
  * result belongs with what asked for it. Nor does the hour cut one in two: what's
  * over goes on the hour, and a conversation still going on waits for its end.
  * With no `endAfterMs`, the hour takes the conversation going on with it.
+ *
+ * Each conversation is a chat with an id, which its entries carry (`chat`). A chat
+ * that was over can be carried on (`restore`): its lines come back marked `earlier`,
+ * and it keeps its id, so when it's over again it takes the place of what was kept.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export const EMPTIED_EVERY_MS = 60 * 60 * 1000;
 
@@ -28,11 +35,15 @@ export const EMPTIED_EVERY_MS = 60 * 60 * 1000;
  *   end it meanwhile, for an hour at most, should one never finish
  * @param {(entries:object[]) => void} [options.onEnded]  a conversation that's over: gone quiet, or taken by the hour
  * @param {(entries:object[]) => void} [options.onEmptied]  onEnded's old name, still taken
- * @returns {{add:Function, current:Function, idleFor:Function, startNew:Function, expire:Function, clear:Function}}
+ * @param {() => void} [options.onChange]  the conversation going on changed: a line, an end, a chat carried on.
+ *   Called as it happens, so it shouldn't read the log back there and then.
+ * @param {() => string} [options.newId]  a new chat's id
+ * @returns {{add:Function, current:Function, entries:Function, chatId:Function, idleFor:Function, startNew:Function,
+ *   restore:Function, justResumed:Function, expire:Function, clear:Function}}
  */
-export function createConversationLog({ file, now = Date.now, endAfterMs = Infinity, busy = () => false, onEnded, onEmptied }) {
+export function createConversationLog({ file, now = Date.now, endAfterMs = Infinity, busy = () => false, onEnded, onEmptied, onChange = () => undefined, newId = randomUUID }) {
   const ended = onEnded || onEmptied || (() => undefined);
-  let data = { emptiedAt: now(), conversation: 1, entries: [] };
+  let data = { emptiedAt: now(), conversation: 1, chat: newId(), entries: [] };
 
   function write() {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -40,6 +51,14 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
     const next = `${file}.tmp`;
     fs.writeFileSync(next, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(next, file);
+  }
+
+  function changed() {
+    try {
+      onChange();
+    } catch {
+      /* the window's business, not the log's */
+    }
   }
 
   try {
@@ -51,10 +70,22 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
 
   const going = () => data.entries.filter((entry) => entry.conversation === data.conversation);
 
-  /** How long since anything was said, or null with nothing going on. */
+  // A log from before chats were kept: what's going on is a chat from now.
+  if (!data.chat) data.chat = newId();
+  for (const entry of going()) entry.chat ??= data.chat;
+
+  /** How long since anything was said, or since a chat was carried on; null with nothing going on. */
   function idleFor() {
     const last = going().at(-1);
-    return last ? now() - Date.parse(last.at) : null;
+    if (!last) return null;
+    return now() - Math.max(Date.parse(last.at), data.resumedAt || 0);
+  }
+
+  /** The next conversation, a new chat; `id` carries one on. */
+  function begin(id = newId()) {
+    data.conversation += 1;
+    data.chat = id;
+    delete data.resumedAt;
   }
 
   /**
@@ -64,9 +95,14 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
   function startNew(keep = 0) {
     const entries = going();
     const over = entries.slice(0, entries.length - keep);
-    data.conversation += 1;
-    for (const entry of entries.slice(entries.length - keep)) entry.conversation = data.conversation;
+    begin();
+    for (const entry of entries.slice(entries.length - keep)) {
+      entry.conversation = data.conversation;
+      entry.chat = data.chat;
+      delete entry.earlier;
+    }
     write();
+    changed();
     return over;
   }
 
@@ -96,9 +132,12 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
       }
       return;
     }
-    data = { emptiedAt: now(), conversation: data.conversation + 1, entries: [] };
+    data = { emptiedAt: now(), conversation: data.conversation + 1, chat: newId(), entries: [] };
     write();
-    if (taken.length) ended(taken);
+    if (taken.length) {
+      changed();
+      ended(taken);
+    }
   }
 
   expire();
@@ -108,20 +147,50 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
     /** @param {'you'|'jester'} who */
     add(who, text) {
       expire(who === 'jester');
-      data.entries.push({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation });
+      data.entries.push({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation, chat: data.chat });
       write();
+      changed();
     },
     /** The last few things said in the conversation going on, oldest first. */
     current(count) {
       expire();
       return going().slice(-count);
     },
+    /** All of the conversation going on, as it is: nothing's ended by asking. */
+    entries: () => going().map((entry) => ({ ...entry })),
+    /** The id of the chat going on. */
+    chatId: () => data.chat,
     idleFor,
     startNew,
+    /**
+     * A chat that was over, carried on: what's going on ends, and is handed back to be kept as any other; the
+     * chat's lines, marked `earlier`, are the conversation going on, as if it had never stopped. Its quiet is
+     * counted from now, so it isn't over again before anything's said.
+     * @param {{who:string, text:string, at:string}[]} entries
+     * @param {string} id  the chat's
+     * @returns {object[]} what was ended
+     */
+    restore(entries, id) {
+      const over = going();
+      begin(String(id));
+      data.resumedAt = now();
+      for (const entry of entries) {
+        const who = entry?.who === 'jester' ? 'jester' : 'you';
+        // A line kept as only that it held a secret stays so: it's a placeholder, not the user's words.
+        const hidden = entry?.hidden ? { hidden: true } : {};
+        data.entries.push({ at: String(entry?.at ?? new Date(now()).toISOString()), who, text: String(entry?.text ?? ''), conversation: data.conversation, chat: data.chat, earlier: true, ...hidden });
+      }
+      write();
+      changed();
+      return over;
+    },
+    /** A chat was just carried on, and the user's said at most one thing since: it's still the chat they picked. */
+    justResumed: () => !!data.resumedAt && going().filter((entry) => !entry.earlier && entry.who === 'you').length <= 1,
     /** Everything, now. */
     clear() {
-      data = { emptiedAt: now(), conversation: data.conversation + 1, entries: [] };
+      data = { emptiedAt: now(), conversation: data.conversation + 1, chat: newId(), entries: [] };
       write();
+      changed();
     }
   };
 }
