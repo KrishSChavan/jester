@@ -212,6 +212,12 @@ so and no longer calls it done. With Claude, the system prompt is cached, so
 each step costs less. Linked to Jester Desktop, what it did step by step goes
 into the app's own log on your computer, to tell why a task stopped.
 
+**What's new in 0.2.4**: With many tabs open, "what tabs do I have open" and
+"close my … tabs" finish and say what was done, where they could stop with "a
+control is not responding" after doing it. Jester is told when a list of tabs
+is only part of them, and reading the same thing twice is no longer taken for a
+control that failed.
+
 Tick all three certifications. Each is true: data goes only to the AI provider
 the user configures, solely to carry out their commands. It is never sold,
 never used for anything else, and never used for credit or lending.

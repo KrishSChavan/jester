@@ -157,6 +157,41 @@ test('repeated no-op actions stop before the third identical attempt', async () 
   assert.match(result.trace[3], /^paused \(unresponsive-control\): A control is not responding\./);
 });
 
+test('a tab list cut short says so; asked for again it isn’t read again, and a third asking ends as what it is', async () => {
+  // 2026-11-15: 40 tabs open, some 20 of them shown to the model with "40 open tabs", asked for three times running
+  // and ended as "A control is not responding".
+  const tabs = Array.from({ length: 40 }, (_, i) => ({ tabId: 1000 + i, title: `A rather long title for tab number ${i}, as most pages have`, url: `https://www.example-site-${i}.com/some/path/that/goes/on/for/a/while` }));
+  const read = { action: { action: 'browser', op: 'tabs' } };
+  const fixed = { ok: true, pageId: 'document-0', revision: 0, url: 'https://example.com/', title: 'Example', text: 'A page that stays as it is.' };
+  let reads = 0;
+  const listing = { observe: async () => fixed, execute: async () => ((reads += 1), { ok: true, detail: '40 open tabs.', tabs }) };
+  const h = harness([read, read, { action: { action: 'finish', say: 'You have 40 tabs open.', success: true } }], listing);
+  const result = await runAssistant({ text: 'what tabs do I have open', env, ...h });
+  assert.equal(result.ok, true);
+  // Read once: the second asking was answered with what it already had.
+  assert.equal(reads, 1);
+  const shown = h.prompts[1].lastResult;
+  assert.ok(shown.tabs.length < 40 && shown.tabs.length >= 20, `${shown.tabs.length} listed`);
+  assert.match(shown.detail, new RegExp(`^40 open tabs\\. Only the first ${shown.tabs.length} are listed here, ${40 - shown.tabs.length} are not: asking again lists the same ones\\.`));
+  assert.equal(h.prompts[2].lastResult.tabs.length, shown.tabs.length);
+  assert.match(h.prompts[2].lastResult.note, /asking again gives the same/);
+  assert.ok(result.trace.some((line) => /^asked again for what it had just read: /.test(line)));
+  // A model that asks a third time all the same: over, and not as a control that failed.
+  reads = 0;
+  const stuck = harness([read, read, read, read], listing);
+  const ended = await runAssistant({ text: 'what tabs do I have open', env, ...stuck });
+  assert.equal(ended.ok, false);
+  assert.equal(reads, 1);
+  assert.match(ended.say, /^I kept reading the same thing/);
+  assert.doesNotMatch(ended.say, /control/);
+  assert.match(ended.trace.at(-1), /^paused \(repeated-read\)/);
+  // A short list is shown whole, with nothing added.
+  const few = harness([read, { action: { action: 'finish', say: 'Three.', success: true } }], { observe: async () => fixed, execute: async () => ({ ok: true, detail: '3 open tabs.', tabs: tabs.slice(0, 3) }) });
+  await runAssistant({ text: 'what tabs do I have open', env, ...few });
+  assert.equal(few.prompts[1].lastResult.detail, '3 open tabs.');
+  assert.equal(few.prompts[1].lastResult.tabs.length, 3);
+});
+
 test('every step’s prompt carries the date and time, and the model is told a date gone by is over', async () => {
   // 2026-11-14: a dashboard's items of November 2 and 3 were read out as due "this week".
   const h = harness([{ action: { action: 'finish', say: 'Nothing is due.', success: true } }]);

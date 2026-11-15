@@ -56,13 +56,25 @@ test('Gemini action schema rejects malformed actions and unsafe or mixed groups 
     {action:click,actions:[click]}, {actions:[]}, {actions:[click,click,click,click]},
     {actions:[{action:'finish',say:'Done',success:true}]}, {actions:[{action:'wait',ms:100}]},
     {action:{action:'press_key',key:'F12'}}, {action:click,memory:{goal:'Different goal'}},
-    {action:click,memory:{facts:Array(11).fill('Fact')}}, {action:{action:'finish',say:'Done'}},
+    {action:{action:'finish',say:'Done'}},
     {action:{action:'execute_js',code:'alert(1)'}}
   ];
   for (const response of invalid) {
     assert.equal(accepts(response),false,JSON.stringify(response));
     assert.throws(() => validateTurn(response));
   }
+  // Too many notes, or one too long: the schema still says so to a model held to it, but from one that isn't the
+  // step is kept and the notes are cut to what's kept, rather than the whole reply refused (2026-11-15).
+  const wordy = {action:click,memory:{facts:[...Array.from({length:14},(_,i)=>`Fact ${i}`),'x'.repeat(400)],subgoal:'y'.repeat(600)}};
+  assert.equal(accepts(wordy),false);
+  const turn = validateTurn(wordy);
+  assert.equal(turn.memory.facts.length,10);
+  assert.equal(turn.memory.facts.at(-1).length,180);
+  assert.equal(turn.memory.facts[0],'Fact 5');
+  assert.equal(turn.memory.subgoal.length,240);
+  // Notes of the wrong kind are still refused.
+  assert.throws(() => validateTurn({action:click,memory:{facts:[1,2]}}));
+  assert.throws(() => validateTurn({action:click,memory:{subgoal:['a']}}));
 });
 
 test('host checks remain authoritative for semantic IDs and navigation even with a response schema', () => {

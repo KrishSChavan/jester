@@ -24,26 +24,33 @@ export function createMemory(goal, stored = null) {
   };
 }
 
+/**
+ * A model's notes for the task, as they'll be kept. Notes of the wrong kind are refused; too many, or too long, are
+ * cut to what's kept (the newest, each to its length): refusing them threw away the step that came with them, and
+ * a model listing forty tabs' worth of facts lost a step each time (2026-11-15).
+ */
 export function validateMemoryPatch(patch) {
   if (patch === undefined) return {};
   if (!isRecord(patch) || Object.keys(patch).some((key) => !['constraints', 'facts', 'subgoal'].includes(key))) {
     throw new Error('Memory may update only constraints, facts, and subgoal.');
   }
+  const kept = { ...patch };
   for (const field of ['constraints', 'facts']) {
     if (patch[field] === undefined) continue;
-    if (!Array.isArray(patch[field]) || patch[field].length > MEMORY_LIMITS[field] ||
-        patch[field].some((item) => typeof item !== 'string' || !item.trim() || item.length > MEMORY_LIMITS.entry)) {
-      throw new Error(`Memory ${field} exceeds its limit.`);
+    if (!Array.isArray(patch[field]) || patch[field].some((item) => typeof item !== 'string')) {
+      throw new Error(`Memory ${field} must be a list of short sentences.`);
     }
+    kept[field] = list(patch[field], MEMORY_LIMITS[field]);
   }
-  if (patch.subgoal !== undefined && (typeof patch.subgoal !== 'string' || patch.subgoal.length > MEMORY_LIMITS.subgoal)) {
-    throw new Error('Memory subgoal exceeds its limit.');
+  if (patch.subgoal !== undefined) {
+    if (typeof patch.subgoal !== 'string') throw new Error('Memory subgoal must be a sentence.');
+    kept.subgoal = tidy(patch.subgoal, MEMORY_LIMITS.subgoal);
   }
-  return patch;
+  return kept;
 }
 
-export function updateMemory(memory, patch) {
-  validateMemoryPatch(patch);
+export function updateMemory(memory, given) {
+  const patch = validateMemoryPatch(given);
   for (const field of ['constraints', 'facts']) {
     if (patch[field]) memory[field] = list([...memory[field], ...patch[field]], MEMORY_LIMITS[field]);
   }

@@ -239,7 +239,11 @@ export function createBrowserTools({ api = () => globalThis.chrome, now = () => 
     switch (action.op) {
       case 'tabs': {
         const tabs = await listTabs(from, action.query);
-        return { ok: true, detail: `${plural(tabs.length, 'open tab')}${action.query ? ` match ${quote(action.query)}` : ''}.`, tabs };
+        // More open than a list holds: said, so the count isn't taken for all there are.
+        const all = tabs.length < LIST_LIMIT ? tabs.length
+          : (await chrome().tabs.query({ windowType: 'normal' }).catch(() => [])).filter((tab) => tabMatches(tab, action.query)).length;
+        const which = action.query ? ` match ${quote(action.query)}` : '';
+        return { ok: true, detail: all > tabs.length ? `${plural(all, 'open tab')}${which}; these are the first ${tabs.length}.` : `${plural(tabs.length, 'open tab')}${which}.`, tabs };
       }
       case 'new': {
         const created = await chrome().tabs.create({ active: true, ...(from ? { windowId: from.windowId, index: from.index + 1 } : {}) });

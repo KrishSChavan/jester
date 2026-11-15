@@ -227,13 +227,17 @@ function compactResult(result) {
     const tabs = [];
     for (const tab of result.tabs.slice(0, 40)) {
       if (!isRecord(tab) || !Number.isSafeInteger(tab.tabId)) continue;
-      const entry = { tabId: tab.tabId, title: boundedString(tab.title, 80), url: boundedString(tab.url, 100) };
+      const entry = { tabId: tab.tabId, title: boundedString(tab.title, 70), url: boundedString(tab.url, 60) };
       for (const flag of ['current', 'otherWindow', 'audible', 'muted', 'pinned']) if (tab[flag] === true) entry[flag] = true;
       if (typeof tab.group === 'string') entry.group = tab.group.slice(0, 40);
       tabs.push(entry);
-      if (JSON.stringify({ ...out, tabs }).length > limit) { tabs.pop(); break; }
+      if (JSON.stringify({ ...out, tabs }).length > limit - 160) { tabs.pop(); break; }
     }
     out.tabs = tabs;
+    // A list cut short says so, or the model asks for it again to get the rest, and gets the same (2026-11-15:
+    // 40 tabs open, some 20 shown, asked for three times running and ended as "a control is not responding").
+    const unlisted = result.tabs.length - tabs.length;
+    if (unlisted > 0) out.detail = `${String(out.detail || '').slice(0, 200)} Only the first ${tabs.length} are listed here, ${unlisted} are not: asking again lists the same ones. tabs(query) finds the others by a word of their title or address.`.trim();
   }
   if (Array.isArray(result.items)) {
     const items = [];
@@ -919,9 +923,21 @@ async function runAssistantSteps({
         const signature = JSON.stringify([fingerprint(page), action]);
         repeats = signature === previousSignature ? repeats + 1 : 1;
         previousSignature = signature;
+        // Asking again for what it was just told (the tabs, a table, some text) reads the same again: no control is
+        // failing. The second asking isn't done, and it's told it has the answer; a third ends the task as what it is.
+        const reread = isReadAction(action) && !['observe', 'wait', 'look'].includes(action.action);
+        if (reread && repeats === 2 && lastResult?.ok) {
+          noted(`asked again for what it had just read: ${actionLabel(action, [...(readPage?.elements || []), ...(rawPage?.elements || [])])}`);
+          lastResult = { ...lastResult, note: 'You asked for exactly this in the last step and this is its result, unchanged: asking again gives the same. Use it now: finish with the answer, or ask for something different.' };
+          state.steps++;
+          count++;
+          break;
+        }
         if (repeats >= 3) {
           noted(`the same step a third time on a page that hadn’t changed: ${actionLabel(action, [...(readPage?.elements || []), ...(rawPage?.elements || [])])}`);
-          return pause('A control is not responding. Adjust the page and say “keep going”.', 'unresponsive-control');
+          return reread
+            ? pause('I kept reading the same thing without getting any further. Try asking it another way.', 'repeated-read')
+            : pause('A control is not responding. Adjust the page and say “keep going”.', 'unresponsive-control');
         }
         state.pendingAction = action;
         await checkpoint();
