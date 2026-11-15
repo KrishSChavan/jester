@@ -604,6 +604,41 @@ test('what Chrome is handed: the user’s words, and what the conversation took 
   ]);
 });
 
+test('something to play on YouTube is the linked Chrome’s, not the laptop’s to search and pick; unlinked, or on Spotify, it’s done as before', async () => {
+  // 2026-11-15: "play the latest MrBeast video on YouTube" opened a search and left picking to the laptop's
+  // assistant, which took 24 steps in Chrome's window and played nothing.
+  const make = (claims) => {
+    const handed = [];
+    const opened = [];
+    const runner = createVoiceRunner({
+      driver: { call: async (cmd) => (cmd === 'apps' ? { apps: RUNNING } : cmd === 'frontmost' ? { app: { name: 'Code' } } : {}) },
+      dispatch: async () => ({ ok: true }),
+      canPost: () => true,
+      run: async (file, args) => (opened.push([file, ...args].join(' ')), ''),
+      installed: () => INSTALLED,
+      platform: 'darwin',
+      wait: async () => undefined,
+      browser: { claims: async () => claims, run: async (text, meant) => (handed.push([text, meant]), { ok: true, text: 'Playing MrBeast’s newest video.' }) }
+    });
+    return { runner, handed, opened };
+  };
+  const linked = make(true);
+  assert.deepEqual((await linked.runner.run('play the latest MrBeast video on YouTube')).outcome, { ok: true, text: 'Playing MrBeast’s newest video.' });
+  assert.deepEqual(linked.handed, [['play the latest MrBeast video on YouTube', '']]);
+  // Nothing was opened here first: finding it is Chrome's.
+  assert.equal(linked.opened.some((line) => /youtube/i.test(line)), false);
+  // Chrome not linked: the search is opened, as it always was.
+  const alone = make(false);
+  const outcome = (await alone.runner.run('play the latest MrBeast video on YouTube')).outcome;
+  assert.deepEqual(alone.handed, []);
+  assert.match(outcome.text, /Searching YouTube for/);
+  assert.equal(alone.opened.some((line) => /youtube\.com\/results/i.test(line)), true);
+  // On Spotify, it's Spotify's, linked or not.
+  const music = make(true);
+  await music.runner.run('play some Gunna on Spotify');
+  assert.deepEqual(music.handed, []);
+});
+
 test('an app’s name with more to do after it isn’t the app alone, and “write down” writes what follows', async () => {
   const { parseSequence } = await import('../desktop/src/main/voice-commands.js');
   const apps = ['TextEdit', 'Notes', 'Spotify', 'Google Chrome', 'Visual Studio Code'];

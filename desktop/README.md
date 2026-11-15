@@ -721,6 +721,12 @@ The first run (2026-11-14, Claude Haiku 5.5) got 2 of 7 done, and none of what
 stopped the rest was the model:
 
 - A picture of the window put Jester's own window back in front (above).
+- "Play the latest MrBeast video on YouTube" is all words voice-commands.js
+  knows, so it never reached the linked Chrome: a search was opened and picking
+  a result left to the laptop's assistant, which took 24 steps in Chrome's
+  window and played nothing (2026-11-15). Something to play on YouTube is now
+  Chrome's when it's linked (`tube`, voice-runner.js): the same sentence played
+  the right video in 6 s, and three more like it in 10–13 s each.
 - macOS's own dialog in front (a permission asked for, an alert) left every step
   failing as "not in front" for a minute. Now it ends the task at once and says
   so: "macOS is asking you something in a dialog of its own… answer it, then

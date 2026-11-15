@@ -606,7 +606,13 @@ export function createVoiceRunner({
       if (outcome) (outcome.ok ? learned.used(alias.key, 'alias') : learned.unalias(text)).catch(() => undefined);
       return { steps, outcome };
     }
-    if (unknown && browser && ((await browser.claims(text)) || (!!said && (await browser.claims(said))))) {
+    const chromes = async () => !!browser && ((await browser.claims(text)) || (!!said && (await browser.claims(said))));
+    // Something to play on YouTube is the linked Chrome's to find and start, though every word of it is a command
+    // known here: the extension reads the page itself, where the laptop's assistant sees a browser window's first
+    // few hundred controls. "Play the latest MrBeast video on YouTube" took 24 steps that way and played nothing
+    // (2026-11-15); Chrome's did the like in 12 s.
+    const tube = steps.length === 1 && steps[0].kind === 'play' && steps[0].service === 'youtube';
+    if ((unknown || tube) && (await chromes())) {
       // The user's own words, and what the conversation took them to mean: Chrome hasn't heard what came before ("try now").
       const meant = again ? text : said && gist(said) !== gist(text) ? text : '';
       const words = again || said || text;
