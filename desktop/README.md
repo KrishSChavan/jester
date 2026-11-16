@@ -1631,6 +1631,34 @@ out to be. The log told most of it.
 `npm run live-check -- ring`: the pill, its sound being made (muted there), the
 card, and each way of stopping it that a check can do: 8 of 8.
 
+And the day after (2026-11-16), from a conversation about one reminder:
+
+- **Told when to set a reminder for, three times, he said "Okay" and set
+  nothing.** The model had it right each time: a `move`, to "set it for one
+  hour before the class" and to "yeah, one thirty's perfect". The list threw
+  each away, since only the user moves a task and those words weren't on its
+  list of ways to say so, nor did they name the task by its last word. Now
+  (`tasks.js`):
+  - a short answer to a line of his that *asked when* one reminder is for
+    (`WHEN_ASK`: "tell me when you want it", "do you want the reminder at
+    1:30?"), and named no other, is about that reminder. Not a line of his
+    saying one's set, nor a reminder as it's given; and never a question back;
+  - a yes to the time he offered is that time, and "an hour before" is counted
+    from the one time his line gave for something else ("it starts at 2:30
+    this afternoon": `timesIn`), which is nobody's sum. A range, a time that
+    could be morning or evening, another day, a number that may be no time:
+    then it's the model's time, as it was before;
+  - to move one, a task is named by more of its words than any other's ("move
+    my first class reminder to 1:30"); a time said in words ("one thirty
+    p.m.", as the recognizer writes it) is a time;
+  - and a change to the list that isn't made is never agreed to: he says how
+    the task stands instead (`undone`).
+
+  A review of the first attempt at this found it let a model's move through
+  on words that asked for nothing ("I set the dentist appointment for
+  Friday"), and counted "an hour before" from the wrong time (the end of a
+  range, his own offer): each is a test now.
+
 ## Getting started, for whoever opens him first
 
 Step 12. Nothing in him is about one person: the examples in his window and in

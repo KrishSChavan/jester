@@ -180,11 +180,27 @@ const YES = /^(?:yes|yeah|yep|yup|sure|please|ok(?:ay)?|do (?:it|that)|go ahead|
 const KEEP_WORDS = /\b(?:write (?:\w+ )?down|jot|note (?:that|down)|make a note|keep track|put (?:\w+ )?down|add|put)\b/i;
 /** A question, by how it starts or ends. */
 const ASKING = /^(?:what|how|when|where|which|who|why|is|are|am|do|does|did|can|could|would|will|should|have|has|any)\b|\?\s*$/i;
+/**
+ * Asking to be told something, and not asking for something to be done: "what time is it for?", "can you tell me
+ * when the class is?"; but not "can you set it for 1:30?".
+ */
+const asksSomething = (said) => {
+  const line = String(said ?? '').trim();
+  // "Do the stamps on Wednesday instead" tells; "do I have one for Wednesday?" asks.
+  if (/^do (?!i\b|you\b|we\b|they\b)/i.test(line) && !/\?\s*$/.test(line)) return false;
+  return ASKING.test(line) && !(/^(?:can|could|would|will) you\b/i.test(line) && !/\b(?:tell me|what|when|where|which|who|why|how|know)\b/i.test(line));
+};
 /** Words that say a thing isn't done yet, whatever else they share with it. */
 const NOT_DONE = /\b(?:not|never|still|yet|need to|needs to|have to|has to|got to|gotta|should|must|going to|gonna|want to|will|tomorrow|later)\b|n['’]t\b|\bi['’]ll\b/i;
 const DONE_WORDS = /\b(?:done|did (?:it|that|them)|i(?:'ve|’ve| have)? (?:just |already |finally )?did|finished|completed?|tick(?:ed)?|check(?:ed)? (?:it|that) off|cross(?:ed)?|handled|sorted|took care|taken care)\b/i;
 const DROP_WORDS = /\b(?:cancel|remove|delete|drop|scrap|never ?mind|forget|take (?:\w+ ){1,5}off|get rid|don(?:'|’)?t need)\b/i;
-const MOVE_WORDS = /\b(?:snooze|later|again|push|move|postpone|reschedule|change|instead|make (?:it|that)|in (?:\w+ )?(?:minutes?|hours?)|remind me)\b/i;
+const MOVE_WORDS = /\b(?:snooze|later|again|push|move|postpone|reschedule|change|instead|make (?:it|that)|set (?:it|that|(?:the|my|a) (?:reminder|time|alarm))|in (?:\w+ )?(?:minutes?|hours?)|(?:minutes?|hours?) (?:before|after)|remind me)\b/i;
+/**
+ * A line of his asking when a reminder should be for: "tell me when you want it", "do you want the reminder at
+ * 1:30?", "I still need the time". Not his saying that one's set, nor a reminder as it's given.
+ */
+const WHEN_ASK =
+  /\b(?:when (?:do you want|would you like|should (?:i|it|that)|works)|tell me when|what time (?:do you want|would you like|should|works)|do you want (?:the reminder|it|that|one|me to (?:set|remind))|want (?:the reminder|it) (?:at|for|set)|should i (?:set|remind)|i (?:still )?need (?:the|a) time|haven['’]t set a time)\b/i;
 /** Words that name nothing: said alone after a reminder, or to his question about one task, they're about that one. */
 const PLAIN_WORDS = new Set(
   "ok okay yes yeah yep yup sure please thanks thank you cool great alright right fine good got it that this one it's its is i i've i'm have did do done finished all already just now the a an for in at to me my snooze again later remind push move postpone back by until till tomorrow tonight today morning afternoon evening noon midnight minutes minute hours hour half and seconds second mins min am pm o'clock cancel remove delete drop forget never mind scrap tick ticked check checked cross crossed mark marked off complete completed handled sorted jester hey with can could would on of make past quarter that's thats yea so well actually then too them those both was were been be there".split(' ')
@@ -286,7 +302,10 @@ export function whenOf(request, now, options) {
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const DAY = WEEKDAYS.join('|');
 /** Their words give a time of day or a length of time: "at 3", "5 pm", "noon", "this evening", "in twenty minutes". */
-const CLOCK_WORDS = new RegExp(String.raw`\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?|o['’]?clock)|\bat (?:\d|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight)|\b\d{1,2}:\d{2}\b|\b(?:noon|midnight|midday|morning|afternoon|evening|tonight|half past|quarter (?:to|past)|lunch(?:time)?|dinner(?:time)?|bedtime)\b|\b${DURATION}\b`, 'i');
+const HOUR_WORD = 'one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve';
+/** A time of day in words, as a recognizer writes one: "one thirty p.m.", "two fifteen", "nine o'clock". */
+const SPOKEN_CLOCK = String.raw`\b(?:${HOUR_WORD})(?:[ -](?:oh[ -]five|fifteen|thirty|forty[- ]five))?\s*(?:a\.?m\b\.?|p\.?m\b\.?|o['’]?clock)|\b(?:${HOUR_WORD})[ -](?:oh[ -]five|fifteen|thirty|forty[- ]five)\b`;
+const CLOCK_WORDS = new RegExp(String.raw`${SPOKEN_CLOCK}|\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?|o['’]?clock)|\bat (?:\d|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|noon|midnight)|\b\d{1,2}:\d{2}\b|\b(?:noon|midnight|midday|morning|afternoon|evening|tonight|half past|quarter (?:to|past)|lunch(?:time)?|dinner(?:time)?|bedtime)\b|\b${DURATION}\b`, 'i');
 /** …or a day: "tomorrow", "on Friday", "next week", "November 20th", "the 20th", "11/20", "in ten days". */
 const DAY_WORDS = new RegExp(String.raw`\b(?:today|tonight|tomorrow|${DAY}|weekend|next (?:week|month)|this week|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2}|\d{1,2}(?:st|nd|rd|th)|\d{1,2}/\d{1,2}|(?:in )?${NUMBER} (?:days?|weeks?|months?)(?: from (?:now|today))?)\b`, 'i');
 const TODAY_WORDS = /\b(?:today|tonight|this (?:morning|afternoon|evening))\b/i;
@@ -317,6 +336,51 @@ export function dayIn(said, at) {
   return found.size === 1 ? [...found][0] : null;
 }
 
+/** A time given by another, in their words: "one hour before", "ten minutes after", "half an hour ahead of". */
+const RELATIVE = new RegExp(String.raw`\b(${DURATION}) (before|after|ahead of|prior to)\b`, 'i');
+
+/** A time of day of their own in what they said, apart from any length of time: "at 3", "1:30", "two fifteen", "noon". */
+const OWN_CLOCK = new RegExp(String.raw`${SPOKEN_CLOCK}|\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?|o['’]?clock)|\bat (?:\d|${HOUR_WORD}|noon|midnight)|\b\d{1,2}:\d{2}\b|\b(?:noon|midnight|midday)\b`, 'i');
+
+/**
+ * The times of day a line of his gives, each as today's or the one day the line names, and whether it's a time he
+ * offered for the reminder itself ("the reminder at 1:30 PM") or something else's ("it starts at 2:30 this
+ * afternoon"). Null when a time in it can't be told for certain: one that could be morning or evening ("at 2:30"),
+ * a number that may not be a time at all, or a day named that isn't plainly one day.
+ * @returns {{due:number, offered:boolean}[]|null}
+ */
+export function timesIn(line, now) {
+  const text = String(line ?? '');
+  const day = dayIn(text, now);
+  // "On November 18", or today and tomorrow both: which day a time is on isn't his line's to say plainly.
+  if (day === null && DAY_WORDS.test(text.replace(new RegExp(String.raw`\b${DURATION}\b`, 'gi'), ' '))) return null;
+  const on = new Date(day ?? dayStart(now));
+  const found = [];
+  for (const match of text.matchAll(/\b(\d{1,2})(?::(\d{2}))?(?:\s*([ap])\.?m\b\.?)?(?:\s+(?:this|in the|tomorrow)\s+(morning|afternoon|evening)|\s+(tonight))?/gi)) {
+    const [whole, h, min, half, part, tonight] = match;
+    const before = text.slice(0, match.index);
+    // A number alone is a room, a course, a count or a temperature: a time has a colon, AM or PM, or "at" before it.
+    const clocklike = min !== undefined || !!half || ((part || tonight) && /\b(?:at|by|around|until|till)\s*$/i.test(before));
+    if (!clocklike) continue;
+    let hour = Number(h);
+    const minute = Number(min || 0);
+    if (hour > 23 || minute > 59 || (half && (hour < 1 || hour > 12))) return null;
+    // Which half of the day has to be said: "2:30" alone isn't known, nor is one end of "3:05-4:20pm".
+    if (!half && !part && !tonight && hour < 13) return null;
+    const late = half ? half.toLowerCase() === 'p' : !!tonight || /afternoon|evening/i.test(part || '');
+    if (late && hour < 12) hour += 12;
+    if (!late && half && hour === 12) hour = 0;
+    found.push({ due: new Date(on.getFullYear(), on.getMonth(), on.getDate(), hour, minute).getTime(), offered: /\b(?:reminder|remind (?:you|me)|set (?:it|that|one)|it|one|that)\s+(?:at|for)\s*$/i.test(before), end: match.index + whole.length });
+  }
+  return found;
+}
+
+/** The one time of day a line of his gives, when it's the only one and plain; else null. */
+export function anchorIn(line, now) {
+  const times = timesIn(line, now);
+  return times?.length === 1 ? times[0].due : null;
+}
+
 /**
  * When a task is for, from what a model gave and what the user actually said. A model's time counts only when
  * their words (or his offer they said yes to) hold one, outside what the task itself is: asked to "add buy stamps
@@ -330,6 +394,22 @@ export function dayIn(said, at) {
 export function whenAsked(request, said, last, now, what = '') {
   const its = new Set((String(what).toLowerCase().match(/[a-z']{3,}/g) || []));
   const outside = String(said ?? '').replace(/[a-z'’]{3,}/gi, (word) => (its.has(word.toLowerCase()) ? ' ' : word));
+  // Answering his question about when a reminder's for, with no time of day or day of their own: what his line
+  // said settles it, and no model's sum does. A yes to the time he offered is that time; and a time given by
+  // another ("an hour before the class") is counted from the one time his line gave for something else ("it starts
+  // at 2:30 this afternoon"). Anything less plain is left to what follows, as it always was.
+  if (WHEN_ASK.test(String(last ?? '')) && !OWN_CLOCK.test(outside) && !DAY_WORDS.test(outside.replace(new RegExp(String.raw`\b${DURATION}\b`, 'gi'), ' '))) {
+    const times = timesIn(last, now);
+    const offers = (times || []).filter((time) => time.offered);
+    const relative = RELATIVE.exec(outside);
+    const length = relative ? durationOf(relative[1].toLowerCase()) : NaN;
+    let due = NaN;
+    if (YES.test(outside.trim()) && offers.length === 1) due = offers[0].due;
+    // "…before I forget", "…after I get home" count from nothing he said.
+    else if (relative && Number.isFinite(length) && times?.length === 1 && !times[0].offered && !/^\s*(?:i|we|you|he|she|they)\b/i.test(outside.slice(relative.index + relative[0].length)) && !/\bin\s*$/i.test(outside.slice(0, relative.index)))
+      due = times[0].due + (/after/i.test(relative[2]) ? length : -length);
+    if (Number.isFinite(due)) return due < now - MIN ? 'past' : { due, allDay: false };
+  }
   const words = `${outside} ${OFFERED.test(String(last ?? '')) || HIS_QUESTION.test(String(last ?? '')) ? last : ''}`;
   const clocky = CLOCK_WORDS.test(words);
   const day = dayIn(outside, now);
@@ -484,12 +564,19 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
    */
   function bears(task, said, last, saying, op) {
     const line = String(said);
-    if (about(task, stems(line)) > 0) {
+    // Named by its telling words; or, to move one, by more of its words than of any other's ("move my first class
+    // reminder to 1:30", of "Go to your first class, DS 435 at Westgate Building"): moving is asked for in so many
+    // words below, where ticking one off is not.
+    if (about(task, stems(line)) > 0 || (op === 'move' && closest(stems(line)) === task)) {
       // They name it. A question about it, or words that say it isn't done, don't tick it; taking it off or moving
       // it has to be asked for.
-      if (QUESTION.test(line.trim())) return false;
+      if (QUESTION.test(line.trim()) || (op === 'move' && asksSomething(line))) return false;
       return op === 'done' ? !NOT_DONE.test(line) : saying.test(line);
     }
+    // His line before asked when this one's for, and named no other ("…so tell me when you want it", "do you want
+    // the reminder at 1:30?"): a short answer that gives a time or says yes to his is about it, whatever its words
+    // (2026-11-16: "set it for one hour before the class" and "yeah, one thirty's perfect" were each left undone).
+    if (op === 'move' && !asksSomething(line) && WHEN_ASK.test(String(last)) && soleNamedBy(last) === task && (line.match(/\S+/g) || []).length <= 14 && (saying.test(line) || YES.test(line.trim()) || CLOCK_WORDS.test(line) || DAY_WORDS.test(line))) return true;
     // They don't name it: then only a few plain words, said right after its reminder or to his question naming it.
     if (!onlyPlain(line)) return false;
     if (String(last).includes(`“${task.text}”`)) return saying.test(line) || YES.test(line.trim()) || CLOCK_WORDS.test(line) || DAY_WORDS.test(line);
@@ -498,6 +585,21 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
     const namedByHim = open().filter((item) => about(item, his) > 0);
     if (namedByHim.length === 1 && namedByHim[0] === task) return saying.test(line);
     return lastTold.id === task.id && now() - lastTold.at <= JUST_TOLD_MS && saying.test(line);
+  }
+
+  /** The one open task that shares more of its telling words with these than any other does; null when none, or a tie. */
+  function closest(words, pool = open()) {
+    const scored = pool.map((item) => ({ item, hits: [...stems(item.text)].filter((word) => words.has(word)).length })).filter((entry) => entry.hits > 0);
+    const best = Math.max(0, ...scored.map((entry) => entry.hits));
+    const top = scored.filter((entry) => entry.hits === best);
+    return top.length === 1 ? top[0].item : null;
+  }
+
+  /** The one open task a line of his named, by its words or in quotes; null when it named none, or more than one. */
+  function soleNamedBy(line, pool = open()) {
+    const his = stems(line);
+    const named = pool.filter((item) => String(line).includes(`“${item.text}”`) || about(item, his) > 0);
+    return named.length === 1 ? named[0] : null;
   }
 
   function markDone(id, on = true) {
@@ -646,10 +748,13 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
       let task = found.one;
       if (!task || !bears(task, said, last, saying, op)) {
         const theirs = theirsIn(said, pool);
+        const his = soleNamedBy(last, pool);
         if (theirs && bears(theirs, said, last, saying, op)) task = theirs;
+        // The one he was just asking them about, when it's that they've answered.
+        else if (his && bears(his, said, last, saying, op)) task = his;
         // Words that weren't asking for this at all ("what's on my list?") leave the list alone, and him to answer.
         // Said as a statement, they may have meant it ("I rang my mother", of "Call your mom"): then he asks.
-        else if ((!saying.test(String(said)) && (!task || op !== 'done' || ASKING.test(String(said).trim()))) || QUESTION.test(String(said).trim()) || (op === 'done' && NOT_DONE.test(String(said)) && !DONE_WORDS.test(String(said)))) return (log(`tasks: a model’s “${op}” their words didn’t ask for was left undone`), '');
+        else if ((!saying.test(String(said)) && (!task || op !== 'done' || ASKING.test(String(said).trim()))) || QUESTION.test(String(said).trim()) || (op === 'move' && asksSomething(said)) || (op === 'done' && NOT_DONE.test(String(said)) && !DONE_WORDS.test(String(said)))) return (log(`tasks: a model’s “${op}” their words didn’t ask for was left undone`), '');
         else if (!task) return which ? `I don’t see “${which}” on your list.` : 'Which one do you mean?';
         else return `Do you mean ${named(task)}? Say which one and I’ll ${op === 'done' ? 'tick it off' : op === 'remove' ? 'take it off' : 'move it'}.`;
       }
@@ -747,7 +852,7 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
       const said = String(text ?? '');
       if (TASK_WORDS.test(said) || (!!lastTold.id && now() - lastTold.at <= JUST_TOLD_MS)) return true;
       // An answer to his own question or offer about the list ("at six", "yes please", "the pasta one").
-      if (now() - askedAt <= JUST_TOLD_MS || OFFERED.test(String(last)) || HIS_QUESTION.test(String(last))) return true;
+      if (now() - askedAt <= JUST_TOLD_MS || OFFERED.test(String(last)) || HIS_QUESTION.test(String(last)) || WHEN_ASK.test(String(last))) return true;
       // Or words that name something on it ("I called the dentist").
       const words = stems(said);
       return open().some((task) => about(task, words) > 0);
@@ -799,6 +904,26 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
      */
     apply(request, context) {
       return asking(applied(request, context));
+    },
+    /**
+     * A model's done, remove or move that wasn't done (apply gave ''), when he was about to agree to it all the
+     * same: what's true of the task instead, so "Okay" is never said of a change that wasn't made.
+     * @returns {string}
+     */
+    undone(request, { said = '', last = '' } = {}) {
+      const pool = open();
+      const which = tidy(request?.text);
+      const task = (which && match(which, pool).one) || theirsIn(said, pool) || soleNamedBy(last, pool);
+      if (!task) return 'I haven’t changed anything on your list.';
+      const at = now();
+      if (task.timer) return `Your ${task.text.replace(/^\w/, (letter) => letter.toLowerCase())} has ${leftWords(task)}: I haven’t changed it.`;
+      // Asked whether its time is set, that's what's answered; asked or told anything else, how it stands.
+      const whether = String(request?.op ?? '').toLowerCase() === 'move' && ASKING.test(String(said).trim());
+      if (Number.isFinite(task.due) && !task.allDay) return `${whether ? 'Yes, it’s set' : 'It’s still on your list, as it was'}: I’ll remind you ${dueWords(task, at)}: ${task.text}.`;
+      const where = Number.isFinite(task.due) ? ` for ${dayWords(task.due, at).replace(/^on /, '')}` : '';
+      // Said so that what they say next is an answer about this one (bears), and not as a question of his own that
+      // anything would answer.
+      return `${whether ? 'Not yet' : 'I haven’t changed it'}: ${named(task)} is on your list${where}, with no time. Tell me when, and I’ll set it.`;
     },
     /**
      * He's said something of theirs is done, and set no "task": if their own words are plainly about one open task,

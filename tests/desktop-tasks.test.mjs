@@ -751,3 +751,137 @@ test('cards: a line in the chat carries the card of what it made, and the archiv
   assert.equal(book2.jobs.get(`task-${reminder.id}`).at, book2.time + 10 * MIN);
   assert.equal(book2.tasks.snooze(timer.id), null, 'a timer isn’t snoozed');
 });
+
+// 2026-11-16, the user's own conversation: asked when he'd remind them of their first class, he said it had no time
+// and to say when, "like an hour before". Three answers running, each of which Haiku rightly gave as a "move", were
+// left undone by the list, and he said "Okay" to each.
+const CLASS = 'Go to your first class, DS 435 at Westgate Building';
+const MONDAY = new Date(2026, 10, 16, 0, 20).getTime();
+const on16 = (h, m = 0, day = 16) => new Date(2026, 10, day, h, m).getTime();
+/** The list as it stood: that one reminder, for today, with no time. Plus any others named. */
+function classBook(...others) {
+  const b = book({ start: MONDAY });
+  b.tasks.apply({ op: 'add', text: CLASS, at: '2026-11-16' }, { said: 'remind me to go to my first class today' });
+  for (const [text, at] of others) b.tasks.apply({ op: 'add', text, at }, { said: `remind me to ${text.toLowerCase()} at 3 pm` });
+  return b;
+}
+const ASKED_WHEN = 'Your first class is DS 435 at Westgate Building, and it starts at 2:30 this afternoon. I haven’t set a time for the reminder yet, so tell me when you want it, like an hour before, and I’ll set it.';
+const OFFERED_130 = 'Not yet, I still need the time. Your first class, DS 435 at Westgate Building, starts at 2:30 this afternoon, so do you want the reminder at 1:30 PM, an hour before?';
+
+test('an answer to his question about a reminder’s time sets it: "an hour before the class", and "yeah, 1:30’s perfect"', () => {
+  // Counted from the time his line gave, whatever the model made of it (here, the class's own time).
+  const b = classBook();
+  assert.equal(b.tasks.apply({ op: 'move', text: CLASS, at: '2026-11-16 14:30' }, { said: 'Set it for one hour before the class', last: ASKED_WHEN }), `Okay, I’ll remind you at 1:30 PM: ${CLASS}.`);
+  assert.equal(b.tasks.list().open[0].due, on16(13, 30));
+  assert.ok(!b.tasks.list().open[0].allDay);
+  assert.ok(b.logs.includes('tasks: one moved'));
+  // His offer of a time, and their saying it back, with the model naming no task at all.
+  const c = classBook();
+  assert.equal(c.tasks.apply({ op: 'move', at: '1:30 PM' }, { said: 'Yeah, one thirty p.m.’s perfect.', last: OFFERED_130 }), `Okay, I’ll remind you at 1:30 PM: ${CLASS}.`);
+  // A plain yes to it is the time he offered, whatever the model gave.
+  const y = classBook();
+  assert.equal(y.tasks.apply({ op: 'move', text: CLASS, at: '1:00 PM' }, { said: 'Yes please.', last: OFFERED_130 }), `Okay, I’ll remind you at 1:30 PM: ${CLASS}.`);
+  // And "an hour before" said back to an offer that already is the hour before isn't taken off it again.
+  const e = classBook();
+  assert.equal(e.tasks.apply({ op: 'move', text: CLASS, at: '1:30 PM' }, { said: 'Yeah, an hour before is perfect.', last: 'Do you want the reminder at 1:30 PM, an hour before your first class, DS 435 at Westgate Building?' }), `Okay, I’ll remind you at 1:30 PM: ${CLASS}.`);
+  // Asked for politely is still asked for; and so is naming it by the words that tell it from the rest.
+  const p = classBook(['Call the dentist', '2026-11-16 15:00']);
+  assert.equal(p.tasks.apply({ op: 'move', text: CLASS, at: '1:30 PM' }, { said: 'Can you set it for one hour before the class?', last: ASKED_WHEN }), `Okay, I’ll remind you at 1:30 PM: ${CLASS}.`);
+  assert.equal(p.tasks.apply({ op: 'move', text: CLASS, at: '1:15 PM' }, { said: 'move my first class reminder to 1:15 pm' }), `Okay, I’ll remind you at 1:15 PM: ${CLASS}.`);
+  // To his own way of asking, when the list itself asks.
+  const d = classBook();
+  assert.equal(d.tasks.apply({ op: 'move', text: CLASS, at: '9:00 AM' }, { said: 'set it for nine a.m.', last: `Not yet: “${CLASS}” is on your list for today, with no time. Tell me when, and I’ll set it.` }), `Okay, I’ll remind you at 9:00 AM: ${CLASS}.`);
+});
+
+test('but only an answer to that: the same words elsewhere move nothing, and nor does a time that isn’t plain', () => {
+  const dentist = ['Call the dentist', '2026-11-16 15:00'];
+  const still = (b) => b.tasks.list().open.map((task) => [task.text, task.due, !!task.allDay]);
+  // His saying one's set, or giving the reminder itself, asks nothing: what's said next isn't about its time.
+  const a = classBook(dentist);
+  const before = still(a);
+  assert.equal(a.tasks.apply({ op: 'move', text: 'Call the dentist', at: '8:00 PM' }, { said: 'I think I will watch a movie tonight', last: 'Okay, I’ll remind you at 3:00 PM: Call the dentist.' }), '');
+  assert.equal(a.tasks.apply({ op: 'move', text: 'Call the dentist', at: '2026-11-17' }, { said: 'Can you tell me the weather for tomorrow', last: 'Reminder: call the dentist.' }), '');
+  // "Set" and "earlier" in a sentence of theirs aren't asking for a move.
+  assert.equal(a.tasks.apply({ op: 'move', text: 'Call the dentist', at: '2026-11-20 14:00' }, { said: 'I set the dentist appointment for Friday at 2' }), '');
+  assert.equal(a.tasks.apply({ op: 'move', text: 'Call the dentist', at: '2026-11-17' }, { said: 'The dentist said earlier is better, maybe tomorrow' }), '');
+  // He asked, but named two: which one isn't theirs to guess. And a question back at him moves nothing.
+  assert.equal(a.tasks.apply({ op: 'move', text: CLASS, at: '1:30 PM' }, { said: 'Yeah, one thirty’s perfect.', last: 'You have go to your first class, DS 435 at Westgate Building, and call the dentist. Tell me when you want them.' }), '');
+  assert.equal(a.tasks.apply({ op: 'move', text: CLASS, at: '1:30 PM' }, { said: 'can you tell me what time the class is at again', last: ASKED_WHEN }), '');
+  assert.deepEqual(still(a), before);
+
+  // What "an hour before" is counted from has to be one plain time of his, for something else, on a plain day.
+  const now = on16(9);
+  const model = { at: '2026-11-16 13:30' };
+  const fromModel = { due: on16(13, 30), allDay: false };
+  const ask = (line) => `${line} Tell me when you want the reminder.`;
+  assert.deepEqual(whenAsked(model, 'an hour before', ask('It starts at 2:30 this afternoon.'), now), fromModel);
+  assert.deepEqual(whenAsked({ at: '2026-11-16 09:30' }, 'an hour before', ask('It starts at 2:30 this afternoon.'), now), fromModel, 'his time, not the model’s sum');
+  // A range, a time that could be either half of the day, another day, a number that's no time: left to the model, as it was.
+  for (const line of ['It runs from 2:30 to 3:45 PM.', 'DS 320 is 3:05-4:20pm.', 'It starts at 2:30.', 'It’s on November 18 at 2:30 PM.', 'It’s tomorrow at 2:30 PM, and nothing else is on today.', 'It will reach 15 this afternoon, and class is in room 9 tonight.'])
+    assert.deepEqual(whenAsked(model, 'an hour before', ask(line), now), fromModel, line);
+  assert.deepEqual(whenAsked({ at: '2026-11-17 13:30' }, 'an hour before, tomorrow', ask('It starts at 2:30 this afternoon.'), now), { due: on16(13, 30, 17), allDay: false }, 'a day of their own');
+  // Not asked when: a time in whatever he last said is nothing to count from.
+  assert.deepEqual(whenAsked(model, 'ten minutes before my meeting', 'It is 10:00 AM.', now), fromModel);
+  assert.deepEqual(whenAsked({ at: '2026-11-16 16:45' }, 'ten minutes after I get home', ask('Class ends at 4:20 PM.'), now), { due: on16(16, 45), allDay: false });
+  // As it always was: a time of their own, and "in ten minutes".
+  assert.deepEqual(whenAsked({ at: '2:50 PM' }, 'remind me ten minutes before 3 pm to call mom', '', now, 'call mom'), { due: on16(14, 50), allDay: false });
+  assert.deepEqual(whenAsked({ in: 10 }, 'remind me in ten minutes before I forget to call mom', '', now, 'call mom'), { due: now + 10 * MIN, allDay: false });
+  assert.deepEqual(whenAsked({}, 'ten minutes after that', 'It ends at 4:20 PM. When do you want the reminder?', now), { due: on16(16, 30), allDay: false });
+  assert.equal(whenAsked({}, 'an hour before', ask('It starts at 2:30 this afternoon.'), on16(14)), 'past');
+});
+
+test('timesIn: the times of day a line of his gives for certain, and which he offered for the reminder', async () => {
+  const { anchorIn, timesIn } = await import('../desktop/src/main/tasks.js');
+  const now = on16(9);
+  assert.equal(anchorIn('It starts at 2:30 this afternoon.', now), on16(14, 30));
+  assert.equal(anchorIn('DS 435 at Westgate Building is at 3 PM.', now), on16(15));
+  assert.equal(anchorIn('Your dentist is at 9:15 a.m. tomorrow.', now), on16(9, 15, 17));
+  assert.equal(anchorIn('Dinner is at 7 tonight.', now), on16(19));
+  assert.equal(anchorIn('Lunch is at 12 PM and nothing else.', now), on16(12));
+  assert.equal(anchorIn('It starts at 12:05 AM.', now), on16(0, 5));
+  assert.equal(anchorIn('It starts at 14:30.', now), on16(14, 30));
+  assert.equal(anchorIn('It starts at 2:30.', now), null, 'morning or afternoon, it doesn’t say');
+  assert.equal(anchorIn('It runs from 3:05 PM to 4:20 PM.', now), null, 'two times');
+  assert.equal(anchorIn('It runs from 2:30 to 3:45 PM.', now), null, 'a range whose start doesn’t say');
+  assert.equal(anchorIn('You have 10 events, DS 435 is in room 12, and it will reach 15 this afternoon.', now), null);
+  assert.equal(anchorIn('It’s on November 18 at 2:30 PM.', now), null, 'a day that isn’t today or tomorrow');
+  assert.equal(anchorIn('', now), null);
+  assert.deepEqual(timesIn(OFFERED_130, MONDAY).map((time) => [time.due, time.offered]), [[on16(14, 30), false], [on16(13, 30), true]]);
+});
+
+test('undone: what he says of a change that wasn’t made', () => {
+  const c = classBook();
+  assert.equal(c.tasks.undone({ op: 'move', text: CLASS }, { said: 'did you set a time for my reminder to go to my first class?' }), `Not yet: “${CLASS}” is on your list for today, with no time. Tell me when, and I’ll set it.`);
+  assert.equal(c.tasks.undone({ op: 'move', text: CLASS }, { said: 'I was thinking about lunch' }), `I haven’t changed it: “${CLASS}” is on your list for today, with no time. Tell me when, and I’ll set it.`);
+  // What he said isn't a question of his that anything would answer.
+  assert.equal(c.tasks.asked('tell me a joke about lunch', c.tasks.undone({ op: 'move', text: CLASS }, { said: 'is it set?' }), 'add', 'tell a joke'), false);
+  c.tasks.apply({ op: 'move', text: CLASS, at: '1:30 PM' }, { said: 'move my first class reminder to 1:30 pm' });
+  assert.equal(c.tasks.undone({ op: 'move', text: CLASS }, { said: 'is the reminder time set.' }), `Yes, it’s set: I’ll remind you at 1:30 PM: ${CLASS}.`);
+  assert.equal(c.tasks.undone({ op: 'remove', text: CLASS }, { said: 'did I cancel my first class reminder?' }), `It’s still on your list, as it was: I’ll remind you at 1:30 PM: ${CLASS}.`);
+  assert.equal(c.tasks.undone({ op: 'move' }, { said: 'the weather is nice' }), 'I haven’t changed anything on your list.');
+  const t = book();
+  t.tasks.direct('set a pasta timer for 8 minutes');
+  assert.equal(t.tasks.undone({ op: 'move', text: 'pasta timer' }, { said: 'is the pasta timer okay?' }), 'Your pasta timer has 8 minutes left: I haven’t changed it.');
+});
+
+test('conversation: the user’s own exchange about a reminder’s time, end to end', async () => {
+  // As it went on 2026-11-16, with the model's replies as the log has them: a "move" each time, and "Okay".
+  const text = CLASS;
+  const w = talking({ reply: { say: 'Okay', do: '', new: false, task: { op: 'add', text, at: '2026-11-15' } } });
+  assert.equal(await w.type('No, you’re good, but remind me to go to my first class today.'), `Added to your list for today: ${text}.`);
+  w.reply = { say: 'Your first class is DS 435 at Westgate Building, and it starts at 4:30 this afternoon. I haven’t set a time for the reminder yet, so tell me when you want it, like an hour before, and I’ll set it.', do: '', new: false };
+  await w.type('Okay, what time are you going to remind me about that?');
+  w.reply = { say: 'Okay', do: '', new: false, task: { op: 'move', text, at: '2026-11-15 15:30' } };
+  assert.equal(await w.type('Set it for one hour before the class'), `Okay, I’ll remind you at 3:30 PM: ${text}.`);
+  assert.equal(w.tasks.list().open[0].due, at(15, 30));
+  // Asked whether it's set, the model gives another "move" and "Okay": nothing's moved, and he answers.
+  assert.equal(await w.type('is the reminder time set.'), `Yes, it’s set: I’ll remind you at 3:30 PM: ${text}.`);
+  assert.ok(w.clog.includes('he agreed to a change to the list that wasn’t made: said how it stands instead'));
+  assert.equal(w.tasks.list().open[0].due, at(15, 30));
+  // He says he'll set it, and the list wouldn't: never left as said.
+  w.reply = { say: 'Okay, I’ll set your reminder for 5:00 this afternoon, for your first class.', do: '', new: false, task: { op: 'move', text, at: '5:00 PM' } };
+  assert.equal(await w.type('hmm, what do you think about the weather'), `It’s still on your list, as it was: I’ll remind you at 3:30 PM: ${text}.`);
+  // A real answer of his own to a question, with a stray "move" beside it, is still his answer.
+  w.reply = { say: 'It’s the one for your first class, at half past three.', do: '', new: false, task: { op: 'move', text, at: '3:30 PM' } };
+  assert.equal(await w.type('which reminder is that again?'), 'It’s the one for your first class, at half past three.');
+});

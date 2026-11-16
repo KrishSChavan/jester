@@ -135,6 +135,10 @@ const DONE_CLAIM = /\b(?:ticked|crossed|checked|marked)\b[^.!?]*\b(?:off|done|co
 /** He says one's been taken off the list, or a timer cancelled. */
 const DROP_CLAIM = /\b(?:removed|deleted|cancell?ed|taken (?:it |that )?off|took (?:it |that )?off|dropped|scrapped|cleared)\b/i;
 /** He says it's set, added or that he'll remind them: with no "task" given, nothing was (qwen3.5:9b says it and sets none). */
+/** Agreeing, and nothing more: what he's told to say with a task, which says it's done. */
+const BARE_ACK = /^(?:ok(?:ay)?|sure|on it|got it|done|will do|alright|you got it|no problem|yes|yep|noted)\W*$/i;
+/** Saying he'll change one, or has: "I'll set your reminder for 1:30", "I've moved it to Friday". */
+const CHANGE_CLAIM = /\bi(?:['’]ll| will|['’]ve| have|['’]m going to)? ?(?:just )?(?:set|move[d]?|change[d]?|push(?:ed)?|update[d]?|reschedule[d]?)\b[^.!?]*\b(?:reminder|it|that|time)\b/i;
 const TASK_CLAIM = /\b(?:i(?:['’]ll| will) remind you|reminder(?: is|['’]s| has been)? (?:set|added)|timer(?: is|['’]s| has been)? (?:set|started|running|going)|(?:added|put)(?: it| that| this)? (?:to|on) your (?:to[- ]?do )?list|i(?:['’]ve| have) (?:set|added|scheduled|started)\b[^.!?]*\b(?:reminder|timer|list)|(?:starting|started) (?:a|your|the) (?:\w+[ -])*timer)\b/i;
 const SUMMARY_SCHEMA = { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'], additionalProperties: false };
 
@@ -1187,13 +1191,19 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         const applied = await tasks.apply(reply.task, { said: text, last: lastHis });
         why = applied || why;
         if (stale()) return;
+        // A change to the list that wasn't made, which he was about to agree to ("Okay", "I'll set it for 1:30"):
+        // he says how it stands instead.
+        if (!applied && ['done', 'remove', 'move'].includes(String(reply.task.op).toLowerCase()) && !reply.do && (BARE_ACK.test(reply.say) || TASK_CLAIM.test(reply.say) || CHANGE_CLAIM.test(reply.say))) {
+          log('he agreed to a change to the list that wasn’t made: said how it stands instead');
+          why = tasks.undone?.(reply.task, { said: text, last: lastHis }) || why;
+        }
         if (applied && !noted) card = tasks.touched?.() || card;
         // The same thing handed to the laptop as well ("open Reminders and add…") isn't wanted twice.
         if (reply.do && /\b(?:remind|reminder|timer|to[- ]?do|list|alarm)/i.test(reply.do)) reply.do = '';
       } else if (reply.task) {
         log('a task nobody asked for wasn’t made');
         // Told to say just "Okay" with a task, he mustn't be heard to agree to one that wasn't made: he offers it.
-        if (!reply.do && (TASK_CLAIM.test(reply.say) || /^(?:ok(?:ay)?|sure|on it|got it|done|will do|alright|you got it|no problem|yes|yep|noted)\W*$/i.test(reply.say))) why = 'That isn’t on your list yet: want me to add it?';
+        if (!reply.do && (TASK_CLAIM.test(reply.say) || BARE_ACK.test(reply.say))) why = 'That isn’t on your list yet: want me to add it?';
       }
       // He says one's done and set nothing (qwen3.5:9b, to "I called the dentist": "Okay, that call's done"): their own
       // words name it, so it's they who said so, and it's ticked.
