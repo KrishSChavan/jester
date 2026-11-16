@@ -1550,26 +1550,39 @@ inbox (`format=metadata`): never the body. Then:
 1. *Gmail's own labels* (`important`): unread, in the inbox, and either marked
    important by Gmail or not filed by it under Promotions, Social, Forums or
    Updates.
-2. *Not written at him* (`steering`): "ignore your instructions", "SYSTEM:".
-   Nobody who writes that is worth an interruption, and it never reaches a
-   model.
+2. *Not shown to a model if it reads as written at him* (`steering`): "ignore
+   your previous instructions", "SYSTEM:". Such a message stands by Gmail's
+   marking alone, and is told like any other: never dropped for it, since a
+   professor writes "please ignore the previous instructions for HW5" too.
 3. *Worth an interruption* (`worth`), if Settings allows a model to see it: the
    model he talks through is shown what's left, numbered, as data, and picks by
    number. Measured (2026-11-15, `npm run talk-check -- --only self --match "new
    mail"`, six made-up emails, 6 tries): Claude Haiku 5.5 picked the professor's
    change, the roommate's ask and the hold on an account, and none of the
    newsletter, the receipt or the one written to steer it, 6 of 6. qwen3.5:9b
-   picked the same and the steering one too, every time: hence rule 2.
+   picked the same and the steering one too, every time: hence rule 2, which
+   keeps what's written to steer a model away from the model.
 
 What he says is who it's from and its subject, as they are ("New email from
 Sarah Lee: Lab report feedback."), never a model's account of it; three by name
 at most, then how many more. It's told like any line of his (`tell.js`): said
 when they're here, sent to their phone when they're away, with a card that
 opens the conversation in Gmail. Between ten at night and eight in the morning
-it's kept for the morning's brief, which has the mail since six the evening
-before. Asked about their mail, he's shown what's arrived lately, as data. A
+it's kept: the morning's brief has what he's found and not yet told, and marks
+it told; whatever the brief didn't take (it's off, or they sat down late) is
+told at the first look after eight. Asked about their mail, he's shown what's arrived lately, as data. A
 sender and a subject are other people's words: a line that holds them is marked
 so, and what's asked after it is asked carefully.
+
+A second reading found twelve faults, each now a test. Mail could be lost four
+ways: the first `steering` dropped what it matched, and it matched "You must
+reply by Friday to keep your housing offer"; his mark in the inbox moved before
+the messages were fetched, so one failed fetch lost the batch; only the first
+page of Gmail's history was read; and the night's mail reached the user only if
+the morning brief happened to run. And a sign-in could be broken by any other
+request to its port, which now answers only the one carrying this asking's
+state; a Gmail that refused every call ("the Gmail API isn't turned on") looked
+like success, and now fails the sign-in and says what to turn on.
 
 `npm run live-check -- mail` runs it in the real app on a scratch profile
 against a pretend Google and a pretend browser: the file chosen, the sign-in,

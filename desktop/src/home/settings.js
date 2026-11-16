@@ -1013,10 +1013,14 @@ function drawMail(mail, { error = null } = {}) {
   $('mail-status').textContent = mail.connecting
     ? 'Waiting for you to finish signing in, in your browser…'
     : mail.signedIn
-      ? `Signed in${mail.email ? ` as ${mail.email}` : ''}. Watching for new mail.`
+      ? mail.problem === 'refused'
+        ? `Signed in${mail.email ? ` as ${mail.email}` : ''}, but Gmail is refusing to be read. In Google Cloud’s console, check the Gmail API is turned on for the project this file is from.`
+        : `Signed in${mail.email ? ` as ${mail.email}` : ''}. Watching for new mail.`
       : mail.problem === 'signin'
         ? 'Google has signed him out: it does that every seven days while the sign-in is in its “Testing” state. Sign in again to go on.'
-        : mail.client
+        : mail.problem === 'client'
+          ? 'Google no longer accepts this file’s sign-in client. Choose the file again, or a new one.'
+          : mail.client
           ? 'Not signed in.'
           : 'Not set up: choose Google’s file below first.';
   // A state that only arrived (he finished signing in) leaves what was said of the last try as it is.

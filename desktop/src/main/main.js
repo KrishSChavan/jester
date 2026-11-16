@@ -218,6 +218,12 @@ let google = null;
 let mail = null;
 /** He's said Google signed him out, this time round: not said again until they've signed back in. */
 let signInTold = false;
+/** A sign-in is being finished: Gmail isn't looked at until his place in the new inbox is made. */
+let mailBusy = false;
+/** Whether the user wanted Gmail watched (the switch) when last asked: null before the first asking. */
+let mailWatched = null;
+/** The brief made for someone who asked for one: the mail it told of is marked so once it's given. */
+let askedBrief = null;
 /** The morning brief, the evening wrap-up and check-ins before what's on the calendar (briefs.js). */
 let briefs = null;
 /** The day each brief was last given, so it's given once: {morning, evening}, by presence.js's day. */
@@ -899,24 +905,32 @@ function startInput() {
  * to their phone or held, by where they are.
  */
 async function checkMail() {
-  if (!google.signedIn || settings?.mailWatch === false) return undefined;
-  let fresh = [];
+  if (!google.signedIn || settings?.mailWatch === false || mailBusy) return undefined;
+  const hour = new Date().getHours();
+  const quiet = !env.JESTER_ANY_HOUR && (hour >= 22 || hour < 8);
   try {
-    fresh = await mail.check();
+    await mail.check();
   } catch (err) {
-    // Signed out by Google (a week in its Testing state, or access taken away): said once, and nothing's read till they're back in.
-    if (err.code === 'signin' && !signInTold) {
-      signInTold = true;
-      clock.add({ id: 'mail-signin', kind: 'say', inMs: 0, keepFor: 12 * 3600_000, payload: { text: 'Google has signed me out of your Gmail. Sign in again in Settings, under Email, and I’ll go on watching it.', title: 'Email' } });
-    } else if (err.code !== 'signin') log('mail: couldn’t look:', String(err.code || 'error'));
+    if (err.code !== 'signin') return void log('mail: couldn’t look:', String(err.code || 'error'));
+    // Signed out by Google (a week in its Testing state, or access taken away): nothing's read till they're back in,
+    // and his place in the inbox is made afresh then. Said once, and not in the night.
+    await mail.reset();
+    if (signInTold) return undefined;
+    signInTold = true;
+    const morning = new Date();
+    morning.setHours(8, 0, 0, 0);
+    if (hour >= 22) morning.setDate(morning.getDate() + 1);
+    clock.add({ id: 'mail-signin', kind: 'say', ...(quiet ? { at: morning.getTime() } : { inMs: 0 }), keepFor: 12 * 3600_000, payload: { text: 'Google has signed me out of your Gmail. Sign in again in Settings, under Email, and I’ll go on watching it.', title: 'Email' } });
     return undefined;
   }
-  if (!fresh.length) return undefined;
-  // Not in the night: what came then is in the morning's brief.
-  const hour = new Date().getHours();
-  if (!env.JESTER_ANY_HOUR && (hour >= 22 || hour < 8)) return void log(`mail: ${fresh.length} kept for the morning`);
+  // What's been found worth telling and not told yet: this look's, and the night's if the morning's brief didn't
+  // take it. In the night it's left for the morning.
+  const due = mail.unsaid();
+  if (!due.length) return undefined;
+  if (quiet) return void log(`mail: ${due.length} kept for the morning`);
   // A line like any other he tells: said, sent to their phone or held, by where they are. Other people's words.
-  clock.add({ kind: 'say', inMs: 0, keepFor: 2 * 3600_000, payload: { text: mailLine(fresh), card: mailCard(fresh), untrusted: true, title: 'Email', priority: 3 } });
+  clock.add({ kind: 'say', inMs: 0, keepFor: 12 * 3600_000, payload: { text: mailLine(due), card: mailCard(due), untrusted: true, title: 'Email', priority: 3 } });
+  await mail.said(due.map((message) => message.id));
   return undefined;
 }
 
@@ -924,15 +938,22 @@ async function checkMail() {
 function syncMail() {
   if (!clock || !google) return;
   const on = google.signedIn && settings?.mailWatch !== false;
+  // The switch turned back on after a while off: his place in the inbox is made afresh, not a backlog announced.
+  // (Signing in makes it afresh itself.)
+  const wanted = settings?.mailWatch !== false;
+  if (wanted && mailWatched === false && google.signedIn) mail.reset().catch(() => undefined);
+  mailWatched = wanted;
   const job = clock.list().find((item) => item.id === 'mail-check');
   if (on && job?.everyMs !== CHECK_MS) clock.add({ id: 'mail-check', kind: 'mail', everyMs: CHECK_MS });
   else if (!on && job) clock.remove('mail-check');
 }
 
 /** A brief's been given, unasked or asked for: not again today. */
-async function briefGiven(which) {
+async function briefGiven(which, made = null) {
   briefDays = { ...briefDays, [which === 'evening' ? 'evening' : 'morning']: dayOf(Date.now()) };
   await storage.local.set({ briefDays }).catch(() => undefined);
+  // The mail it told of has been told.
+  if (made?.mailIds?.length) await mail?.said(made.mailIds);
 }
 
 /**
@@ -1279,18 +1300,24 @@ function listenToPages() {
             const file = picked.filePaths[0];
             if (picked.canceled || !file) return { ok: true, ...google.state() };
             if (fs.statSync(file).size > 100_000) throw new Error('That isn’t the file from Google: it’s far too big.');
-            await google.setClient(fs.readFileSync(file, 'utf8'));
-            await mail.reset();
+            // Another client than before is another sign-in: nothing of the last one's mail is carried over.
+            if (await google.setClient(fs.readFileSync(file, 'utf8'))) await mail.reset();
           } else if (message.op === 'connect') {
-            const signed = await google.connect();
-            if (signed.ok) {
-              signInTold = false;
-              await mail.reset();
-              // The first look makes his mark in the inbox: from here on, what arrives is news.
-              mail.check().catch(() => undefined);
+            // Gmail isn't looked at while this is finished: his place in the inbox is made before anything's read.
+            mailBusy = true;
+            try {
+              const signed = await google.connect();
+              if (signed.ok) {
+                signInTold = false;
+                await mail.reset();
+                // The first look makes his mark in the inbox: from here on, what arrives is news.
+                await mail.check().catch(() => undefined);
+              }
+              syncMail();
+              return { ...signed, ...google.state() };
+            } finally {
+              mailBusy = false;
             }
-            syncMail();
-            return { ...signed, ...google.state() };
           } else if (message.op === 'check') await checkMail();
           else if (message.op === 'cancel') google.cancel();
           else if (message.op === 'signout') {
@@ -2000,7 +2027,7 @@ async function start() {
     // Their to-do list, reminders and timers.
     tasks,
     // The day's brief and its wrap-up, when they ask for one.
-    briefs: { asked: briefAsked, compose: (kind) => briefs.compose(kind), given: (kind) => briefGiven(kind) },
+    briefs: { asked: briefAsked, compose: async (kind) => (askedBrief = await briefs.compose(kind)), given: (kind) => briefGiven(kind, askedBrief) },
     // The rest of what's connected, read each turn, so what he says he can do is what's true now (abilities.js).
     abilities: async () => ({
       chrome: !!chromeLink?.linked,
@@ -2055,11 +2082,13 @@ async function start() {
   await google.start();
   mail = createMail({ google, storage: storage.local, request: talking, judged: () => settings?.mailJudge !== false, log });
   await mail.start();
-  clock.on('mail', checkMail);
+  // Not waited for: a look at Gmail can take a while, and a timer mustn't wait behind it (the clock does one job at
+  // a time). One look at a time is mail.js's own rule.
+  clock.on('mail', () => void checkMail().catch((err) => log('mail: couldn’t look:', String(err?.code || 'error'))));
   syncMail();
   // The morning brief and the evening wrap-up (briefs.js): composed when it's time to say one, and counted as given
   // only once it's been said. Away, it's held; too late to be worth it, the clock drops it.
-  briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
+  briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, mailToModel: () => settings?.mailJudge !== false, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
   ({ briefDays = {}, checkinsTold = {} } = await storage.local.get(['briefDays', 'checkinsTold']));
   let composed = null;
   /** Times a brief found a connected source not ready (the network just after waking), and waited. */
@@ -2083,9 +2112,10 @@ async function start() {
     const answer = composed.text ? await teller.say({ ...job, payload: { text, card: composed.card, untrusted: composed.untrusted, title: which === 'evening' ? 'Your day' : 'This morning', priority: 2, phone: which === 'evening' } }) : undefined;
     if (!answer) {
       log(`brief: the ${which} one ${composed.text ? 'given' : 'had nothing to say'}`);
+      const made = composed;
       composed = null;
       unreadyTries = 0;
-      await briefGiven(which);
+      await briefGiven(which, made.text ? made : null);
     }
     return answer;
   });

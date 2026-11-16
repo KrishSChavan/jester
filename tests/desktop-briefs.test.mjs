@@ -119,7 +119,7 @@ test('nothing connected and nothing on the list: nothing to say', async () => {
   assert.deepEqual(await w.compose('evening'), { text: '', card: null, untrusted: false });
   // The list alone is enough for one, and it holds nobody else's words.
   const some = createBriefs({ tasks: { list: () => ({ open: [{ id: '1', text: 'Buy stamps' }], done: [] }) }, now: () => at(13) });
-  assert.deepEqual(await some.compose('morning'), { text: 'Afternoon. And one thing with no date.', plain: 'Afternoon. And one thing with no date.', card: { kind: 'brief', title: 'Today, Monday, Nov 16', lines: ['Also on their list, with no date: one thing.'] }, untrusted: false });
+  assert.deepEqual(await some.compose('morning'), { text: 'Afternoon. And one thing with no date.', plain: 'Afternoon. And one thing with no date.', card: { kind: 'brief', title: 'Today, Monday, Nov 16', lines: ['Also on their list, with no date: one thing.'] }, untrusted: false, mailIds: [] });
 });
 
 test('the evening wrap-up: what got done, what’s left, tomorrow, and how long they sat', async () => {

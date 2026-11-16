@@ -54,18 +54,27 @@ export function clientIn(text) {
   return { id, secret };
 }
 
-/** A port on this computer, open for the one answer: the browser is sent there by Google when they've signed in. */
-function loopback() {
+/**
+ * A port on this computer, open for the one answer: the browser is sent there by Google when they've signed in.
+ * Only a request carrying this asking's `state` is the answer. Anything else that finds the port (another program,
+ * a page guessing at it) is told no and the wait goes on.
+ */
+function loopback(state) {
   let settle;
   const answered = new Promise((resolve) => (settle = resolve));
   const page = (words) => `<!doctype html><meta charset="utf-8"><title>Jester</title><body style="font:16px system-ui;background:#08060c;color:#efe9f7;display:grid;place-items:center;height:100vh;margin:0"><p>${words}</p>`;
   const server = http.createServer((request, response) => {
-    const url = new URL(request.url || '/', 'http://127.0.0.1');
-    if (url.pathname !== '/') return void response.writeHead(404).end();
-    const ok = url.searchParams.has('code');
-    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(page(ok ? 'Jester is signed in. You can close this tab.' : 'Jester wasn’t signed in. You can close this tab.'));
-    settle(url.searchParams);
+    try {
+      const url = new URL(request.url || '/', 'http://127.0.0.1');
+      if (url.pathname !== '/') return void response.writeHead(404).end();
+      if (url.searchParams.get('state') !== state) return void response.writeHead(400).end();
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      response.end(page('That’s all Jester needed from your browser. You can close this tab.'));
+      settle(url.searchParams);
+    } catch {
+      // Not a request he can read, so not his answer.
+      response.writeHead(400).end();
+    }
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -77,22 +86,30 @@ function loopback() {
  * @param {object} deps
  * @param {{get:Function, set:Function, remove:Function}} deps.storage  storage.local: the `google` key, sealed
  * @param {(url:string) => Promise<void>} deps.open  opens the user's browser
- * @param {() => Promise<{port:number, answered:Promise<URLSearchParams>, close:Function}>} [deps.listen]
+ * @param {(state:string) => Promise<{port:number, answered:Promise<URLSearchParams>, close:Function}>} [deps.listen]
  */
 export function createGoogle({ storage, open, listen = loopback, fetchImpl = globalThis.fetch, now = Date.now, log = () => undefined, onChange = () => undefined }) {
   /** @type {{client:{id:string, secret:string}|null, refresh:string, access:string, expiresAt:number, email:string}} */
   let kept = { client: null, refresh: '', access: '', expiresAt: 0, email: '' };
-  /** 'signin': Google wants them to sign in again. */
+  /**
+   * 'signin': Google wants them to sign in again. 'client': Google no longer takes the file's client. 'refused':
+   * Gmail won't be read (the Gmail API isn't turned on for the client's project, as likely as not).
+   */
   let problem = '';
   /** The sign-in under way: what calls it off. */
   let waiting = null;
   let refreshing = null;
 
-  async function save(next) {
-    kept = { ...kept, ...next };
-    await storage.set({ google: kept });
+  async function save(patch) {
+    const next = { ...kept, ...patch };
+    // On disk first: a sign-in that couldn't be kept isn't one he has.
+    await storage.set({ google: next });
+    kept = next;
     onChange();
   }
+
+  /** Google's told to forget a sign-in; whether or not it answers. */
+  const revoke = (refresh) => (refresh ? fetchImpl(REVOKE, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: refresh }).toString(), redirect: 'error', signal: AbortSignal.timeout(FETCH_MS) }).catch(() => undefined) : Promise.resolve());
 
   /** Google's token endpoint. Throws {code}: its own word for what went wrong, or 'unreachable'. */
   async function token(params) {
@@ -119,9 +136,9 @@ export function createGoogle({ storage, open, listen = loopback, fetchImpl = glo
         return kept.access;
       } catch (err) {
         // Google's taken the sign-in back: a week in Testing has passed, or the user took his access away.
-        if (err.code === 'invalid_grant') {
-          log('google: signed out by Google (invalid_grant): they need to sign in again');
-          problem = 'signin';
+        if (err.code === 'invalid_grant' || err.code === 'invalid_client' || err.code === 'unauthorized_client') {
+          log(`google: signed out by Google (${err.code}): they need to sign in again`);
+          problem = err.code === 'invalid_grant' ? 'signin' : 'client';
           await save({ refresh: '', access: '', expiresAt: 0 });
           throw Object.assign(new Error('Google wants you to sign in again.'), { code: 'signin' });
         }
@@ -145,59 +162,96 @@ export function createGoogle({ storage, open, listen = loopback, fetchImpl = glo
     get signedIn() {
       return !!kept.client && !!kept.refresh;
     },
-    /** The file from Google's console, read: its client is kept, and anyone signed in with another is signed out. */
+    /**
+     * The file from Google's console, read: its client is kept. Another client than the one kept signs out whoever
+     * was signed in with that one, and calls off a sign-in that's waiting.
+     * @returns {Promise<boolean>} whether it's another client than before
+     */
     async setClient(text) {
       const client = clientIn(text);
-      if (kept.client?.id !== client.id) await save({ client, refresh: '', access: '', expiresAt: 0, email: '' });
-      else await save({ client });
+      const changed = kept.client?.id !== client.id;
+      if (changed) {
+        waiting?.();
+        const old = kept.refresh;
+        await save({ client, refresh: '', access: '', expiresAt: 0, email: '' });
+        problem = '';
+        revoke(old);
+      } else await save({ client });
       log('google: a sign-in client was kept');
+      return changed;
     },
     /**
      * Signs in: their browser opens Google's page, and this waits for its answer.
      * @returns {Promise<{ok:boolean, email?:string, error?:string}>}
      */
     async connect() {
-      if (!kept.client) return { ok: false, error: 'Choose the file from Google first.' };
+      const client = kept.client;
+      if (!client) return { ok: false, error: 'Choose the file from Google first.' };
       if (waiting) return { ok: false, error: 'A sign-in is already open in your browser.' };
-      const verifier = base64url(crypto.randomBytes(32));
-      const state = base64url(crypto.randomBytes(16));
-      let server;
-      try {
-        server = await listen();
-      } catch {
-        return { ok: false, error: 'Couldn’t open a port on this computer for Google’s answer.' };
-      }
-      const redirect = `http://127.0.0.1:${server.port}`;
+      // Taken at once, before anything's waited on: a second click finds it under way.
+      let giveUp;
       let timer;
       const gaveUp = new Promise((resolve) => {
+        giveUp = () => resolve(null);
         timer = setTimeout(resolve, SIGN_IN_MS, null);
-        waiting = () => resolve(null);
       });
+      waiting = giveUp;
+      const verifier = base64url(crypto.randomBytes(32));
+      const state = base64url(crypto.randomBytes(16));
+      let server = null;
       onChange();
       try {
-        const url = `${AUTH}?${new URLSearchParams({ client_id: kept.client.id, redirect_uri: redirect, response_type: 'code', scope: SCOPE, code_challenge: base64url(crypto.createHash('sha256').update(verifier).digest()), code_challenge_method: 'S256', state, access_type: 'offline', prompt: 'consent' })}`;
+        try {
+          server = await listen(state);
+        } catch {
+          return { ok: false, error: 'Couldn’t open a port on this computer for Google’s answer.' };
+        }
+        const redirect = `http://127.0.0.1:${server.port}`;
+        const url = `${AUTH}?${new URLSearchParams({ client_id: client.id, redirect_uri: redirect, response_type: 'code', scope: SCOPE, code_challenge: base64url(crypto.createHash('sha256').update(verifier).digest()), code_challenge_method: 'S256', state, access_type: 'offline', prompt: 'consent' })}`;
         await open(url);
         const answer = await Promise.race([server.answered, gaveUp]);
         if (!answer) return { ok: false, error: 'The sign-in wasn’t finished.' };
         // Only the answer to this asking counts: another page sending the browser here is nobody's sign-in.
         if (answer.get('state') !== state) return { ok: false, error: 'That answer wasn’t to this sign-in. Try it again.' };
         if (!answer.get('code')) return { ok: false, error: answer.get('error') === 'access_denied' ? 'You didn’t allow it, so nothing was connected.' : 'Google didn’t sign you in.' };
-        const json = await token({ grant_type: 'authorization_code', code: answer.get('code'), client_id: kept.client.id, client_secret: kept.client.secret, code_verifier: verifier, redirect_uri: redirect });
+        const json = await token({ grant_type: 'authorization_code', code: answer.get('code'), client_id: client.id, client_secret: client.secret, code_verifier: verifier, redirect_uri: redirect });
+        // The file was changed or forgotten while the browser was open: this sign-in was with the one before.
+        if (kept.client?.id !== client.id) {
+          revoke(json.refresh_token);
+          return { ok: false, error: 'Google’s file was changed while you signed in. Try it again.' };
+        }
         if (!json.refresh_token) return { ok: false, error: 'Google signed you in for an hour only. Try it again.' };
-        if (!String(json.scope || SCOPE).split(' ').includes(SCOPE)) return { ok: false, error: 'Reading your mail wasn’t ticked on Google’s page, so there’s nothing he can read. Try again and leave it ticked.' };
+        if (!String(json.scope || SCOPE).split(' ').includes(SCOPE)) {
+          revoke(json.refresh_token);
+          return { ok: false, error: 'Reading your mail wasn’t ticked on Google’s page, so there’s nothing he can read. Try again and leave it ticked.' };
+        }
+        const old = kept.refresh;
         await save({ refresh: json.refresh_token, access: json.access_token, expiresAt: now() + Number(json.expires_in || 3600) * 1000, email: '' });
         problem = '';
-        const profile = await this.get('/profile').catch(() => null);
+        if (old && old !== json.refresh_token) revoke(old);
+        // Signed in, and Gmail must let itself be read: with the Gmail API off for the client's project it won't.
+        let profile = null;
+        try {
+          profile = await this.get('/profile');
+        } catch (err) {
+          if (err.code === 'refused') {
+            await save({ refresh: '', access: '', expiresAt: 0 });
+            problem = '';
+            revoke(json.refresh_token);
+            log('google: signed in, but Gmail refused to be read');
+            return { ok: false, error: 'Google signed you in, but Gmail wouldn’t let itself be read. In Google Cloud’s console, turn on the Gmail API for the project this file is from, then try again.' };
+          }
+        }
         await save({ email: typeof profile?.emailAddress === 'string' ? profile.emailAddress : '' });
         log('google: signed in');
         return { ok: true, email: kept.email };
       } catch (err) {
         log('google: the sign-in failed:', err.code || 'error');
-        return { ok: false, error: err.message || 'Google didn’t sign you in.' };
+        return { ok: false, error: err.code ? err.message || 'Google didn’t sign you in.' : 'Google didn’t sign you in.' };
       } finally {
         clearTimeout(timer);
         waiting = null;
-        server.close();
+        server?.close();
         onChange();
       }
     },
@@ -221,22 +275,42 @@ export function createGoogle({ storage, open, listen = loopback, fetchImpl = glo
         } catch {
           throw Object.assign(new Error('Gmail couldn’t be reached.'), { code: 'unreachable' });
         }
-        if (response.ok) return response.json();
+        if (response.ok) {
+          if (problem === 'refused') {
+            problem = '';
+            onChange();
+          }
+          return response.json();
+        }
         // A token Google no longer takes is asked for again, once.
         if (response.status === 401 && attempt === 0) {
           kept = { ...kept, access: '', expiresAt: 0 };
           continue;
         }
-        throw Object.assign(new Error(`Gmail answered ${Number(response.status) || 0}.`), { code: response.status === 404 ? 'gone' : response.status === 401 ? 'signin' : 'refused', status: Number(response.status) || 0 });
+        // Refused though the token's new: Google has taken the sign-in back, whatever it calls it.
+        if (response.status === 401) {
+          log('google: Gmail refused a new token: they need to sign in again');
+          problem = 'signin';
+          await save({ refresh: '', access: '', expiresAt: 0 });
+          throw Object.assign(new Error('Google wants you to sign in again.'), { code: 'signin' });
+        }
+        // Not allowed to read at all (403): said in Settings, since it won't mend itself.
+        if (response.status === 403 && problem !== 'refused') {
+          problem = 'refused';
+          onChange();
+        }
+        throw Object.assign(new Error(`Gmail answered ${Number(response.status) || 0}.`), { code: response.status === 404 ? 'gone' : 'refused', status: Number(response.status) || 0 });
       }
       throw Object.assign(new Error('Gmail refused it.'), { code: 'refused' });
     },
     /** Signs out: Google's told to forget the sign-in, and it's forgotten here whether or not Google answered. */
     async signOut() {
+      // A sign-in waiting in the browser is called off with it.
+      waiting?.();
       const refresh = kept.refresh;
       await save({ refresh: '', access: '', expiresAt: 0, email: '' });
       problem = '';
-      if (refresh) await fetchImpl(REVOKE, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: refresh }).toString(), redirect: 'error', signal: AbortSignal.timeout(FETCH_MS) }).catch(() => undefined);
+      await revoke(refresh);
       log('google: signed out');
     },
     /** The client forgotten too: back to before the file was chosen. */

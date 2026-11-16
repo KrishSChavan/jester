@@ -27,6 +27,8 @@ const KEPT_MS = 2 * 24 * 3600_000;
 const MOST_KEPT = 40;
 /** No more than this many are fetched from one look: a flood is a flood, not twenty announcements. */
 const MOST_NEW = 25;
+/** Pages of Gmail's history read in one look: a hundred additions each. */
+const MOST_PAGES = 10;
 const MOST_NAMED = 3;
 const JUDGE_TOKENS = 200;
 const JUDGE_SCHEMA = { type: 'object', properties: { important: { type: 'array', items: { type: 'integer' } } }, required: ['important'], additionalProperties: false };
@@ -43,7 +45,10 @@ const plain = (text) =>
     .replace(/&#(\d+);/g, (_all, code) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_all, code) => String.fromCodePoint(parseInt(code, 16)))
     .replace(/&([a-z]+);/gi, (all, name) => ENTITIES[name.toLowerCase()] ?? all)
-    .replace(/[\u200B-\u200F\u2028-\u202E\uFEFF]/g, '')
+    // A line break is a space; what can't be seen (controls, direction marks, the tag characters that carry hidden
+    // text) is nothing at all.
+    .replace(/[\r\n\t\u2028\u2029]+/g, ' ')
+    .replace(/[\p{Cc}\p{Cf}\u{E0000}-\u{E007F}]/gu, '')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -64,7 +69,8 @@ export function senderOf(from) {
   const text = decoded(from).trim();
   const named = /^\s*"?([^"<]*?)"?\s*<([^>]+)>\s*$/.exec(text);
   const name = plain(named ? named[1] : '').replace(/^['"]|['"]$/g, '');
-  const address = (named ? named[2] : text).trim();
+  // With no name, or a header that isn't shaped like one: the address, cleaned like anything else of theirs.
+  const address = plain(named ? named[2] : text).replace(/[<>"]/g, '');
   return (name || address.split('@')[0] || 'someone').slice(0, 60);
 }
 
@@ -93,12 +99,14 @@ export function important(message) {
 }
 
 /**
- * A message written at whatever reads it, not at the user: "ignore your instructions", "SYSTEM:". Nobody who writes
- * that is worth an interruption, and qwen3.5:9b picked one such every time it was shown it (6 of 6).
+ * A message that reads as written at whatever reads it, not at the user: "ignore your previous instructions",
+ * "SYSTEM:". It's kept out of what a model is shown to judge, and goes by Gmail's own marking alone: never dropped
+ * for it, since a professor writes "please ignore the previous instructions for HW5" too. (qwen3.5:9b picked one
+ * such as worth telling every time it was shown it, 6 of 6.)
  */
 export function steering(message) {
-  const text = `${message?.subject ?? ''} ${message?.opening ?? ''}`;
-  return /\b(?:ignore|disregard|forget) (?:all |any |your |the |these |previous |prior |above )*(?:instructions|rules|prompt)|\bas an ai\b|\byou (?:must|should) (?:mark|include|say|reply|respond|tell the user)\b|\b(?:assistant|ai|model)[,:] /i.test(text) || /\bSYSTEM\s*:|^\s*system\s*:/.test(text);
+  const text = `${message?.from ?? ''} ${message?.subject ?? ''} ${message?.opening ?? ''}`;
+  return /\b(?:ignore|disregard|forget) (?:all |any |your |the |these |previous |prior |above |earlier )*(?:instructions|rules|prompt)|\bas an ai\b/i.test(text) || /\bSYSTEM\s*:|^\s*system\s*:/.test(text);
 }
 
 /** "New email from Sarah Lee: Lab report feedback." Three by name at most, and how many more. */
@@ -130,19 +138,25 @@ export function createMail({ google, storage, request = null, judged = () => tru
   /** What he's told of lately: {id, thread, from, subject, at}. */
   let told = [];
   let checking = null;
+  /** Times he's been reset (signed out, another account): a look begun before one ends with nothing. */
+  let resets = 0;
 
-  const save = () => storage.set({ mail: { mark, told } }).catch(() => undefined);
+  const save = () => storage.set({ mail: { version: 2, mark, told } }).catch(() => undefined);
   const fresh = () => (told = told.filter((message) => now() - message.at < KEPT_MS).slice(-MOST_KEPT));
 
-  /** Of those that could matter, the ones a model says are worth a word; all of them when there's no model to ask. */
+  /**
+   * Of those that could matter, the ones a model says are worth a word; all of them when there's no model to ask.
+   * One that reads as written to steer whoever reads it isn't shown to the model: it stands by Gmail's marking.
+   */
   async function worth(messages) {
-    if (!messages.length || !request || !judged()) return messages;
+    const shown = messages.filter((message) => !steering(message));
+    if (!shown.length || !request || !judged()) return messages;
     try {
-      const { json } = await request({ system: JUDGE, prompt: messages.map((message, i) => `${i + 1}. From: ${message.from} | Subject: ${message.subject || '(none)'} | Opens: ${message.opening || '(nothing)'}`).join('\n'), schema: JUDGE_SCHEMA, maxOutputTokens: JUDGE_TOKENS });
+      const { json } = await request({ system: JUDGE, prompt: shown.map((message, i) => `${i + 1}. From: ${message.from} | Subject: ${message.subject || '(none)'} | Opens: ${message.opening || '(nothing)'}`).join('\n'), schema: JUDGE_SCHEMA, maxOutputTokens: JUDGE_TOKENS });
       if (!Array.isArray(json?.important)) return messages;
-      const picked = new Set(json.important.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= messages.length));
-      log(`mail: ${picked.size} of ${messages.length} judged worth telling`);
-      return messages.filter((_message, i) => picked.has(i + 1));
+      const picked = new Set(json.important.map(Number).filter((n) => Number.isInteger(n) && n >= 1 && n <= shown.length).map((n) => shown[n - 1].id));
+      log(`mail: ${picked.size} of ${shown.length} judged worth telling`);
+      return messages.filter((message) => picked.has(message.id) || steering(message));
     } catch (err) {
       // With nobody to judge, Gmail's own labels stand.
       log('mail: no model to judge by, so Gmail’s own marking stands:', String(err?.code || err?.message || '').slice(0, 60));
@@ -152,36 +166,57 @@ export function createMail({ google, storage, request = null, judged = () => tru
 
   async function look() {
     if (!google.signedIn) return [];
+    const mine = resets;
+    /** Signed out or another account since this look began: what it found is nobody's now. */
+    const over = () => mine !== resets;
     // The first look only makes the mark: what was there before he was connected is theirs, not news.
     if (!mark) {
-      mark = String((await google.get('/profile')).historyId ?? '');
+      const first = String((await google.get('/profile')).historyId ?? '');
+      if (over()) return [];
+      mark = first;
       await save();
       log('mail: watching from now');
       return [];
     }
-    let history;
-    try {
-      history = await google.get('/history', { startHistoryId: mark, historyTypes: 'messageAdded', labelId: 'INBOX', maxResults: 100 });
-    } catch (err) {
-      // A mark too old for Gmail to count from: he starts again from now, and says nothing of the gap.
-      if (err.code !== 'gone') throw err;
-      mark = '';
-      return look();
+    // Everything added to the inbox since the mark, page by page: the mark moves only once it's all been read, so
+    // a fetch that fails (the network just after waking) leaves it for the next look.
+    const added = new Map();
+    let reached = mark;
+    let pageToken = '';
+    for (let page = 0; page < MOST_PAGES; page++) {
+      let history;
+      try {
+        history = await google.get('/history', { startHistoryId: mark, historyTypes: 'messageAdded', labelId: 'INBOX', maxResults: 100, ...(pageToken ? { pageToken } : {}) });
+      } catch (err) {
+        // A mark too old for Gmail to count from: he starts again from now, and says nothing of the gap.
+        if (err.code !== 'gone' || over()) throw err;
+        mark = '';
+        return look();
+      }
+      if (over()) return [];
+      for (const item of history.history || []) for (const one of item.messagesAdded || []) if (one?.message?.id) added.set(String(one.message.id), Array.isArray(one.message.labelIds) ? one.message.labelIds.map(String) : null);
+      reached = String(history.historyId ?? reached);
+      pageToken = String(history.nextPageToken ?? '');
+      if (!pageToken) break;
     }
-    const ids = [...new Set((history.history || []).flatMap((item) => (item.messagesAdded || []).map((added) => String(added?.message?.id ?? ''))).filter(Boolean))];
-    mark = String(history.historyId ?? mark);
     const seen = new Set(told.map((message) => message.id));
+    // What Gmail's own labels already rule out isn't fetched; of the rest, the newest, and how many weren't.
+    const wanted = [...added].filter(([id, labels]) => !seen.has(id) && (!labels || important({ labels }))).map(([id]) => id);
+    if (wanted.length > MOST_NEW) log(`mail: ${wanted.length - MOST_NEW} more than he reads at once were left unread by him`);
     const found = [];
-    for (const id of ids.filter((item) => !seen.has(item)).slice(-MOST_NEW)) {
+    for (const id of wanted.slice(-MOST_NEW)) {
       // Gone since (read and deleted on their phone): nothing to tell.
       const raw = await google.get(`/messages/${encodeURIComponent(id)}`, { format: 'metadata', metadataHeaders: ['From', 'Subject'] }).catch((err) => (err.code === 'gone' ? null : Promise.reject(err)));
+      if (over()) return [];
       if (raw) found.push(messageOf(raw));
     }
-    const picked = await worth(found.filter((message) => important(message) && !steering(message)));
+    const picked = await worth(found.filter(important));
+    if (over()) return [];
+    mark = reached;
     told.push(...picked.map(({ id, thread, from, subject, at }) => ({ id, thread, from, subject, at: at || now() })));
     fresh();
     await save();
-    if (found.length) log(`mail: ${found.length} new, ${picked.length} worth telling`);
+    if (added.size) log(`mail: ${added.size} new, ${picked.length} worth telling`);
     return picked;
   }
 
@@ -191,6 +226,8 @@ export function createMail({ google, storage, request = null, judged = () => tru
       if (stored && typeof stored === 'object') {
         mark = typeof stored.mark === 'string' ? stored.mark : '';
         told = Array.isArray(stored.told) ? stored.told.filter((message) => message && typeof message.id === 'string' && Number.isFinite(message.at)) : [];
+        // Kept before he noted what he'd told: all of it was.
+        if (stored.version !== 2) for (const message of told) message.said = true;
         fresh();
       }
     },
@@ -205,8 +242,23 @@ export function createMail({ google, storage, request = null, judged = () => tru
     },
     /** Signed out, or another account: nothing's carried over. */
     async reset() {
+      resets += 1;
       mark = '';
       told = [];
+      await save();
+    },
+    /**
+     * What he's found worth telling and hasn't told yet: mail from the night, kept for the morning, or for the
+     * first look after it.
+     */
+    unsaid() {
+      fresh();
+      return told.filter((message) => !message.said).map((message) => ({ ...message }));
+    },
+    /** These have been told (said, sent to their phone, or put in a brief): not again. */
+    async said(ids = []) {
+      const done = new Set(ids);
+      for (const message of told) if (done.has(message.id)) message.said = true;
       await save();
     },
     /** What he's told of since `since`, the newest last. */

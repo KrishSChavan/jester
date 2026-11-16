@@ -378,19 +378,19 @@ if (!process.versions.electron) {
       };
       const beforeMail = entries().length;
       await inPage(`await chrome.runtime.sendMessage({ type: 'jester/mail', op: 'check' });`);
-      const told = await until('the mail told', () => entries().slice(beforeMail).find((entry) => /^New email/.test(entry.text)), 10000).catch((err) => ({ text: err.message }));
-      check('new mail that matters is told: who it’s from and its subject, marked as other people’s words', told.text === 'New email from Sarah Lee: Lab report feedback.' && told.untrusted === true, JSON.stringify(told));
-      check('the model picked it by number, shown only what could matter: never the offer, nor the one written to steer it', judged.length === 1 && /^1\. From: Sarah Lee \| Subject: Lab report feedback \| Opens: Hello\n2\. From: Weekly Digest/.test(judged[0]) && !/50% off|Growth Hacks/.test(judged[0]), judged[0]);
-      check('with its card, to open in Gmail', told.card?.kind === 'mail' && told.card.title === 'From Sarah Lee' && told.card.id === '18f3a2b4aa01', JSON.stringify(told.card));
+      const told = await until('the mail told', () => entries().slice(beforeMail).find((entry) => /^(?:New email|\d+ new emails)/.test(entry.text)), 10000).catch((err) => ({ text: err.message }));
+      check('new mail that matters is told: who it’s from and its subject, marked as other people’s words', told.text === '2 new emails: from Sarah Lee: Lab report feedback; from Growth Hacks: URGENT.' && told.untrusted === true, JSON.stringify(told));
+      check('the model picked it by number, shown only what could matter: never the offer, nor the one written to steer it, which stands by Gmail’s marking', judged.length === 1 && /^1\. From: Sarah Lee \| Subject: Lab report feedback \| Opens: Hello\n2\. From: Weekly Digest/.test(judged[0]) && !/50% off|Growth Hacks/.test(judged[0]), judged[0]);
+      check('with its card: who and what, a line each', told.card?.kind === 'mail' && told.card.title === '2 new emails' && told.card.lines?.[0] === 'Sarah Lee: Lab report feedback', JSON.stringify(told.card));
       await until('the card in his window', () => inPage(`return !![...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.label')?.textContent === 'Email');`));
       await shot('mail');
       await inPage(`[...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.label')?.textContent === 'Email').querySelector('.act').click();`);
       await until('Gmail opened', () => opened.some((target) => /mail\.google\.com/.test(target))).catch(() => undefined);
-      check('Open on the card opens that conversation in Gmail, signed in as them', opened.at(-1) === 'https://mail.google.com/mail/?authuser=you%40example.com#inbox/18f3a2b4aa01', opened.at(-1));
-      check('the log has how many, never who or what', /mail: 4 new, 1 worth telling/.test(logLines()) && !/Sarah Lee|Lab report/.test(logLines().split('\n').filter((line) => /mail:|telling:/.test(line)).join('\n')));
+      check('Open on the card opens Gmail, signed in as them', opened.at(-1) === 'https://mail.google.com/mail/?authuser=you%40example.com#inbox', opened.at(-1));
+      check('the log has how many, never who or what', /mail: 4 new, 2 worth telling/.test(logLines()) && !/Sarah Lee|Lab report|Growth/.test(logLines().split('\n').filter((line) => /mail:|telling:/.test(line)).join('\n')));
       paid.answer = () => ({ say: 'One from Sarah Lee about your lab report.', do: '', new: false });
       await type('any new email?');
-      check('asked about their mail, the model is shown what’s arrived, as data', /Their Gmail, which you can read and not send from\.[^\n]*\n- \w+ \d+:\d\d [AP]M, from Sarah Lee: Lab report feedback/.test(lastSaid(paid)) && /Watch their Gmail and tell them when something that matters arrives/.test(lastSystem(paid)), lastSaid(paid).slice(0, 300));
+      check('asked about their mail, the model is shown what’s arrived, as data', /Their Gmail, which you can read and not send from\.[\s\S]*\n- \w+ \d+:\d\d [AP]M, from Sarah Lee: Lab report feedback/.test(lastSaid(paid)) && /Watch their Gmail and tell them when something that matters arrives/.test(lastSystem(paid)), lastSaid(paid).slice(0, 300));
 
       // Google takes the sign-in back (a week in its Testing state): said once, and Settings says why.
       gmail.revoked = true;
