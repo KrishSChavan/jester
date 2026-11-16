@@ -58,6 +58,8 @@ front window fills its display.
 | `src/main/presence.js` | Whether the user's at the computer (here, near, away), the day's first sit-down, and how long they've sat. |
 | `src/main/tell.js` | Telling them something when its time comes: said if they're there, held until they're back if they aren't. |
 | `src/main/briefs.js` | The morning brief, the evening wrap-up and a word before what's on the calendar: the day's facts, said by the model and checked against them, or said plainly. |
+| `src/main/google.js` | Signing in with Google, to read their Gmail and nothing else: OAuth for an installed app, with their own client from Google's file. |
+| `src/main/mail.js` | Their Gmail, watched: what's new in the inbox, what of it could matter, and what he says of it. |
 | `src/main/phone.js` | Their phone, for what's told while they're away: a notification through ntfy, to a topic only they know the name of. |
 | `src/main/tasks.js` | Their to-do list, reminders and timers: `tasks.json`, a clock job for each one with a time, and the rule that only they tick one off. |
 | `src/home/cards.js` | Cards: a timer, a reminder, a task or a note as a thing to look at and act on, on his line in the chat, on the shelf over the orb, and in the Tasks screen. |
@@ -1514,6 +1516,68 @@ locked and not said again on unlocking, and one held when the server fails: 8
 of 8. **No message has been sent to a real phone**: that needs the user's own
 subscription.
 
+## Their email
+
+Step 11. He watches their Gmail and tells them when something that matters
+arrives (`mail.js`), signed in with Google to read and nothing else
+(`google.js`: the one scope asked for is `gmail.readonly`, so he can't send,
+answer, change or delete).
+
+**Signing in.** Google has each app sign people in through a client of its own,
+and Jester ships none: Settings › Email takes the file Google's console gives
+for a "Desktop app" client (Download JSON), reads it once, and keeps it sealed
+with the other keys. Sign in with Google then opens Google's own page in their
+browser, with PKCE and a state only this asking knows, and Google sends its
+answer to a port on 127.0.0.1 that's open only while it's waited for (five
+minutes). What that yields is sealed too. None of it is in the log (which has
+that a sign-in happened, and why one failed, in Google's own word for it), in
+what his pages can read, or in anything a model is shown.
+
+A client in Google's **"Testing"** state signs its users out after seven days
+(Google's rule for any scope beyond name and email). He says so once ("Google
+has signed me out of your Gmail…"), Settings says why, and nothing's read until
+they've signed in again. Publishing the app in Google's console ("In
+production", unverified) ends the weekly sign-in, at the price of Google's "this
+app isn't verified" page when signing in: the user's choice, and not made for
+them.
+
+**Watching.** Every five minutes (a job on his clock) he asks Gmail what's been
+added to the inbox since his mark in its history; the first look only makes the
+mark, so nothing from before he was connected is ever told. Of each new message
+he fetches who it's from, its subject and the opening words Gmail shows in the
+inbox (`format=metadata`): never the body. Then:
+
+1. *Gmail's own labels* (`important`): unread, in the inbox, and either marked
+   important by Gmail or not filed by it under Promotions, Social, Forums or
+   Updates.
+2. *Not written at him* (`steering`): "ignore your instructions", "SYSTEM:".
+   Nobody who writes that is worth an interruption, and it never reaches a
+   model.
+3. *Worth an interruption* (`worth`), if Settings allows a model to see it: the
+   model he talks through is shown what's left, numbered, as data, and picks by
+   number. Measured (2026-11-15, `npm run talk-check -- --only self --match "new
+   mail"`, six made-up emails, 6 tries): Claude Haiku 5.5 picked the professor's
+   change, the roommate's ask and the hold on an account, and none of the
+   newsletter, the receipt or the one written to steer it, 6 of 6. qwen3.5:9b
+   picked the same and the steering one too, every time: hence rule 2.
+
+What he says is who it's from and its subject, as they are ("New email from
+Sarah Lee: Lab report feedback."), never a model's account of it; three by name
+at most, then how many more. It's told like any line of his (`tell.js`): said
+when they're here, sent to their phone when they're away, with a card that
+opens the conversation in Gmail. Between ten at night and eight in the morning
+it's kept for the morning's brief, which has the mail since six the evening
+before. Asked about their mail, he's shown what's arrived lately, as data. A
+sender and a subject are other people's words: a line that holds them is marked
+so, and what's asked after it is asked carefully.
+
+`npm run live-check -- mail` runs it in the real app on a scratch profile
+against a pretend Google and a pretend browser: the file chosen, the sign-in,
+new mail told with its card and opened, the model shown only what could matter,
+"any new email?", and Google signing him out said once: 14 of 14. **Nothing has
+been signed in to or read at Google itself**: that needs the user's own client
+and their own Allow.
+
 ## Weather, location and calendars
 
 Settings › Weather and calendars tells Jester the user's day: where they are, the
@@ -1934,6 +1998,18 @@ models decode in under 35 ms.
     minutes to stretch", lock the Mac, and the reminder should come to the
     phone, and not be said when you unlock. The log has `telling: a line, to
     their phone`, and never the topic or what was sent.
+
+15. **Your email** (a pretend Google in the checks; no real sign-in or mail has
+    been read). In Google Cloud's console, project Jester: finish the Auth
+    Platform's setup (it's waiting at "I agree to the Google API Services: User
+    Data Policy"), add yourself under Audience › Test users, and under Clients
+    make a "Desktop app" client and Download JSON. In Jester, Settings › Email:
+    Choose the file, then Sign in with Google, and Allow on Google's page (it
+    will say Google hasn't verified the app: Continue). Send yourself an email
+    from another account: within five minutes, "New email from …", with its
+    card. The log has `google: signed in`, `mail: watching from now` and `mail: 1
+    new, 1 worth telling`, and never an address, a subject or a key. After seven
+    days Google signs him out, and he says so.
 
 ## Things learned the hard way
 

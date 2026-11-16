@@ -43,6 +43,8 @@ export function cardView(card, state = {}) {
   }
   // A brief's card is its facts, a line each: nothing to do to it.
   if (card?.kind === 'brief') return { label: 'Brief', title: String(card.title || 'Today'), detail: '', lines: Array.isArray(card.lines) ? card.lines.map(String) : [], icon: /evening/i.test(card.title || '') ? 'i-moon' : 'i-sun', tick: null, tone: '', actions: [] };
+  // New mail: who and what, and the conversation to open in Gmail when it's just the one.
+  if (card?.kind === 'mail') return { label: 'Email', title: String(card.title || 'New mail'), detail: '', lines: Array.isArray(card.lines) ? card.lines.map(String) : [], icon: 'i-mail', tick: null, tone: '', actions: ['mail'] };
   const id = String(card?.id ?? '');
   const timer = (state.timers || []).find((task) => task.id === id);
   if (timer) return { label: 'Timer', title: timer.text, detail: '', icon: 'i-timer', tick: null, tone: '', actions: ['cancel'], due: timer.due, span: timer.timer };
@@ -80,7 +82,8 @@ const ACTIONS = {
   cancel: { label: 'Cancel', icon: 'i-close' },
   remove: { label: 'Remove', icon: 'i-trash' },
   snooze: { label: 'Snooze 10 min', icon: 'i-snooze', text: '10 min' },
-  open: { label: 'Open in Obsidian', icon: 'i-open', text: 'Open' }
+  open: { label: 'Open in Obsidian', icon: 'i-open', text: 'Open' },
+  mail: { label: 'Open in Gmail', icon: 'i-open', text: 'Open' }
 };
 
 // ——— The page's half: one list, kept up to date, and every card drawn from it ———
@@ -137,6 +140,7 @@ function counting() {
 
 async function act(action, card) {
   if (action === 'open') return void chrome.runtime.sendMessage({ type: 'jester/notes', op: 'open', rel: card.rel }).catch(() => null);
+  if (action === 'mail') return void chrome.runtime.sendMessage({ type: 'jester/mail', op: 'open', id: card.id || '' }).catch(() => null);
   const op = { done: { op: 'done', on: true }, undo: { op: 'done', on: false }, remove: { op: 'remove' }, cancel: { op: 'remove' }, snooze: { op: 'snooze', minutes: 10 } }[action];
   if (op) took(await ask({ ...op, id: card.id }));
   return undefined;

@@ -237,6 +237,8 @@ function renderVoice() {
 function renderPictures() {
   $('agentScreenshots').checked = settings.agentScreenshots !== false;
   $('keepUnsureSpeech').checked = settings.keepUnsureSpeech === true;
+  $('mailWatch').checked = settings.mailWatch !== false;
+  $('mailJudge').checked = settings.mailJudge !== false;
   // What he tells them unasked, by the day: on unless turned off.
   $('briefMorning').checked = settings.briefMorning !== false;
   $('briefEvening').checked = settings.briefEvening !== false;
@@ -874,6 +876,7 @@ chrome.runtime.onMessage.addListener((message) => {
   switch (message?.type) {
     case 'jester/desktop-state':
       desktop = message;
+      drawMail(message.mail);
       render();
       break;
     case 'jester/telemetry': {
@@ -994,6 +997,41 @@ for (const use of ['talk', 'act']) {
   });
 }
 $('jesterVoice').addEventListener('change', (event) => save({ jesterVoice: event.target.value }));
+// ——— Email: Google's file, signing in and out, and what he tells (main.js jester/mail) ———
+
+function drawMail(mail, { error = null } = {}) {
+  if (!mail) return;
+  $('mail-connect').hidden = !mail.client || mail.signedIn || mail.connecting;
+  $('mail-connect').textContent = mail.problem === 'signin' ? 'Sign in again' : 'Sign in with Google';
+  $('mail-cancel').hidden = !mail.connecting;
+  $('mail-signout').hidden = !mail.signedIn;
+  $('mail-forget').hidden = !mail.client;
+  $('mail-client').textContent = mail.client ? 'Choose another…' : 'Choose the file…';
+  $('mail-client-hint').textContent = mail.client
+    ? 'Kept, sealed, on this computer. It says which Google sign-in Jester uses, and holds nothing of yours.'
+    : 'Google has each app sign in through a “client” of its own. In Google Cloud’s console, under Clients, make one of type “Desktop app”, press Download JSON, and choose that file here. It’s read once and kept sealed.';
+  $('mail-status').textContent = mail.connecting
+    ? 'Waiting for you to finish signing in, in your browser…'
+    : mail.signedIn
+      ? `Signed in${mail.email ? ` as ${mail.email}` : ''}. Watching for new mail.`
+      : mail.problem === 'signin'
+        ? 'Google has signed him out: it does that every seven days while the sign-in is in its “Testing” state. Sign in again to go on.'
+        : mail.client
+          ? 'Not signed in.'
+          : 'Not set up: choose Google’s file below first.';
+  // A state that only arrived (he finished signing in) leaves what was said of the last try as it is.
+  if (error !== null) $('mail-error').textContent = error;
+  aside('sum-mail', mail.signedIn ? mail.email || 'Signed in' : mail.problem === 'signin' ? 'Sign in again' : 'Off', mail.problem === 'signin' ? 'warn' : '');
+}
+const mailOp = async (op) => {
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/mail', op }).catch(() => null);
+  drawMail(reply, { error: reply?.ok === false ? reply.error || '' : '' });
+  return reply;
+};
+for (const [id, op] of [['mail-client', 'client'], ['mail-connect', 'connect'], ['mail-cancel', 'cancel'], ['mail-signout', 'signout'], ['mail-forget', 'forget']]) $(id).addEventListener('click', () => mailOp(op));
+for (const id of ['mailWatch', 'mailJudge']) $(id).addEventListener('change', (event) => save({ [id]: event.target.checked }));
+mailOp('state');
+
 // ——— Your phone: the topic to subscribe to in the ntfy app, a test, and the switch (main.js jester/phone) ———
 
 function drawPhone(phone, { error = '', sent = false } = {}) {

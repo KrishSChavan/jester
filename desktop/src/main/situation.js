@@ -160,11 +160,13 @@ const ago = (ms) => {
  * @param {() => 'fahrenheit'|'celsius'} deps.units
  * @param {string} [deps.computer]  "Mac", or "computer": what he says the location is from
  * @param {{lines:() => string}} [deps.presence]  when they sat down at the computer (presence.js)
+ * @param {{wanted:(text:string) => boolean, lines:() => string}} [deps.mail]  new mail that looked worth telling
+ *   (mail.js): told when their words are about their mail. Senders and subjects are other people's words.
  * @param {{wanted:(text:string) => boolean, lines:() => string}} [deps.tasks]  their to-do list, reminders and timers
  *   (tasks.js): told when their words may be about them
  * @param {() => number} [deps.now]
  */
-export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', presence = null, tasks = null, now = Date.now }) {
+export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', presence = null, tasks = null, mail = null, now = Date.now }) {
   function whereLine(here, asked, at) {
     if (!here) {
       const { problem } = whereabouts.state();
@@ -247,10 +249,15 @@ export function createSituation({ whereabouts, weather, calendars, units, comput
         summary.push('their list');
       }
       let untrusted = false;
+      if (mail?.wanted(text)) {
+        lines.push(mail.lines());
+        summary.push('their mail');
+        untrusted = true;
+      }
       if (calendars.connected) {
         const part = calendarPart(asked, text, at);
         lines.push(...part.lines);
-        untrusted = part.told;
+        untrusted ||= part.told;
         summary.push(`${part.count} events`);
       }
       return { block: lines.join('\n'), untrusted, summary: summary.join(', ') };

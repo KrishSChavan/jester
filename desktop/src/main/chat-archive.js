@@ -57,11 +57,11 @@ function keptLine(entry, fallbackAt, { follows = '' } = {}) {
 
 /** A line's card as it's kept: what it's of and where to find it, each a short string, and nothing else. */
 export function cardOf(card) {
-  if (!card || typeof card !== 'object' || !['task', 'note', 'remembered', 'brief'].includes(card.kind)) return null;
+  if (!card || typeof card !== 'object' || !['task', 'note', 'remembered', 'brief', 'mail'].includes(card.kind)) return null;
   const short = (value, most) => (typeof value === 'string' && value ? value.slice(0, most) : undefined);
   const kept = { kind: card.kind, id: short(card.id, 40), type: short(card.type, 12), text: short(card.text, 200), title: short(card.title, 120), rel: short(card.rel, 300), snippet: short(card.snippet, 160) };
   // A brief's card is its facts, a line each.
-  const lines = card.kind === 'brief' && Array.isArray(card.lines) ? card.lines.filter((line) => typeof line === 'string' && line).slice(0, 8).map((line) => line.slice(0, 160)) : [];
+  const lines = (card.kind === 'brief' || card.kind === 'mail') && Array.isArray(card.lines) ? card.lines.filter((line) => typeof line === 'string' && line).slice(0, 8).map((line) => line.slice(0, 160)) : [];
   return { ...Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined)), ...(lines.length ? { lines } : {}) };
 }
 

@@ -58,6 +58,8 @@ import { PROVIDERS } from '../../../jester-extension/src/common/credentials.js';
 import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
+import { createGoogle } from './google.js';
+import { CHECK_MS, createMail, mailCard, mailLine } from './mail.js';
 import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
@@ -211,6 +213,11 @@ let teller = null;
 let tasks = null;
 /** Their phone, for what's told while they're away (phone.js). */
 let phone = null;
+/** Signing in with Google (google.js), and their Gmail, watched for what matters (mail.js). */
+let google = null;
+let mail = null;
+/** He's said Google signed him out, this time round: not said again until they've signed back in. */
+let signInTold = false;
 /** The morning brief, the evening wrap-up and check-ins before what's on the calendar (briefs.js). */
 let briefs = null;
 /** The day each brief was last given, so it's given once: {morning, evening}, by presence.js's day. */
@@ -387,6 +394,8 @@ function desktopState() {
     voice: voiceState(),
     // Their phone: whether it's set up and on. Never the topic's name, which is asked for by Settings alone.
     phone: phone ? { on: phone.ready, set: !!phone.state().topic } : null,
+    // Their Gmail: whether there's a client to sign in with, whether they're signed in and as whom. No key.
+    mail: google ? google.state() : null,
     speechModel: speech?.model || null,
     speechChoices: speech?.choices || [],
     watch: watch?.state || null,
@@ -443,6 +452,7 @@ async function refresh() {
   openVault();
   followLocation();
   syncBriefs();
+  syncMail();
   tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState(), watch: watch?.state }));
   post(desktopState());
 }
@@ -884,6 +894,41 @@ function startInput() {
   }
 }
 
+/**
+ * Gmail's asked what's new, and what's worth telling is put on the clock to be told like any line of his: said, sent
+ * to their phone or held, by where they are.
+ */
+async function checkMail() {
+  if (!google.signedIn || settings?.mailWatch === false) return undefined;
+  let fresh = [];
+  try {
+    fresh = await mail.check();
+  } catch (err) {
+    // Signed out by Google (a week in its Testing state, or access taken away): said once, and nothing's read till they're back in.
+    if (err.code === 'signin' && !signInTold) {
+      signInTold = true;
+      clock.add({ id: 'mail-signin', kind: 'say', inMs: 0, keepFor: 12 * 3600_000, payload: { text: 'Google has signed me out of your Gmail. Sign in again in Settings, under Email, and I’ll go on watching it.', title: 'Email' } });
+    } else if (err.code !== 'signin') log('mail: couldn’t look:', String(err.code || 'error'));
+    return undefined;
+  }
+  if (!fresh.length) return undefined;
+  // Not in the night: what came then is in the morning's brief.
+  const hour = new Date().getHours();
+  if (!env.JESTER_ANY_HOUR && (hour >= 22 || hour < 8)) return void log(`mail: ${fresh.length} kept for the morning`);
+  // A line like any other he tells: said, sent to their phone or held, by where they are. Other people's words.
+  clock.add({ kind: 'say', inMs: 0, keepFor: 2 * 3600_000, payload: { text: mailLine(fresh), card: mailCard(fresh), untrusted: true, title: 'Email', priority: 3 } });
+  return undefined;
+}
+
+/** Gmail's looked at every few minutes while they're signed in and want it watched, and not otherwise. */
+function syncMail() {
+  if (!clock || !google) return;
+  const on = google.signedIn && settings?.mailWatch !== false;
+  const job = clock.list().find((item) => item.id === 'mail-check');
+  if (on && job?.everyMs !== CHECK_MS) clock.add({ id: 'mail-check', kind: 'mail', everyMs: CHECK_MS });
+  else if (!on && job) clock.remove('mail-check');
+}
+
 /** A brief's been given, unasked or asked for: not again today. */
 async function briefGiven(which) {
   briefDays = { ...briefDays, [which === 'evening' ? 'evening' : 'morning']: dayOf(Date.now()) };
@@ -1224,6 +1269,46 @@ function listenToPages() {
         const notes = cards.filter((card) => !seen.has(card.rel) && seen.add(card.rel)).slice(0, 12);
         const there = new Set(vault ? vault.listNotes().map((note) => note.rel) : []);
         return { ok: true, notes: notes.filter((card) => there.has(card.rel)) };
+      }
+      // Settings › Email: the file from Google's console (chosen here, read here, never shown), signing in and out,
+      // and a card's Open, which opens that conversation in Gmail.
+      case 'jester/mail': {
+        try {
+          if (message.op === 'client') {
+            const picked = await dialog.showOpenDialog({ title: 'Choose the file from Google', buttonLabel: 'Use this file', properties: ['openFile'], filters: [{ name: 'Google client', extensions: ['json'] }], defaultPath: app.getPath('downloads') });
+            const file = picked.filePaths[0];
+            if (picked.canceled || !file) return { ok: true, ...google.state() };
+            if (fs.statSync(file).size > 100_000) throw new Error('That isn’t the file from Google: it’s far too big.');
+            await google.setClient(fs.readFileSync(file, 'utf8'));
+            await mail.reset();
+          } else if (message.op === 'connect') {
+            const signed = await google.connect();
+            if (signed.ok) {
+              signInTold = false;
+              await mail.reset();
+              // The first look makes his mark in the inbox: from here on, what arrives is news.
+              mail.check().catch(() => undefined);
+            }
+            syncMail();
+            return { ...signed, ...google.state() };
+          } else if (message.op === 'check') await checkMail();
+          else if (message.op === 'cancel') google.cancel();
+          else if (message.op === 'signout') {
+            await google.signOut();
+            await mail.reset();
+          } else if (message.op === 'forget') {
+            await google.forget();
+            await mail.reset();
+          } else if (message.op === 'open') {
+            const id = String(message.id ?? '');
+            const who = google.state().email;
+            await shell.openExternal(`https://mail.google.com/mail/${who ? `?authuser=${encodeURIComponent(who)}` : ''}#inbox${/^[0-9a-f]{6,32}$/.test(id) ? `/${id}` : ''}`);
+          }
+          syncMail();
+          return { ok: true, ...google.state() };
+        } catch (err) {
+          return { ok: false, error: err.message, ...google.state() };
+        }
       }
       // Settings' "Your phone": the topic to subscribe to in the ntfy app, turning it on, and a test. The topic is
       // shown here and nowhere else: it's the key to what's sent.
@@ -1843,7 +1928,9 @@ async function start() {
     units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()),
     computer: process.platform === 'darwin' ? 'Mac' : 'computer',
     presence,
-    tasks
+    tasks,
+    // New mail that looked worth telling, once Gmail's connected (made further down).
+    mail: { wanted: (text) => !!mail?.wanted(text), lines: () => mail.lines() }
   });
   recollections = createRecollections({
     file: path.join(app.getPath('userData'), 'recollections.json'),
@@ -1922,6 +2009,7 @@ async function start() {
       gestures: settings?.gesturesEnabled !== false,
       watch: !!watch?.state?.paired,
       phone: !!phone?.ready,
+      mail: !!google?.signedIn,
       computer: process.platform === 'darwin' ? 'Mac' : 'computer'
     }),
     assistant,
@@ -1962,9 +2050,16 @@ async function start() {
   });
   phone = createPhone({ storage: storage.local, log, onChange: () => post(desktopState()) });
   await phone.start();
+  // Their Gmail: signed in to with Google, to read only, and watched for what matters.
+  google = createGoogle({ storage: storage.local, open: (url) => shell.openExternal(url), log, onChange: () => post(desktopState()) });
+  await google.start();
+  mail = createMail({ google, storage: storage.local, request: talking, judged: () => settings?.mailJudge !== false, log });
+  await mail.start();
+  clock.on('mail', checkMail);
+  syncMail();
   // The morning brief and the evening wrap-up (briefs.js): composed when it's time to say one, and counted as given
   // only once it's been said. Away, it's held; too late to be worth it, the clock drops it.
-  briefs = createBriefs({ whereabouts, weather, calendars, tasks, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
+  briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
   ({ briefDays = {}, checkinsTold = {} } = await storage.local.get(['briefDays', 'checkinsTold']));
   let composed = null;
   /** Times a brief found a connected source not ready (the network just after waking), and waited. */

@@ -23,6 +23,7 @@
       <symbol id="i-tasks" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4" /><path d="M8.5 12.2l2.4 2.4 4.6-5" /></symbol>
       <symbol id="i-tick" viewBox="0 0 24 24"><path d="M6 12.5l4 4 8-9" /></symbol>
       <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13.5" r="7" /><path d="M12 13.5V9.5M9.5 3h5M12 3v3.5" /></symbol>
+      <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5" /><path d="M4.5 7.5l7.5 5.5 7.5-5.5" /></symbol>
       <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 2h-15zM10 20.5a2.2 2.2 0 0 0 4 0" /></symbol>
       <symbol id="i-note" viewBox="0 0 24 24"><path d="M6 3.5h8.5L19 8v12.5H6zM14 3.5V8.5h5M9 12.5h6M9 16h4" /></symbol>
       <symbol id="i-snooze" viewBox="0 0 24 24"><circle cx="12" cy="13" r="7.5" /><path d="M9.5 10.5h5l-5 5h5M5 4.5L3 6.5M19 4.5l2 2" /></symbol>
@@ -160,6 +161,7 @@
             <button class="row go" type="button" data-go="settings/assistant"><span class="glyph"><svg class="icon-svg"><use href="#i-voice" /></svg></span><span class="label">Assistant and voice</span><span class="aside" id="sum-assistant"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/memory"><span class="glyph"><svg class="icon-svg"><use href="#i-book" /></svg></span><span class="label">Memory</span><span class="aside" id="sum-memory"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/day"><span class="glyph"><svg class="icon-svg"><use href="#i-calendar" /></svg></span><span class="label">Weather and calendars</span><span class="aside" id="sum-day"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/mail"><span class="glyph"><svg class="icon-svg"><use href="#i-mail" /></svg></span><span class="label">Email</span><span class="aside" id="sum-mail"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/models"><span class="glyph"><svg class="icon-svg"><use href="#i-chip" /></svg></span><span class="label">Models</span><span class="aside" id="sum-models"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/chrome"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Chrome</span><span class="aside" id="sum-chrome"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/gestures"><span class="glyph"><svg class="icon-svg"><use href="#i-hand" /></svg></span><span class="label">Gestures and shortcuts</span><span class="aside" id="sum-gestures"></span><svg class="chev"><use href="#i-forward" /></svg></button>
@@ -431,6 +433,45 @@
             </dl>
             <p>Calendars are read again every 15 minutes, and Google’s link can itself be a few hours behind the calendar. Events a week back to three months ahead are kept: titles, times and places, never descriptions.</p>
           </details>
+        </div>
+      </section>
+
+      <section id="page-mail" class="screen page" data-screen="settings/mail" aria-labelledby="mail-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="mail-heading">Email</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <div class="row">
+              <span>
+                <strong>Gmail</strong>
+                <small id="mail-status" aria-live="polite"></small>
+                <small>He signs in with Google to read your mail and nothing else: he can’t send, reply, change or delete. Of each new message he reads who it’s from, its subject and the opening words Gmail shows in the inbox, never the message itself. You can take his access away at any time here, or in your Google account under Security › Third-party access.</small>
+                <small id="mail-error" class="error" role="alert"></small>
+              </span>
+              <span class="buttons">
+                <button id="mail-connect" type="button" hidden>Sign in with Google</button>
+                <button id="mail-cancel" type="button" hidden>Cancel</button>
+                <button id="mail-signout" type="button" hidden>Sign out</button>
+              </span>
+            </div>
+            <div class="row">
+              <span><strong>Google’s file</strong><small id="mail-client-hint"></small></span>
+              <span class="buttons">
+                <button id="mail-client" type="button">Choose the file…</button>
+                <button id="mail-forget" type="button" hidden>Forget it</button>
+              </span>
+            </div>
+            <label class="row">
+              <span><strong>Tell me when something important arrives</strong><small>He looks every five minutes. What Gmail files under Promotions, Social, Forums or Updates is left alone unless Gmail itself marks it important. Said aloud when you’re here, sent to your phone when you’re away (who it’s from and the subject go through ntfy then), and between ten at night and eight in the morning kept for the morning brief.</small></span>
+              <input type="checkbox" id="mailWatch" />
+            </label>
+            <label class="row">
+              <span><strong>Let the model judge what’s worth telling</strong><small>Of the mail that gets that far, who it’s from, the subject and the opening words are shown to the model you talk through, which picks the ones worth interrupting you for. Off, he goes by Gmail’s own marking alone, and nothing of your mail is shown to a model unless you ask him about it.</small></span>
+              <input type="checkbox" id="mailJudge" />
+            </label>
+          </div>
         </div>
       </section>
 

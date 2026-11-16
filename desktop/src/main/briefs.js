@@ -74,7 +74,7 @@ export function briefAsked(text) {
  * The day's facts for the morning: what he'll say from, and what's checked against.
  * @returns {Promise<{kind:'morning', at:number, weather:object|null, events:object[], due:object[], tasks:{overdue:object[], today:object[], given:object[], loose:number}}>}
  */
-async function morningFacts({ whereabouts, weather, calendars, tasks, units, now }) {
+async function morningFacts({ whereabouts, weather, calendars, tasks, mail, units, now }) {
   const at = now();
   const end = dayStart(at, 1);
   let sky = null;
@@ -92,6 +92,8 @@ async function morningFacts({ whereabouts, weather, calendars, tasks, units, now
     weather: sky,
     // The weather's connected and didn't come (the network's not up yet, just after waking): worth another try.
     unready: !!whereabouts?.connected && !sky,
+    // Mail that looked worth telling since six yesterday evening: what came while they were away from it.
+    mail: (mail?.recent?.(dayStart(at) - 6 * 3600_000) || []).slice(-3).map(({ from, subject }) => ({ from: titled(from), subject: titled(subject) })),
     events: all.filter((event) => !event.allDay && event.start >= at - 5 * MIN).map(eventOf),
     // What's on the calendar for the whole of today is what's due today: a class site's deadlines are.
     due: all.filter((event) => event.allDay).map(eventOf),
@@ -193,6 +195,7 @@ export function factLines(facts) {
     if (facts.tasks.overdue.length || facts.tasks.given.length) lines.push(`Overdue on their to-do list: ${[...facts.tasks.given, ...facts.tasks.overdue].map((task) => taskLine(task, facts.at)).join('; ')}.`);
     if (facts.tasks.today.length) lines.push(`On their to-do list for today: ${facts.tasks.today.map((task) => taskLine(task, facts.at)).join('; ')}.`);
     if (facts.tasks.loose) lines.push(`Also on their list, with no date: ${count(facts.tasks.loose, 'thing')}.`);
+    if (facts.mail?.length) lines.push(`Mail since yesterday evening that looked worth telling: ${facts.mail.map((message) => `from ${message.from}, “${message.subject || 'no subject'}”`).join('; ')}.`);
     return lines;
   }
   if (facts.done.length) lines.push(`Ticked off today: ${facts.done.map((task) => task.text).join('; ')}.`);
@@ -223,6 +226,7 @@ export function plain(facts) {
     if (late.length) out.push(`Overdue on your list: ${listed(late.slice(0, 3).map((task) => taskLine(task, facts.at)))}.`);
     if (facts.tasks.today.length) out.push(`On your list for today: ${listed(facts.tasks.today.slice(0, 4).map((task) => taskLine(task, facts.at)))}.`);
     if (facts.tasks.loose) out.push(`And ${count(facts.tasks.loose, 'thing')} with no date.`);
+    if (facts.mail?.length) out.push(`In your mail since last night: ${listed(facts.mail.map((message) => `${message.from} about ${message.subject || 'something with no subject'}`))}.`);
     return out.length ? `${hello} ${out.join(' ')}` : '';
   }
   if (facts.done.length) out.push(`You ticked off ${count(facts.done.length, 'thing')} today: ${listed(facts.done.slice(0, 4).map((task) => task.text.replace(/^\w/, (letter) => letter.toLowerCase())))}.`);
@@ -313,13 +317,14 @@ function cardOf(facts, lines) {
  * @param {{forecast:Function}} [deps.weather]
  * @param {{connected:boolean, between:Function}} [deps.calendars]
  * @param {{list:Function}} deps.tasks
+ * @param {{recent:Function}} [deps.mail]  new mail that looked worth telling (mail.js)
  * @param {{state:Function}} [deps.presence]
  * @param {() => 'fahrenheit'|'celsius'} [deps.units]
  * @param {(request:object) => Promise<{json:object}>} [deps.request]  the model he talks through; none: said plainly
  * @param {() => boolean|Promise<boolean>} [deps.writes]  whether that model is one to write a brief; if not, plainly
  */
-export function createBriefs({ whereabouts = null, weather = null, calendars = null, tasks, presence = null, units = () => 'fahrenheit', request = null, writes = () => true, now = Date.now, log = () => undefined }) {
-  const deps = { whereabouts, weather, calendars, tasks, presence, units, now };
+export function createBriefs({ whereabouts = null, weather = null, calendars = null, tasks, mail = null, presence = null, units = () => 'fahrenheit', request = null, writes = () => true, now = Date.now, log = () => undefined }) {
+  const deps = { whereabouts, weather, calendars, tasks, mail, presence, units, now };
 
   return {
     /**
@@ -333,7 +338,7 @@ export function createBriefs({ whereabouts = null, weather = null, calendars = n
       const lines = factLines(facts);
       const fallback = plain(facts);
       if (!lines.length || !fallback) return { text: '', card: null, untrusted: false, ...(facts.unready ? { unready: true } : {}) };
-      const untrusted = [...(facts.events || []), ...(facts.due || [])].length > 0;
+      const untrusted = [...(facts.events || []), ...(facts.due || []), ...(facts.mail || [])].length > 0;
       const card = cardOf(facts, lines);
       // Only a model that's been seen to keep to the facts writes it (main.js: a paid one). qwen3.5:9b gave a wrap-up
       // "seventy-five degree weather" and a lecture an end time, and what it makes up in words can't be caught.
