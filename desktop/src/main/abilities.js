@@ -35,6 +35,7 @@
  * @property {boolean} [gestures]  Gestures is on in the menu bar
  * @property {boolean} [watch]  an Apple Watch is paired (watch.js)
  * @property {boolean} [tasks]  he keeps their to-do list, reminders and timers (tasks.js)
+ * @property {boolean} [phone]  their phone is set up for what he tells them when they're away (phone.js)
  * @property {string} [computer]  'Mac', or 'computer' elsewhere
  */
 
@@ -63,6 +64,12 @@ export const ABILITIES = Object.freeze([
     id: 'tasks',
     on: (state) => !!state.tasks,
     can: () => 'Keep their to-do list, remind them of something at a time or on a day, and run timers. A reminder is said aloud when it’s due, or as soon as they’re back at the computer. It stays on the list until they say it’s done: only they tick things off. Reminders are one-off: none repeats yet.'
+  },
+  {
+    id: 'phone',
+    on: (state) => !!state.phone,
+    can: () => 'Reach them on their phone when they’re away from the computer: a reminder, a timer or a word before class goes there as a notification. You can’t text or call anyone, and you don’t hear back from the phone.',
+    off: 'Their phone (Settings › Assistant and voice › Your phone): until it’s set up, what’s due while they’re away waits until they’re back.'
   },
   {
     id: 'where',

@@ -292,7 +292,7 @@
               <input type="checkbox" id="briefMorning" />
             </label>
             <div class="row">
-              <span><strong>Evening wrap-up</strong><small>At this time he tells you what got ticked off, what’s still open and what tomorrow starts with. If you’re away he keeps it until you’re back, for three hours. Ask for it any time: “wrap up my day”.</small></span>
+              <span><strong>Evening wrap-up</strong><small>At this time he tells you what got ticked off, what’s still open and what tomorrow starts with. If you’re away it goes to your phone, when that’s set up below; otherwise he keeps it until you’re back, for three hours. Ask for it any time: “wrap up my day”.</small></span>
               <input type="time" id="eveningAt" aria-label="When the evening wrap-up is given" />
               <input type="checkbox" id="briefEvening" aria-label="Evening wrap-up" />
             </div>
@@ -300,6 +300,21 @@
               <span><strong>A word before what’s on your calendar</strong><small>Fifteen minutes before each class or event with a time, he says it’s coming and where. Needs a calendar connected (Weather and calendars).</small></span>
               <input type="checkbox" id="checkIns" />
             </label>
+            <div class="row">
+              <span>
+                <strong>Your phone</strong>
+                <small>When you’re away from this computer, what he has to tell you (a reminder, a timer, a word before class, the evening wrap-up) goes to your phone instead, through the ntfy app. Sent over the internet by ntfy’s server to a topic only you know the name of: anyone who had the name could read what’s sent, so keep it to yourself. A line that looks like a password or a card number is never sent.</small>
+                <small id="phone-steps" hidden>1. Open the ntfy app on your phone and tap +.<br />2. Subscribe to this topic, exactly as written: <code id="phone-topic"></code><br />3. Press Send a test. When it arrives, turn this on.</small>
+                <small id="phone-status" aria-live="polite"></small>
+                <small id="phone-error" class="error" role="alert"></small>
+              </span>
+              <span class="buttons">
+                <button id="phone-setup" type="button">Set up</button>
+                <button id="phone-test" type="button" hidden>Send a test</button>
+                <button id="phone-renew" type="button" hidden title="Makes a new topic and stops using this one: for when its name has got out. Your phone has to subscribe again.">New topic</button>
+              </span>
+              <input type="checkbox" id="phoneOn" aria-label="Send to my phone when I’m away" disabled />
+            </div>
             <div class="row">
               <span><strong>Jester’s voice</strong><small id="jester-voice-hint"></small><small id="jester-voice-error" class="error" role="alert"></small></span>
               <span class="buttons">

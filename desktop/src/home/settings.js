@@ -994,6 +994,37 @@ for (const use of ['talk', 'act']) {
   });
 }
 $('jesterVoice').addEventListener('change', (event) => save({ jesterVoice: event.target.value }));
+// ——— Your phone: the topic to subscribe to in the ntfy app, a test, and the switch (main.js jester/phone) ———
+
+function drawPhone(phone, { error = '', sent = false } = {}) {
+  if (!phone) return;
+  const set = !!phone.topic;
+  $('phone-setup').hidden = set;
+  $('phone-test').hidden = !set;
+  $('phone-renew').hidden = !set;
+  $('phone-steps').hidden = !set;
+  $('phone-topic').textContent = phone.topic || '';
+  $('phoneOn').disabled = !set;
+  $('phoneOn').checked = phone.on === true;
+  const where = phone.usual ? '' : ` On ${phone.server.replace(/^https:\/\//, '')}.`;
+  $('phone-status').textContent = sent ? 'Sent. It should be on your phone in a few seconds.' : phone.on ? `On.${where}${phone.last && !phone.last.ok ? ` The last one didn’t go: ${phone.last.problem}.` : ''}` : set ? `Off: nothing is sent.${where}` : '';
+  $('phone-error').textContent = error;
+}
+const phoneOp = async (op, more = {}) => {
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/phone', op, ...more }).catch(() => null);
+  drawPhone(reply, { error: reply?.ok ? '' : reply?.error || '', sent: op === 'test' && reply?.ok === true });
+  return reply;
+};
+$('phone-setup').addEventListener('click', () => phoneOp('setup'));
+$('phone-renew').addEventListener('click', () => phoneOp('renew'));
+$('phone-test').addEventListener('click', async () => {
+  $('phone-test').disabled = true;
+  await phoneOp('test');
+  $('phone-test').disabled = false;
+});
+$('phoneOn').addEventListener('change', (event) => phoneOp('on', { on: event.target.checked }));
+phoneOp('state');
+
 /** The line being played for "Hear it". */
 let sample = null;
 $('jester-voice-hear').addEventListener('click', async () => {

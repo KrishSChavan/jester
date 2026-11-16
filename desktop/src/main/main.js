@@ -58,6 +58,7 @@ import { PROVIDERS } from '../../../jester-extension/src/common/credentials.js';
 import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
+import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
 import { missingNeeded } from './permission-list.js';
@@ -208,6 +209,8 @@ let clock = null;
 let teller = null;
 /** Their to-do list, reminders and timers (tasks.js). */
 let tasks = null;
+/** Their phone, for what's told while they're away (phone.js). */
+let phone = null;
 /** The morning brief, the evening wrap-up and check-ins before what's on the calendar (briefs.js). */
 let briefs = null;
 /** The day each brief was last given, so it's given once: {morning, evening}, by presence.js's day. */
@@ -382,6 +385,8 @@ function desktopState() {
     permissions,
     missing: missingNeeded(permissions).map((item) => item.id),
     voice: voiceState(),
+    // Their phone: whether it's set up and on. Never the topic's name, which is asked for by Settings alone.
+    phone: phone ? { on: phone.ready, set: !!phone.state().topic } : null,
     speechModel: speech?.model || null,
     speechChoices: speech?.choices || [],
     watch: watch?.state || null,
@@ -1220,6 +1225,23 @@ function listenToPages() {
         const there = new Set(vault ? vault.listNotes().map((note) => note.rel) : []);
         return { ok: true, notes: notes.filter((card) => there.has(card.rel)) };
       }
+      // Settings' "Your phone": the topic to subscribe to in the ntfy app, turning it on, and a test. The topic is
+      // shown here and nowhere else: it's the key to what's sent.
+      case 'jester/phone': {
+        try {
+          if (message.op === 'setup') await phone.setUp();
+          else if (message.op === 'renew') await phone.renew();
+          else if (message.op === 'on') await phone.setOn(message.on === true);
+          else if (message.op === 'server') await phone.setServer(String(message.server ?? '').slice(0, 200));
+          else if (message.op === 'test') {
+            const { went } = await phone.send({ title: 'Jester', text: 'This is Jester, on your phone. What you’re due while you’re away from the computer comes here.', priority: 3 }, { anyway: true });
+            return { ok: went, error: went ? '' : `It didn’t go: ${phone.state().last?.problem || 'no topic yet'}.`, ...phone.state() };
+          }
+          return { ok: true, ...phone.state() };
+        } catch (err) {
+          return { ok: false, error: err.message, ...phone.state() };
+        }
+      }
       // His clock, for his own window: what's on it, a line to tell them at a time, and taking one off.
       case 'jester/desktop-clock': {
         if (message.op === 'add') {
@@ -1899,6 +1921,7 @@ async function start() {
       voice: !!voiceprint,
       gestures: settings?.gesturesEnabled !== false,
       watch: !!watch?.state?.paired,
+      phone: !!phone?.ready,
       computer: process.platform === 'darwin' ? 'Mac' : 'computer'
     }),
     assistant,
@@ -1912,7 +1935,16 @@ async function start() {
     // Not across the lines being read to teach him their voice, or anyone mid-sentence.
     announce: (text, card, more) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening, card, untrusted: more?.untrusted === true })),
     release: () => clock.release(),
-    held: () => clock.held,
+    // Held, or waiting on another try at their phone: back, they're told now.
+    held: () => clock.held + clock.waiting,
+    // Away, a line goes to their phone, if it's set up. With a film or a call on, it's shown and not said: on the
+    // screen, and written in his window with its card.
+    phone: (message) => phone.send(message),
+    watching: () => presence.watching,
+    show: (text, title, card, more) => {
+      overlays.toast(text, { detail: title });
+      conversation.announce(text, { written: true, card, untrusted: more?.untrusted === true });
+    },
     settleMs: Number(env.JESTER_SETTLE_MS) || undefined,
     log
   });
@@ -1923,10 +1955,13 @@ async function start() {
     const text = tasks.ringLine(id);
     // Ticked off or removed meanwhile: there's nothing to say.
     if (!text) return undefined;
-    const answer = await teller.say({ ...job, payload: { text, late: tasks.ringLine(id, info.meant), card: tasks.cardFor(id) } }, info);
+    const timer = !!tasks.get(id)?.timer;
+    const answer = await teller.say({ ...job, payload: { text, late: tasks.ringLine(id, info.meant), card: tasks.cardFor(id), title: timer ? 'Timer' : 'Reminder', priority: 4 } }, info);
     if (!answer) tasks.rang(id);
     return answer;
   });
+  phone = createPhone({ storage: storage.local, log, onChange: () => post(desktopState()) });
+  await phone.start();
   // The morning brief and the evening wrap-up (briefs.js): composed when it's time to say one, and counted as given
   // only once it's been said. Away, it's held; too late to be worth it, the clock drops it.
   briefs = createBriefs({ whereabouts, weather, calendars, tasks, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
@@ -1938,7 +1973,8 @@ async function start() {
     const which = job.payload?.which === 'evening' ? 'evening' : 'morning';
     const today = dayOf(Date.now());
     if (settings?.[which === 'evening' ? 'briefEvening' : 'briefMorning'] === false || briefDays[which] === today) return undefined;
-    if (presence.where === 'away') return { hold: true };
+    // Away: the evening's goes to their phone, if there is one; the morning's is for sitting down to.
+    if (presence.where === 'away' && (which === 'morning' || !phone.ready)) return { hold: true };
     // Made once, and kept while he waits for a quiet moment to say it.
     if (!composed || composed.which !== which || composed.day !== today || Date.now() - composed.at > 10 * 60_000) composed = { which, day: today, at: Date.now(), ...(await briefs.compose(which)) };
     // Nothing to say because the weather hadn't come yet: asked again in a minute, a few times, before it's let go.
@@ -1947,7 +1983,9 @@ async function start() {
       composed = null;
       return { retryIn: 60_000 };
     }
-    const answer = composed.text ? await teller.say({ ...job, payload: { text: composed.text, card: composed.card, untrusted: composed.untrusted } }) : undefined;
+    // To their phone it's the facts said plainly: a model's wording of a calendar's titles isn't what's pushed.
+    const text = presence.where === 'away' ? composed.plain || composed.text : composed.text;
+    const answer = composed.text ? await teller.say({ ...job, payload: { text, card: composed.card, untrusted: composed.untrusted, title: which === 'evening' ? 'Your day' : 'This morning', priority: 2, phone: which === 'evening' } }) : undefined;
     if (!answer) {
       log(`brief: the ${which} one ${composed.text ? 'given' : 'had nothing to say'}`);
       composed = null;
@@ -1960,7 +1998,7 @@ async function start() {
   clock.on('checkin', async (job) => {
     if (settings?.checkIns === false) return undefined;
     const text = briefs.checkinLine(job.payload || {});
-    const answer = text ? await teller.say({ ...job, payload: { text, untrusted: true } }) : undefined;
+    const answer = text ? await teller.say({ ...job, payload: { text, untrusted: true, title: 'Coming up', priority: 4 } }) : undefined;
     if (text && !answer) {
       checkinsTold = { ...checkinsTold, [job.id]: job.payload.start };
       await storage.local.set({ checkinsTold }).catch(() => undefined);

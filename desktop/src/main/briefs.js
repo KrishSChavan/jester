@@ -143,7 +143,9 @@ const hashed = (text) => {
   return hash.toString(36);
 };
 
-const eventOf = ({ title, place, start, end, allDay }) => ({ title: titled(title), place: titled(place), start, end, allDay: !!allDay });
+/** Where it is, as it's said: a link (a video call's) isn't, and would be taken for a key by what guards his phone. */
+const placed = (text) => titled(String(text ?? '').replace(/\bhttps?:\/\/\S+/gi, ' '));
+const eventOf = ({ title, place, start, end, allDay }) => ({ title: titled(title), place: placed(place), start, end, allDay: !!allDay });
 
 /**
  * A day's weather, in what a sentence needs: `day` 0 is the forecast's today. `now`: with the temperature right now.
@@ -335,20 +337,20 @@ export function createBriefs({ whereabouts = null, weather = null, calendars = n
       const card = cardOf(facts, lines);
       // Only a model that's been seen to keep to the facts writes it (main.js: a paid one). qwen3.5:9b gave a wrap-up
       // "seventy-five degree weather" and a lecture an end time, and what it makes up in words can't be caught.
-      if (!request) return { text: fallback, card, untrusted };
+      if (!request) return { text: fallback, plain: fallback, card, untrusted };
       try {
-        if (!(await writes())) return { text: fallback, card, untrusted };
+        if (!(await writes())) return { text: fallback, plain: fallback, card, untrusted };
         const date = new Date(facts.at);
         const stamp = `[${date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}, ${clock(facts.at)}]`;
         const { json } = await request({ system: SYSTEM(kind), prompt: `${stamp}\n${lines.join('\n')}`, schema: BRIEF_SCHEMA, maxOutputTokens: BRIEF_TOKENS });
         const said = String(json?.say ?? '').replace(/\s+/g, ' ').trim();
         const wrong = strays(said, [stamp, ...lines]);
-        if (!wrong) return { text: said, card, untrusted };
+        if (!wrong) return { text: said, plain: fallback, card, untrusted };
         log(`brief: the model’s ${kind} brief said something the facts don’t (${wrong}), so they’re said plainly`);
       } catch (err) {
         log(`brief: no model for the ${kind} brief (${err.message}), so it’s said plainly`);
       }
-      return { text: fallback, card, untrusted };
+      return { text: fallback, plain: fallback, card, untrusted };
     },
     /**
      * What's coming up on the calendar that wants a word beforehand: each as a clock job to keep.
@@ -368,7 +370,7 @@ export function createBriefs({ whereabouts = null, weather = null, calendars = n
     checkinLine({ title, place, start }) {
       const minutes = Math.round((start - now()) / MIN);
       if (minutes < 1 || !title) return '';
-      return `${titled(title)} starts in ${minutes === 1 ? 'a minute' : `${minutes} minutes`}${place ? `, at ${titled(place)}` : ''}.`;
+      return `${titled(title)} starts in ${minutes === 1 ? 'a minute' : `${minutes} minutes`}${placed(place) ? `, at ${placed(place)}` : ''}.`;
     }
   };
 }

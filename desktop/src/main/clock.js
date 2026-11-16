@@ -332,12 +332,17 @@ export function createClock({ file, fs = nodeFs, now = Date.now, setTimer = setT
     list() {
       return [...jobs.values()].map((job) => ({ ...job, due: job.held ? NaN : dueAt(job) })).sort((a, b) => (Number.isFinite(a.due) ? a.due : Infinity) - (Number.isFinite(b.due) ? b.due : Infinity));
     },
-    /** What was held is tried again (the user's back). */
+    /**
+     * What was held is tried again (the user's back), and so is what a handler asked to wait a moment over (a send
+     * to their phone being tried again): now, not when its moment's up. Not one that threw: that keeps its time.
+     */
     release() {
       let any = false;
       for (const job of jobs.values()) {
-        if (!job.held) continue;
+        const asked = Number.isFinite(job.retryAt) && !job.tries;
+        if (!job.held && !asked) continue;
         delete job.held;
+        if (asked) delete job.retryAt;
         any = true;
       }
       if (!any) return Promise.resolve();
@@ -349,6 +354,10 @@ export function createClock({ file, fs = nodeFs, now = Date.now, setTimer = setT
     tick,
     get held() {
       return [...jobs.values()].filter((job) => job.held).length;
+    },
+    /** How many are waiting a moment at a handler's asking: release() tries those now too. */
+    get waiting() {
+      return [...jobs.values()].filter((job) => Number.isFinite(job.retryAt) && !job.tries).length;
     }
   };
 }

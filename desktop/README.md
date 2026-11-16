@@ -58,6 +58,7 @@ front window fills its display.
 | `src/main/presence.js` | Whether the user's at the computer (here, near, away), the day's first sit-down, and how long they've sat. |
 | `src/main/tell.js` | Telling them something when its time comes: said if they're there, held until they're back if they aren't. |
 | `src/main/briefs.js` | The morning brief, the evening wrap-up and a word before what's on the calendar: the day's facts, said by the model and checked against them, or said plainly. |
+| `src/main/phone.js` | Their phone, for what's told while they're away: a notification through ntfy, to a topic only they know the name of. |
 | `src/main/tasks.js` | Their to-do list, reminders and timers: `tasks.json`, a clock job for each one with a time, and the rule that only they tick one off. |
 | `src/home/cards.js` | Cards: a timer, a reminder, a task or a note as a thing to look at and act on, on his line in the chat, on the shelf over the orb, and in the Tasks screen. |
 | `src/home/tasks.js` | The Tasks screen in his window: every timer, reminder and task as a card, by when it's for, and the notes he's made lately. |
@@ -1464,6 +1465,55 @@ for by the free one, which then wrote the brief (the reply has to be the paid
 model's own); and the evening's "today" was the calendar's, so a wrap-up after
 midnight had nothing in it.
 
+## Their phone
+
+Step 10. When they aren't at the computer, what he has to tell them goes to
+their phone (`phone.js`), as a notification in the [ntfy](https://ntfy.sh) app.
+
+ntfy has no accounts here: a message is published to a topic, and whoever has
+subscribed to that topic's name gets it, so the name is the key. Settings ›
+Assistant and voice › Your phone › Set up makes one nobody could guess
+(`jester-` and sixteen letters at random, in fours so it can be typed with a
+thumb: 72 bits), kept sealed on disk with the other keys and shown in that row
+alone: not in the log, not to his pages' storage, not to a model. The user
+subscribes to it in the app, presses Send a test, and turns it on. Until it's
+on, nothing is sent. New topic leaves one behind that's got out.
+
+**What's sent passes through ntfy's server, readable by anyone who had the
+topic's name**: the line he'd have said, and no more. A line that looks like a
+password or a card number is never sent (`phoneText`): only that there's
+something to see. It's published as JSON over https, so a title in any script
+arrives whole; another server than ntfy.sh can be set (the `jester/phone`
+message's `server`), https only.
+
+Where a line goes is `tell.js`'s to say, by where they are (`presence.js`):
+
+| | |
+| --- | --- |
+| here | said, and the phone left alone |
+| near (quiet a few minutes) | said, and sent as well: they may have stepped out |
+| watching (near only because a film or a call keeps the screen awake) | sent, and shown on the screen and in his window; not said across it. With no phone to take it, it's said all the same: a timer missed is worse than a film interrupted. |
+| away | sent, and that's it told: a reminder is marked as given, and isn't said again when they're back. A send the server refused, or that never reached it (the network not up yet, just after waking), is tried again twice, half a minute apart; one that got no answer may have arrived, so it isn't. Then, as with no phone set up, it's held and said when they're back. |
+
+Reminders, timers and a word before class go at high priority; the evening
+wrap-up quietly, and as the facts said plainly (a model's wording of a
+calendar's titles isn't what's pushed); the morning brief never, being for
+sitting down to. A line that looks like a secret sends only "There’s something
+for you on your computer", and stays to be told: so does the real line, when
+they're back. A place that's a link to a call isn't said or sent at all.
+
+A second reading found ten faults, each now a test: that last one was the worst
+(the line was swapped for its placeholder, counted as told, and lost), with a
+timer during a film getting a toast for a second and a half and nothing else
+when there was no phone.
+
+`npm run live-check -- phone` runs it in the real app on a scratch profile
+against a server of the script's own (nothing is published anywhere real): the
+topic made and shown in Settings alone, a test, a reminder sent with the screen
+locked and not said again on unlocking, and one held when the server fails: 8
+of 8. **No message has been sent to a real phone**: that needs the user's own
+subscription.
+
 ## Weather, location and calendars
 
 Settings › Weather and calendars tells Jester the user's day: where they are, the
@@ -1876,6 +1926,14 @@ models decode in under 35 ms.
     morning one given`, `telling: a line`, and never what was said. If he talks
     over a call or a film, that's the next step's to fix: turn the three
     switches off in Settings › Assistant and voice meanwhile.
+
+14. **Your phone** (a pretend server in the checks; nothing has reached a real
+    one): Settings › Assistant and voice › Your phone › Set up; in the ntfy app
+    on the phone, + and subscribe to the topic shown, on ntfy.sh; Send a test,
+    and it should arrive in seconds; turn it on. Then "Jester, remind me in two
+    minutes to stretch", lock the Mac, and the reminder should come to the
+    phone, and not be said when you unlock. The log has `telling: a line, to
+    their phone`, and never the topic or what was sent.
 
 ## Things learned the hard way
 

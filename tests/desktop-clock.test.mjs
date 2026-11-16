@@ -207,6 +207,28 @@ test('held, a job waits for release, however long, and across a restart', async 
   assert.equal(again.clock.list().length, 0);
 });
 
+test('released, what a handler asked to wait over is tried now; what threw keeps its time', async () => {
+  const t = timed();
+  const tried = [];
+  let failing = true;
+  t.clock.on('wait', () => (tried.push(['wait', t.time]), tried.filter(([kind]) => kind === 'wait').length < 2 ? { retryIn: 30_000 } : undefined));
+  t.clock.on('throw', () => {
+    tried.push(['throw', t.time]);
+    if (failing) throw new Error('down');
+  });
+  t.clock.start();
+  t.clock.add({ kind: 'wait', inMs: 1000 });
+  t.clock.add({ kind: 'throw', inMs: 1000 });
+  await t.pass(2000);
+  assert.deepEqual([t.clock.waiting, t.clock.held], [1, 0]);
+  failing = false;
+  await t.pass(3000);
+  await t.clock.release();
+  assert.deepEqual(tried.map(([kind, time]) => [kind, time - at(9)]), [['wait', 1000], ['throw', 1000], ['wait', 5000]], 'the one that waited is tried at once; the one that threw, in its minute');
+  await t.pass(MIN);
+  assert.equal(tried.filter(([kind]) => kind === 'throw').length, 2);
+});
+
 test('asked to wait a moment, a job is tried again then, with no count against it', async () => {
   const t = timed();
   let busy = 3;

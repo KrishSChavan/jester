@@ -103,6 +103,8 @@ export function createPresence({ idleSeconds, keptAwake = async () => null, file
   let owns = [];
   /** Things of his own under way right now. */
   let owning = 0;
+  /** Quiet, with something keeping the screen awake: a film or a call they're at, as far as can be told. */
+  let watching = false;
   let awake = { at: 0, kept: null };
   let savedAt = 0;
   let timer = null;
@@ -161,6 +163,7 @@ export function createPresence({ idleSeconds, keptAwake = async () => null, file
   /** Gone: the sitting ended when they were last seen, not when it was noticed. */
   function leave(why) {
     if (where === 'away') return;
+    watching = false;
     // Quiet through a film, they were at it until it ended, not until they last touched something.
     lastSeenAt = Math.max(lastSeenAt, Math.min(watchedAt, now()));
     const open = openSitting();
@@ -176,6 +179,7 @@ export function createPresence({ idleSeconds, keptAwake = async () => null, file
   function seen(by, at = now()) {
     // Behind a locked screen or a closed lid, only its opening says so.
     if (shut.size) return;
+    watching = false;
     if (where === 'away') return arrive(by, at);
     lastSeenAt = Math.max(lastSeenAt, at);
     set('here');
@@ -215,13 +219,17 @@ export function createPresence({ idleSeconds, keptAwake = async () => null, file
       return where;
     }
     const quiet = now() - lastSeenAt;
+    if (quiet < HERE_MS || quiet < AWAY_MS) watching = false;
     if (quiet < HERE_MS) set('here');
     else if (quiet < AWAY_MS) set('near');
     else if (quiet < HELD_MS && (await screenKeptAwake())) {
       // Someone may have touched it, or the lid closed, while that was asked.
       if (where !== 'away') {
         watchedAt = now();
-        if (now() - lastSeenAt >= HERE_MS) set('near');
+        if (now() - lastSeenAt >= HERE_MS) {
+          watching = true;
+          set('near');
+        }
       }
     } else if (now() - lastSeenAt >= AWAY_MS) leave(`quiet for ${lasting(quiet)}`);
     return where;
@@ -309,6 +317,13 @@ export function createPresence({ idleSeconds, keptAwake = async () => null, file
     tick,
     get where() {
       return where;
+    },
+    /**
+     * Near only because something's keeping the screen awake: a film or a call, with nothing touched for ten
+     * minutes. Not the moment to speak across it.
+     */
+    get watching() {
+      return where === 'near' && watching;
     },
     /** Where things stand: `quietMs` since they were last seen; `sittingSince` 0 while away. */
     state() {

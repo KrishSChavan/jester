@@ -1343,6 +1343,17 @@ select:focus-visible {
   user-select: text;
 }
 
+/* The topic to type into a phone: easy to read, and picked up whole by a double-click. */
+#phone-topic {
+  display: inline-block;
+  margin: 2px 0;
+  color: var(--text);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  user-select: all;
+}
+
 code {
   font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   padding: 1px 5px;

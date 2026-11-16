@@ -33,6 +33,8 @@
  *   brief    a word before something on a calendar, by the clock's sum; the morning brief on sitting down, once, in
  *            the model's words when they keep to the facts and plainly when they don't; the evening's when asked;
  *            each with its card, and marked as holding a calendar's words.
+ *   phone    a topic made in Settings and shown there alone; a test sent; then, with the screen locked, a reminder
+ *            goes to the phone and isn't said again on unlocking; with the server failing it's held and said then.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -62,7 +64,17 @@ if (!process.versions.electron) {
   // A calendar this script serves, at an address nothing else answers: read through the app's own fetch.
   const feed = { url: 'https://calendar.jester.test/feed.ics', text: '' };
   const realFetch = globalThis.fetch;
-  globalThis.fetch = async (input, init) => (String(input?.url ?? input).startsWith(feed.url) ? new Response(feed.text, { status: 200, headers: { 'content-type': 'text/calendar' } }) : realFetch(input, init));
+  // And a phone's server, likewise: what's published to it is kept here, and it fails when told to.
+  const ntfy = { url: 'https://ntfy.jester.test', got: [], status: 200 };
+  globalThis.fetch = async (input, init) => {
+    const url = String(input?.url ?? input);
+    if (url.startsWith(feed.url)) return new Response(feed.text, { status: 200, headers: { 'content-type': 'text/calendar' } });
+    if (url.startsWith(ntfy.url)) {
+      if (ntfy.status === 200) ntfy.got.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ id: 'x', event: 'message' }), { status: ntfy.status });
+    }
+    return realFetch(input, init);
+  };
   // Whether anyone's at the keys is this script's to say, not the real computer's: seconds since the last one.
   const keys = { idle: 1 };
   powerMonitor.getSystemIdleTime = () => keys.idle;
@@ -290,6 +302,62 @@ if (!process.versions.electron) {
       await inPage(`[...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.title').textContent === 'Pasta timer').querySelector('.act').click();`);
       const gone = await until('the timer gone', async () => (taskFile().some((task) => task.timer) ? null : await cardsIn('#live-lines'))).catch((err) => [err.message]);
       check('Cancel on a timer’s card cancels it, and its cards say it’s over', gone.some((card) => /^Timer \| Pasta timer \| Finished \| $/.test(card)) && (await cardsIn('#shelf')).every((card) => !/Pasta/.test(card)), JSON.stringify(gone));
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+    },
+
+    /** Step 10: their phone. Set up in Settings, a test, and what's due while they're away going there. */
+    async phone({ paid }) {
+      const entries = () => said().filter((entry) => entry.who === 'jester');
+      await inPage(`window.jesterHome.go('settings/assistant', { instant: true });`);
+      await inPage(`await chrome.runtime.sendMessage({ type: 'jester/phone', op: 'server', server: ${JSON.stringify(ntfy.url)} });`);
+      await inPage(`document.getElementById('phone-setup').click();`);
+      const topic = await until('the topic in Settings', () => inPage(`const el = document.getElementById('phone-topic'); return !document.getElementById('phone-steps').hidden && el.textContent ? el.textContent : '';`));
+      check('Set up makes a topic nobody could guess, and Settings shows it to subscribe to', /^jester-(?:[a-z]{4}-){3}[a-z]{4}$/.test(topic) && (await inPage(`return document.getElementById('phoneOn').checked === false && !document.getElementById('phoneOn').disabled;`)), topic);
+      await inPage(`document.getElementById('phone-test').click();`);
+      const status = await until('the test sent', () => inPage(`const text = document.getElementById('phone-status').textContent; return /^Sent/.test(text) ? text : '';`)).catch((err) => err.message);
+      check('Send a test publishes to that topic, though it isn’t on yet', ntfy.got.length === 1 && ntfy.got[0].topic === topic && /This is Jester/.test(ntfy.got[0].message) && /^Sent\./.test(status), JSON.stringify(ntfy.got));
+      await inPage(`const box = document.getElementById('phone-test').closest('.scroll'); if (box) box.scrollTop = document.getElementById('phone-test').closest('.row').offsetTop - 120;`);
+      await shot('phone');
+      await inPage(`document.getElementById('phoneOn').click();`);
+      await until('turned on', () => inPage(`return chrome.runtime.sendMessage({ type: 'jester/phone', op: 'state' }).then((state) => state.on);`));
+      const stored = await inPage(`return Object.keys(await chrome.storage.local.get('phone'));`);
+      const state = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-state' }).catch(() => null);`);
+      check('the topic is kept from pages and out of the log: only Settings is told it', stored.length === 0 && !logLines().includes(topic) && !JSON.stringify(state || {}).includes(topic), `${JSON.stringify(stored)}`);
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+
+      // Away: a reminder's time comes, and it goes to the phone.
+      powerMonitor.emit('lock-screen');
+      keys.idle = 600;
+      await until('away', () => /presence: away \(locked\)/.test(logLines().split('\n').slice(-8).join('\n')));
+      paid.answer = () => ({ say: 'Okay', do: '', new: false, task: { op: 'add', text: 'water the plants', in: 1 } });
+      const before = entries().length;
+      await type('remind me in two seconds to water the plants');
+      const sent = await until('the reminder on the phone', () => ntfy.got.find((message) => /water the plants/.test(message.message)), 10000).catch((err) => ({ message: err.message }));
+      check('away, a reminder goes to their phone', sent.topic === topic && sent.title === 'Reminder' && sent.message === 'Reminder: water the plants.' && sent.priority === 4, JSON.stringify(sent));
+      await until('counted as given', () => taskFile().find((task) => task.text === 'Water the plants')?.told).catch(() => undefined);
+      check('and counts as given: on the list, marked so', Number.isFinite(taskFile().find((task) => task.text === 'Water the plants')?.told) && /telling: a line, to their phone/.test(logLines()), JSON.stringify(taskFile().find((task) => task.text === 'Water the plants')));
+      powerMonitor.emit('unlock-screen');
+      keys.idle = 0;
+      await pause(3000);
+      check('back, it isn’t said again', !entries().slice(before).some((entry) => /^Reminder/.test(entry.text)), entries().slice(before).map((entry) => entry.text).join(' | '));
+
+      // The server failing: it's held, and said when they're back, as before there was a phone.
+      ntfy.status = 500;
+      powerMonitor.emit('lock-screen');
+      keys.idle = 600;
+      await pause(600);
+      paid.answer = () => ({ say: 'Okay', do: '', new: false, task: { op: 'add', text: 'feed the cat', in: 1 } });
+      const beforeHeld = entries().length;
+      await type('remind me in two seconds to feed the cat');
+      await until('held', () => /phone: a line didn’t go: the server answered 500/.test(logLines()), 10000).catch(() => undefined);
+      await pause(800);
+      check('with the send failing it’s kept to try again, and the log says why, not what', jobs()?.some((job) => job.kind === 'task' && (job.held || job.retryAt)) && !/feed the cat/.test(logLines().split('\n').filter((line) => /phone:|telling:/.test(line)).join('\n')), JSON.stringify(jobs()?.filter((job) => job.kind === 'task')));
+      powerMonitor.emit('unlock-screen');
+      keys.idle = 0;
+      const told = await until('told on coming back', () => entries().slice(beforeHeld).find((entry) => /^Reminder/.test(entry.text)), 10000).catch((err) => ({ text: err.message }));
+      check('and said when they’re back', told.text === 'Reminder: feed the cat.', told.text);
+      ntfy.status = 200;
+      await inPage(`await chrome.runtime.sendMessage({ type: 'jester/phone', op: 'on', on: false });`);
       paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
     },
 

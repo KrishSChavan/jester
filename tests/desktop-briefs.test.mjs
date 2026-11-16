@@ -70,7 +70,9 @@ test('the morning brief with no model: the facts, said plainly', async () => {
 test('the morning brief with a model: its words, when they say only what the facts do', async () => {
   const good = 'Morning. It’s 48 and raining, with a high of 52. Algorithms is at 4:00 PM in Westgate, and homework 5 is due today. The dentist call is at 3.';
   const w = world({ reply: good });
-  assert.equal((await w.briefs.compose('morning')).text, good);
+  const made = await w.briefs.compose('morning');
+  assert.equal(made.text, good);
+  assert.match(made.plain, /^Morning\. It’s 48 degrees and light rain/, 'with the facts said plainly beside it, for a phone');
   assert.match(w.requests[0].system, /this is their morning brief/);
   assert.match(w.requests[0].system, /Use only the facts below/);
   assert.match(w.requests[0].prompt, /^\[Monday, November 16, 8:42 AM\]\nWeather now: 48°F, light rain\./);
@@ -117,7 +119,7 @@ test('nothing connected and nothing on the list: nothing to say', async () => {
   assert.deepEqual(await w.compose('evening'), { text: '', card: null, untrusted: false });
   // The list alone is enough for one, and it holds nobody else's words.
   const some = createBriefs({ tasks: { list: () => ({ open: [{ id: '1', text: 'Buy stamps' }], done: [] }) }, now: () => at(13) });
-  assert.deepEqual(await some.compose('morning'), { text: 'Afternoon. And one thing with no date.', card: { kind: 'brief', title: 'Today, Monday, Nov 16', lines: ['Also on their list, with no date: one thing.'] }, untrusted: false });
+  assert.deepEqual(await some.compose('morning'), { text: 'Afternoon. And one thing with no date.', plain: 'Afternoon. And one thing with no date.', card: { kind: 'brief', title: 'Today, Monday, Nov 16', lines: ['Also on their list, with no date: one thing.'] }, untrusted: false });
 });
 
 test('the evening wrap-up: what got done, what’s left, tomorrow, and how long they sat', async () => {
@@ -148,6 +150,8 @@ test('check-ins: a word before each thing with a time, by the clock’s own sum'
   w.now = at(16, 1);
   assert.equal(w.briefs.checkinLine(jobs[0].payload), '', 'begun, there’s nothing to say');
   assert.equal(w.briefs.checkinLine({ title: 'Office hours', place: '', start: at(16, 30) }), 'Office hours starts in 29 minutes.');
+  // A place that's a link to a call isn't said, or sent.
+  assert.equal(w.briefs.checkinLine({ title: 'Standup', place: 'https://us02web.zoom.us/j/84512345678?pwd=QWxhZGRpbjpvcGVuIHNlc2FtZQ1x', start: at(16, 30) }), 'Standup starts in 29 minutes.');
   assert.deepEqual(world({ calendarOn: false }).briefs.checkins(), []);
 });
 
