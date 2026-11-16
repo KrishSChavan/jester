@@ -264,14 +264,93 @@ function drawControls() {
   mic.title = mic.disabled ? 'Listening needs the speech model: Settings › Controls' : wanted ? 'Stop listening' : 'Start listening for his name';
 }
 
-/** What's needed and not allowed, over the orb, a click from where it's allowed. */
+/** What's needed and not there yet (main.js `jester/setup`): as last told. */
+let setup = null;
+
+/**
+ * What's still needed before he's any use, over the orb, a click from Getting started: a permission macOS hasn't
+ * given says which; anything else, how many things are left.
+ */
 function drawBanner() {
-  const missing = (state().desktop?.permissions || []).filter((item) => item.tier === 'needed' && !item.granted);
-  $('banner').hidden = !missing.length;
-  if (missing.length) $('banner-text').textContent = `Jester needs ${missing.map((item) => item.label).join(' and ')} to work.`;
+  // As main.js counts them (permission-list.js): not the camera with gestures off, and the microphone with voice on.
+  const desktop = state().desktop;
+  const missing = (desktop?.permissions || []).filter((item) => (desktop?.missing || []).includes(item.id));
+  const left = setup?.left || 0;
+  $('banner').hidden = !missing.length && !left;
+  if (missing.length && left <= 1) $('banner-text').textContent = `Jester needs ${missing.map((item) => item.label).join(' and ')} to work.`;
+  else if (left) $('banner-text').textContent = `${left} thing${left === 1 ? '' : 's'} left to set up before Jester’s ready.`;
+}
+
+/** Getting started: each thing to set up, whether it's done, and the way to where it's done. */
+function drawSetup() {
+  if (!setup?.steps) return;
+  const listening = setup.steps.find((step) => step.id === 'listening')?.done;
+  $('setup-words').textContent = !setup.ready
+    ? `${setup.left} thing${setup.left === 1 ? '' : 's'} left before he’s ready.`
+    : !listening
+      ? 'He’s ready, and not listening yet: turn on listening for his name below, or type to him.'
+      : setup.more
+        ? 'He’s ready: say “Jester”, then what you want. The rest is yours to add when you want it.'
+        : 'Everything’s set up.';
+  const row = (step) => {
+    const item = document.createElement('div');
+    item.className = `setup-step${step.done ? ' done' : ''}${step.required ? ' needed' : ''}`;
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'icon-svg');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '#i-tick');
+    svg.append(use);
+    mark.append(svg);
+    const words = document.createElement('div');
+    words.className = 'words';
+    const title = document.createElement('span');
+    title.className = 'title';
+    title.textContent = step.title;
+    const why = document.createElement('span');
+    why.className = 'why';
+    why.textContent = step.why;
+    words.append(title, why);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.dataset.go = step.go;
+    button.textContent = step.done ? 'Change' : 'Set up';
+    button.setAttribute('aria-label', `${step.done ? 'Change' : 'Set up'}: ${step.title}`);
+    item.append(mark, words, button);
+    return item;
+  };
+  const heading = (text) => {
+    const h2 = document.createElement('h2');
+    h2.textContent = text;
+    return h2;
+  };
+  const needed = setup.steps.filter((step) => step.required);
+  const optional = setup.steps.filter((step) => !step.required);
+  $('setup-list').replaceChildren(heading('Needed'), ...needed.map(row), heading('When you want them'), ...optional.map(row));
+}
+
+/** Asked again whenever something about the computer changes: a permission given, a model saved, a vault chosen. */
+let setupAsked = null;
+function askSetup() {
+  clearTimeout(setupAsked);
+  setupAsked = setTimeout(async () => {
+    const reply = await chrome.runtime.sendMessage({ type: 'jester/setup' }).catch(() => null);
+    if (!reply?.ok) return;
+    setup = reply;
+    drawBanner();
+    drawSetup();
+    const aside = $('sum-setup');
+    aside.textContent = reply.ready ? (reply.more ? `${reply.more} to add` : 'All set') : `${reply.left} left`;
+    if (reply.ready) delete aside.dataset.tone;
+    else aside.dataset.tone = 'warn';
+  }, 150);
 }
 
 function drawMain() {
+  // Whatever changed may have been something he was waiting on to be set up.
+  askSetup();
   drawLight();
   drawControls();
   drawBanner();
@@ -355,6 +434,8 @@ const screens = createScreens({
     orb.pause(screen !== 'main');
     chrome.runtime.sendMessage({ type: 'jester/home-screen', screen }).catch(() => undefined);
     showing(screen);
+    // Back from where something was set up, or come to see what's left: how things stand now, not when last told.
+    if (screen === 'main' || screen === 'setup') askSetup();
     chats.shown(screen);
     tasksPanel.shown(screen);
     history.replaceState(null, '', `#${screen}`);
@@ -409,7 +490,8 @@ for (const form of document.querySelectorAll('.type')) {
 $('listen').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/talk-listen', on: !state().desktop?.continuous?.wanted }));
 $('gestures').addEventListener('click', () => save({ gesturesEnabled: state().settings?.gesturesEnabled === false }));
 $('sleep').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-sleep', on: state().desktop?.engine?.state !== ENGINE.SLEEPING }));
-$('banner-fix').addEventListener('click', () => screens.go('settings/permissions'));
+// The banner's button goes to Getting started (its data-go), where what's needed is listed.
+askSetup();
 
 chrome.runtime.onMessage.addListener((message) => {
   switch (message?.type) {
@@ -452,6 +534,9 @@ else {
   screens.go(first, { instant: true });
 }
 showing(screens.current);
+// Something done outside his window (the models downloaded in a terminal, Ollama started) shows when they come back.
+window.addEventListener('focus', askSetup);
+
 // The window may have been shown before this page was listening for jester/home-shown: if so, the intro plays now.
 chrome.runtime
   .sendMessage({ type: 'jester/home-screen', screen: screens.current })

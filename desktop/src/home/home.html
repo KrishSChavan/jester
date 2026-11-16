@@ -62,7 +62,7 @@
         <div id="banner" class="banner" role="alert" hidden>
           <svg class="icon-svg"><use href="#i-alert" /></svg>
           <span id="banner-text"></span>
-          <button id="banner-fix" type="button">Set up</button>
+          <button id="banner-fix" type="button" data-go="setup">Set up</button>
         </div>
         <!-- What's in play, as cards: timers running, reminders given or coming up (cards.js). -->
         <div id="shelf" class="shelf" aria-label="Timers and reminders in play" hidden></div>
@@ -97,6 +97,19 @@
           <div id="chat-list" class="chat-list"></div>
           <p id="chats-none" class="empty" hidden>No chats yet. Once a conversation with Jester is over, it’s kept here, word for word, for a week.</p>
           <p class="note">Kept on this computer for a week, then gone. A line that looks like a password or a card number is left out. Deleting a chat here deletes its words and the sentence he remembers it by; what’s already in your Obsidian vault (Jester › Conversations, About me) stays until you delete it there.</p>
+        </div>
+      </section>
+
+      <!-- Getting started: what's needed before he's any use, and what can be added. The same for whoever opens him. -->
+      <section id="setup" class="screen" data-screen="setup" aria-labelledby="setup-title" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="main" aria-label="Back to Jester" title="Back to Jester"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="setup-title">Getting started</h1>
+        </header>
+        <div class="scroll">
+          <p id="setup-words" class="note setup-words" aria-live="polite"></p>
+          <div id="setup-list" class="task-list"></div>
+          <p class="note">Everything here can be changed later in Settings, and nothing optional is turned on until you turn it on. What he hears is recognized on this computer; what’s sent anywhere, and to whom, is said where you set it up.</p>
         </div>
       </section>
 
@@ -155,6 +168,7 @@
             </div>
           </div>
           <nav class="cards index" aria-label="Settings">
+            <button class="row go" type="button" data-go="setup"><span class="glyph"><svg class="icon-svg"><use href="#i-tasks" /></svg></span><span class="label">Getting started</span><span class="aside" id="sum-setup"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/permissions"><span class="glyph"><svg class="icon-svg"><use href="#i-shield" /></svg></span><span class="label">Permissions</span><span class="aside" id="sum-permissions"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/controls"><span class="glyph"><svg class="icon-svg"><use href="#i-sliders" /></svg></span><span class="label">Controls</span><span class="aside" id="sum-controls"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/watch" id="go-watch"><span class="glyph"><svg class="icon-svg"><use href="#i-watch" /></svg></span><span class="label">Apple Watch</span><span class="aside" id="sum-watch"></span><svg class="chev"><use href="#i-forward" /></svg></button>
@@ -382,7 +396,7 @@
               </select>
             </label>
             <form class="row" id="place-form" hidden>
-              <span><strong>Place</strong><small>A town or city, with its state or country if there are others like it: “State College, PA”.</small><small id="place-error" class="error" role="alert"></small></span>
+              <span><strong>Place</strong><small>A town or city, with its state or country if there are others like it: “Springfield, IL”.</small><small id="place-error" class="error" role="alert"></small></span>
               <span class="controls">
                 <input id="place-name" type="text" spellcheck="false" autocomplete="off" aria-label="Place" />
                 <button id="place-set" type="submit">Set</button>
@@ -412,7 +426,7 @@
             </label>
             <label class="row">
               <span><strong>Name</strong><small>Optional: what Jester calls it. Otherwise, the calendar’s own name.</small></span>
-              <input id="calendar-name" type="text" spellcheck="false" autocomplete="off" placeholder="Penn State" />
+              <input id="calendar-name" type="text" spellcheck="false" autocomplete="off" placeholder="School" />
             </label>
             <div class="row">
               <span id="calendar-error" class="error" role="alert"></span>

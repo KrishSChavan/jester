@@ -90,9 +90,12 @@ function renderStatus() {
   if (![ENGINE.RUNNING, ENGINE.SLEEPING].includes(engine.state) || (settings && !settings.enabled)) $('camera-stats').textContent = '—';
 }
 
+/** What he can't do without as he's set up, and hasn't got: main.js says which (permission-list.js). */
+const stillMissing = () => (desktop?.permissions || []).filter((item) => (desktop?.missing || []).includes(item.id));
+
 function renderPermissions() {
   const items = desktop?.permissions || [];
-  const missing = items.filter((item) => item.tier === 'needed' && !item.granted);
+  const missing = stillMissing();
   $('permissions-intro').textContent = missing.length
     ? `Jester needs ${missing.map((item) => item.label).join(' and ')} to work. Everything it sees and hears stays on this computer.`
     : 'Everything Jester needs is allowed. Camera frames and audio stay on this computer.';
@@ -396,6 +399,7 @@ function renderConnections(reply) {
   savedModels = saved;
   paidFirst = reply?.paidFirst !== false;
   $('connection-error').textContent = reply?.ok === false ? reply.error : '';
+  fitTalking();
   renderJobs();
   renderIndex();
   $('connections').hidden = !saved.length;
@@ -430,6 +434,21 @@ function renderConnections(reply) {
   );
 }
 
+/** The Talking box was set by hand, for the model being added: left as they set it. */
+let talkingChosen = false;
+
+/**
+ * Whether a model being added is ticked for Talking before they've said. Talking is the user's words, so it's ticked
+ * where they stay on this computer; and where nothing talks yet, since he can't answer at all until something does
+ * (the hint beside it says where their words go).
+ */
+function fitTalking() {
+  if (talkingChosen) return;
+  const provider = $('connection-provider').value;
+  const talks = savedModels.some((connection) => connection.uses?.includes('talk')) || (localUses().includes('talk') && !!ollama?.chosen);
+  $('connection-talk').checked = provider === 'ollama' || !talks;
+}
+
 function buildConnectionForm() {
   const provider = $('connection-provider');
   provider.replaceChildren(...Object.entries(PROVIDERS).map(([id, meta]) => new Option(meta.label, id)));
@@ -438,13 +457,14 @@ function buildConnectionForm() {
     $('connection-url-row').hidden = provider.value !== 'custom';
     $('connection-key-row').hidden = $('connection-plan-row').hidden = provider.value === 'ollama';
     $('connection-plan').value = ['google', 'groq'].includes(provider.value) ? 'free' : 'paid';
-    // Talking is the user's words: ticked by default only where they stay on this computer.
-    $('connection-talk').checked = provider.value === 'ollama';
+    talkingChosen = false;
+    fitTalking();
     $('connection-uses-hint').textContent = provider.value === 'ollama'
       ? 'Runs on this computer: nothing it hears or reads leaves it.'
       : `A model that talks hears what you say to him, so that goes to ${PROVIDERS[provider.value]?.label || 'its provider'} too.`;
   };
   provider.addEventListener('change', fit);
+  $('connection-talk').addEventListener('change', () => (talkingChosen = true));
   fit();
   $('connection-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -456,6 +476,8 @@ function buildConnectionForm() {
     $('connection-add').disabled = false;
     // The key isn't kept in the page once it's saved.
     if (reply?.ok) $('connection-key').value = '';
+    // The next one added starts from how things stand now.
+    if (reply?.ok) (talkingChosen = false), fitTalking();
   });
 }
 
@@ -829,7 +851,7 @@ function aside(id, text, tone = '') {
 /** Settings' list of pages, each with how it stands. */
 function renderIndex() {
   if (!settings) return;
-  const missing = (desktop?.permissions || []).filter((item) => item.tier === 'needed' && !item.granted);
+  const missing = stillMissing();
   aside('sum-permissions', missing.length ? `${missing.length} needed` : desktop?.permissions?.length ? 'All set' : '', missing.length ? 'warn' : '');
   aside('sum-controls', !settings.enabled ? 'Off' : [settings.gesturesEnabled === false ? 'Gestures off' : 'Gestures on', settings.pointerEnabled ? 'cursor on' : ''].filter(Boolean).join(', '));
   const watch = desktop?.watch || {};

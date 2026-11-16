@@ -862,7 +862,7 @@ function endedPrompt(date, known, picked = null) {
     `You keep the memory of Jester, a voice assistant. The conversation below, between the user and Jester, is over. It began on ${day} at ${clock(date)}.` +
       (picked ? ` It was picked up again on ${longDate(picked)}: a line in brackets names the day the lines after it were said, and a date they give is from that day.` : ''),
     'Reply with JSON: {"title":"…","summary":"…","topics":["…"],"people":["…"],"facts":{"add":[{"section":"…","fact":"…"}],"remove":["…"]}}',
-    '"title": what it was about, in at most 6 words, like "Opening PSU Canvas".',
+    '"title": what it was about, in at most 6 words, like "Booking a flight home".',
     '"summary": one sentence of at most 30 words. Keep names, plans and decisions, but never a password, PIN, code, card number or key. ' +
       'Call the user "the user" or "they": never "he" or "she". ' +
       // 2026-11-12's "advised attending the upcoming class", read the next evening, became "a class starting in about an hour".
@@ -871,7 +871,7 @@ function endedPrompt(date, known, picked = null) {
     '"topics": one to four lowercase words or short phrases, like "canvas" or "school".',
     '"people": the names of the people the user talked about. Never Jester or the user.',
     '"facts" "add": only lasting things the user said about themselves, the people in their life, their preferences, routines and plans. ' +
-      'Each is one short sentence that leaves out "the user", like "Takes CMPSC 465 at Penn State" or "Roommate is Sam Lee".',
+      'Each is one short sentence that leaves out "the user", like "Takes Chemistry 110 this fall" or "Roommate is Sam Lee".',
     `Make dates absolute: "Friday", said on ${day}, is ${longDate(friday)}.`,
     'Never what Jester did, never a one-off request ("asked to open Canvas" is not a fact), never what was so only that day ' +
       '("parked on level 3" is not a fact: what they asked to be remembered is kept elsewhere), never a guess, never a password, PIN, code, card number or key.',

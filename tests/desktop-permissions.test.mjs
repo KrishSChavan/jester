@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { missingNeeded, permissionItems } from '../desktop/src/main/permission-list.js';
+import { missingFor, missingNeeded, permissionItems } from '../desktop/src/main/permission-list.js';
 
 const pick = (items) => items.map(({ id, status, granted, action }) => ({ id, status, granted, action }));
 
@@ -46,4 +46,13 @@ test('Settings opens by itself only while a needed permission is missing', () =>
   assert.deepEqual(missing({ camera: 'granted', accessibility: 'granted', microphone: 'denied', screen: 'denied' }), []);
   assert.deepEqual(missing({ camera: 'granted', accessibility: 'not-determined' }), ['accessibility']);
   assert.deepEqual(missing({}), ['camera', 'accessibility']);
+});
+
+test('what he can’t do without follows how he’s set up: no camera with gestures off, the microphone with voice on', () => {
+  const missing = (statuses, settings) => missingFor(permissionItems('darwin', statuses), settings).map((item) => item.id);
+  assert.deepEqual(missing({}, {}).sort(), ['accessibility', 'camera', 'microphone']);
+  assert.deepEqual(missing({}, { gesturesEnabled: false }).sort(), ['accessibility', 'microphone']);
+  assert.deepEqual(missing({}, { gesturesEnabled: false, voiceEnabled: false }), ['accessibility']);
+  assert.deepEqual(missing({ camera: 'granted', accessibility: 'granted', microphone: 'denied', screen: 'denied' }, {}), ['microphone']);
+  assert.deepEqual(missing({ camera: 'granted', accessibility: 'granted', microphone: 'granted', screen: 'denied' }, undefined), []);
 });

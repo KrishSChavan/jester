@@ -60,6 +60,7 @@ front window fills its display.
 | `src/main/briefs.js` | The morning brief, the evening wrap-up and a word before what's on the calendar: the day's facts, said by the model and checked against them, or said plainly. |
 | `src/main/google.js` | Signing in with Google, to read their Gmail and nothing else: OAuth for an installed app, with their own client from Google's file. |
 | `src/main/mail.js` | Their Gmail, watched: what's new in the inbox, what of it could matter, and what he says of it. |
+| `src/main/setup.js` | Getting started: what a new user has to set up and what they can add, as one list with where each is done. |
 | `src/main/phone.js` | Their phone, for what's told while they're away: a notification through ntfy, to a topic only they know the name of. |
 | `src/main/tasks.js` | Their to-do list, reminders and timers: `tasks.json`, a clock job for each one with a time, and the rule that only they tick one off. |
 | `src/home/cards.js` | Cards: a timer, a reminder, a task or a note as a thing to look at and act on, on his line in the chat, on the shelf over the orb, and in the Tasks screen. |
@@ -82,6 +83,10 @@ Tests live with the extension's, in `../tests/desktop-*.test.mjs`, and run with
 `npm test` from the repository root.
 
 ## Setup
+
+Setting him up on another Mac, for someone who isn't going to read the rest of
+this: [SETUP.md](SETUP.md).
+
 
 ```sh
 cd desktop
@@ -1591,6 +1596,53 @@ new mail told with its card and opened, the model shown only what could matter,
 been signed in to or read at Google itself**: that needs the user's own client
 and their own Allow.
 
+## Getting started, for whoever opens him first
+
+Step 12. Nothing in him is about one person: the examples in his window and in
+what a model is told are anyone's ("Springfield, IL"; a test keeps it so), and a
+new user is walked through the same things in the order they matter
+(`setup.js`).
+
+His window opens by itself, on the orb with a banner, whenever something needed
+is missing, and **Getting started** (the banner's Set up; also the first row of
+Settings) lists it all, each with whether it's done and a button to where it's
+done:
+
+- *Needed:* what macOS has to allow (the microphone unless voice is off,
+  Accessibility, and the camera unless gestures are off: `missingFor` in
+  `permission-list.js`, the one rule the banner, the menu bar, Settings and
+  the list all use), a model that talks (a saved one ticked Talking, or one
+  Ollama has), and the recognizer's model on disk.
+- *When they want them:* listening for his name, which is off until they turn
+  it on and comes first for that; their voice taught, his own voice downloaded,
+  an Obsidian vault, weather and calendars, their phone, their email, Chrome.
+
+What a first review of it found, each of which would have stopped a friend:
+
+- **A pasted key couldn't talk.** Talking was ticked on a new model only for
+  Ollama, so a key added as the guide says left him with nothing to answer
+  with. It's ticked now whenever nothing talks yet, with where their words go
+  written beside it; and a model saved for actions alone makes the list say so.
+- **Ready, and deaf.** The continuous assistant is off by default, and nothing
+  said so: it's a step of its own now, and the screen's first line when it's
+  what's left.
+- **Chrome could link only on one Mac.** An unpacked extension's id is made
+  from the path of its folder, and the one allowed was this Mac's. It's worked
+  out now (`unpackedId` in `link-host.js`) from the `jester-extension` folder
+  beside the app, wherever that is.
+- **The list went stale** after a model was saved: it's asked for again on
+  coming to the orb or the list, and when the window is clicked back into.
+- **A launch with Ollama not up yet** looked like a first launch. Having been
+  ready once is kept (`setUpOnce`), and after that his window opens by itself
+  only for a permission.
+
+`npm run live-check -- setup`: the list as main.js makes it, drawn in his
+window, a step's button going where it says: 5 of 5.
+
+The watch app's bundle id (`com.krishchavan.jesterwatch`) and the Chrome Web
+Store listing are the publisher's, and stay so: anyone building the watch app
+signs it as themselves anyway.
+
 ## Weather, location and calendars
 
 Settings › Weather and calendars tells Jester the user's day: where they are, the
@@ -2004,25 +2056,31 @@ models decode in under 35 ms.
     over a call or a film, that's the next step's to fix: turn the three
     switches off in Settings › Assistant and voice meanwhile.
 
-14. **Your phone** (a pretend server in the checks; nothing has reached a real
-    one): Settings › Assistant and voice › Your phone › Set up; in the ntfy app
-    on the phone, + and subscribe to the topic shown, on ntfy.sh; Send a test,
-    and it should arrive in seconds; turn it on. Then "Jester, remind me in two
+14. **Your phone** (a pretend server in the checks; Settings' own test did
+    reach the real phone, 2026-11-15, and nothing else has): with it turned on
+    in Settings › Assistant and voice › Your phone, "Jester, remind me in two
     minutes to stretch", lock the Mac, and the reminder should come to the
     phone, and not be said when you unlock. The log has `telling: a line, to
     their phone`, and never the topic or what was sent.
 
 15. **Your email** (a pretend Google in the checks; no real sign-in or mail has
-    been read). In Google Cloud's console, project Jester: finish the Auth
-    Platform's setup (it's waiting at "I agree to the Google API Services: User
-    Data Policy"), add yourself under Audience › Test users, and under Clients
-    make a "Desktop app" client and Download JSON. In Jester, Settings › Email:
+    been read). Google Cloud's side is set up (project Jester, the Gmail API
+    on, yourself a test user, a "Desktop app" client called Jester desktop):
+    what's left there is Download JSON on that client. In Jester, Settings › Email:
     Choose the file, then Sign in with Google, and Allow on Google's page (it
     will say Google hasn't verified the app: Continue). Send yourself an email
     from another account: within five minutes, "New email from …", with its
     card. The log has `google: signed in`, `mail: watching from now` and `mail: 1
     new, 1 worth telling`, and never an address, a subject or a key. After seven
     days Google signs him out, and he says so.
+
+16. **A first launch** (the checks run on a scratch profile that already has a
+    model; no new Mac has run it): on a Mac that's never had Jester, or a
+    second user account on this one, follow SETUP.md from `git clone` to the
+    Getting started screen, and note every place it's wrong or unclear. The
+    banner should count down as each needed thing is done, and go when the last
+    is; a key pasted in Settings › Models should come with Talking ticked; and
+    Load unpacked from that copy's `jester-extension` folder should link.
 
 ## Things learned the hard way
 

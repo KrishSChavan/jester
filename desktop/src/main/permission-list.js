@@ -62,7 +62,23 @@ export function permissionItems(platform, statuses, { listedAs = '' } = {}) {
     });
 }
 
-/** The `needed` ones still missing: while any are, Jester's window opens by itself, saying so. */
+/** The `needed` ones still missing, whatever's switched off. */
 export function missingNeeded(items) {
   return items.filter((item) => item.tier === 'needed' && !item.granted);
+}
+
+/**
+ * What he can't do without as he's set up, and hasn't got: while any are, his window says so. The `needed` ones,
+ * but not the camera for someone with gestures off; and the microphone for someone who talks to him, whatever tier
+ * the list gives it.
+ * @param {{id:string, tier:string, granted:boolean}[]} items
+ * @param {{gesturesEnabled?:boolean, voiceEnabled?:boolean}} [settings]
+ */
+export function missingFor(items, settings) {
+  return items.filter((item) => {
+    if (item.granted) return false;
+    if (item.id === 'camera') return item.tier === 'needed' && settings?.gesturesEnabled !== false;
+    if (item.id === 'microphone') return settings?.voiceEnabled !== false;
+    return item.tier === 'needed';
+  });
 }

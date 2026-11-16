@@ -63,11 +63,13 @@ import { CHECK_MS, createMail, mailCard, mailLine } from './mail.js';
 import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
-import { missingNeeded } from './permission-list.js';
+import { missingFor } from './permission-list.js';
+import { loadConnections } from '../../../jester-extension/src/common/credentials.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
 import { startKokoro } from './kokoro.js';
 import { createRecollections } from './recollections.js';
+import { setupSteps, setupSummary } from './setup.js';
 import { createSituation } from './situation.js';
 import { createSpeaker, systemVoice } from './speaker.js';
 import { startSpeech } from './speech.js';
@@ -228,6 +230,8 @@ let askedBrief = null;
 let briefs = null;
 /** The day each brief was last given, so it's given once: {morning, evening}, by presence.js's day. */
 let briefDays = {};
+/** He's been ready once on this computer (setupState): kept, so a later launch isn't taken for a first one. */
+let setUpOnce = false;
 /** Check-ins already said, by their id, with when each one's event starts: not put back on the clock meanwhile. */
 let checkinsTold = {};
 /** The model he talks through (model-jobs.js). */
@@ -396,7 +400,8 @@ function desktopState() {
     platform: process.platform,
     engine,
     permissions,
-    missing: missingNeeded(permissions).map((item) => item.id),
+    // What he can't do without as he's set up, and hasn't got (permission-list.js).
+    missing: missingFor(permissions, settings).map((item) => item.id),
     voice: voiceState(),
     // Their phone: whether it's set up and on. Never the topic's name, which is asked for by Settings alone.
     phone: phone ? { on: phone.ready, set: !!phone.state().topic } : null,
@@ -459,7 +464,7 @@ async function refresh() {
   followLocation();
   syncBriefs();
   syncMail();
-  tray?.update(trayModel({ engine, settings, missing: missingNeeded(permissions), voice: voiceState(), watch: watch?.state }));
+  tray?.update(trayModel({ engine, settings, missing: missingFor(permissions, settings), voice: voiceState(), watch: watch?.state }));
   post(desktopState());
 }
 
@@ -934,6 +939,36 @@ async function checkMail() {
   return undefined;
 }
 
+/**
+ * Getting started (setup.js): what a new user still has to set up, and what they can add, from how things stand.
+ * @returns {Promise<{steps:object[], ready:boolean, left:number, more:number, words:string}>}
+ */
+async function setupState() {
+  const saved = (await talking?.savedOnes().catch(() => [])) || [];
+  const local = saved.length ? null : await talking?.localOne().catch(() => null);
+  const model = saved.length > 0 || !!local?.model;
+  const steps = setupSteps({
+    missing: missingFor(permissions, settings).map((item) => item.label),
+    model,
+    // A key pasted and saved for actions alone: he still can't answer, and the list says why.
+    otherModel: !model && ((await loadConnections().catch(() => [])) || []).length > 0,
+    hearing: voiceState() !== 'missing',
+    listening: !!settings?.continuousAssistant,
+    ownVoice: (kokoro?.state || 'missing') !== 'missing',
+    voiceprint: !!voiceprint,
+    vault: !!vault,
+    day: !!whereabouts?.connected || !!calendars?.connected,
+    phone: !!phone?.ready,
+    mail: !!google?.signedIn,
+    chrome: !!chromeLink?.linked
+  });
+  const summary = setupSummary(steps);
+  // Once he's been ready, he has been set up: a launch after that with a model away (Ollama not up yet) isn't a
+  // first launch, and doesn't open his window to say so.
+  if (summary.ready && !setUpOnce) void storage.local.set({ setUpOnce: (setUpOnce = true) }).catch(() => undefined);
+  return { steps, ...summary };
+}
+
 /** Gmail's looked at every few minutes while they're signed in and want it watched, and not otherwise. */
 function syncMail() {
   if (!clock || !google) return;
@@ -1291,6 +1326,9 @@ function listenToPages() {
         const there = new Set(vault ? vault.listNotes().map((note) => note.rel) : []);
         return { ok: true, notes: notes.filter((card) => there.has(card.rel)) };
       }
+      // Getting started: what's left to set up, for his window's banner and its Getting started screen.
+      case 'jester/setup':
+        return { ok: true, ...(await setupState()) };
       // Settings › Email: the file from Google's console (chosen here, read here, never shown), signing in and out,
       // and a card's Open, which opens that conversation in Gmail.
       case 'jester/mail': {
@@ -1396,7 +1434,7 @@ function listenToPages() {
             if (message.source === 'here') whereabouts.locate({ patient: true }).then(() => noteWeather());
           } else if (message.op === 'place') {
             const place = await weather.findPlace(String(message.text ?? '').slice(0, 120));
-            if (!place) return { ok: false, error: `Couldn’t find “${String(message.text ?? '').trim()}”. Try the town and its state or country, like “State College, PA”.`, ...desktopState() };
+            if (!place) return { ok: false, error: `Couldn’t find “${String(message.text ?? '').trim()}”. Try the town and its state or country, like “Springfield, IL”.`, ...desktopState() };
             await saveDay({ locationSource: 'place', locationPlace: place });
             await noteWeather();
           } else if (message.op === 'locate') {
@@ -2090,6 +2128,7 @@ async function start() {
   // only once it's been said. Away, it's held; too late to be worth it, the clock drops it.
   briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, mailToModel: () => settings?.mailJudge !== false, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
   ({ briefDays = {}, checkinsTold = {} } = await storage.local.get(['briefDays', 'checkinsTold']));
+  setUpOnce = (await storage.local.get('setUpOnce')).setUpOnce === true;
   let composed = null;
   /** Times a brief found a connected source not ready (the network just after waking), and waited. */
   let unreadyTries = 0;
@@ -2231,8 +2270,9 @@ async function start() {
 
   if (env.JESTER_SELFTEST) selfTest(env.JESTER_CAPTURE && path.resolve(env.JESTER_CAPTURE));
   else if (env.JESTER_OPEN_SETTINGS) showSettings();
-  // Something needed isn't allowed: his window says what, and Settings › Permissions is a click away.
-  else if (missingNeeded(permissions).length) showHome();
+  // Something needed isn't there yet (a permission, a model, what he hears with): his window says what, with
+  // Getting started a click away. A first launch is this.
+  else if (missingFor(permissions, settings).length || (!(await setupState()).ready && !setUpOnce)) showHome();
   // Started from its icon, Jester opens no window: say it's there, once the overlay has loaded.
   else setTimeout(() => overlays.toast('Jester is on', { detail: 'It lives in the menu bar' }), STARTED_TOAST_MS);
 

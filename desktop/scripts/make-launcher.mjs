@@ -71,7 +71,7 @@ ELECTRON="$DESKTOP/node_modules/electron/dist/Electron.app"
 LOG="$HOME/Library/Logs/Jester/dev.log"
 
 if [ ! -d "$ELECTRON" ]; then
-  osascript -e 'display alert "Jester can’t start" message "Its files aren’t where they were. In the jester-extension folder’s desktop folder, run: npm run launcher" as critical'
+  osascript -e 'display alert "Jester can’t start" message "Its files aren’t where they were. In Jester’s desktop folder, run: npm run launcher" as critical'
   exit 1
 fi
 

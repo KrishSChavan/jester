@@ -12,13 +12,38 @@
  * own folder, never one made for it. Nothing changes on disk when nothing has.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { HOST_NAME, hostManifest } from './link.js';
 
-/** The Web Store's Jester, and the repo's own copy as Chrome names it when loaded unpacked on the development Mac. */
-export const EXTENSION_IDS = Object.freeze(['jbfmeaijggbkkakdiinamgjjmcfblpab', 'fepkikohkficncoppffmemobjogdfdip']);
+/** The Web Store's Jester. */
+export const EXTENSION_IDS = Object.freeze(['jbfmeaijggbkkakdiinamgjjmcfblpab']);
+
+/** The extension's folder beside this app's, in a copy of the repo: what "Load unpacked" is pointed at. */
+const UNPACKED = fileURLToPath(new URL('../../../jester-extension', import.meta.url));
+
+/**
+ * The id Chrome gives an extension loaded unpacked from `folder`: with no key in its manifest, the id is made from
+ * where the folder is (the first 16 bytes of the path's SHA-256, in the letters a to p), so it's different on every
+ * computer, and can be worked out on each.
+ * @returns {string} '' when there's no such folder
+ */
+export function unpackedId(folder = UNPACKED) {
+  try {
+    // As Chrome reads it: absolute, with links followed.
+    return idForPath(fs.realpathSync(folder));
+  } catch {
+    return '';
+  }
+}
+
+/** The id for a folder's full path, as Chrome makes it. */
+export function idForPath(real) {
+  return [...crypto.createHash('sha256').update(String(real)).digest('hex').slice(0, 32)].map((digit) => String.fromCharCode(97 + parseInt(digit, 16))).join('');
+}
 
 /** Where each Chromium browser keeps a user's native-messaging hosts, under ~/Library/Application Support. */
 const MAC_BROWSERS = Object.freeze({
@@ -32,9 +57,12 @@ const MAC_BROWSERS = Object.freeze({
   Vivaldi: 'Vivaldi'
 });
 
-/** Which extensions may link: the known two, and any a developer names in JESTER_LINK_EXTENSIONS (ids, comma-separated). */
-export function linkOrigins(extra = process.env.JESTER_LINK_EXTENSIONS || '') {
-  const ids = [...EXTENSION_IDS, ...String(extra).split(',').map((id) => id.trim()).filter((id) => /^[a-p]{32}$/.test(id))];
+/**
+ * Which extensions may link: the Web Store's, this copy of the repo's own loaded unpacked, and any a developer names
+ * in JESTER_LINK_EXTENSIONS (ids, comma-separated).
+ */
+export function linkOrigins(extra = process.env.JESTER_LINK_EXTENSIONS || '', unpacked = unpackedId()) {
+  const ids = [...EXTENSION_IDS, unpacked, ...String(extra).split(',').map((id) => id.trim())].filter((id) => /^[a-p]{32}$/.test(id));
   return [...new Set(ids)].map((id) => `chrome-extension://${id}/`);
 }
 

@@ -38,6 +38,7 @@
  *   mail     Google's file chosen and a sign-in through a pretend browser and a pretend Google; new mail told with its
  *            card, the model picking which by number; "any new email?" answered from it; and Google signing him out
  *            said once. Nothing real is signed in to, read or sent.
+ *   setup    Getting started says what's needed and what can be added, each with where it's done, and how it stands.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -326,6 +327,24 @@ if (!process.versions.electron) {
       const gone = await until('the timer gone', async () => (taskFile().some((task) => task.timer) ? null : await cardsIn('#live-lines'))).catch((err) => [err.message]);
       check('Cancel on a timer’s card cancels it, and its cards say it’s over', gone.some((card) => /^Timer \| Pasta timer \| Finished \| $/.test(card)) && (await cardsIn('#shelf')).every((card) => !/Pasta/.test(card)), JSON.stringify(gone));
       paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+    },
+
+    /** Step 12: Getting started, as a new user finds it. */
+    async setup() {
+      const state = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/setup' });`);
+      const by = Object.fromEntries((state.steps || []).map((step) => [step.id, step]));
+      check('Getting started lists what’s needed and what can be added, each with where it’s done', state.ok && state.steps.length === 11 && by.model.required && !by.listening.required && by.model.go === 'settings/models' && !by.mail.required && by.mail.go === 'settings/mail', JSON.stringify(state.steps?.map((step) => [step.id, step.done])));
+      check('it knows what’s there already: a model, and a vault', by.model.done === true && by.vault.done === true && by.mail.done === false && by.phone.done === false, JSON.stringify([by.model.done, by.vault.done, by.mail.done, by.phone.done]));
+      await inPage(`window.jesterHome.go('setup', { instant: true });`);
+      const rows = await until('the Getting started screen', () => inPage(`const rows = [...document.querySelectorAll('#setup-list > *')].map((el) => el.tagName === 'H2' ? '# ' + el.textContent : (el.classList.contains('done') ? '[x] ' : '[ ] ') + el.querySelector('.title').textContent + ' > ' + el.querySelector('button').dataset.go); return rows.length > 11 ? rows : null;`));
+      check('his window draws it: needed first, then what’s optional, ticked where done', rows[0] === '# Needed' && rows.includes('[x] Give him a model to think with > settings/models') && rows.includes('# When you want them') && rows.includes('[ ] Your email > settings/mail') && rows.includes('[x] A place for what he remembers > settings/memory'), JSON.stringify(rows));
+      const words = await inPage(`return [document.getElementById('setup-words').textContent, document.getElementById('sum-setup').textContent];`);
+      check('and says how it stands, there and in Settings', (state.ready ? /^He’s ready[,:]/.test(words[0]) && /to add$/.test(words[1]) : /left before he’s ready\.$/.test(words[0]) && /left$/.test(words[1])), JSON.stringify(words));
+      await shot('setup');
+      await inPage(`[...document.querySelectorAll('#setup-list .setup-step')].find((el) => el.querySelector('.title').textContent === 'Your email').querySelector('button').click();`);
+      await until('the Email page', () => inPage(`return location.hash === '#settings/mail';`)).catch(() => undefined);
+      check('a step’s button goes to where it’s done', (await inPage(`return location.hash;`)) === '#settings/mail');
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
     },
 
     /** Step 11: Gmail, signed in to through a pretend browser and watched in a pretend inbox. */
@@ -647,6 +666,9 @@ if (!process.versions.electron) {
       const page = await until('Settings › Models, drawn', () => inPage(`const jobs = document.getElementById('job-talk')?.textContent || ''; const rows = document.getElementById('connections')?.textContent || ''; return rows.includes('free-model') && jobs ? { jobs, rows } : null;`));
       check('Settings › Models names the paid model first for talking', /paid-model, then .*free-model/.test(page.jobs), page.jobs);
       check('and says what each has answered this month', /paid-model.*\d+ repl(?:y|ies) this month/.test(page.rows) && /free-model.*2 replies this month/.test(page.rows), page.rows);
+      // A model being added is ticked for Talking only while nothing talks yet (a new user's first key): here two do.
+      const box = await inPage(`const provider = document.getElementById('connection-provider'); provider.value = 'groq'; provider.dispatchEvent(new Event('change')); return document.getElementById('connection-talk').checked;`);
+      check('with models that talk already, another being added isn’t ticked for Talking unasked', box === false, String(box));
     }
   };
 

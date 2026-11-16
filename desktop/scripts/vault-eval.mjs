@@ -140,7 +140,7 @@ updated: 2026-11-10
 What Jester has learned about you from your conversations. Edit or delete anything here: Jester reads this note as it is.
 
 ## Who you are
-- Name is Krish <!-- noted 2026-11-03 -->
+- Name is Jordan <!-- noted 2026-11-03 -->
 - Lives in an apartment on Beaver Avenue in State College <!-- noted 2026-11-03 -->
 - Grew up in Edison, New Jersey <!-- noted 2026-11-06 -->
 

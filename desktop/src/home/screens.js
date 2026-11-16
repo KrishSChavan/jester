@@ -11,7 +11,7 @@ export function placeOf(screen) {
   const name = String(screen);
   if (name === 'chat') return -2;
   if (name === 'chats' || name === 'tasks') return -1;
-  if (name === 'settings') return 1;
+  if (name === 'settings' || name === 'setup') return 1;
   if (name.startsWith('settings/')) return 2;
   return 0;
 }
@@ -26,7 +26,7 @@ export function backOf(screen) {
   const name = String(screen);
   if (name === 'chat') return 'chats';
   if (name.startsWith('settings/')) return 'settings';
-  if (name === 'chats' || name === 'tasks' || name === 'settings') return 'main';
+  if (name === 'chats' || name === 'tasks' || name === 'settings' || name === 'setup') return 'main';
   return null;
 }
 

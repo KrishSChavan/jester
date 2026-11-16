@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { browserish, createChromeLink } from '../desktop/src/main/chrome-link.js';
-import { EXTENSION_IDS, installLinkHost, linkOrigins } from '../desktop/src/main/link-host.js';
+import { EXTENSION_IDS, idForPath, installLinkHost, linkOrigins, unpackedId } from '../desktop/src/main/link-host.js';
 import { createDesktopLink, desktopBindings, LINK_STATE } from '../jester-extension/src/background/desktop-link.js';
 
 const pause = (ms = 0) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -164,13 +164,20 @@ test('the relay is copied out of the guarded folders, and a manifest goes only t
   assert.equal(fs.statSync(first.relay).mode & 0o777, 0o755);
   const manifest = JSON.parse(fs.readFileSync(path.join(support, 'Google/Chrome/NativeMessagingHosts/com.jester.desktop.json'), 'utf8'));
   assert.equal(manifest.path, first.relay);
-  assert.deepEqual(manifest.allowed_origins, EXTENSION_IDS.map((id) => `chrome-extension://${id}/`));
+  // The Web Store's, and this copy of the repo's own, loaded unpacked: whatever Chrome calls that on this computer.
+  assert.deepEqual(manifest.allowed_origins, [...EXTENSION_IDS, unpackedId()].map((id) => `chrome-extension://${id}/`));
   assert.equal(fs.existsSync(path.join(support, 'Microsoft Edge')), false, 'no folder made for a browser that isn’t there');
   assert.equal(installLinkHost({ relaySource: source, home, platform: 'darwin' }).changed, false, 'nothing rewritten');
   fs.writeFileSync(source, 'newer binary');
   assert.equal(installLinkHost({ relaySource: source, home, platform: 'darwin' }).changed, true);
   assert.match(installLinkHost({ relaySource: source, home, platform: 'win32' }).why, /macOS/);
   assert.deepEqual(linkOrigins('abcdefghijklmnopabcdefghijklmnop, not-an-id').at(-1), 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/');
+  // An unpacked extension's id comes from where its folder is: worked out, never one computer's written down.
+  assert.equal(idForPath('/Users/someone/jester/jester-extension'), 'bbgokfidbfdbmeoneocempjfclklbnbe');
+  assert.match(unpackedId(), /^[a-p]{32}$/);
+  assert.equal(unpackedId(home), idForPath(fs.realpathSync(home)));
+  assert.equal(unpackedId(path.join(home, 'not-there')), '');
+  assert.deepEqual(linkOrigins('', ''), EXTENSION_IDS.map((id) => `chrome-extension://${id}/`), 'no copy of the repo beside him: the Web Store’s alone');
   fs.rmSync(home, { recursive: true, force: true });
 });
 
