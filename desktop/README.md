@@ -56,6 +56,7 @@ front window fills its display.
 | `src/main/mood.js` | How the user seems, from what they plainly say: told to the model, and how fast he speaks. |
 | `src/main/clock.js` | His clock: things to do at a time, kept in `jobs.json`, and done on waking when they came due while the computer slept. |
 | `src/main/presence.js` | Whether the user's at the computer (here, near, away), the day's first sit-down, and how long they've sat. |
+| `src/main/ring.js`, `ring-page.js` | A timer's ringing, until it's turned off by a word, a gesture or a click; and the small pill that sounds it and has the Stop. |
 | `src/main/tell.js` | Telling them something when its time comes: said if they're there, held until they're back if they aren't. |
 | `src/main/briefs.js` | The morning brief, the evening wrap-up and a word before what's on the calendar: the day's facts, said by the model and checked against them, or said plainly. |
 | `src/main/google.js` | Signing in with Google, to read their Gmail and nothing else: OAuth for an installed app, with their own client from Google's file. |
@@ -1596,6 +1597,40 @@ new mail told with its card and opened, the model shown only what could matter,
 been signed in to or read at Google itself**: that needs the user's own client
 and their own Allow.
 
+## What the first real test found
+
+The user's own pass through the checks (2026-11-15), and what each thing turned
+out to be. The log told most of it.
+
+- **He needed his name again to hear an answer to his own question.** Not the
+  window being shut: it was open, and their voice scored 0.39 to 0.50 against
+  the voiceprint, "maybe", which counted only with his name. Now, in the
+  moments after he's spoken (8 s; 20 s after a question of his), a voice that
+  may be theirs is taken for theirs. A yes to something he's asked leave to do
+  still has to be theirs for certain.
+- **A timer only said it was up.** It rings now (`ring.js`): he says it once,
+  then a small pill at the top of the screen rings, three notes and a rest,
+  until it's turned off. By a word, with his name or without ("stop", "turn it
+  off", "okay", "thanks": `RING_STOP`, the whole of what was said); by talking
+  to him at all; by any gesture, which then does nothing else; or by a click,
+  on the pill's Stop, the timer's card in his window, or the first item of his
+  menu. Left alone it stops after a minute. It doesn't ring for a timer they
+  were told of late or on their phone, nor if he was told to stop while saying
+  it was up. Reminders don't ring.
+- **A song played, stopped, and he said it was playing.** He never paused it to
+  speak, and has no way to. He pressed Play, read Spotify 350 ms later, before
+  it had turned its Play into Pause, and pressed it again. A press of Play or
+  Pause asked for again at once, on the same control, isn't done (`toggleKeys`
+  in `agent/loop.js`): the app gets a moment, the screen is read afresh, and
+  asked a third time it's meant.
+- **Asked to open the second file in Downloads, he selected it and said so.**
+  The talking model had rewritten "open" as "select" in its command. The
+  user's own verb is put back (`asAsked` in `conversation.js`), and the acting
+  model is told that selected isn't open.
+
+`npm run live-check -- ring`: the pill, its sound being made (muted there), the
+card, and each way of stopping it that a check can do: 8 of 8.
+
 ## Getting started, for whoever opens him first
 
 Step 12. Nothing in him is about one person: the examples in his window and in
@@ -2006,7 +2041,7 @@ models decode in under 35 ms.
    my Canvas" should open the bookmark, with the steps on the app's pill; and a
    cursor click near a link should land on it.
 
-8. **Talking through a cloud model**: tick Talking on a saved model in Settings ›
+8. **Talking through a cloud model** (*done 2026-11-15: Groq's talked fine*): tick Talking on a saved model in Settings ›
    Models, then `npm run talk-check` to compare it with this computer's on the same
    cases, and talk to him.
 
@@ -2020,7 +2055,7 @@ models decode in under 35 ms.
    with yellow numbers on its controls and none of Jester's own windows. Then
    check that the Mac doesn't keep a recording indicator up after it.
 
-10. **His voice, and what he knows** (read back by his own recognizer, and
+10. **His voice, and what he knows** (*done 2026-11-15: good; what it found is under "What the first real test found"*; read back by his own recognizer, and
     checked against real models, but never by an ear or a real spoken turn):
     Settings › Assistant and voice › Jester's voice › Hear it, and pick the one
     you like. Then say "Jester, what do you know about me?", "Jester, remember
@@ -2037,7 +2072,7 @@ models decode in under 35 ms.
     this?" and compare with what you know. While a long task of his works with
     your hands off the Mac, no `presence: here (keys or mouse)` should appear.
 
-12. **Reminders and timers, out loud** (typed and scripted in the checks, never
+12. **Reminders and timers, out loud** (*done 2026-11-15: they work; a timer now rings, check 17*; typed and scripted in the checks, never
     spoken or heard): say "Jester, set a timer for one minute", and a minute
     later he should say it's up, unasked, over whatever else is quiet. Say
     "Jester, remind me in two minutes to stretch", lock the Mac for five, and
@@ -2056,7 +2091,7 @@ models decode in under 35 ms.
     over a call or a film, that's the next step's to fix: turn the three
     switches off in Settings › Assistant and voice meanwhile.
 
-14. **Your phone** (a pretend server in the checks; Settings' own test did
+14. **Your phone** (*done 2026-11-15: a reminder reached the phone with the Mac locked*; a pretend server in the checks; Settings' own test did
     reach the real phone, 2026-11-15, and nothing else has): with it turned on
     in Settings › Assistant and voice › Your phone, "Jester, remind me in two
     minutes to stretch", lock the Mac, and the reminder should come to the
@@ -2081,6 +2116,16 @@ models decode in under 35 ms.
     banner should count down as each needed thing is done, and go when the last
     is; a key pasted in Settings › Models should come with Talking ticked; and
     Load unpacked from that copy's `jester-extension` folder should link.
+
+17. **What the first test changed** (built from its log; none of it heard or
+    spoken since): ask "Jester, what do you know about me?" and answer his
+    question without his name. Set a one-minute timer and let it ring: stop it
+    by saying "stop", then another by clicking Stop on the pill, then another
+    with a gesture (Gestures on). "Play Gunna's newest song on Spotify": it
+    should keep playing while he says so. "Open the second file in my
+    Downloads": it should open. The log has `ring: a timer is ringing`,
+    `ring: stopped by their saying so`, and for a second press of Play that
+    wasn't made, `not pressed twice`.
 
 ## Things learned the hard way
 

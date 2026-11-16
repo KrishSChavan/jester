@@ -39,6 +39,8 @@
  *            card, the model picking which by number; "any new email?" answered from it; and Google signing him out
  *            said once. Nothing real is signed in to, read or sent.
  *   setup    Getting started says what's needed and what can be added, each with where it's done, and how it stands.
+ *   ring     a timer that's up is said and then rings: a pill with its name and a Stop, its card in his window
+ *            saying Ringing; a click on either stops it, and so does talking to him. Silent here.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
  */
@@ -64,7 +66,7 @@ if (!process.versions.electron) {
   const { app, BrowserWindow, dialog, powerMonitor, safeStorage, shell } = await import('electron');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-live-'));
   // Presence looks every quarter second, and what's held is told half a second after they're back.
-  Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1', JESTER_TICK_MS: '250', JESTER_SETTLE_MS: '500', JESTER_MORNING_ENDS: '24', JESTER_ANY_HOUR: '1' });
+  Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1', JESTER_TICK_MS: '250', JESTER_RING_MS: '3000', JESTER_SETTLE_MS: '500', JESTER_MORNING_ENDS: '24', JESTER_ANY_HOUR: '1' });
   // A calendar this script serves, at an address nothing else answers: read through the app's own fetch.
   const feed = { url: 'https://calendar.jester.test/feed.ics', text: '' };
   const realFetch = globalThis.fetch;
@@ -330,6 +332,51 @@ if (!process.versions.electron) {
     },
 
     /** Step 12: Getting started, as a new user finds it. */
+    async ring() {
+      const pill = () => BrowserWindow.getAllWindows().find((win) => !win.isDestroyed() && win.webContents.getURL().includes('/overlay/ring.html'));
+      const ringing = async () => (await inPage(`return chrome.runtime.sendMessage({ type: 'jester/tasks' });`)).ringing;
+      const timer = async () => {
+        const before = his().length;
+        await type('set a timer for two seconds');
+        return until('the timer’s end', () => his().slice(before).find((line) => /is up\.$/.test(line)), 10000).catch((err) => err.message);
+      };
+      const up = await timer();
+      const win = await until('the ringing pill', pill, 5000).catch(() => null);
+      await until('the pill, drawn', () => win?.webContents.executeJavaScript(`document.readyState === 'complete' && document.getElementById('what').textContent`), 5000).catch(() => null);
+      const shown = win ? await win.webContents.executeJavaScript(`[document.getElementById('what').textContent, document.getElementById('stop').textContent]`) : [];
+      const sounding = win ? await until('its sound, started', () => win.webContents.executeJavaScript(`window.jesterRing?.state() === 'running' && window.jesterRing.groups() >= 1 ? [window.jesterRing.state(), window.jesterRing.groups()] : null`), 4000).catch((err) => [err.message]) : [];
+      check('a timer that’s up is said, and then rings: a pill with its name and a Stop', up === 'Your 2 second timer is up.' && shown[0] === '2 second timer' && shown[1] === 'Stop', `${up} · ${JSON.stringify(shown)}`);
+      check('its ring is being made (and muted in a check), without taking the keyboard', !!win && sounding[0] === 'running' && win.webContents.isAudioMuted() && !win.isFocused(), win ? `sound ${JSON.stringify(sounding)}, muted ${win.webContents.isAudioMuted()}, focused ${win.isFocused()}` : 'no pill');
+      const state = await ringing();
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      const card = await until('its card on the shelf', () => inPage(`const el = [...document.querySelectorAll('#shelf .card')].find((card) => /Ringing/.test(card.textContent)); return el ? [el.textContent.replace(/\\s+/g, ' ').trim(), !!el.querySelector('button[title="Stop the ringing"]')] : null;`), 5000).catch((err) => [err.message, false]);
+      check('his window knows: the timer’s card says Ringing, with a Stop', state?.label === '2 second timer' && /2 second timer/.test(card[0]) && card[1] === true, `${JSON.stringify(state)} · ${JSON.stringify(card)}`);
+      if (SHOTS && win) fs.mkdirSync(SHOTS, { recursive: true }), fs.writeFileSync(path.join(SHOTS, 'ring-pill.png'), (await win.webContents.capturePage()).toPNG());
+      await shot('ring');
+      // The pill's own Stop.
+      await win?.webContents.executeJavaScript(`document.getElementById('stop').click()`);
+      await until('quiet', () => !pill(), 5000).catch(() => undefined);
+      check('a click on the pill’s Stop ends it', !pill() && !(await ringing()) && /ring: stopped by a click, after \d+ s/.test(logLines()), logLines().split('\n').filter((line) => /ring:/.test(line)).join(' | '));
+      // The card's.
+      await timer();
+      await until('the pill again', pill, 5000).catch(() => null);
+      await until('its card', () => inPage(`return !!document.querySelector('#shelf .card button[title="Stop the ringing"]');`), 5000).catch(() => undefined);
+      await inPage(`document.querySelector('#shelf .card button[title="Stop the ringing"]')?.click();`);
+      await until('quiet', () => !pill(), 5000).catch(() => undefined);
+      check('and so does the Stop on its card', !pill() && logLines().split('\n').filter((line) => /ring: stopped by a click/.test(line)).length === 2);
+      const after = await until('the card, settled', () => inPage(`const el = [...document.querySelectorAll('#shelf .card')].find((card) => /2 second timer/.test(card.textContent)); return el ? el.textContent : 'gone';`).then((text) => (/Ringing/.test(text) ? null : text)), 5000).catch((err) => err.message);
+      check('stopped, the card no longer says it’s ringing', !/Ringing/.test(after), after);
+      // Talking to him.
+      await timer();
+      await until('the pill a third time', pill, 5000).catch(() => null);
+      const answer = await type('hello there');
+      check('talked to, he isn’t rung over while he answers', !pill() && /ring: stopped by their talking to him/.test(logLines()) && !!answer, answer);
+      // Left alone, it gives up by itself (two seconds here, a minute for real).
+      await timer();
+      await until('the pill a fourth time', pill, 5000).catch(() => null);
+      await until('quiet by itself', () => !pill(), 6000).catch(() => undefined);
+      check('left alone, it stops by itself', !pill() && /ring: stopped by itself, unanswered/.test(logLines()));
+    },
     async setup() {
       const state = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/setup' });`);
       const by = Object.fromEntries((state.steps || []).map((step) => [step.id, step]));
@@ -492,6 +539,8 @@ if (!process.versions.electron) {
       const entries = () => said().filter((entry) => entry.who === 'jester');
       const stamp = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
       // A seminar that starts fifteen minutes and a few seconds from now: the word before it is due in those seconds.
+      // (Run in the last quarter of an hour before midnight, that's tomorrow's, today's brief has nothing in it, and
+      // six of these fail for that alone.)
       const start = Math.ceil((Date.now() + 15 * 60000 + 6000) / 1000) * 1000;
       feed.text = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//jester//live-check//EN', 'BEGIN:VEVENT', 'UID:seminar-1', `DTSTAMP:${stamp(Date.now())}`, `DTSTART:${stamp(start)}`, `DTEND:${stamp(start + 3600000)}`, 'SUMMARY:Seminar', 'LOCATION:Room 1', 'END:VEVENT', 'END:VCALENDAR'].join('\r\n');
       const added = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-day', op: 'calendar-add', url: ${JSON.stringify(feed.url)}, name: 'School' });`);

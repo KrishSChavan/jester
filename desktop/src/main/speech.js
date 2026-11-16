@@ -103,7 +103,7 @@ export function startSpeech({ log = () => undefined } = {}) {
         // Every score, for tuning voiceprint.js against a real voice.
         // The voiceprint's own score too, when what was learned from use raised it.
         const raised = typeof message.enrolled === 'number' && message.score - message.enrolled >= 0.005 ? `, ${message.enrolled.toFixed(2)} by the voiceprint alone` : '';
-        if (message.score !== null) log(`speech: ${message.unsure ? 'maybe your voice, so only with his name' : 'your voice'} (${message.score.toFixed(2)}${raised}, ${message.seconds.toFixed(1)} s)`);
+        if (message.score !== null) log(`speech: ${message.unsure ? 'maybe your voice: with his name, or as an answer to him' : 'your voice'} (${message.score.toFixed(2)}${raised}, ${message.seconds.toFixed(1)} s)`);
         return void listener?.(message.text, message);
       }
       if (message?.type === 'wake') return void waker?.();

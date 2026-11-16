@@ -588,7 +588,9 @@ test('tokens: a plan and a step stay small, and a run’s prompts don’t grow',
   const longest = await steps('y'.repeat(240));
   assert.ok(typical.length >= 6, `${typical.length} steps`);
   for (const request of typical) {
-    assert.ok(estimateTokens(request) <= 2500, `${estimateTokens(request)} tokens`);
+    // 2,500 until 2026-11-15, when the prompt gained two lines a real task had needed: Play isn't pressed twice,
+    // and a file asked to be opened is opened, not selected.
+    assert.ok(estimateTokens(request) <= 2550, `${estimateTokens(request)} tokens`);
     assert.ok(JSON.parse(request.prompt).screen.length <= SCREEN_LIMITS.chars);
   }
   for (const request of longest) assert.ok(estimateTokens(request) < 3000, `${estimateTokens(request)} tokens`);

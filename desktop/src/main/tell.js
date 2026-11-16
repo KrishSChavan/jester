@@ -65,8 +65,11 @@ export function createTeller({ where, announce, release, held, phone = async () 
   const tries = new Map();
 
   return {
-    /** The clock's handler for "say" jobs: {payload: {text, late?}}. */
-    async say(job, { late = 0, meant = now() } = {}) {
+    /**
+     * The clock's handler for "say" jobs: {payload: {text, late?}}. `said`, when given, is called once the line has
+     * been said to them here (not sent to a phone, shown across a film, or held), with whether it was late.
+     */
+    async say(job, { late = 0, meant = now(), said: wasSaid = () => undefined } = {}) {
       const text = String(job?.payload?.text ?? '').trim().slice(0, MOST_CHARS);
       // Nothing to say is done with, not tried again.
       if (!text) return undefined;
@@ -114,6 +117,8 @@ export function createTeller({ where, announce, release, held, phone = async () 
         return { retryIn: busyMs };
       }
       log(`telling: a line${late >= LATE_MS ? `, ${Math.round(late / 60000)} min late` : ''}`);
+      // Said to them here, and on time or not: for whoever asked to know (a timer rings after it).
+      wasSaid({ late: late >= LATE_MS });
       // Quiet for a few minutes, and still so now it's said, they may not be in the room: to their phone as well.
       if (place === 'near' && where() === 'near' && !watching()) phoned();
       return undefined;

@@ -13,7 +13,7 @@
 import { requiresConfirmation } from '../../../../jester-extension/src/common/agent-permissions.js';
 import { createMemory, MEMORY_LIMITS, updateMemory } from '../../../../jester-extension/src/common/task-memory.js';
 import { parseShortcut } from '../os-actions.js';
-import { classify, describeAction, menuPath, PICTURES_PER_TASK, quoted, READ_ACTIONS, taskCaption, validateTurn } from './actions.js';
+import { classify, describeAction, menuPath, PICTURES_PER_TASK, PLAYS, quoted, READ_ACTIONS, taskCaption, validateTurn } from './actions.js';
 import { DESKTOP_SCHEMA, systemPrompt } from './prompt.js';
 import { elementById, plain, SCREEN_LIMITS, screenText } from './screen.js';
 
@@ -57,6 +57,27 @@ function sensitiveKey(action, screen) {
   if (action.action === 'drag') return `drag ${elementById(screen, action.from)?.label || action.from} onto ${elementById(screen, action.to)?.label || action.to} in ${where}`;
   return `${action.action} ${action.url || ''} in ${where}`;
 }
+/** How long the app is then given to show what the first press did, before the screen's read again. */
+const TOGGLE_WAIT_MS = 900;
+
+/**
+ * A press of Play or Pause, as the control it is: by where it is, and by what it's in, since the same button reads
+ * Play and then Pause. Empty for anything else. The app is read 350 ms after a press, and a music app can take longer
+ * than that to turn its Play into Pause: a model shown Play still there presses it again, which pauses what it had
+ * just started (2026-11-15, Spotify: the song played, stopped, and he said it was playing).
+ */
+function toggleKeys(action, screen) {
+  if (action.action !== 'click' || action.button === 'right' || action.id === undefined) return [];
+  const element = elementById(screen, action.id);
+  if (!element || !PLAYS.test(String(element.label || '').trim())) return [];
+  const app = screen?.app?.name || '';
+  const frame = element.frame;
+  // Where it is says which it is. What it's in stands in only for a control with no place given: two Plays in one
+  // list are two controls.
+  if (frame?.w > 0 && frame?.h > 0) return [`${app}|at ${Math.round(frame.x + frame.w / 2)},${Math.round(frame.y + frame.h / 2)}`];
+  return element.in ? [`${app}|in ${plain(element.in)}`] : [];
+}
+
 /** model-client.js's codes for a reply the model can be asked to redo. */
 export const UNREADABLE = new Set(['invalid_json', 'model_output_truncated']);
 
@@ -172,7 +193,7 @@ async function screenChars(run, rest) {
  * @param {boolean} [options.see]  the host can take a picture of the window and the model can read it:
  *   the model is offered `screenshot`
  */
-export function createRun({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now, note = '', meant = '', see = false }) {
+export function createRun({ goal, previous = [], host, model, confirm, onStep = () => undefined, signal, platform = process.platform, limits = DESKTOP_LIMITS, now = Date.now, note = '', meant = '', see = false, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   const run = {
     goal,
     meant,
@@ -209,6 +230,9 @@ export function createRun({ goal, previous = [], host, model, confirm, onStep = 
     captioned: false,
     /** How often a screen and the actions chosen for it have been done. */
     signatures: new Map(),
+    /** The Play or Pause last pressed (toggleKeys), until something else is done: pressed again, it would undo itself. */
+    toggled: null,
+    wait,
     /** Text read back in its field (landedKey), and how often the model has tried to type it again. */
     landed: new Map(),
     /** The app a plan opened, which later steps need in front. */
@@ -303,6 +327,20 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
     if (signal?.aborted) return { stop: run.end(false, '', { cancelled: true }) };
     if (!approved) return { stop: run.end(false, 'Okay, I didn’t do that.', { declined: true }) };
   }
+  // Play, pressed last and asked for again with nothing done between: not pressed, once. However long the model
+  // took to ask, it asked from the screen as read just after the press. The app gets a moment, the screen is read
+  // afresh, and if it's asked for again after that, it's meant.
+  const toggle = toggleKeys(action, seen.snapshot);
+  if (toggle.length && run.toggled && toggle.some((key) => run.toggled.includes(key))) {
+    run.toggled = null;
+    onStep({ phase: 'acted', label, ok: false, detail: 'not pressed twice' });
+    await run.wait(TOGGLE_WAIT_MS);
+    if (signal?.aborted) return { stop: run.end(false, '', { cancelled: true }) };
+    run.next = null;
+    run.lastResult = { action: label, ok: false, detail: 'Not done: you pressed that a moment ago, and pressing it again would undo it (play, then pause). The screen hadn’t caught up: look at it now. If what was asked for is playing, finish; if it isn’t, press what plays it.' };
+    remember(memory, label, run.lastResult, false);
+    return { halted: true };
+  }
   onStep({ phase: 'acting', label });
   let result;
   try {
@@ -341,6 +379,8 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
     // The rest of a group was chosen for a screen that didn't happen.
     return { halted: true };
   }
+  if (toggle.length) run.toggled = toggle;
+  else if (!READ_ACTIONS.has(action.action)) run.toggled = null;
   if (key) doneSensitive.add(key);
   if (result.landed) landed.set(landedKey(action, seen.snapshot), 0);
   if (!READ_ACTIONS.has(action.action)) run.trace.push(traced(action, seen.snapshot, category, result));

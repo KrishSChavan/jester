@@ -23,11 +23,12 @@ export const STATUS_TEXT = {
  * @param {object} state.settings  merged settings
  * @param {{id:string,label:string}[]} state.missing  needed permissions not yet granted
  * @param {string} [state.voice]  the speech model: 'ready' | 'off' | 'missing' (speech.js)
+ * @param {{label:string}|null} [state.ringing]  a timer that's ringing (ring.js)
  * @param {{paired?:boolean}} [state.watch]  the Apple Watch (watch.js)
  * @param {string} [state.platform]
  * @returns {{tooltip:string, title:string, items:object[]}} title: beside the icon, on a Mac
  */
-export function trayModel({ engine, settings, missing = [], voice = 'missing', watch = null, platform = process.platform }) {
+export function trayModel({ engine, settings, missing = [], voice = 'missing', watch = null, ringing = null, platform = process.platform }) {
   const on = !!settings?.enabled;
   // Off, the camera's closed and voice, the watch and talking to him carry on.
   const gestures = settings?.gesturesEnabled !== false;
@@ -36,6 +37,8 @@ export function trayModel({ engine, settings, missing = [], voice = 'missing', w
     ? `${STATUS_TEXT[ENGINE.SLEEPING]} — ${wakeHint(resumeGlyphs(settings), platform)}`
     : !gestures ? 'Gestures off' : STATUS_TEXT[engine?.state] || engine?.state || STATUS_TEXT[ENGINE.OFF];
   const items = [
+    // A timer ringing: the first thing in his menu is the way to turn it off.
+    ...(ringing ? [{ id: 'ring', label: `Stop the ringing — ${ringing.label}` }, { type: 'separator' }] : []),
     { id: 'status', label: on ? status : 'Jester is off', enabled: false },
     { type: 'separator' },
     { id: 'enabled', label: 'Jester on', type: 'checkbox', checked: on },

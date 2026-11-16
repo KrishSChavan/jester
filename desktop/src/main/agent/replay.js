@@ -7,7 +7,7 @@
  * with a note of where.
  */
 
-import { classify, describeAction } from './actions.js';
+import { classify, describeAction, pressedTwice } from './actions.js';
 import { findTarget } from './screen.js';
 
 /** Steps done to what's on screen, which a fresh read must find. */
@@ -28,6 +28,8 @@ export async function replaySteps({ steps, goal, host, onStep = () => undefined,
   for (const [index, step] of steps.entries()) {
     const fail = (detail) => ({ ok: false, step: index, detail });
     if (signal?.aborted) return { ...fail('cancelled'), cancelled: true };
+    // Learned before such a thing was caught: Play pressed twice, which paused what the first press started. Once.
+    if (index > 0 && pressedTwice(steps[index - 1], step)) continue;
     const action = { ...step.action };
     if (ON_SCREEN.has(action.action)) {
       const seen = screen ? { ok: true, snapshot: screen } : await host.observe();

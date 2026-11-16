@@ -28,10 +28,13 @@ import { moodLine, moodOf, paceFor } from './mood.js';
 import { spokenLine, writtenLine } from './speaker.js';
 import { ago, askedToForget, mayAskToForget, verbatim } from './vault-memory.js';
 import { PATHS } from './vault.js';
+import { ringStopAsked } from './ring.js';
 import { addressed } from './wake.js';
 
 /** How long he waits for more: after just his name, and after answering, with no need to say it again. */
 const OPEN_MS = 8000;
+/** And after a question of his, which wants an answer: long enough to think of one. */
+const ASKED_MS = 20000;
 /** His name heard with the user still talking: he listens this long for the end of it. */
 const WOKEN_MS = 12000;
 /** His own voice can still be on its way through the recognizer this long after he stops. */
@@ -319,6 +322,31 @@ export function noteAsked(text) {
 /** Words that ask for a note: one to add to, make, open or read. Without them, a note from the model is its own idea. */
 const NOTE_ASKED = /\b(?:notes?|noted|lists?|write|wrote|jot|add|put|open|show|read)\b/i;
 const noteName = (title) => title.toLowerCase().replace(/^(?:my|the)\s+/, '').replace(/\s+/g, ' ');
+/** Words that say what a thing is, of a few said about it: "the second file in my Downloads" is second, file, downloads. */
+const thingWords = (text) => String(text ?? '').toLowerCase().match(/[a-z0-9]+/g)?.filter((word) => word.length > 1 && !THING_FILLER.has(word)) || [];
+const THING_FILLER = new Set(['the', 'my', 'in', 'on', 'of', 'at', 'to', 'an', 'up', 'for', 'from', 'inside', 'that', 'this', 'it', 'please']);
+
+/**
+ * The model's command, with the user's own verb put back where the model weakened it: asked to open something, a
+ * command to "select" it leaves it shut (2026-11-15: "open the second file in my Downloads" came back as "open Finder
+ * and select second file in Downloads", and the file was selected and left). Only for the thing they asked to open:
+ * "open Mail and delete the top three messages" may well come as "open Mail, select the top three messages and
+ * delete them", and selecting is right there. And never when they said select themselves.
+ */
+export function asAsked(command, said) {
+  const text = String(command ?? '');
+  const theirs = String(said ?? '');
+  if (/\b(?:select|highlight|choose|pick)/i.test(theirs)) return text;
+  // What they asked to open, each time they said so: the words after "open", up to the next thing asked.
+  const opened = [...theirs.matchAll(/\bopen(?:ed|s|ing)?\b([^,.;!?]*?)(?=\s+(?:and|then)\b|[,.;!?]|$)/gi)].map((match) => new Set(thingWords(match[1]))).filter((words) => words.size);
+  if (!opened.length) return text;
+  return text.replace(/\b(select|highlight)(?:ing|ed|s)?\b([^,.;!?]*?)(?=\s+(?:and|then)\b|[,.;!?]|$)/gi, (whole, verb, thing) => {
+    const words = thingWords(thing);
+    const same = words.length > 0 && opened.some((asked) => words.every((word) => asked.has(word)));
+    return same ? `${/^[A-Z]/.test(verb) ? 'Open' : 'open'}${thing}` : whole;
+  });
+}
+
 /** The note the user named, with the model's spelling of its name when it's the same one, else the model's note. */
 const whichNote = (asked, given) => (asked ? { ...asked, title: given && noteName(given.title) === noteName(asked.title) ? given.title : asked.title } : given);
 
@@ -551,6 +579,8 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  *   where the user is, the weather and their calendars (situation.js); without it he knows none of them
  * @param {() => import('./abilities.js').AbilityState|Promise<import('./abilities.js').AbilityState>} [deps.abilities]  what else is connected right now (Chrome,
  *   pictures, their voice, gestures, the watch), for what he says he can do; the vault and situation say the rest
+ * @param {{ringing:() => boolean, stop:(by:string) => boolean}} [deps.ring]  a timer's ringing (ring.js): turned off
+ *   by their saying so, and by their talking to him at all
  * @param {() => void} [deps.warm]  his name's just been heard: whatever a turn waits on that can be got ready, is
  * @param {() => boolean|Promise<boolean>} [deps.thinkAhead]  whether he may start on his reply at a pause that may be
  *   the end of what's being said (paused), before it's known to be: a request to his model that's thrown away when
@@ -559,7 +589,7 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, listenAfresh = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, listenAfresh = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, ring = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
@@ -970,13 +1000,14 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * (think), and it's the turn's own if those turn out to be the words (turn). Nothing is said, shown, kept or done
    * here: a command is never begun on, only thought about.
    */
-  async function ponder(said, unsure) {
+  async function ponder(said) {
     dropPending();
     const { woken, rest } = addressed(said);
     const meant = woken ? rest : String(said).trim();
-    // As overheard() would take it, and only then.
+    // As overheard() would take it, and only then: words that turn a ringing timer off are never his model's.
+    if (ring?.ringing() && ringStopAsked(meant)) return;
     if (!meant || talking || now() < quietUntil || assistant.asking || assistant.running || echoes(meant)) return;
-    if (!woken && (unsure || now() >= openUntil)) return;
+    if (!woken && now() >= openUntil) return;
     const mine = ponders;
     const during = turns;
     try {
@@ -1005,6 +1036,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     if (begun) pending = null;
     dropPending();
     hush();
+    // Spoken or typed to, he isn't rung over.
+    ring?.stop('their talking to him');
     openUntil = 0;
     typing = typed;
     // Quicker to someone in a hurry, slower to someone low: for all he says this turn.
@@ -1181,10 +1214,13 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // The model's command drops and changes details, so the user's own words go with it. Given the user's notes, or
       // their calendars' events (someone else's invitation, as often as not), the command may be one of those's rather
       // than theirs, so what could do harm asks first, as if overheard.
+      // What they asked for is what's done: asked to open something, it isn't merely selected.
+      reply.do = asAsked(reply.do, text);
       if (reply.do) return void (await act(reply.do, { overheard: overheard || theirs || around.untrusted || history.some((entry) => entry.untrusted), stale, before: spoken, said: text, answer, typed }));
       await spoken;
       // Without a voiceprint anyone could carry on from here, and he'd answer his own echo. Typed to, nobody's talking.
-      if (!stale() && knowsYou() && !typed) stayOpen();
+      // A question of his is waited on for longer.
+      if (!stale() && knowsYou() && !typed) stayOpen(/\?["”’')\]]*\s*$/.test(whole) ? ASKED_MS : OPEN_MS);
     } catch (err) {
       if (stale()) return;
       log('jester couldn’t answer:', err.message);
@@ -1199,14 +1235,23 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   }
 
   /**
-   * What's overheard, once it's finished. `unsure`: the voiceprint only maybe matched, so it counts with his name
-   * and never as a yes or a follow-up, which could be someone else's.
+   * What's overheard, once it's finished. `unsure`: the voiceprint only maybe matched, so it counts with his name,
+   * or as an answer to him just after he's spoken, and never as a yes to something he's asked leave to do, which
+   * could be someone else's.
    * @returns {Promise<void>|null} his turn, or null when it wasn't one
    */
   function overheard(text, { unsure = false, lag = NaN } = {}) {
     const { woken, rest } = addressed(text);
     const meant = woken ? rest : String(text).trim();
     if (!meant && !woken) return null;
+    // A timer ringing is turned off by saying so, with his name or without: nothing else comes of those words, so a
+    // voice that only may be theirs will do, and so will his name alone.
+    if (ring?.ringing() && (ringStopAsked(meant) || (woken && !meant))) {
+      ring.stop('their saying so');
+      // Said across a line of his, "stop" is for him as well.
+      if ((talking || now() < quietUntil) && STOP.test(meant)) hush();
+      return null;
+    }
     // Hearing himself: while he talks and just after, only "stop" counts.
     if (talking || now() < quietUntil) {
       if (STOP.test(meant)) hush();
@@ -1234,7 +1279,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       assistant.cancel();
       return null;
     }
-    if (!woken && (unsure || now() >= openUntil)) return null;
+    // Without his name it's for him only just after he's spoken to them. Then a voice that only may be theirs is
+    // taken for theirs: it's an answer to him, seconds after he spoke (2026-11-15: every "yes" to a question of his
+    // scored as maybe, and went unheard).
+    if (!woken && now() >= openUntil) return null;
     if (!meant) {
       stayOpen();
       return Promise.resolve();
@@ -1258,8 +1306,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      * (`thinkAhead`), and says and does nothing. If those were the words, heard() carries on from there.
      * @returns {Promise<void>}
      */
-    paused(text, { unsure = false } = {}) {
-      return ponder(text, unsure).catch((err) => log('couldn’t think ahead:', err.message));
+    paused(text) {
+      return ponder(text).catch((err) => log('couldn’t think ahead:', err.message));
     },
     /** They went on talking after the pause: what was begun then is dropped. */
     wentOn() {
@@ -1314,6 +1362,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     /** A command he handed on is at work, or its result being said: its conversation isn't over (conversation-log.js busy). */
     get acting() {
       return acting > 0;
+    },
+    /** How often he's been told to stop talking: one more than before a line means it was cut off by them. */
+    get hushes() {
+      return hushes;
     },
     /**
      * Something to tell them that nobody asked for just now (a reminder whose time has come, tell.js). It's said as

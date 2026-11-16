@@ -31,6 +31,7 @@
  * PRIVATE_KEYS).
  */
 
+import { pressedTwice } from './agent/actions.js';
 import { secretIn } from './vault-memory.js';
 
 export const LEARNED_KEY = 'desktopLearned';
@@ -139,6 +140,8 @@ export function learnable(goal, trace, { said = '' } = {}) {
   // "What's due on Canvas?" may come as "open Canvas and check my assignments": the asking was the user's.
   if ([goal, said].some((asked) => asked && asksToBeTold(asked))) return { ok: false, why: 'it asked something, and the answer changes' };
   if (trace.length > LEARNED_LIMITS.steps) return { ok: false, why: 'it took too many steps' };
+  // Play pressed twice running paused what it started: not a way worth doing again.
+  if (trace.some((step, index) => index > 0 && pressedTwice(trace[index - 1], step))) return { ok: false, why: 'it pressed Play twice, which pauses it' };
   for (const step of trace) {
     if (step.sensitive) return { ok: false, why: 'a step needed your OK' };
     if ('target' in step && !step.target?.label) return { ok: false, why: 'a control it used has no name' };

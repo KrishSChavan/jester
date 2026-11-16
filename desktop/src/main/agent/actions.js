@@ -363,3 +363,15 @@ export function classify(action, { screen = null, goal = '' } = {}) {
   if (action.action === 'open_url' && !knownSite(action.url, goal)) return { category: 'sensitive', reason: 'it opens a site you didn’t name' };
   return { category: 'browse' };
 }
+
+/** A control that plays or pauses what's on: pressed twice, the second press undoes the first. */
+export const PLAYS = /^(?:play|pause|resume)\b/i;
+
+/**
+ * Whether two steps of a task done (loop.js's trace) are the same press of Play or Pause, one after the other: the
+ * second undid the first, whatever the task went on to say (a screen read before the app had caught up).
+ */
+export function pressedTwice(before, step) {
+  const click = (item) => item?.action?.action === 'click' && item.action.button !== 'right' && PLAYS.test(String(item.target?.label || '').trim());
+  return click(before) && click(step) && before.app === step.app && before.target.role === step.target.role && before.target.label === step.target.label;
+}

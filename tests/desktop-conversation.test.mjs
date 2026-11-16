@@ -6,7 +6,7 @@ import path from 'node:path';
 import { addressed, wakesEarly } from '../desktop/src/main/wake.js';
 import { asksFirst, parseCommand, parseSequence } from '../desktop/src/main/voice-commands.js';
 import { createConversationLog, EMPTIED_EVERY_MS } from '../desktop/src/main/conversation-log.js';
-import { askedToRemember, askModel, createConversation, LOCAL_KEEP_ALIVE, NEW_AFTER_MS, noteAsked, personaPrompt, pickModel, stamped, summarize, warmOllama } from '../desktop/src/main/conversation.js';
+import { asAsked, askedToRemember, askModel, createConversation, LOCAL_KEEP_ALIVE, NEW_AFTER_MS, noteAsked, personaPrompt, pickModel, stamped, summarize, warmOllama } from '../desktop/src/main/conversation.js';
 import { createRecollections, KEPT_MS } from '../desktop/src/main/recollections.js';
 import { createVault } from '../desktop/src/main/vault.js';
 import { createVaultMemory } from '../desktop/src/main/vault-memory.js';
@@ -289,7 +289,7 @@ function minutes(count) {
   return count * 60 * 1000;
 }
 
-function jester({ knows = () => false, risky = () => false, reply = { say: 'Hello there.', do: '' }, allow = true, chat, knowsYou = false, vaultMemory, log } = {}) {
+function jester({ knows = () => false, risky = () => false, reply = { say: 'Hello there.', do: '' }, allow = true, chat, knowsYou = false, vaultMemory, ring, log } = {}) {
   let time = 1000;
   const entries = [];
   const times = [];
@@ -323,6 +323,7 @@ function jester({ knows = () => false, risky = () => false, reply = { say: 'Hell
     assistant,
     show: (voice) => shown.push(voice),
     vaultMemory,
+    ring,
     log,
     now: () => time
   });
@@ -1074,25 +1075,103 @@ test('a voiceprint: takes averaged, voices compared, and short clips given a low
   assert.equal(TEACHING_LINES.length, 5);
 });
 
-test('a voice only maybe the user’s needs his name, and can’t say yes or carry on', async () => {
+test('a voice only maybe the user’s needs his name to begin, can answer him just after he’s spoken, and can’t say yes to a task', async () => {
   const j = jester({ knowsYou: true });
   await j.conversation.heard('What should I cook tonight?', { unsure: true });
   assert.equal(j.entries.length, 0);
   await j.conversation.heard('Jester, what should I cook tonight?', { unsure: true });
   assert.deepEqual(j.entries.filter((entry) => entry.who === 'you').map((entry) => entry.text), ['what should I cook tonight?']);
   assert.equal(j.shown.find((voice) => voice.phase === 'heard').matched, false);
-  // The follow-up window is the user's alone.
+  // Just after he's spoken, what's said without his name is an answer to him, in a voice that may be theirs too
+  // (2026-11-15: every answer to a question of his scored as maybe, and went unheard).
   j.pass(2000);
   await j.conversation.heard('And something for dessert?', { unsure: true });
-  assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 1);
-  await j.conversation.heard('And something for dessert?');
   assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 2);
-  // A yes lets a task go ahead; a no or a stop is anyone's to give. (Past his quiet moment after speaking.)
-  j.pass(2000);
+  // Once that moment's over, it needs his name again.
+  j.pass(30000);
+  await j.conversation.heard('And a drink?', { unsure: true });
+  assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 2);
+  await j.conversation.heard('And a drink?');
+  assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 2, 'nor does their own voice carry on once it’s over');
+  // A yes lets a task go ahead, so it must be theirs; a no or a stop is anyone's to give.
   j.assistant.asking = true;
   await j.conversation.heard('Jester, yes.', { unsure: true });
   await j.conversation.heard('No.', { unsure: true });
   assert.deepEqual(j.assistant.answers, [false]);
+});
+
+test('a question of his is waited on for longer than a statement', async () => {
+  const asks = jester({ knowsYou: true, reply: { say: 'Want me to open it for you?', do: '', new: false } });
+  await asks.conversation.heard('Jester, what do you know about me?');
+  asks.pass(12000);
+  await asks.conversation.heard('Yes please.', { unsure: true });
+  assert.deepEqual(asks.entries.filter((entry) => entry.who === 'you').map((entry) => entry.text), ['what do you know about me?', 'Yes please.']);
+  const tells = jester({ knowsYou: true, reply: { say: 'It’s on the desk.', do: '', new: false } });
+  await tells.conversation.heard('Jester, where’s my book?');
+  tells.pass(12000);
+  await tells.conversation.heard('Thanks a lot.');
+  assert.equal(tells.entries.filter((entry) => entry.who === 'you').length, 1, 'twelve seconds after a statement, the moment’s over');
+});
+
+test('a timer ringing is turned off by saying so, by his name alone, and by talking to him at all', async () => {
+  const world = () => {
+    const ring = { on: true, stopped: [], ringing: () => ring.on, stop: (by) => (ring.on ? ((ring.on = false), ring.stopped.push(by), true) : false) };
+    return { ring, j: jester({ knowsYou: true, ring }) };
+  };
+  // Without his name, in a voice that only may be theirs: nothing else comes of the words, so it will do.
+  for (const words of ['Stop.', 'okay, turn it off', 'Turn off the timer', 'thanks', "I'm up", 'Okay.', 'shut up', 'stop the ringing please']) {
+    const { ring, j } = world();
+    assert.equal(await j.conversation.heard(words, { unsure: true }), undefined, words);
+    assert.deepEqual(ring.stopped, ['their saying so'], words);
+    assert.equal(j.entries.length, 0, 'and nothing is made of it');
+  }
+  // What isn't about it leaves it ringing.
+  const other = world();
+  await other.j.conversation.heard('I think the pasta needs more salt.');
+  await other.j.conversation.heard('stop by the store later');
+  assert.deepEqual(other.ring.stopped, []);
+  // His name alone, or his name and the word.
+  const named = world();
+  await named.j.conversation.heard('Jester.');
+  assert.deepEqual(named.ring.stopped, ['their saying so']);
+  const told = world();
+  await told.j.conversation.heard('Jester, stop the timer.');
+  assert.deepEqual(told.ring.stopped, ['their saying so']);
+  assert.equal(told.j.entries.length, 0, 'the model isn’t asked what "stop the timer" means');
+  // Asked something else, he isn't rung over while he answers.
+  const asked = world();
+  await asked.j.conversation.heard('Jester, what time is it?');
+  assert.deepEqual(asked.ring.stopped, ['their talking to him']);
+  assert.equal(asked.j.entries.filter((entry) => entry.who === 'you').length, 1);
+  // Said across a line of his, "stop" stops him as well as the ring; "thanks" only the ring.
+  const across = world();
+  across.j.speaker.hold = new Promise(() => undefined);
+  void across.j.conversation.announce('Reminder: call your mom.');
+  await new Promise((resolve) => setImmediate(resolve));
+  const stops = across.j.speaker.stops;
+  await across.j.conversation.heard('Stop!');
+  assert.deepEqual(across.ring.stopped, ['their saying so']);
+  assert.ok(across.j.speaker.stops > stops, 'he was hushed too');
+  // Nothing ringing, "stop" is what it always was.
+  const quiet = jester({ knowsYou: true, ring: { ringing: () => false, stop: () => assert.fail('nothing is ringing') } });
+  await quiet.conversation.heard('Thanks.');
+  assert.equal(quiet.entries.length, 0);
+});
+
+test('asked to open something, the command isn’t weakened to selecting it', () => {
+  assert.equal(asAsked('open Finder and select second file in Downloads', 'opened the second file in my finder in my downloads.'), 'open Finder and open second file in Downloads');
+  assert.equal(asAsked('Select the second email', 'open the second email'), 'Open the second email');
+  // They said select: it's what they asked for.
+  assert.equal(asAsked('open Finder and select the second file', 'open Finder and select the second file'), 'open Finder and select the second file');
+  assert.equal(asAsked('select all and copy', 'copy everything on the page'), 'select all and copy');
+  assert.equal(asAsked('', 'open my notes'), '');
+  // Only the thing they asked to open: what's selected on the way to something else stays selected.
+  assert.equal(asAsked('open Mail, select the top three messages and delete them', 'open Mail and delete the top three messages'), 'open Mail, select the top three messages and delete them');
+  assert.equal(asAsked('open Notes, select all and copy', 'open Notes and copy everything'), 'open Notes, select all and copy');
+  assert.equal(asAsked('open the essay, select the title and make it bold', 'open my essay and make the title bold'), 'open the essay, select the title and make it bold');
+  assert.equal(asAsked('open Pages and replace the selected text', 'open Pages and replace what I have selected there'), 'open Pages and replace the selected text');
+  assert.equal(asAsked('select the second email and delete it', 'open the second email and delete it'), 'open the second email and delete it');
+  assert.equal(asAsked('open Finder, select the second file in Downloads, then close the window', 'open the second file in downloads then close the window'), 'open Finder, open the second file in Downloads, then close the window');
 });
 
 test('the prompt says who he is, what the laptop can do for him and what he cannot know; the clock is on what was said', () => {

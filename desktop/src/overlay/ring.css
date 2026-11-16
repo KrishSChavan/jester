@@ -1,0 +1,84 @@
+/* A ringing timer: the pill's look, with the timer's name and a Stop. */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font: 14px/1.3 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  user-select: none;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ring {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  max-width: 100%;
+  height: 46px;
+  padding: 0 7px 0 16px;
+  border-radius: 999px;
+  background: #0a0c11;
+  border: 2px solid rgba(253, 224, 71, 0.92);
+  color: #e8ecf2;
+}
+
+.bell {
+  flex: none;
+  fill: none;
+  stroke: #fde047;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform-origin: 50% 10%;
+  animation: swing 0.9s ease-in-out infinite;
+}
+
+#what {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+#stop {
+  flex: none;
+  height: 30px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: #fde047;
+  color: #0a0c11;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+#stop:hover {
+  background: #fef08a;
+}
+
+@keyframes swing {
+  0%,
+  100% {
+    transform: rotate(-14deg);
+  }
+  50% {
+    transform: rotate(14deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bell {
+    animation: none;
+  }
+}

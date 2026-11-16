@@ -34,7 +34,7 @@ const SHELF_MOST = 4;
  * @param {{timers?:object[], open?:object[], done?:object[]}} state  the list (main.js `jester/tasks`)
  * @returns {{label:string, title:string, detail:string, icon:string, tick:null|boolean, tone:string, actions:string[], due?:number, span?:number, gone?:boolean}}
  *   tick: null for no box, else whether it's ticked; tone: '' | 'due' | 'done' | 'gone'; actions: of done, undo,
- *   snooze, remove, cancel, open; due and span: a running timer's end and length
+ *   snooze, remove, cancel, open, quiet (a ringing timer's Stop); due and span: a running timer's end and length
  */
 export function cardView(card, state = {}) {
   if (card?.kind === 'note' || card?.kind === 'remembered') {
@@ -46,6 +46,8 @@ export function cardView(card, state = {}) {
   // New mail: who and what, and the conversation to open in Gmail when it's just the one.
   if (card?.kind === 'mail') return { label: 'Email', title: String(card.title || 'New mail'), detail: '', lines: Array.isArray(card.lines) ? card.lines.map(String) : [], icon: 'i-mail', tick: null, tone: '', actions: ['mail'] };
   const id = String(card?.id ?? '');
+  // A timer that's up and ringing (ring.js): off the list, and still to be turned off. Its card is one way.
+  if (state.ringing && state.ringing.id === id) return { label: 'Timer', title: String(state.ringing.label || card?.text || 'Timer'), detail: 'Ringing', icon: 'i-timer', tick: null, tone: 'due', actions: ['quiet'] };
   const timer = (state.timers || []).find((task) => task.id === id);
   if (timer) return { label: 'Timer', title: timer.text, detail: '', icon: 'i-timer', tick: null, tone: '', actions: ['cancel'], due: timer.due, span: timer.timer };
   const open = (state.open || []).find((task) => task.id === id);
@@ -71,6 +73,8 @@ export function shelfOf(state = {}, now = Date.now()) {
   const card = (task, type) => ({ kind: 'task', id: task.id, type, text: task.text });
   const timed = (task) => Number.isFinite(task.due) && !task.allDay;
   const all = [
+    // What's ringing first: it's the one thing here that wants something of them now.
+    ...(state.ringing ? [card({ id: state.ringing.id, text: state.ringing.label }, 'timer')] : []),
     ...(state.timers || []).map((task) => card(task, 'timer')),
     ...(state.open || []).filter((task) => timed(task) && (task.told || task.overdue)).map((task) => card(task, 'reminder')),
     ...(state.open || []).filter((task) => timed(task) && !task.told && !task.overdue && task.due - now <= SOON_MS).map((task) => card(task, 'reminder'))
@@ -79,6 +83,7 @@ export function shelfOf(state = {}, now = Date.now()) {
 }
 
 const ACTIONS = {
+  quiet: { label: 'Stop the ringing', icon: 'i-close', text: 'Stop' },
   cancel: { label: 'Cancel', icon: 'i-close' },
   remove: { label: 'Remove', icon: 'i-trash' },
   snooze: { label: 'Snooze 10 min', icon: 'i-snooze', text: '10 min' },
@@ -141,7 +146,7 @@ function counting() {
 async function act(action, card) {
   if (action === 'open') return void chrome.runtime.sendMessage({ type: 'jester/notes', op: 'open', rel: card.rel }).catch(() => null);
   if (action === 'mail') return void chrome.runtime.sendMessage({ type: 'jester/mail', op: 'open', id: card.id || '' }).catch(() => null);
-  const op = { done: { op: 'done', on: true }, undo: { op: 'done', on: false }, remove: { op: 'remove' }, cancel: { op: 'remove' }, snooze: { op: 'snooze', minutes: 10 } }[action];
+  const op = { done: { op: 'done', on: true }, undo: { op: 'done', on: false }, remove: { op: 'remove' }, cancel: { op: 'remove' }, snooze: { op: 'snooze', minutes: 10 }, quiet: { op: 'quiet' } }[action];
   if (op) took(await ask({ ...op, id: card.id }));
   return undefined;
 }

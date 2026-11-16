@@ -163,6 +163,45 @@ test('playing something: the model sees the screen, presses Play, and finishes',
   assert.ok(steps.some((step) => step.phase === 'acting' && step.label === 'Click “Play Gunna”'));
 });
 
+test('Play isn’t pressed twice running: asked again at once, it waits, looks afresh, and is believed only then', async () => {
+  // The app is read before it has turned its Play into Pause, the model sees Play still there and presses it again,
+  // and what had started is paused (2026-11-15, Spotify).
+  const waits = [];
+  const run = async (...turns) => {
+    const { model, prompts } = scripted(...turns);
+    const { host, done } = fakeHost(SPOTIFY);
+    const steps = [];
+    const result = await runDesktopAgent({ goal: 'play Gunna on Spotify', host, model, confirm: async () => true, onStep: (step) => steps.push(step), platform: 'darwin', wait: async (ms) => waits.push(ms) });
+    return { result, done, prompts, steps };
+  };
+  const press = { action: { action: 'click', id: 2 } };
+  const twice = await run(press, press, { action: { action: 'finish', say: 'Playing Gunna.', success: true } });
+  assert.deepEqual(twice.done, [{ action: 'click', id: 2 }], 'pressed once');
+  assert.equal(twice.result.ok, true);
+  assert.equal(twice.result.actions, 1);
+  assert.match(twice.prompts[2].lastResult.detail, /^Not done: you pressed that a moment ago, and pressing it again would undo it/);
+  assert.ok(twice.steps.some((step) => step.phase === 'acted' && step.detail === 'not pressed twice'));
+  assert.deepEqual(waits, [900], 'the app is given a moment before the screen’s read again');
+  // Asked for a third time, after that fresh look, it's meant: the first press may have missed.
+  const thrice = await run(press, press, press, { action: { action: 'finish', say: 'Playing Gunna.', success: true } });
+  assert.equal(thrice.done.length, 2);
+  // However long the model took to ask again: it asked from the screen as read just after the press.
+  let clock = 0;
+  const slow = scripted(press, press, { action: { action: 'finish', say: 'Playing Gunna.', success: true } });
+  const slowHost = fakeHost(SPOTIFY);
+  await runDesktopAgent({ goal: 'play Gunna on Spotify', host: slowHost.host, model: async (request) => ((clock += 60_000), slow.model(request)), confirm: async () => true, platform: 'darwin', now: () => clock, wait: async () => undefined });
+  assert.equal(slowHost.done.length, 1, 'a minute later, still not pressed twice');
+  // Two Plays in one list are two controls: the second isn't taken for the first.
+  const LIST = { ...SPOTIFY, elements: [{ id: 1, role: 'button', label: 'Play', in: 'Songs', depth: 3, frame: frame(100, 100) }, { id: 2, role: 'button', label: 'Play', in: 'Songs', depth: 3, frame: frame(100, 160) }] };
+  const rows = scripted({ action: { action: 'click', id: 1 } }, { action: { action: 'click', id: 2 } }, { action: { action: 'finish', say: 'Playing.', success: true } });
+  const rowsHost = fakeHost(LIST);
+  await runDesktopAgent({ goal: 'play the second song', host: rowsHost.host, model: rows.model, confirm: async () => true, platform: 'darwin', wait: async () => undefined });
+  assert.equal(rowsHost.done.length, 2);
+  // Something done in between, and it's a new press.
+  const between = await run(press, { action: { action: 'press', keys: 'down' } }, press, { action: { action: 'finish', say: 'Paused.', success: true } });
+  assert.equal(between.done.length, 3);
+});
+
 test('the caption is what the user said at once, then the model\'s own, given once', async () => {
   const steps = [];
   await runDesktopAgent({

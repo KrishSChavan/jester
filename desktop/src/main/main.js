@@ -64,6 +64,8 @@ import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
 import { missingFor } from './permission-list.js';
+import { createRing } from './ring.js';
+import { createRingPage } from './ring-page.js';
 import { loadConnections } from '../../../jester-extension/src/common/credentials.js';
 import { openSettings, readPermissions, readStatuses, requestPermission } from './permissions.js';
 import { registerScheme, serveFiles } from './protocol.js';
@@ -175,6 +177,8 @@ let driver = null;
 let dispatch = null;
 let assistant = null;
 let stopButton = null;
+/** A timer's ringing (ring.js): until it's turned off by a word, a gesture or a click. */
+let ring = null;
 let speech = null;
 let voiceRunner = null;
 let conversation = null;
@@ -464,8 +468,13 @@ async function refresh() {
   followLocation();
   syncBriefs();
   syncMail();
-  tray?.update(trayModel({ engine, settings, missing: missingFor(permissions, settings), voice: voiceState(), watch: watch?.state }));
+  updateTray();
   post(desktopState());
+}
+
+/** His menu, as things stand. */
+function updateTray() {
+  tray?.update(trayModel({ engine, settings, missing: missingFor(permissions, settings), voice: voiceState(), watch: watch?.state, ringing: ring?.ringing || null }));
 }
 
 /**
@@ -1120,6 +1129,8 @@ function warmUp() {
 
 /** The voice shortcut, gesture or menu item: start listening, or finish. */
 function toggleVoice() {
+  // About to be spoken to: not across a ringing timer, which the mic would hear.
+  ring?.stop('their talking to him');
   const problem = voiceProblem({ mic: false });
   if (problem) return overlays?.toast('Voice commands', { tone: 'warn', detail: problem });
   if (!mediaAllowed('audio')) {
@@ -1228,6 +1239,8 @@ async function onTrayAction(id, checked) {
       return saveSettings({ watchEnabled: checked });
     case 'continuous':
       return saveSettings({ continuousAssistant: checked });
+    case 'ring':
+      return void ring?.stop('his menu');
     case 'listen':
       return toggleVoice();
     case 'sleep':
@@ -1306,7 +1319,9 @@ function listenToPages() {
         else if (message.op === 'done') tasks.done(String(message.id ?? ''), message.on !== false);
         else if (message.op === 'remove') tasks.remove(String(message.id ?? ''));
         else if (message.op === 'snooze') tasks.snooze(String(message.id ?? ''), message.minutes);
-        return { ok: true, count: tasks.count, ...tasks.list() };
+        // A ringing timer's card: its Stop.
+        else if (message.op === 'quiet') ring?.stop('a click');
+        return { ok: true, count: tasks.count, ...tasks.list(), ringing: ring?.ringing || null };
       }
       // A note's card: opened in Obsidian, if it's one of the vault's; and the notes he's made or kept lately, for
       // the Tasks screen (the cards on his lines in the chat going on and those kept in Chats).
@@ -1510,6 +1525,10 @@ function listenToPages() {
         assistant.answer(message.approved === true);
         return { ok: true };
       // The × beside the pill, and where the pill is for it to sit beside.
+      // The Stop on a ringing timer's pill.
+      case 'jester/ring':
+        ring?.stop('a click');
+        return { ok: true };
       case 'jester/stop':
         stopButton.clicked(String(message.op));
         return { ok: true };
@@ -2028,6 +2047,8 @@ async function start() {
   }, LOG_CHECK_MS);
   conversation = createConversation({
     chat: (request) => askModel({ ...request, request: talking }),
+    // A timer ringing: turned off by their saying so, or by their talking to him at all.
+    ring: { ringing: () => !!ring?.ringing, stop: (by) => !!ring?.stop(by) },
     speaker,
     memory,
     // What's over is in Chats at once, word for word, and summed up for him once he's answered, whichever way it ended.
@@ -2101,6 +2122,15 @@ async function start() {
     settleMs: Number(env.JESTER_SETTLE_MS) || undefined,
     log
   });
+  ring = createRing({
+    page: createRingPage({ muted: !!env.JESTER_FAKE_MEDIA }),
+    ringMs: Number(env.JESTER_RING_MS) || undefined,
+    log,
+    onChange: () => {
+      post({ type: 'jester/tasks-changed', count: tasks.count });
+      updateTray();
+    }
+  });
   clock.on('say', teller.say);
   // A reminder's time, or a timer's end: told like any line, and only then counted as given.
   clock.on('task', async (job, info) => {
@@ -2109,8 +2139,15 @@ async function start() {
     // Ticked off or removed meanwhile: there's nothing to say.
     if (!text) return undefined;
     const timer = !!tasks.get(id)?.timer;
-    const answer = await teller.say({ ...job, payload: { text, late: tasks.ringLine(id, info.meant), card: tasks.cardFor(id), title: timer ? 'Timer' : 'Reminder', priority: 4 } }, info);
+    const label = tasks.get(id)?.text || 'Timer';
+    // Told to stop while he was saying it's up: that was the answer, and it doesn't then ring.
+    const hushed = conversation.hushes;
+    let here = null;
+    const answer = await teller.say({ ...job, payload: { text, late: tasks.ringLine(id, info.meant), card: tasks.cardFor(id), title: timer ? 'Timer' : 'Reminder', priority: 4 } }, { ...info, said: (how) => (here = how) });
     if (!answer) tasks.rang(id);
+    // A timer that's up, said to them here and on time, rings until it's turned off. One they were told of late, on
+    // coming back, has rung its hour out already; one sent to their phone rang there.
+    if (!answer && timer && here && !here.late && conversation.hushes === hushed) ring.start({ id, label });
     return answer;
   });
   phone = createPhone({ storage: storage.local, log, onChange: () => post(desktopState()) });
@@ -2182,6 +2219,8 @@ async function start() {
     powerMonitor.on(event, () => {
       if (on) away.add(reason);
       else away.delete(reason);
+      // Nobody's there to turn it off, and it mustn't ring out its minute when the lid's next opened.
+      if (on) ring?.stop('the screen locking or the computer sleeping');
       presence.screen(reason, on);
       updateListening();
       // Timers stood still while it slept: what came due meanwhile is seen to now.
@@ -2222,6 +2261,11 @@ async function start() {
       if (message.source === 'swipe' && !toggledSleep && pointer.aiming()) return log('trigger ignored: the watch is aiming');
       // While the assistant asks, 👍 and 👎 answer it instead of doing their
       // usual action, which sleep has already done: the engine does it on the spot.
+      // A timer ringing is turned off by any gesture, which then does nothing else: a hand raised at it is "enough".
+      if (ring?.stop('a gesture')) {
+        if (toggledSleep) engineHost.sleep(!message.sleeping);
+        return;
+      }
       if (message.source === 'pose' && assistant.gesture(message.gesture)) {
         if (toggledSleep) engineHost.sleep(!message.sleeping);
         return;
