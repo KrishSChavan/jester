@@ -64,5 +64,5 @@ test('what’s learned is sealed with the voiceprint, forgotten with it, and sta
   assert.match(main, /op === 'forget'\) await storage\.local\.remove\(\['voiceprint', 'voiceLearned'\]\)/);
   assert.match(main, /await storage\.local\.set\(\{ voiceprint: averageVoice\(takes\) \}\);\n\s+await storage\.local\.remove\('voiceLearned'\);/);
   // Kept only from something he took as said to him.
-  assert.match(main, /if \(turned && heard\?\.learn && heard\.voice && voiceprint\) learnVoice\(heard\.voice\);/);
+  assert.match(main, /if \(turned && !across && heard\?\.learn && heard\.voice && voiceprint\) learnVoice\(heard\.voice\);/);
 });

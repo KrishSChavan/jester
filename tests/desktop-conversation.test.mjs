@@ -10,6 +10,7 @@ import { asAsked, askedToRemember, askModel, createConversation, LOCAL_KEEP_ALIV
 import { createRecollections, KEPT_MS } from '../desktop/src/main/recollections.js';
 import { createVault } from '../desktop/src/main/vault.js';
 import { createVaultMemory } from '../desktop/src/main/vault-memory.js';
+import { nameAt } from '../desktop/src/main/wake.js';
 import { averageVoice, judged, likeness, sounds, TEACHING_LINES } from '../desktop/src/main/voiceprint.js';
 import { createSpeaker, forEar, runsOn, spokenLine, spokenPieces, SPOKEN_CHARS } from '../desktop/src/main/speaker.js';
 import { startKokoro } from '../desktop/src/main/kokoro.js';
@@ -33,7 +34,19 @@ test('his name, and what the recognizer really writes for it', () => {
     ['Chester, what time is it?', 'what time is it?'],
     // Last, as you'd call someone.
     ['What time is it, Jester?', 'What time is it'],
-    ['Open Spotify Jester.', 'Open Spotify']
+    ['Open Spotify Jester.', 'Open Spotify'],
+    // Turned to, as people do: a word first, or his name after something said to someone else (2026-11-16).
+    ['Yeah Jester, what time is it?', 'what time is it?'],
+    ['Wait, Jester, pause the music.', 'pause the music.'],
+    ['Alright Jester set a timer for ten minutes', 'set a timer for ten minutes'],
+    ['Watch this. Jester, what’s the weather tomorrow?', 'what’s the weather tomorrow?'],
+    ['The bread is in the oven, Jester, set a timer for forty minutes.', 'set a timer for forty minutes.'],
+    ['Her name is Trisha. Jester, say hi to Trisha.', 'say hi to Trisha.'],
+    ['I think so. So Jester what should we make next', 'what should we make next'],
+    ['Trisha, this is Jester. Jester, tell her a joke.', 'tell her a joke.'],
+    // The first call is the one, and all that follows is his.
+    ['Hold on. Jester, pause the music, and Jester, set a timer for ten minutes.', 'pause the music, and Jester, set a timer for ten minutes.'],
+    ['Hang on. Jester, text Sam saying hey Jester what’s up', 'text Sam saying hey Jester what’s up']
   ]) {
     const result = addressed(heard);
     assert.equal(result.woken, true, heard);
@@ -41,8 +54,21 @@ test('his name, and what the recognizer really writes for it', () => {
   }
 });
 
+test('nameAt: where his name sits in what was heard, for the log', () => {
+  assert.deepEqual(nameAt('Jester, what time is it?'), { words: 5, at: 1 });
+  assert.deepEqual(nameAt('I was telling Trisha about Jester'), { words: 6, at: 6 });
+  assert.deepEqual(nameAt('the bread is nearly done'), { words: 5, at: 0 });
+  assert.deepEqual(nameAt(''), { words: 0, at: 0 });
+});
+
 test('ordinary speech is not for him', () => {
-  for (const heard of ['Just kidding.', 'Just what I needed.', 'Yes please.', 'Yesterday was fun.', 'The rest of it is fine.', 'Gesture control is cool.', 'Jessica is here.', 'Chester is a town in England.', 'Jess is late.', 'Jess and I went out.', 'Jay walked home.', 'I told Jester.', 'Best of luck.', 'Guess what.', 'Test this.', '', '   ']) {
+  for (const heard of ['Just kidding.', 'Just what I needed.', 'Yes please.', 'Yesterday was fun.', 'The rest of it is fine.', 'Gesture control is cool.', 'Jessica is here.', 'Chester is a town in England.', 'Jess is late.', 'Jess and I went out.', 'Jay walked home.', 'I told Jester.', 'Best of luck.', 'Guess what.', 'Test this.', '', '   ',
+    // About him, not to him: his name further in with nothing that sets it off, or nothing asked after it.
+    'I told Jester to play some music.', 'So I asked Jester what time it was.', 'Trisha, this is Jester.', 'Yesterday Jester set a timer for me.', 'I think Jester is listening.', 'We use Jester, mostly.', 'Is that Jester? Jester is great.', 'The gesture, Jessica, is rude.',
+    // The words people turn to him with are just talk before a name that's also someone's, or before "just".
+    'No, just stop.', 'No, just close it.', 'Yeah just quit.', 'And just lock the door.', 'Now just press the button.', 'No, Jess, stop it.', 'Yeah Jay can you pass that', 'Well Jessica what do you think', 'No, Chester! Stop that.', 'No jazz play something else', 'No Jess', 'Sorry, Jess.', 'Alright Jay',
+    // His name between commas, or after one, with nothing asked of him.
+    'My assistant, Jester, is running on my Mac.', 'Siri, Alexa, Jester, they all do it.', 'Yesterday, Jester set a timer for five minutes on its own.', 'This morning, Jester read my email out loud.', 'Siri and Jester make mistakes.', 'There’s no Jester, what are you talking about.', 'Play some music, Jester, please.', 'What time is it, Jester? Thanks.']) {
     assert.equal(addressed(heard).woken, false, heard);
   }
 });
@@ -1596,4 +1622,48 @@ test('the voices Settings offers are the model’s own, and a setting that names
   assert.equal(config.model.numThreads, 4);
   // Four cores are left for everything else, and never fewer than two used.
   assert.deepEqual([4, 8, 10, 12, 16].map(kokoroThreads), [2, 4, 6, 8, 8]);
+});
+
+// 2026-11-16: "when he stops listening he doesn't respond to any trigger phrase."
+test('talked over by name, in a voice that’s surely theirs, he gives way; and what he lets pass is logged by its shape', async () => {
+  const logs = [];
+  const world = (options = {}) => {
+    const j = jester({ knowsYou: true, log: (...parts) => logs.push(parts.join(' ')), ...options });
+    // He's mid-sentence, and stays so until told to stop.
+    let release;
+    j.speaker.hold = new Promise((resolve) => (release = resolve));
+    j.speaker.stop = () => ((j.speaker.stops += 1), release());
+    void j.conversation.announce('Reminder: call your mom.');
+    return j;
+  };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const theirs = (j) => j.entries.filter((entry) => entry.who === 'you').map((entry) => entry.text);
+
+  const a = world();
+  await tick();
+  // Without his name, or in a voice that only may be theirs, he's still only hearing himself.
+  await a.conversation.heard('what time is it?');
+  await a.conversation.heard('Jester, what time is it?', { unsure: true });
+  assert.deepEqual(theirs(a), []);
+  assert.deepEqual(logs.splice(0), ['heard and let pass: he was talking (4 words, no name in it)', 'heard and let pass: he was talking (5 words, his name first)']);
+  // By name, in their own voice: he stops, and answers that.
+  await a.conversation.heard('Jester, what time is it?');
+  assert.deepEqual(theirs(a), ['what time is it?']);
+  assert.ok(a.speaker.stops >= 1);
+  assert.ok(logs.splice(0).includes('talked over, by name: he gives way'));
+
+  // With no voiceprint there's no telling them from his own voice in the mic: as before, only "stop".
+  const b = world({ knowsYou: false });
+  await tick();
+  await b.conversation.heard('Jester, what time is it?');
+  assert.deepEqual(theirs(b), []);
+  // Quiet, and not said to him: let pass, with why. His name further in, and said to him: taken.
+  logs.length = 0;
+  const d = jester({ knowsYou: true, log: (...parts) => logs.push(parts.join(' ')) });
+  await d.conversation.heard('I was telling Trisha about Jester yesterday');
+  await d.conversation.heard('the bread is nearly done');
+  assert.deepEqual(logs, ['heard and let pass: not said to him (7 words, his name word 6)', 'heard and let pass: not said to him (5 words, no name in it)']);
+  await d.conversation.heard('The bread is in the oven. Jester, set a timer for forty minutes.');
+  assert.deepEqual(theirs(d), ['set a timer for forty minutes.']);
+  assert.ok(!logs.join('\n').includes('bread'), 'never the words');
 });

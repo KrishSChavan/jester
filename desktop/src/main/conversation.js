@@ -29,7 +29,7 @@ import { spokenLine, writtenLine } from './speaker.js';
 import { ago, askedToForget, mayAskToForget, verbatim } from './vault-memory.js';
 import { PATHS } from './vault.js';
 import { ringStopAsked } from './ring.js';
-import { addressed } from './wake.js';
+import { addressed, nameAt } from './wake.js';
 
 /** How long he waits for more: after just his name, and after answering, with no need to say it again. */
 const OPEN_MS = 8000;
@@ -1245,6 +1245,16 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   }
 
   /**
+   * Something heard and let pass, for the log: why, and its shape, never its words. When someone says he didn't
+   * answer to his name, this is what tells a name that wasn't heard as one from a state he was in.
+   */
+  function passed(text, why) {
+    const { words, at } = nameAt(text);
+    log(`heard and let pass: ${why} (${words} word${words === 1 ? '' : 's'}${at ? `, his name ${at === 1 ? 'first' : `word ${at}`}` : ', no name in it'})`);
+    return null;
+  }
+
+  /**
    * What's overheard, once it's finished. `unsure`: the voiceprint only maybe matched, so it counts with his name,
    * or as an answer to him just after he's spoken, and never as a yes to something he's asked leave to do, which
    * could be someone else's.
@@ -1262,10 +1272,16 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       if ((talking || now() < quietUntil) && STOP.test(meant)) hush();
       return null;
     }
-    // Hearing himself: while he talks and just after, only "stop" counts.
+    // Hearing himself: while he talks and just after, only "stop" counts. Unless it's them, by name, with something
+    // to say: a voice the voiceprint is sure of isn't his (his own scores as a stranger's), so they're talking over
+    // him, and he gives way. Never in a voice that only may be theirs, and never without a voiceprint to tell.
     if (talking || now() < quietUntil) {
-      if (STOP.test(meant)) hush();
-      return null;
+      if (STOP.test(meant)) {
+        hush();
+        return null;
+      }
+      if (!(woken && meant && !unsure && knowsYou() && !assistant.asking && !echoes(meant))) return passed(text, talking ? 'he was talking' : 'he’d just stopped talking');
+      log('talked over, by name: he gives way');
     }
     if (echoes(meant)) {
       log('that was me:', JSON.stringify(text));
@@ -1282,7 +1298,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       } else if (NO.test(meant)) {
         typing = false;
         assistant.answer(false);
-      }
+      } else return passed(text, 'he was waiting on a yes or a no');
       return null;
     }
     if (assistant.running && STOP.test(meant)) {
@@ -1292,7 +1308,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // Without his name it's for him only just after he's spoken to them. Then a voice that only may be theirs is
     // taken for theirs: it's an answer to him, seconds after he spoke (2026-11-15: every "yes" to a question of his
     // scored as maybe, and went unheard).
-    if (!woken && now() >= openUntil) return null;
+    if (!woken && now() >= openUntil) return passed(text, 'not said to him');
     if (!meant) {
       stayOpen();
       return Promise.resolve();
@@ -1372,6 +1388,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     /** A command he handed on is at work, or its result being said: its conversation isn't over (conversation-log.js busy). */
     get acting() {
       return acting > 0;
+    },
+    /** He's saying something, or only just has: what the mic hears now has his voice in it. */
+    get speaking() {
+      return talking > 0 || now() < quietUntil;
     },
     /** How often he's been told to stop talking: one more than before a line means it was cut off by them. */
     get hushes() {

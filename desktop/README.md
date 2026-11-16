@@ -1659,6 +1659,25 @@ And the day after (2026-11-16), from a conversation about one reminder:
   Friday"), and counted "an hour before" from the wrong time (the end of a
   range, his own offer): each is a test now.
 
+- **"When he stops listening he doesn't answer to his name: I have to turn
+  listening off and on."** The log couldn't say why: it had him hearing their
+  voice plainly (0.69 to 0.74) and taking nothing, once straight after the
+  switch was flipped, and no state that flipping it clears could be made to
+  stick in a simulation. What worked each time was his name alone after a
+  silence, then the request. A friend was in the room. So, three things:
+  - his name counts further into what's said, when it's a call (`addressed`
+    in `wake.js`): after "yeah", "wait", "alright"; opening a later sentence
+    ("Watch this. Jester, what's the weather?"); or between commas with a
+    request after ("…in the oven, Jester, set a timer"). Only his own name:
+    "No, Jess, stop it" and "No, just stop" are talk, and so are "I told
+    Jester to…" and "Yesterday, Jester set a timer";
+  - talked over by name, in a voice the voiceprint is sure of, he gives way.
+    Before, while he spoke and for a moment after, only "stop" was heard;
+  - and every utterance heard and let pass is logged with why and its shape,
+    never its words: `heard and let pass: not said to him (7 words, his name
+    word 6)`, `… he was talking (5 words, his name first)`. Next time the log
+    says which it was.
+
 ## Getting started, for whoever opens him first
 
 Step 12. Nothing in him is about one person: the examples in his window and in

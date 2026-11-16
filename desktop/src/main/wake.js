@@ -19,6 +19,12 @@ const SHORT = new Set(['j', 'jay', 'jes', 'jess']);
 const NEAR = new Set(['chester', 'gesture', 'gestures', 'jest', 'jesse', 'jessie', 'jessica', 'jace', 'jase', 'jazz', 'jaz']);
 /** What may come before the name without changing who's meant. */
 const OPENING = /^(?:(?:hey|hi|hello|okay|ok|yo|um|uh|so|oh|ah)\b[\s,.!?-]*)+/i;
+/**
+ * More of what people turn to him with: "Yeah Jester…", "Wait, Jester…", "Alright Jester…". Only before his own
+ * name: before a word that's also a person's or an everyday one, they're just talk ("No, Jess, stop it", "No, just
+ * stop").
+ */
+const TURNING = /^(?:(?:hey|hi|hello|okay|ok|yo|um|uh|so|oh|ah|yeah|yes|no|well|and|but|now|wait|alright|all right|right|actually|sorry|hmm|hm)\b[\s,.!?-]*)+/i;
 const CALLED = /^(?:(?:hey|hi|hello|okay|ok|yo)\b)/i;
 /** The name last, as in "what time is it, Jester?": set off by a comma, ending a question, or after a request. */
 const ENDING = /^(.+?)(?:,\s*|\s+)(jester|jesters|chester|gesture)\s*([.?!]*)$/i;
@@ -51,6 +57,28 @@ export function addressed(heard) {
     if (SHORT.has(word) ? !rest || called : NEAR.has(word) && called) return said(after, word);
     if (word === 'just' && JUST_REQUEST.test(rest)) return said(rest.replace(MEANT, ''), word);
   }
+  // A turning word, then his own name.
+  const turned = text.match(TURNING)?.[0] || '';
+  const named = turned.length > opening.length ? text.slice(turned.length).match(FIRST_WORD)?.[1] : '';
+  if (named && NAME.has(named.toLowerCase())) return said(text.slice(turned.length + named.length), named.toLowerCase());
+  // Further in: "Watch this. Jester, what's the weather?", "The bread's in, Jester, set a timer for forty minutes".
+  // With people talking, what's said to him seldom starts the breath it's said in (2026-11-16: with a friend in the
+  // room he took nothing that didn't begin with his name after a silence). Only his own name, never a word that's
+  // also someone's, and only as a call: opening a later sentence with a comma or a request after it, or between
+  // commas with a request after it. "I told Jester to play something", "Yesterday, Jester set a timer" and "My
+  // assistant, Jester, is running" are about him. The first such call is the one: what follows is all his.
+  for (const match of text.matchAll(/[a-z]+(?:'[a-z]+)?/gi)) {
+    if (!match.index || !NAME.has(match[0].toLowerCase())) continue;
+    const before = text.slice(0, match.index);
+    const after = text.slice(match.index + match[0].length);
+    const rest = tidy(after);
+    if (!rest) continue;
+    const comma = /^\s*,/.test(after);
+    const asks = REQUEST.test(rest);
+    // A new sentence, begun with his name or a turning word and his name.
+    const opens = new RegExp(`[.!?]["”’')\\]]*\\s+(?:${TURNING.source.slice(1)})?$`, 'i').test(before);
+    if ((opens && (comma || asks)) || (/,\s*$/.test(before) && comma && asks)) return said(after, match[0].toLowerCase());
+  }
   const ending = text.match(ENDING);
   if (ending && (/,\s*\S+\s*[.?!]*$/.test(text) || ending[3].includes('?') || REQUEST.test(body))) return said(ending[1].slice(opening.length), ending[2].toLowerCase());
   return NOT_ADDRESSED;
@@ -67,4 +95,13 @@ export function wakesEarly(partial) {
   const { woken, word, rest } = addressed(text);
   const first = text.slice(text.match(OPENING)?.[0].length || 0).match(FIRST_WORD)?.[1]?.toLowerCase();
   return woken && first === word && (NAME.has(word) || !!rest);
+}
+
+/**
+ * Where his name sits in something heard, for the log: how many words there were, and which of them was his name
+ * (1 for the first; 0 when it isn't there). The words themselves are never logged.
+ */
+export function nameAt(heard) {
+  const words = String(heard ?? '').toLowerCase().match(/[a-z]+(?:'[a-z]+)?/g) || [];
+  return { words: words.length, at: words.findIndex((word) => NAME.has(word) || NEAR.has(word) || SHORT.has(word)) + 1 };
 }

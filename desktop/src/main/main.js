@@ -508,10 +508,12 @@ function updateListening() {
  * they sound (voiceprint.js): kept, so the next thing said like that is theirs without his name.
  */
 function heardAloud(text, heard) {
+  // Said across him, it has his voice in it too: not a way they sound.
+  const across = conversation.speaking;
   const turned = conversation.heard(text, { unsure: !!heard?.unsure, lag: heard?.afterMs });
   // Their voice, or words he took as said to him: they're there, wherever in the room.
   if (turned || (voiceprint && !heard?.unsure)) presence?.seen('voice');
-  if (turned && heard?.learn && heard.voice && voiceprint) learnVoice(heard.voice);
+  if (turned && !across && heard?.learn && heard.voice && voiceprint) learnVoice(heard.voice);
 }
 
 async function learnVoice(voice) {
