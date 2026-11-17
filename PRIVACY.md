@@ -1,15 +1,16 @@
 # Jester privacy policy
 
-_Last updated: November 7, 2026_
+_Last updated: November 16, 2026_
 
 Jester is a Chrome extension that lets you control video and your browser with
 hand gestures, an eye or head cursor, and voice commands. This policy explains
 what Jester does with your data.
 
 **In short:** your camera and microphone are processed on your device and never
-leave it. Jester has no servers, no analytics and no ads. The only data that
-leaves your device goes to the AI provider you choose in Settings, and only
-while Jester carries out a voice command you gave it.
+leave it. Jester has no servers, no analytics and no ads. When carrying out a
+request, it contacts the websites and search engine needed for that request
+and the AI provider you choose in Settings. Research can include extracted
+text from signed-in pages you ask it to read.
 
 ## Processed only on your device
 
@@ -35,6 +36,11 @@ profile. The popup's list of recent actions, your last three voice commands
 task are held in Chrome's session storage, which is cleared when you close the
 browser.
 
+The extension's latest background research answer and source links are also
+held in session storage so you can review them in the popup. Closing the
+browser clears them. Desktop research answers are part of its conversation
+history and follow the app's existing conversation retention settings.
+
 ## Sent to the AI provider you choose
 
 Simple commands such as "next tab", "open Gmail" or "reopen the closed tab" are
@@ -52,6 +58,10 @@ contain:
   raw HTML, and never the contents of password, payment, one-time-code or other
   secret fields;
 - the task's progress so far: its goal, short notes and the last few actions;
+- for background research: bounded extracted page text, search snippets,
+  titles, source URLs, links and retrieval times. This includes signed-in
+  pages such as Canvas when your request concerns them. Open-tab metadata is
+  used to locate those pages; raw HTML and cookies are not sent to the model;
 - only when the command needs them: the titles and addresses of your open tabs,
   or up to ten matching history entries or bookmarks. Address parameters that
   look like tokens, keys or passwords are removed first;
@@ -66,7 +76,8 @@ receives under its own terms and privacy policy:
 [Anthropic](https://www.anthropic.com/legal/privacy),
 [Google](https://policies.google.com/privacy),
 [Groq](https://groq.com/privacy-policy/). If you don't add a model, nothing is
-sent anywhere.
+sent to an AI provider. Public searches and page requests still contact their
+respective websites.
 
 **API keys** you enter are stored in your browser profile on this device and
 are sent only to the provider they belong to. Settings never shows a saved key
@@ -98,6 +109,45 @@ While they're linked:
 Unlinking removes the permission, and the extension goes back to using its own
 camera and microphone.
 
+Desktop can create saved briefings from connected calendars, tasks, watched
+important mail, retained conversations, and requested background research.
+Briefing snapshots, source links, covered time ranges, and read/snooze/dismiss
+state stay on your computer for up to seven days. Your chosen model may receive
+the relevant facts to write a briefing; the Email setting that prevents model
+judgment also prevents briefing wording from sending watched mail to a model.
+Scheduled briefings announce availability and wait for an accepted reading.
+They are not pushed to your phone. Opening an item requires your click or a
+separate explicit request.
+
+## Background web research
+
+Jester tries background reading before using browser or desktop controls for
+informational requests. If reading cannot finish, it asks before interacting.
+The extension can search and fetch public pages without the desktop app. Its
+current search source is DuckDuckGo's public HTML results, which receives the
+search terms. Each requested website receives ordinary page requests.
+
+When the desktop app is running and linked, the extension can use its local
+Scrapling helper for public pages and isolated headless rendering. The helper
+does not use your Chrome profile, sends no browser cookies, and keeps no page
+cache. Python dependencies and its browser are installed explicitly on your
+computer, not downloaded at every launch.
+
+Signed-in research uses the extension's existing open tabs, and only when you
+ask about Canvas or pages you have open; any other research reads pages
+anonymously, without your cookies, even if you have the same site open. It
+reads the current page or makes GET requests for same-origin documents in that
+tab's isolated context, with Chrome's normal session cookies. Cookies, passwords,
+and browser profiles are not exported to the desktop helper or model. Form
+fields and known secret patterns are excluded from extracted content. The
+requested page text and links can still contain personal information, and
+that relevant extracted content is sent to your configured AI provider.
+
+Reading does not focus, refresh or navigate your tabs. The reported retrieval
+time for an open page is when its current DOM was read, not when the server
+last updated it. Extraction is bounded and may omit content; login steps,
+verification screens, and unsupported documents may require interaction.
+
 ## How Jester uses its browser permissions
 
 Jester uses each permission only to carry out what you ask:
@@ -110,7 +160,9 @@ Jester uses each permission only to carry out what you ask:
   carry out commands such as "switch to the recipe tab", "reopen the closed
   tab", "find the page I visited about bread", "bookmark this page" or "search
   for a USB hub". Searches go to your default search engine, as if you had typed
-  them. History and bookmarks are read only when a command asks for them.
+  them for explicit browser searches. Background research searches use
+  DuckDuckGo's HTML results. History and bookmarks are read only when a
+  command asks for them.
 - **Debugger**: during a voice task, to click and type with Chrome's real mouse
   and keyboard and to take the screenshot described above. Chrome shows a
   "Jester started debugging this browser" bar while it's in use; closing the
@@ -118,7 +170,8 @@ Jester uses each permission only to carry out what you ask:
 - **Notifications**: to ask for your OK and report results on pages where the
   voice pill can't appear.
 - **Storage, offscreen document and scripting**: to save settings, run the
-  camera engine, and show Jester's controls on pages.
+  camera engine, show Jester's controls on pages, and read permitted open
+  pages in an isolated context for requested research.
 - **Native messaging** (optional, asked for only when you click Link) and
   **alarms**: to talk to Jester Desktop as described above, and to try the link
   again every half minute while the app isn't running.
@@ -127,9 +180,10 @@ Jester uses each permission only to carry out what you ask:
 
 - There are no Jester servers. The developer never receives your data.
 - No analytics, tracking or advertising, and your data is never sold.
-- Your data is used only to carry out your commands. It is not transferred to
-  anyone except the AI provider you choose, and it is not used to determine
-  creditworthiness or for lending.
+- Your data is used only to carry out your commands. Requested websites and
+  search providers receive the requests needed to find the information, and
+  your chosen AI provider receives the relevant extracted evidence. Your
+  data is not used to determine creditworthiness or for lending.
 
 ## Your choices
 

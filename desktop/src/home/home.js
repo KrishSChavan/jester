@@ -12,8 +12,9 @@ import { chatElements, createChats, dividerElement, lineElement } from './chats.
 import { createOrb, ORB_STATES } from './orb.js';
 import { createScreens } from './screens.js';
 import { createTasksPanel } from './tasks.js';
-import { cardElement, refreshCards, shelfOf, watchCards } from './cards.js';
+import { cardElement, refreshBriefingCards, refreshCards, shelfOf, watchCards } from './cards.js';
 import { onRender, save, showing, startSettings, state } from './settings.js';
+import { renderResearchState } from './research.js';
 
 const $ = (id) => document.getElementById(id);
 document.documentElement.dataset.platform = /^Win/i.test(navigator.platform) ? 'win' : 'mac';
@@ -57,6 +58,15 @@ let heardNow = '';
 let note = '';
 let noteTimer = null;
 let introTimer = null;
+let research = null;
+
+function drawResearch(next) {
+  research = next || null;
+  renderResearchState($('research-progress'), research);
+  document.body.classList.toggle('researching', research?.active === true);
+  if (research?.active) mood('thinking', THINKING_MS);
+  else drawPending();
+}
 
 // ——— The orb ———
 
@@ -94,7 +104,7 @@ const nearEnd = (box) => box.scrollHeight - box.scrollTop - box.clientHeight < 8
 /** He's thinking about what you said: three dots where his words will go. */
 function drawPending() {
   const lines = $('live-lines');
-  const waiting = document.body.dataset.state === 'thinking' && chat.lines.at(-1)?.who === 'you';
+  const waiting = !research?.active && document.body.dataset.state === 'thinking' && chat.lines.at(-1)?.who === 'you';
   const pending = lines.querySelector('.pending');
   if (waiting && !pending) {
     const dots = document.createElement('li');
@@ -403,6 +413,20 @@ const chats = createChats({ go: (screen) => screens.go(screen), onPickedUp: () =
 // The to-do list, reminders and timers, to the left of the orb beside Chats.
 const tasksPanel = createTasksPanel();
 
+let briefingShelfKey = '';
+/** Today, as the briefings' `day` is written (briefing-manager.js dayOf). */
+const today = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
+function drawBriefings(cards = []) {
+  refreshBriefingCards(cards, { replace: true });
+  // Today's, waiting to be read: yesterday's offer left unanswered isn't news any more.
+  const waiting = cards.filter((card) => ['offered', 'later', 'ready'].includes(card.status) && card.day === today()).slice(0, 3);
+  const key = JSON.stringify(waiting);
+  if (key === briefingShelfKey) return;
+  briefingShelfKey = key;
+  $('briefing-shelf').hidden = waiting.length === 0;
+  $('briefing-shelf').replaceChildren(...waiting.map((card) => cardElement(card)));
+}
+
 // The shelf over the orb: what's in play right now, as cards. Timers running, reminders given and not ticked, and
 // those coming up in the next few hours. Drawn again only when what's on it changes: a card keeps itself current.
 let shelved = '';
@@ -501,11 +525,17 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'jester/chat':
       drawChat(message.chat, { forgotten: message.forgotten === true });
       break;
+    case 'jester/research-state':
+      drawResearch(message.research);
+      break;
     case 'jester/chats-changed':
       chats.changed(screens.current);
       break;
     case 'jester/tasks-changed':
       refreshCards();
+      break;
+    case 'jester/briefings-changed':
+      drawBriefings(message.cards);
       break;
     // Opened again from the menu bar or the Dock: to the screen asked for, with the intro if it wasn't on screen.
     case 'jester/home-go':
@@ -523,6 +553,9 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 onRender(drawMain);
+onRender(({ desktop }) => {
+  if (desktop && Object.hasOwn(desktop, 'research')) drawResearch(desktop.research);
+});
 addEventListener('resize', () => orb.resize(orbSize()));
 
 // Where it opens: the orb, with its intro, unless the menu bar asked for Settings. A chat needs picking from Chats.
@@ -548,6 +581,10 @@ chrome.runtime
   .catch(() => undefined);
 mood(document.body.dataset.state);
 chrome.runtime.sendMessage({ type: 'jester/chats', op: 'current' }).then((reply) => reply?.chat && drawChat(reply.chat));
+chrome.runtime.sendMessage({ type: 'jester/briefings', op: 'list' }).then((reply) => reply?.ok && drawBriefings(reply.cards));
+document.addEventListener('jester/briefing-navigate', (event) => {
+  if (event.detail === 'tasks') screens.go('tasks');
+});
 startSettings().then(drawMain);
 
 // For main.js's self-test, and anyone checking the window from outside: go to a screen.

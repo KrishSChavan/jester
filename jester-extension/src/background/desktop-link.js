@@ -25,6 +25,8 @@ const FIRST_TRY_MS = 1500;
 const RESTART_KEY = 'desktopLinkRestart';
 /** A reload this recent that still didn't bring connectNative won't be followed by another: Chrome itself needs restarting. */
 const RESTART_GUARD_MS = 60_000;
+/** Includes a headless page load, without keeping the worker waiting indefinitely. */
+const SCRAPE_MS = 90_000;
 const SETTINGS_PAGE = 'src/options/options.html';
 /** What the app needs to know of the extension's settings: what each gesture does. */
 const BINDING_KEYS = ['bindings', 'windowedBindings', 'swipeBindings', 'windowedSwipeBindings', 'windowedBindingsEnabled'];
@@ -39,16 +41,19 @@ export const desktopBindings = (settings) => Object.fromEntries(BINDING_KEYS.fil
  * @param {(id:string, text:string, meant:string) => Promise<{ok:boolean, say:string}>} deps.task  a command from the app,
  *   carried out; `meant`: what the app's conversation took the words to mean, or ''
  * @param {() => void} deps.cancel  the app stopped it
- * @param {(op:string, args:object) => Promise<unknown>} deps.request  a question from the app: knows, aim, act
+ * @param {(op:string, args:object, options?:{signal:AbortSignal}) => Promise<unknown>} deps.request  a question from the app: knows, aim, act, web
  * @param {(state:string, detail:string) => void} [deps.onChange]
  */
-export function createDesktopLink({ api = () => globalThis.chrome, version, settings, task, cancel, request, onChange = () => undefined }) {
+export function createDesktopLink({ api = () => globalThis.chrome, version, settings, task, cancel, request, onChange = () => undefined, scrapeTimeoutMs = SCRAPE_MS }) {
   const chrome = api;
   let port = null;
   let state = LINK_STATE.OFF;
   let detail = '';
   let next = 0;
   const asking = new Map();
+  const scraping = new Map();
+  const webRequests = new Map();
+  let scraperAvailable = false;
   let firstTry = null;
   let settleFirst = () => undefined;
 
@@ -68,7 +73,13 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
     detail = why;
     if (state === LINK_STATE.LINKED || state === LINK_STATE.OFF || state === LINK_STATE.RESTART) chrome().alarms?.clear(RETRY_ALARM);
     else chrome().alarms?.create(RETRY_ALARM, { periodInMinutes: RETRY_MINUTES });
-    if (state !== LINK_STATE.LINKED) for (const [id, resolve] of asking) (asking.delete(id), resolve(false));
+    if (state !== LINK_STATE.LINKED) {
+      scraperAvailable = false;
+      for (const [id, resolve] of asking) (asking.delete(id), resolve(false));
+      for (const pending of [...scraping.values()]) pending.finish({ ok: false, code: 'scrape_unavailable', detail: 'The link to Jester Desktop closed before the web request finished.' });
+      for (const controller of webRequests.values()) controller.abort();
+      webRequests.clear();
+    }
     onChange(state, detail);
   }
 
@@ -85,12 +96,16 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
   async function onMessage(message) {
     switch (message?.type) {
       case 'welcome':
+        scraperAvailable = message.scraping === true;
         return become(LINK_STATE.LINKED);
+      case 'scrape-result':
+        return scraping.get(String(message.id))?.finish(message.result && typeof message.result === 'object'
+          ? message.result : { ok: false, code: 'scrape_failed', detail: 'Jester Desktop returned no web data.' });
       case 'jester/link-error':
         return become(LINK_STATE.WAITING, String(message.detail || 'Jester Desktop isn’t running.'));
       case 'task': {
-        const result = await task(String(message.id), String(message.text || ''), String(message.meant || '')).catch((err) => ({ ok: false, say: String(err?.message || err) }));
-        return void post({ type: 'done', id: message.id, ok: !!result?.ok, say: String(result?.say || ''), ...(Array.isArray(result?.trace) ? { trace: result.trace.slice(-40).map((line) => String(line).slice(0, 220)) } : {}) });
+        const result = await task(String(message.id), String(message.text || ''), String(message.meant || ''), { skipResearch: message.skipResearch === true }).catch((err) => ({ ok: false, say: String(err?.message || err) }));
+        return void post({ type: 'done', id: message.id, ok: !!result?.ok, say: String(result?.say || ''), ...(typeof result?.answer === 'string' ? { answer: result.answer.slice(0, 6000) } : {}), ...(Array.isArray(result?.sources) ? { sources: result.sources.slice(0, 24) } : {}), ...(Array.isArray(result?.trace) ? { trace: result.trace.slice(-40).map((line) => String(line).slice(0, 220)) } : {}) });
       }
       case 'cancel':
         return cancel();
@@ -99,8 +114,25 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
         return asking.delete(String(message.id));
       case 'request': {
         const { id, op, type: _type, ...args } = message;
+        if (op === 'web') {
+          if (state !== LINK_STATE.LINKED || typeof id !== 'string' || id.length > 80 || webRequests.has(id)) return;
+          if (webRequests.size >= 8) return void post({ type: 'reply', id, result: { ok: false, code: 'browser_busy', detail: 'Too many background page reads are already running.' } });
+          const controller = new AbortController();
+          webRequests.set(id, controller);
+          const result = await request('web', args, { signal: controller.signal }).catch(() => ({ ok: false, code: 'browser_failed', detail: 'The background page read failed.' }));
+          if (webRequests.get(id) !== controller) return;
+          webRequests.delete(id);
+          if (!controller.signal.aborted) post({ type: 'reply', id, result });
+          return;
+        }
         const result = await request(String(op), args).catch(() => null);
         return void post({ type: 'reply', id, result });
+      }
+      case 'web-cancel': {
+        const controller = webRequests.get(message.id);
+        webRequests.delete(message.id);
+        controller?.abort();
+        return;
       }
       default:
         return undefined;
@@ -185,6 +217,35 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
     },
     get linked() {
       return state === LINK_STATE.LINKED;
+    },
+    /** Older apps do not advertise a scraper; their ordinary browser link still works. */
+    get scraping() {
+      return state === LINK_STATE.LINKED && scraperAvailable;
+    },
+    /** Read web data through the desktop's Scrapling worker; no Chrome tab is opened or focused. */
+    scrape(request, { signal } = {}) {
+      if (signal?.aborted) return Promise.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+      if (state !== LINK_STATE.LINKED || !scraperAvailable) return Promise.resolve({ ok: false, code: 'scrape_unavailable', detail: 'Open an updated Jester Desktop and link it from Settings to use Scrapling.' });
+      const id = String(++next);
+      return new Promise((resolve, reject) => {
+        const finish = (result, error) => {
+          if (!scraping.delete(id)) return;
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', abort);
+          if (error) reject(error); else resolve(result);
+        };
+        const abort = () => {
+          post({ type: 'scrape-cancel', id });
+          finish(null, Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+        };
+        const timer = setTimeout(() => {
+          post({ type: 'scrape-cancel', id });
+          finish({ ok: false, code: 'scrape_timeout', detail: 'The background web request timed out.' });
+        }, Math.max(1, scrapeTimeoutMs));
+        scraping.set(id, { finish });
+        signal?.addEventListener('abort', abort, { once: true });
+        if (!post({ type: 'scrape', id, request })) finish({ ok: false, code: 'scrape_unavailable', detail: 'Jester Desktop is no longer linked.' });
+      });
     },
     /** A frame for the app's pill, in place of this one's. */
     pill: (voice) => post({ type: 'pill', voice }),

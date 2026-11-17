@@ -34,7 +34,7 @@ test('linked once the extension says hello, which the app answers; its gestures 
   link.message(hello);
   assert.equal(link.linked, true);
   assert.equal(link.version, '0.2.0');
-  assert.deepEqual(sent, [{ type: 'welcome', version: '0.1.0' }]);
+  assert.deepEqual(sent, [{ type: 'welcome', version: '0.1.0', scraping: false }]);
   assert.deepEqual(link.bindings(), { bindings: { Open_Palm: { action: 'PLAY_PAUSE' } }, windowedBindingsEnabled: true });
   assert.equal(link.inFront(4242), true);
   assert.equal(link.inFront(17), false, 'another app');
@@ -182,7 +182,7 @@ test('the relay is copied out of the guarded folders, and a manifest goes only t
 });
 
 /** The extension's half, against a fake Chrome whose native port is scripted. */
-function extensionSide({ granted = true, bound = true, stored = {}, tabs = [] } = {}) {
+function extensionSide({ granted = true, bound = true, stored = {}, tabs = [], scrapeTimeoutMs, webRequest } = {}) {
   const ports = [];
   const reloads = [];
   const opened = [];
@@ -230,7 +230,8 @@ function extensionSide({ granted = true, bound = true, stored = {}, tabs = [] } 
     settings: async () => ({ enabled: true, bindings: { Victory: { action: 'SLEEP' } }, seekSeconds: 10 }),
     task: async (id, text, meant) => (tasks.push(text), meant && understood.push([text, meant]), { ok: true, say: `Did ${text}`, ...(text === 'traced' ? { trace: ['did: one thing', 'y'.repeat(400)] } : {}) }),
     cancel: () => tasks.push('cancelled'),
-    request: async (op, args) => (op === 'knows' ? args.text.includes('canvas') : null),
+    request: webRequest || (async (op, args) => (op === 'knows' ? args.text.includes('canvas') : null)),
+    ...(scrapeTimeoutMs === undefined ? {} : {scrapeTimeoutMs}),
     onChange: (state) => states.push(state)
   });
   return { link, ports, alarms, listeners, tasks, meant: understood, states, reloads, opened, stored, grant: (on) => (granted = on) };
@@ -329,4 +330,156 @@ test('a worker that started before Link has no connectNative: it reloads once, S
   quiet.link.start();
   await pause();
   assert.equal(quiet.stored.desktopLinkRestart.reopen, false);
+});
+
+test('Scrapling reads cross the native link with correlated results and an advertised capability', async () => {
+  const calls = [];
+  const result = {ok:true,url:'https://example.com/',title:'Example',text:'Fresh data',fetchedAt:'2026-11-16T12:00:00Z',links:[]};
+  const app = appSide({onScrape:async (request, {signal}) => (calls.push({request,signal}), result)});
+  app.link.message(hello);
+  assert.equal(app.sent[0].scraping,true);
+  app.link.message({type:'scrape',id:'read-1',request:{op:'scrape',url:'https://example.com/',mode:'auto'}});
+  await pause();
+  assert.deepEqual(calls[0].request,{op:'scrape',url:'https://example.com/',mode:'auto'});
+  assert.equal(calls[0].signal.aborted,false);
+  assert.deepEqual(app.sent.at(-1),{type:'scrape-result',id:'read-1',result});
+
+  const ext = extensionSide();
+  ext.link.start();
+  await pause();
+  const port = ext.ports[0];
+  port.receive({type:'welcome',version:'new',scraping:true});
+  assert.equal(ext.link.scraping,true);
+  const reading = ext.link.scrape({op:'search',query:'current events'});
+  const request = port.posted.at(-1);
+  assert.equal(request.type,'scrape');
+  assert.deepEqual(request.request,{op:'search',query:'current events'});
+  port.receive({type:'scrape-result',id:'unrelated',result:{ok:false}});
+  port.receive({type:'scrape-result',id:request.id,result});
+  assert.deepEqual(await reading,result);
+  port.close();
+  assert.equal(ext.link.scraping,false);
+});
+
+test('research task replies retain their plain answer and more than eight source cards', async () => {
+  const { link, sent } = appSide();
+  link.message(hello);
+  const pending = link.task('Search for news');
+  const id = sent.at(-1).id;
+  const sources = Array.from({ length: 12 }, (_, index) => ({ url: `https://example.com/${index}`, title: `Source ${index}` }));
+  link.message({ type: 'done', id, ok: true, say: 'Answer with citations.', answer: 'Plain answer.', sources });
+  const result = await pending;
+  assert.equal(result.answer, 'Plain answer.');
+  assert.deepEqual(result.sources, sources);
+});
+
+test('native scraping aborts on cancellation, disconnect and timeout, and late results are ignored', async () => {
+  const ext = extensionSide({scrapeTimeoutMs:10});
+  ext.link.start();
+  await pause();
+  const port = ext.ports[0];
+  port.receive({type:'welcome',scraping:true});
+  const controller = new AbortController();
+  const reading = ext.link.scrape({op:'scrape',url:'https://example.com/'},{signal:controller.signal});
+  const request = port.posted.at(-1);
+  const stopped = assert.rejects(reading,{name:'AbortError'});
+  controller.abort();
+  await stopped;
+  assert.deepEqual(port.posted.at(-1),{type:'scrape-cancel',id:request.id});
+  port.receive({type:'scrape-result',id:request.id,result:{ok:true,text:'too late'}});
+  const timed = await ext.link.scrape({op:'search',query:'test'});
+  assert.equal(timed.code,'scrape_timeout');
+  assert.equal(port.posted.at(-1).type,'scrape-cancel');
+  const interrupted = ext.link.scrape({op:'search',query:'test'});
+  port.close();
+  assert.equal((await interrupted).code,'scrape_unavailable');
+  assert.equal((await ext.link.scrape({op:'search',query:'test'})).code,'scrape_unavailable');
+});
+
+test('desktop scraping cancels the worker on cancel/disconnect and does not send stale data', async () => {
+  const calls = [];
+  const app = appSide({onScrape:(request,{signal}) => new Promise(resolve => calls.push({request,signal,resolve}))});
+  app.link.message(hello);
+  app.link.message({type:'scrape',id:'one',request:{op:'search',query:'one'}});
+  await pause();
+  app.link.message({type:'scrape-cancel',id:'one'});
+  assert.equal(calls[0].signal.aborted,true);
+  calls[0].resolve({ok:true,text:'stale'});
+  await pause();
+  assert.equal(app.sent.some(message => message.type === 'scrape-result'),false);
+  app.link.message({type:'scrape',id:'two',request:{op:'search',query:'two'}});
+  await pause();
+  app.link.disconnected();
+  assert.equal(calls[1].signal.aborted,true);
+  calls[1].resolve({ok:true});
+  await pause();
+  assert.equal(app.sent.some(message => message.type === 'scrape-result'),false);
+});
+
+test('older linked apps do not advertise scraping and failed workers return a structured error', async () => {
+  const ext = extensionSide();
+  ext.link.start();
+  await pause();
+  ext.ports[0].receive({type:'welcome',version:'old'});
+  assert.equal(ext.link.linked,true);
+  assert.equal(ext.link.scraping,false);
+  assert.equal((await ext.link.scrape({op:'search',query:'test'})).code,'scrape_unavailable');
+  const app = appSide({onScrape:async () => { throw new Error('private runtime path'); }});
+  app.link.message(hello);
+  app.link.message({type:'scrape',id:'broken',request:{op:'search',query:'test'}});
+  await pause();
+  assert.deepEqual(app.sent.at(-1),{type:'scrape-result',id:'broken',result:{ok:false,code:'scrape_failed',detail:'The background web request failed.'}});
+});
+
+test('desktop reads open signed-in pages through the extension and cancels the read when stopped', async () => {
+  const app = appSide();
+  app.link.message(hello);
+  const controller = new AbortController();
+  const waiting = app.link.web({op:'scrape',url:'https://canvas.example.edu/courses',openOnly:true},{signal:controller.signal});
+  const request = app.sent.at(-1);
+  assert.equal(request.type,'request');
+  assert.equal(request.op,'web');
+  assert.equal(request.request.openOnly,true);
+  app.link.message({type:'reply',id:request.id,result:{ok:true,text:'Assignment due tomorrow'}});
+  assert.deepEqual(await waiting,{ok:true,text:'Assignment due tomorrow'});
+  const cancelled = app.link.web({op:'tabs'},{signal:controller.signal});
+  const pending = app.sent.at(-1);
+  const stopped = assert.rejects(cancelled,{name:'AbortError'});
+  controller.abort();
+  await stopped;
+  assert.deepEqual(app.sent.at(-1),{type:'web-cancel',id:pending.id});
+  assert.equal(app.link.running,false);
+});
+
+test('extension receives cancellable desktop page reads without delegating them back to Scrapling', async () => {
+  const calls = [];
+  const ext = extensionSide({webRequest:(op,args,{signal}) => new Promise(resolve => calls.push({op,args,signal,resolve}))});
+  ext.link.start();
+  await pause();
+  const port = ext.ports[0];
+  port.receive({type:'welcome',scraping:true});
+  port.receive({type:'request',id:'web-one',op:'web',request:{op:'tabs'}});
+  await pause();
+  assert.equal(calls[0].op,'web');
+  assert.deepEqual(calls[0].args,{request:{op:'tabs'}});
+  calls[0].resolve({ok:true,tabs:[]});
+  await pause();
+  assert.deepEqual(port.posted.at(-1),{type:'reply',id:'web-one',result:{ok:true,tabs:[]}});
+  port.receive({type:'request',id:'web-two',op:'web',request:{op:'tabs'}});
+  await pause();
+  port.receive({type:'web-cancel',id:'web-two'});
+  assert.equal(calls[1].signal.aborted,true);
+  calls[1].resolve({ok:true,tabs:[]});
+  await pause();
+  assert.equal(port.posted.some(message => message.type === 'reply' && message.id === 'web-two'),false);
+  assert.equal(port.posted.some(message => message.type === 'scrape'),false);
+});
+
+test('desktop-approved UI fallback carries skipResearch once so the extension does not ask again', () => {
+  const app = appSide();
+  app.link.message(hello);
+  const waiting = app.link.task('research Canvas',{skipResearch:true});
+  assert.equal(app.sent.at(-1).skipResearch,true);
+  app.link.message({type:'done',id:app.sent.at(-1).id,ok:true,say:'Read Canvas'});
+  return waiting;
 });

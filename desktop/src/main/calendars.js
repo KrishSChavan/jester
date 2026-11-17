@@ -17,6 +17,7 @@
 
 import crypto from 'node:crypto';
 import ICAL from 'ical.js';
+import { sourceAddress } from './research-sources.js';
 
 /** How often every calendar is read again. Google's own feed lags its calendar by hours at worst: no sooner helps. */
 export const REFRESH_MS = 15 * 60 * 1000;
@@ -163,14 +164,23 @@ function endOf(component, start, startAt) {
   return start.isDate ? new Date(start.year, start.month - 1, start.day + 1).getTime() : startAt;
 }
 
-const eventOf = (component, start, end, allDay) => ({
-  uid: String(component.getFirstPropertyValue('uid') ?? ''),
-  title: clip(component.getFirstPropertyValue('summary'), TITLE_CHARS) || '(no title)',
-  place: clip(component.getFirstPropertyValue('location'), PLACE_CHARS),
-  start,
-  end,
-  allDay
-});
+/** An event's explicit page URL, never the private calendar subscription link. */
+export function calendarEventUrl(value) {
+  const address = sourceAddress(typeof value === 'string' ? value : '');
+  if (!address || /(?:\.ics$|\/calendar\/ical\/|\/feeds\/calendars\/)/i.test(address.pathname)) return '';
+  return address.href;
+}
+
+const eventOf = (component, start, end, allDay) => {
+  const url = calendarEventUrl(component.getFirstPropertyValue('url'));
+  return {
+    uid: String(component.getFirstPropertyValue('uid') ?? ''),
+    title: clip(component.getFirstPropertyValue('summary'), TITLE_CHARS) || '(no title)',
+    place: clip(component.getFirstPropertyValue('location'), PLACE_CHARS),
+    start, end, allDay,
+    ...(url ? { url } : {})
+  };
+};
 
 const overlaps = (start, end, from, to) => start < to && Math.max(end, start + 1) > from;
 
@@ -325,9 +335,14 @@ export function combine(lists) {
       if (already) {
         if (!already.calendars.includes(calendar)) already.calendars.push(calendar);
         if (!already.place && event.place) already.place = event.place;
+        if (!already.url) {
+          const url = calendarEventUrl(event.url);
+          if (url) already.url = url;
+        }
         continue;
       }
-      const entry = { title: event.title, place: event.place, start: event.start, end: event.end, allDay: event.allDay, calendars: [calendar] };
+      const url = calendarEventUrl(event.url);
+      const entry = { title: event.title, place: event.place, start: event.start, end: event.end, allDay: event.allDay, calendars: [calendar], ...(url ? { url } : {}) };
       kept.set(key, entry);
       if (uidKey) byUid.set(uidKey, entry);
     }

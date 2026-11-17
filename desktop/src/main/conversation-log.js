@@ -23,8 +23,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { sourcesOf } from './research-sources.js';
 
 export const EMPTIED_EVERY_MS = 60 * 60 * 1000;
+
+function safeSources(entry) {
+  const { sources, ...line } = entry;
+  const kept = line.hidden ? [] : sourcesOf(sources);
+  return { ...line, ...(kept.length ? { sources: kept } : {}) };
+}
 
 /**
  * @param {object} options
@@ -49,6 +56,7 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
     fs.mkdirSync(path.dirname(file), { recursive: true });
     // Written beside it and swapped in: a crash never leaves half a file.
     const next = `${file}.tmp`;
+    data.entries = data.entries.map(safeSources);
     fs.writeFileSync(next, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
     fs.renameSync(next, file);
   }
@@ -63,7 +71,7 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
 
   try {
     const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (Number.isFinite(stored?.emptiedAt) && Array.isArray(stored.entries)) data = { conversation: 1, ...stored };
+    if (Number.isFinite(stored?.emptiedAt) && Array.isArray(stored.entries)) data = { conversation: 1, ...stored, entries: stored.entries.map(safeSources) };
   } catch {
     /* no file yet, or not one of ours: start empty */
   }
@@ -146,13 +154,13 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
     expire: () => expire(),
     /**
      * @param {'you'|'jester'} who
-     * @param {{card?:object, untrusted?:boolean}} [more]  card: what the line is about, for his window to show with it
+     * @param {{card?:object, sources?:object[], untrusted?:boolean}} [more]  card: what the line is about, for his window to show with it
      *   (cards.js); untrusted: it holds someone else's words (a calendar's titles), so what's asked after it is
      *   treated as carefully as if they'd been read out
      */
-    add(who, text, { card = null, untrusted = false } = {}) {
+    add(who, text, { card = null, sources = null, untrusted = false } = {}) {
       expire(who === 'jester');
-      data.entries.push({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation, chat: data.chat, ...(card ? { card } : {}), ...(untrusted ? { untrusted: true } : {}) });
+      data.entries.push(safeSources({ at: new Date(now()).toISOString(), who, text: String(text), conversation: data.conversation, chat: data.chat, ...(card ? { card } : {}), sources, ...(untrusted ? { untrusted: true } : {}) }));
       write();
       changed();
     },
@@ -162,7 +170,7 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
       return going().slice(-count);
     },
     /** All of the conversation going on, as it is: nothing's ended by asking. */
-    entries: () => going().map((entry) => ({ ...entry })),
+    entries: () => going().map(safeSources),
     /** The id of the chat going on. */
     chatId: () => data.chat,
     idleFor,
@@ -185,7 +193,7 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
         const hidden = entry?.hidden ? { hidden: true } : {};
         // What a line was about, and whether it held someone else's words, come back with it.
         const more = { ...(entry?.card && typeof entry.card === 'object' ? { card: entry.card } : {}), ...(entry?.untrusted ? { untrusted: true } : {}) };
-        data.entries.push({ at: String(entry?.at ?? new Date(now()).toISOString()), who, text: String(entry?.text ?? ''), conversation: data.conversation, chat: data.chat, earlier: true, ...hidden, ...more });
+        data.entries.push(safeSources({ at: String(entry?.at ?? new Date(now()).toISOString()), who, text: String(entry?.text ?? ''), conversation: data.conversation, chat: data.chat, earlier: true, ...hidden, ...more, sources: entry?.sources }));
       }
       write();
       changed();

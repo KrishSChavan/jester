@@ -1,4 +1,6 @@
 import { MSG, ENGINE, ACTIONS, saveSettings } from '../common/constants.js';
+import { fromJester } from '../common/senders.js';
+import { renderResearchResult } from './research-result.js';
 
 
 const el = (id) => document.getElementById(id);
@@ -21,6 +23,7 @@ const ui = {
   gestureScore: el('gestureScore'),
   gestureBar: el('gestureBar'),
   history: el('history'),
+  researchCard: el('researchCard'),
   targetState: el('targetState'),
   optionsBtn: el('optionsBtn'),
   restartBtn: el('restartBtn')
@@ -251,8 +254,11 @@ ui.grantBtn.addEventListener('click', () => {
   window.close();
 });
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender) => {
   switch (message?.type) {
+    case 'jester/research-result':
+      if (fromJester(sender)) renderResearchResult(ui.researchCard,message.result);
+      return false;
     case 'jester/approval-state':
       renderApproval(message.approval);
       return false;
@@ -319,6 +325,7 @@ setInterval(() => {
   renderNotice();
   renderEngine(state.engine);
   renderHistory(state.history || []);
+  renderResearchResult(ui.researchCard,state.webResult);
   // Which binding set is live is otherwise invisible, and it's the first thing
   // you want to check when a pose does something you didn't expect.
   const context = state.context === 'windowed' ? 'windowed' : 'fullscreen';

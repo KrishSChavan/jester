@@ -83,6 +83,85 @@ front window fills its display.
 Tests live with the extension's, in `../tests/desktop-*.test.mjs`, and run with
 `npm test` from the repository root.
 
+## Background web research
+
+Web searches and informational research run before app discovery, browser
+focus, or learned mouse/keyboard routines. Jester returns extracted evidence
+with source addresses and retrieval times, and asks before browser or desktop
+interaction if background reading cannot finish. Try “search the web for
+Scrapling,” “look up the latest launch news,” or “look through my Canvas and
+tell me what is due.” Research runs fresh each time rather than replaying a
+previous search.
+
+While a search is running, the desktop window shows **Searching the internet**
+with live progress and a Stop button. Research answers attach source cards with
+an **Open** button for each page. Up to three cards are shown directly; a longer
+list starts inside a collapsed sources dropdown. Cards remain with the answer
+when its chat is reopened. The visible desktop window keeps the research pill
+and its floating stop control hidden, including while the window is unfocused
+or showing Settings. Hiding or minimizing the window moves active search
+feedback to the pill until the window returns.
+
+A search without a target, such as “search something,” first asks what to
+search for. The answer continues that request: typed, or said with his name
+within two minutes, or without it within 20 seconds in a voice the voiceprint
+knows (as for any question of his). It's cleared when cancelled.
+
+What counts as a search: “search for…”, “look up…”, “research…”, “google…”,
+Canvas or pages already open (“what's due on Canvas”, “summarize this page”),
+and a link to read. Searching an app (“search YouTube for cats”), finding your
+own things (“find my keys in Finder”), the weather and your calendar go where
+they always went. Other live questions (“what's bitcoin at?”) reach it through
+the talking model, as “search the web for…”. Open tabs, with their sign-ins,
+are read only when your own words ask about Canvas or open pages; everything
+else is read anonymously. Without the helper below set up or Chrome linked,
+a search opens in the browser, as before. A model then
+chooses a strategy and gives background scraping a confidence score from 0 to
+100. At 70 or above, Jester can try background reading. Below 70, or when the
+model recommends interaction, Jester asks before using browser or desktop
+controls. The score appears in the search indicator and in low-confidence
+confirmation questions. It estimates suitability for the task, rather than
+guaranteeing the page will be readable; a failed read still asks before falling
+back to controls.
+
+Install the local public-web helper from the repository root:
+
+```sh
+npm --prefix desktop run scraping:setup -- --browser
+```
+
+Python 3.10+ is required. This creates `desktop/.scrapling/`, installs pinned
+[Scrapling 0.5.1](https://github.com/D4Vinci/Scrapling/releases/tag/v0.5.1),
+and downloads a project-local headless Chromium. Omit `--browser` for HTTP
+extraction only. Set `JESTER_PYTHON` to choose the Python used for setup, or
+`JESTER_SCRAPLING_PYTHON` to use an existing prepared Python environment at
+runtime. Startup never installs packages. On Linux, rendering may also need
+Chromium's operating-system dependencies installed separately.
+
+The extension shares this helper over the existing native link. For signed-in
+Canvas and other open sites, desktop research delegates reads to the extension
+instead: cookies stay in Chrome. Link it through Settings › Chrome, grant
+site access in the extension's Settings, and keep the relevant site open and
+signed in. Current DOM snapshots and same-origin document requests do not
+focus or navigate tabs. Jester asks before a login, navigation, or other
+interaction is needed. Without the desktop app, the extension can still search
+and read pages through its own background reader.
+
+`web-research.js` in the extension is the shared bounded research loop.
+`src/main/web-scraper.js` launches cancellable Python workers;
+`scraping/worker.py` uses Scrapling for extraction/rendering and a checked
+HTTP transport for public pages. Public requests validate and pin DNS, check
+redirects, and block local/private networks. Browser sessions are isolated
+from the user's profiles. The helper has no listening HTTP service, exports
+no cookies, and accepts no code or shell commands from a model. Reads and
+model calls are bounded; cancellation stops the worker and its browser.
+
+Search currently uses DuckDuckGo's public HTML results, which can be blocked
+or rate limited. Documents such as PDFs, image-only content, and interactive
+app views may need the browser. Read content goes to the selected model as
+untrusted evidence, and existing conversation retention applies to desktop
+answers. The helper keeps no page cache or research log.
+
 ## Setup
 
 Setting him up on another Mac, for someone who isn't going to read the rest of
@@ -589,11 +668,22 @@ since Ollama answers one request at a time. Typing in his window loads the model
 swap left, about as long as typing a sentence. Saying his name doesn't load it,
 since a command the matcher knows would then load 7.6 GB for nothing.
 
-He'd otherwise hear himself, and did: through a Mac's speakers, his replies came
-back garbled as if the user had said them, and he answered them. So while he
-talks and for 1.2 s after, only "stop" gets through; when he stops, whatever was
-mid-utterance is thrown away (`listenAfresh`), since it began with him in it; and
-anything heard that's mostly words he said in the last 30 s is dropped as an echo.
+You can talk over him while the continuous microphone is on: he stops speaking
+and listens to the rest without needing his name again. That takes Your voice:
+a voice the voiceprint is sure of can recognize an interruption before its
+transcript is ready (a check every 0.45 s of the last 1.2 s while he talks).
+Without a voiceprint only "stop" cuts him off, as before: his own voice comes
+back through the speakers garbled past any echo check, and so does a
+television's. Echo cancellation is on for the continuous microphone; noise
+suppression and automatic gain stay off.
+
+The current microphone utterance is retained, including its opening words, when
+playback stops. Old streamed replies and prefetched speech are cancelled so they
+cannot resume behind the interruption. Unverified playback echoes, including a
+short “yes” from his own approval question, are screened before they can become
+another turn or an approval. A verified interruption or a screened correction
+can repeat words from the reply; it is not discarded for doing so. Mixed audio
+from an interruption is never used to update the user's voiceprint.
 
 Teaching him a voice (Settings › Assistant › Your voice) keeps everyone else out
 at the door. Five sentences make a voiceprint (`voiceprint.js`, sealed with the API
@@ -610,6 +700,15 @@ as a yes to his question or a follow-up without it. Below 0.35 isn't decoded.
 Every score is still logged ("your voice", "maybe your voice", "not your voice").
 Only with a voiceprint does he take what's said after an answer without his name;
 his name alone opens the next 8 seconds either way.
+
+Those 8 seconds (20 after a question) are time to **start** answering. Once speech
+begins inside the window, he keeps listening until the speaker goes quiet, even
+if the response and its transcription take longer. The listening pill stays up
+throughout. An utterance ends on a pause, or at a minute: a television or
+music the detector takes for a voice would otherwise make one that never ends,
+held in memory and decoded whole. The voice detectors refresh during ongoing
+speech so their own 20-second limit can't shorten the pause they allow. Gesture
+and shortcut command capture keeps its separate 30-second limit.
 
 The voiceprint is five lines read once, up close. Said from across the room,
 about half of what the user says lands in "maybe" (dev.log, 2026-11-14: 36 heard
@@ -1429,8 +1528,11 @@ answer the rules would accept.
 
 ## The morning brief, the evening wrap-up, and a word before class
 
-Step 9: what he tells the user unasked, by the day (`briefs.js`). Each is a
-switch in Settings › Assistant and voice, on unless turned off.
+Scheduled briefings announce themselves and wait for permission to read.
+Jester says “I have your morning briefing. Would you like me to read it?”
+Answer yes, or use **Read**, **Later** (ten minutes), or **Dismiss**. He waits
+until you are available and does not read across a film or call. The schedule
+remains in Settings › Assistant and voice.
 
 - **The morning brief**, when they first sit down at the computer for the day
   (`presence.js`'s first sit-down; any later one, until it's been given; not
@@ -1447,7 +1549,31 @@ switch in Settings › Assistant and voice, on unless turned off.
   calendar's own words and the clock's sum, never a model's; said late, it says
   how long there is by then, and once the thing has begun, nothing.
 
-"Brief me" and "wrap up my day" give the same ones, asked for.
+“Read my morning briefing” and “read my evening briefing” replay the saved
+version. “Update my morning briefing” rebuilds it. Briefings are saved locally
+for seven days, with their original time range and sources; missing historical
+briefings are identified rather than recreated from today’s information.
+
+“Create a briefing” defaults to **since our last conversation**. “Create a
+briefing for today so far” covers the day to this point. If no previous
+conversation is available, Jester explains that he is using today instead.
+Custom topics include Canvas/classes, important mail, tasks, upcoming events,
+and news. For example: “create a Canvas briefing” or “create an upcoming events
+briefing for tomorrow.” Canvas and news use background research and do not
+silently switch to computer controls.
+
+**See more** expands the saved details inside Jester. **Open** takes you to the
+original page or Gmail thread, the Tasks screen, or a calendar day view when
+the event has no original page. No page opens just because a briefing was
+created or read. A briefing is marked read only after playback finishes;
+interrupting it leaves it available to read again.
+
+Custom briefings summarize accessible records, not an audit of everything you
+did. Calendar entries describe scheduled plans, not confirmed attendance.
+Mail covers watched important arrivals retained for two days; task history
+contains retained creations and completions. Current Canvas/news pages may
+not establish what changed throughout a requested period. These coverage
+details stay with the briefing. This feature currently runs in Desktop.
 
 **The facts come first, and what a model says of them is checked against them.**
 `factLines` gathers the day as lines; the model he talks through says them his
@@ -1466,7 +1592,7 @@ five", and "calling the dentist this evening" for a three o'clock: the first two
 are caught now that numbers in words are read, and the third never could be,
 which is why a free model's brief is the plain one.
 
-Each comes with its card in his window (the facts, a line each), and is in the
+Each comes with an expandable card in his window, and is in the
 conversation like anything he says, so "thanks" or "move the dentist to
 tomorrow" follows on. A line that held a calendar's titles is marked as someone
 else's words (`untrusted`): for the rest of that conversation a command that
@@ -1474,8 +1600,8 @@ could do harm asks first, as it does after any calendar's been told.
 
 `npm run live-check -- brief` runs it in the real app on a scratch profile, with
 a calendar the script serves: the check-in on his clock and said when it comes
-(and once), the brief on unlocking the screen and only once, a model that makes
-a time up replaced by the plain facts, the card, and the switches: 12 of 12.
+(and once), an offer on unlocking the screen, consent and snoozing, saved replay,
+explicit updates, source navigation, custom ranges, and the settings switches.
 
 A second reading found twelve faults, each now a test or a live check. The ones
 worth knowing: a check-in already said was put back on the clock at the next
@@ -1521,10 +1647,9 @@ Where a line goes is `tell.js`'s to say, by where they are (`presence.js`):
 | watching (near only because a film or a call keeps the screen awake) | sent, and shown on the screen and in his window; not said across it. With no phone to take it, it's said all the same: a timer missed is worse than a film interrupted. |
 | away | sent, and that's it told: a reminder is marked as given, and isn't said again when they're back. A send the server refused, or that never reached it (the network not up yet, just after waking), is tried again twice, half a minute apart; one that got no answer may have arrived, so it isn't. Then, as with no phone set up, it's held and said when they're back. |
 
-Reminders, timers and a word before class go at high priority; the evening
-wrap-up quietly, and as the facts said plainly (a model's wording of a
-calendar's titles isn't what's pushed); the morning brief never, being for
-sitting down to. A line that looks like a secret sends only "There’s something
+Reminders, timers and a word before class go at high priority. Morning and
+evening briefings wait at the computer for an accepted reading and are not
+pushed to the phone. A line that looks like a secret sends only "There’s something
 for you on your computer", and stays to be told: so does the real line, when
 they're back. A place that's a link to a call isn't said or sent at all.
 
@@ -2149,12 +2274,11 @@ models decode in under 35 ms.
 
 13. **What he says unasked** (the lock, the idle count and the calendar are
     scripted in the checks; nothing of it has been heard): tomorrow morning,
-    unlock the Mac and wait ten seconds: the morning brief, once, with its card
-    under the orb. At nine in the evening, the wrap-up. Fifteen minutes before a
-    class on a connected calendar, a word about it. The log has `brief: the
-    morning one given`, `telling: a line`, and never what was said. If he talks
-    over a call or a film, that's the next step's to fix: turn the three
-    switches off in Settings › Assistant and voice meanwhile.
+    unlock the Mac and wait ten seconds: the morning briefing offer, once, with
+    Read/Later/Dismiss under the orb. Say yes or press Read. At the configured
+    evening time, the evening offer waits until you are available. Fifteen
+    minutes before a class, the calendar check-in still speaks directly. The
+    log has `brief: the morning one offered`, and never the briefing contents.
 
 14. **Your phone** (*done 2026-11-15: a reminder reached the phone with the Mac locked*; a pretend server in the checks; Settings' own test did
     reach the real phone, 2026-11-15, and nothing else has): with it turned on

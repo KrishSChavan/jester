@@ -125,3 +125,10 @@ header h1 {
 footer button {
   padding: 8px 12px;
 }
+
+.research[hidden] { display: none; }
+.research summary { cursor: pointer; font-weight: 600; }
+.research-answer { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow-y: auto; }
+.research-sources { margin: 8px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.research-sources li { margin-top: 8px; }
+.research-sources span { display: block; font-size: 11px; }

@@ -15,3 +15,6 @@ jester-extension-*.zip
 dist/
 
 node_modules/
+desktop/.scrapling/
+__pycache__/
+*.pyc

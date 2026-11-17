@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { secretIn } from './vault-memory.js';
+import { sourceAddress, sourcesOf } from './research-sources.js';
 
 export const CHATS_KEPT_MS = 7 * 24 * 60 * 60 * 1000;
 /** At most this many chats, and lines in each: a week of talking is far fewer. */
@@ -51,18 +52,51 @@ function keptLine(entry, fallbackAt, { follows = '' } = {}) {
   if (entry?.hidden) return { who, text, at, hidden: true };
   const short = text.split(/\s+/).filter(Boolean).length <= ANSWER_WORDS;
   const secret = secretIn(text) || (who === 'you' && short ? follows : '');
+  const sources = secret ? [] : sourcesOf(entry?.sources);
   // Kept too: that it held someone else's words (a calendar's titles), so a chat picked up again is as careful.
-  return { who, text: secret ? `Left out: this held ${secret}.` : text, at, ...(secret ? { hidden: true } : {}), ...(!secret && cardOf(entry?.card) ? { card: cardOf(entry.card) } : {}), ...(entry?.untrusted ? { untrusted: true } : {}) };
+  return { who, text: secret ? `Left out: this held ${secret}.` : text, at, ...(secret ? { hidden: true } : {}), ...(!secret && cardOf(entry?.card) ? { card: cardOf(entry.card) } : {}), ...(sources.length ? { sources } : {}), ...(entry?.untrusted ? { untrusted: true } : {}) };
 }
 
 /** A line's card as it's kept: what it's of and where to find it, each a short string, and nothing else. */
 export function cardOf(card) {
   if (!card || typeof card !== 'object' || !['task', 'note', 'remembered', 'brief', 'mail'].includes(card.kind)) return null;
   const short = (value, most) => (typeof value === 'string' && value ? value.slice(0, most) : undefined);
-  const kept = { kind: card.kind, id: short(card.id, 40), type: short(card.type, 12), text: short(card.text, 200), title: short(card.title, 120), rel: short(card.rel, 300), snippet: short(card.snippet, 160) };
-  // A brief's card is its facts, a line each.
-  const lines = (card.kind === 'brief' || card.kind === 'mail') && Array.isArray(card.lines) ? card.lines.filter((line) => typeof line === 'string' && line).slice(0, 8).map((line) => line.slice(0, 160)) : [];
-  return { ...Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined)), ...(lines.length ? { lines } : {}) };
+  const kept = { kind: card.kind, id: short(card.id, card.kind === 'brief' ? 160 : 40), type: short(card.type, 12), text: short(card.text, 200), title: short(card.title, 120), rel: short(card.rel, 300), snippet: short(card.snippet, 160) };
+  // Briefing snapshots keep their detailed coverage notes as well as facts;
+  // legacy cards and mail retain the compact representation they had before.
+  const snapshot = card.kind === 'brief' && typeof card.id === 'string' && !!card.id;
+  const lines = (card.kind === 'brief' || card.kind === 'mail') && Array.isArray(card.lines) ? card.lines.filter((line) => typeof line === 'string' && line).slice(0, snapshot ? 24 : 8).map((line) => line.slice(0, snapshot ? 2000 : 160)) : [];
+  const items = card.kind === 'brief' ? briefingItemsOf(card.items) : [];
+  const status = card.kind === 'brief' && ['ready', 'offered', 'reading', 'read', 'later', 'dismissed', 'replaced'].includes(card.status) ? card.status : '';
+  return { ...Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined)), ...(lines.length ? { lines } : {}),
+    ...(items.length ? { items } : {}), ...(card.kind === 'brief' && typeof card.offer === 'boolean' ? { offer: card.offer } : {}), ...(status ? { status } : {}) };
+}
+
+/** Briefing links are displayed from stored metadata; clicks still resolve the
+ * authoritative item in main by its briefing and item IDs. A subscription feed
+ * is never a destination, even when its private token lives in the path. */
+export function briefingItemsOf(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const text = (value, max) => typeof value === 'string' ? value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, max) : '';
+  const items = [];
+  for (const item of value.slice(0, 100)) {
+    if (!item || !['event', 'task', 'mail', 'page', 'activity'].includes(item.kind)) continue;
+    const id = text(item.id, 160), title = text(item.title, 200), detail = text(item.detail, 3000);
+    if (!id || !title || seen.has(id) || secretIn(String(item.title || '')) || secretIn(String(item.detail || ''))) continue;
+    seen.add(id);
+    const address = sourceAddress(item.url);
+    const url = address && !/\.ics(?:$|[?#])|\/calendar\/ical\/|\/private[-/]/i.test(address.href) ? address.href : '';
+    const source = text(item.source, 160);
+    const taskId = text(item.taskId, 160);
+    const mailId = text(item.mailId, 128);
+    items.push({ kind: item.kind, id, title, ...(detail ? { detail } : {}),
+      ...(Number.isFinite(item.start) ? { start: item.start } : {}), ...(Number.isFinite(item.end) ? { end: item.end } : {}),
+      ...(url ? { url } : {}), ...(source && !secretIn(source) ? { source } : {}),
+      ...(item.kind === 'task' && taskId ? { taskId } : {}), ...(item.kind === 'mail' && /^[a-f0-9]+$/i.test(mailId) ? { mailId } : {}) });
+    if (items.length >= 40) break;
+  }
+  return items;
 }
 
 /** The secret a line leaves the user's next line to give: '' for none. */
@@ -101,7 +135,13 @@ export function createChatArchive({ file, now = Date.now, newId = randomUUID, lo
 
   try {
     const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (Array.isArray(stored?.chats)) chats = stored.chats.filter((chat) => chat?.id && Array.isArray(chat.lines));
+    if (Array.isArray(stored?.chats)) chats = stored.chats.filter((chat) => chat?.id && Array.isArray(chat.lines)).map((chat) => ({
+      ...chat,
+      lines: chat.lines.map(({ sources, ...line }) => {
+        const kept = line.hidden ? [] : sourcesOf(sources);
+        return { ...line, ...(kept.length ? { sources: kept } : {}) };
+      })
+    }));
   } catch {
     /* none yet, or not ours: start with nothing */
   }
@@ -191,7 +231,10 @@ export function createChatArchive({ file, now = Date.now, newId = randomUUID, lo
     get(id) {
       if (fresh()) write();
       const chat = chats.find((item) => item.id === id);
-      return chat ? { ...summary(chat), lines: chat.lines.map((line) => ({ ...line })) } : null;
+      return chat ? { ...summary(chat), lines: chat.lines.map(({ sources, ...line }) => {
+        const kept = line.hidden ? [] : sourcesOf(sources);
+        return { ...line, ...(kept.length ? { sources: kept } : {}) };
+      }) } : null;
     },
     /** @returns {boolean} whether there was one */
     remove(id) {

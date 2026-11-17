@@ -17,6 +17,7 @@ import { aliasable, asksToBeTold, gist } from './learned.js';
 import { describePlan } from './os-actions.js';
 import { secretIn } from './vault-memory.js';
 import { asksFirst, matchApp, parseSequence } from './voice-commands.js';
+import { sourcesOf } from './research-sources.js';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Windows' volume keys move it 2% a press. */
@@ -221,6 +222,7 @@ export function createVoiceRunner({
   let catalog = null;
   /** The last task the assistant or Chrome didn't get done: {text, said, at}, for "keep going". */
   let failed = null;
+  let generation = 0;
   /** Notes how a task for the assistant or Chrome ended, and gives the outcome back. */
   const ended = (outcome, text, said) => {
     if (outcome) failed = outcome.ok ? null : { text, said: said || '', at: Date.now() };
@@ -558,23 +560,45 @@ export function createVoiceRunner({
   }
 
   /** @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say */
-  async function runSentence(text, depth = 0, { said = '', again = '', ...context } = {}) {
+  async function runSentence(text, depth = 0, { said = '', again = '', runGeneration = generation, ...context } = {}) {
+    const superseded = () => runGeneration !== generation;
+    const cancelled = () => ({ steps: [], outcome: null });
     // A new command ends a task still running (the assistant hears "stop" and its answers first).
     if (depth === 0 && assistant?.running) await assistant.cancel();
+    if (superseded()) return cancelled();
     // "Keep going": what just failed, again, as it was asked. In Chrome the words go along, so a task it paused a
     // moment ago picks up where it stopped; one it's let go of is begun again from what was meant.
     if (depth === 0 && failed && AGAIN.test(text) && Date.now() - failed.at < AGAIN_MS) {
       const again = failed;
       log('voice: again:', JSON.stringify(again.said || again.text));
-      return runSentence(again.text, depth + 1, { ...context, talking: true, said: again.said, again: text });
+      return runSentence(again.text, depth + 1, { ...context, talking: true, said: again.said, again: text, runGeneration });
     }
-    // A phrase the user taught stands for its sentence.
-    const taught = depth === 0 && learned ? await learned.phrase(text).catch(() => null) : null;
+    // Live information is read before app discovery, browser focus, local
+    // search shortcuts or learned UI replay. Research is always fresh.
+    let researched = false;
+    const researchGoal = said && assistant?.canResearch?.(said) ? said : assistant?.canResearch?.(text) ? text : '';
+    if (researchGoal) {
+      const result = await assistant.research(researchGoal, { context: context.context || '' });
+      if (superseded()) return cancelled();
+      const steps = [{ kind: 'research', text: researchGoal }];
+      if (!result) return { steps, outcome: null };
+      if (result.handled) return { steps, outcome: ended(result, text, said) };
+      researched = result.approvedInteraction === true;
+      if (!researched) return { steps, outcome: bad('Background reading could not finish. Browser interaction needs your approval.') };
+      // The routing model may have resolved "that" or a clarification reply.
+      // Only this approved goal may now reach controls.
+      if (result.goal) text = said = result.goal;
+    }
+    // Search requests must be clarified and scored even if their words were
+    // previously taught as a shortcut to computer interaction.
+    const taught = !researched && depth === 0 && learned ? await learned.phrase(text).catch(() => null) : null;
+    if (superseded()) return cancelled();
     if (taught) {
       log('voice: taught', JSON.stringify(text), '→', JSON.stringify(taught.say));
-      return runSentence(taught.say, depth + 1);
+      return runSentence(taught.say, depth + 1, { ...context, runGeneration });
     }
     const apps = catalog && Date.now() - catalog.at < CATALOG_MS ? await catalog.apps : await readCatalog();
+    if (superseded()) return cancelled();
     catalog = null;
     const steps = parseSequence(text, { ...context, apps: apps.flatMap((app) => app.names), platform });
     log('voice:', JSON.stringify(text), '→', JSON.stringify(steps));
@@ -582,7 +606,8 @@ export function createVoiceRunner({
     if (steps[0]?.kind === 'teach') {
       const [{ phrase, then }] = steps;
       if (!learned || depth > 0) return { steps, outcome: bad('Jester can’t learn a command here.') };
-      const done = await runSentence(then, depth + 1);
+      const done = await runSentence(then, depth + 1, { runGeneration });
+      if (superseded()) return cancelled();
       if (!done.outcome?.ok) return { steps, outcome: done.outcome && bad(`${done.outcome.text.replace(/[.!?]+$/, '')}. So “${phrase}” wasn’t saved.`) };
       const saved = await learned.teach(phrase, then).then(
         () => true,
@@ -596,12 +621,14 @@ export function createVoiceRunner({
     // "open Spotify and do a little dance" does nothing.
     const unknown = steps.find((step) => step.kind === 'unknown');
     // The user's own words (not a command the conversation gave), which it took to mean a command that worked.
-    const alias = unknown && !said && learned ? await learned.aliasFor(text).catch(() => null) : null;
+    const alias = !researched && unknown && !said && learned ? await learned.aliasFor(text).catch(() => null) : null;
+    if (superseded()) return cancelled();
     if (alias) {
       log('voice: stands for', JSON.stringify(text), '→', JSON.stringify(alias.does));
       // The apps just read do for the command too; it's done as the conversation's, with these as the user's words.
       catalog = { at: Date.now(), apps };
-      const { outcome } = await runSentence(alias.does, depth + 1, { ...context, talking: true, said: text });
+      const { outcome } = await runSentence(alias.does, depth + 1, { ...context, talking: true, said: text, runGeneration });
+      if (superseded()) return cancelled();
       // One that didn't work is no shortcut: the next time, the conversation works the words out afresh.
       if (outcome) (outcome.ok ? learned.used(alias.key, 'alias') : learned.unalias(text)).catch(() => undefined);
       return { steps, outcome };
@@ -613,22 +640,29 @@ export function createVoiceRunner({
     // (2026-11-15); Chrome's did the like in 12 s.
     const tube = steps.length === 1 && steps[0].kind === 'play' && steps[0].service === 'youtube';
     if ((unknown || tube) && (await chromes())) {
+      if (superseded()) return cancelled();
       // The user's own words, and what the conversation took them to mean: Chrome hasn't heard what came before ("try now").
       const meant = again ? text : said && gist(said) !== gist(text) ? text : '';
       const words = again || said || text;
       log('voice: Chrome’s to do:', JSON.stringify(words), meant ? `(meaning ${JSON.stringify(meant)})` : '');
-      const done = await browser.run(words, meant);
+      const done = await browser.run(words, meant, { skipResearch: researched });
       const did = !!done?.ok && !CAME_TO_NOTHING.test(done.text || '');
       log('voice: Chrome', done ? `${did ? 'did it' : 'didn’t'}: ${JSON.stringify(done.text)}` : 'stopped');
-      return { steps, outcome: ended(done && (did ? ok(done.text || 'Done.') : bad(done.text || 'That didn’t work in Chrome.')), text, said) };
+      const sources = did ? sourcesOf(done.sources) : [];
+      return { steps, outcome: ended(done && (did ? {
+        ...ok(done.text || 'Done.'),
+        ...(sources.length ? { sources, ...(typeof done.answer === 'string' && done.answer.trim() ? { answer: done.answer } : {}) } : {})
+      } : bad(done.text || 'That didn’t work in Chrome.')), text, said) };
     }
     if (unknown) {
       // A question's answer is the assistant's to find: a way learned for the command it came as would do it and tell nothing.
-      const known = learned && assistant?.replay && !asksToBeTold(said || text) ? await learned.find(text).catch(() => null) : null;
+      const known = !researched && learned && assistant?.replay && !asksToBeTold(said || text) ? await learned.find(text).catch(() => null) : null;
+      if (superseded()) return cancelled();
       let note = '';
       let done = [];
       if (known) {
         const replayed = await assistant.replay(known, text);
+        if (superseded()) return cancelled();
         if (replayed.ok) {
           learned.used(known.key).catch(() => undefined);
           return { steps, outcome: ok(replayed.text) };
@@ -638,13 +672,17 @@ export function createVoiceRunner({
         note = `The way this was done before stopped at step ${replayed.step + 1}: ${replayed.detail}.`;
         done = known.steps.slice(0, replayed.step);
       }
-      if (await assistantReady()) return { steps, outcome: ended(await assisted(text, note, done, { said }), text, said) };
+      if (await assistantReady()) {
+        if (superseded()) return cancelled();
+        return { steps, outcome: ended(await assisted(text, note, done, { said }), text, said) };
+      }
       // The assistant could, given a model: say where to add one.
       const partly = done.length ? `The saved way did ${done.length} step${done.length > 1 ? 's' : ''}, then stopped` : 'Nothing was done';
       if (assistant) return { steps, outcome: bad(`“${unknown.text.replace(/[.!?]+$/, '')}” needs a model for actions: choose one in Jester’s Settings › Models. ${partly}.`) };
       const unknownLine = steps.length > 1 ? `Jester doesn’t know how to “${unknown.text}” yet, so it did nothing.` : `“${unknown.text}” isn’t a command Jester knows yet.`;
       return { steps, outcome: bad(unknownLine) };
     }
+    if (superseded()) return cancelled();
     if (steps.some(needsInput) && !canPost()) return { steps, outcome: bad('Allow Accessibility in Jester’s Settings first.') };
     // "Open Spotify and play …": Spotify, though it wasn't running when the apps were read.
     for (const [i, step] of steps.entries()) {
@@ -681,11 +719,13 @@ export function createVoiceRunner({
      * @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say
      */
     async run(text, context = {}) {
-      const done = await runSentence(text, 0, context);
+      const mine = ++generation;
+      const done = await runSentence(text, 0, { ...context, runGeneration: mine });
+      if (mine !== generation) return { steps: [], outcome: null };
       const { said } = context;
       // Teaching and forgetting are done once: words for them stand for nothing.
       const once = done.steps.some((step) => step.kind === 'teach' || step.kind === 'forget');
-      if (learned && said && done.outcome?.ok && !once) {
+      if (learned && said && done.outcome?.ok && !once && !done.steps.some((step) => step.kind === 'research')) {
         // The user's words, reworded into a command that worked. Or the command's own words, when only Chrome or the
         // assistant could do it and no way was learned for them: else the next time they'd wait on the talking model.
         const same = gist(said) === gist(text);
@@ -701,6 +741,7 @@ export function createVoiceRunner({
     },
     /** Whether a sentence is one Jester can do with no model. Does nothing, and stops nothing running. */
     async knows(text) {
+      if (assistant?.canResearch?.(text)) return true;
       // "Keep going", with a task just failed to go on with: its own, not the talking model's to make something of.
       if (failed && AGAIN.test(text) && Date.now() - failed.at < AGAIN_MS) return true;
       if (learned && (await learned.phrase(text).catch(() => null))) return true;
@@ -715,6 +756,8 @@ export function createVoiceRunner({
      * goes to the assistant doesn't: it asks for itself, at the step that needs it.
      */
     async risky(text) {
+      // Search routing supplies its own approval before any interaction.
+      if (assistant?.canResearch?.(text)) return false;
       const taught = learned ? await learned.phrase(text).catch(() => null) : null;
       const names = (await freshApps()).flatMap((app) => app.names);
       const unknown = (steps) => steps.some((step) => step.kind === 'unknown');

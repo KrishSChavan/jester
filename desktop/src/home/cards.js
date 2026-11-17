@@ -41,8 +41,15 @@ export function cardView(card, state = {}) {
     const kept = card.kind === 'remembered';
     return { label: kept ? 'Remembered' : 'Note', title: String(card.title || 'A note'), detail: kept ? '' : String(card.snippet || ''), icon: kept ? 'i-book' : 'i-note', tick: null, tone: '', actions: card.rel ? ['open'] : [] };
   }
-  // A brief's card is its facts, a line each: nothing to do to it.
-  if (card?.kind === 'brief') return { label: 'Brief', title: String(card.title || 'Today'), detail: '', lines: Array.isArray(card.lines) ? card.lines.map(String) : [], icon: /evening/i.test(card.title || '') ? 'i-moon' : 'i-sun', tick: null, tone: '', actions: [] };
+  if (card?.kind === 'brief') {
+    const status = ['ready', 'offered', 'reading', 'read', 'later', 'dismissed', 'replaced', 'unavailable'].includes(card.status) ? card.status : '';
+    const offer = card.offer === true && !['reading', 'read', 'dismissed', 'replaced'].includes(status);
+    const detail = { reading: 'Reading…', read: 'Saved briefing', later: 'I’ll ask again in 10 minutes.', dismissed: 'Dismissed', replaced: 'Updated since', unavailable: 'No longer saved' }[status] || '';
+    return { label: 'Briefing', title: String(card.title || 'Today'), detail, lines: Array.isArray(card.lines) ? card.lines.map(String) : [],
+      ...(Array.isArray(card.items) && card.items.length ? { items: card.items.slice(0, 40) } : {}),
+      icon: /evening/i.test(card.title || '') ? 'i-moon' : 'i-sun', tick: null, tone: '',
+      actions: card.id && status !== 'unavailable' ? ['brief-read', ...(offer ? ['brief-later', 'brief-dismiss'] : [])] : [] };
+  }
   // New mail: who and what, and the conversation to open in Gmail when it's just the one.
   if (card?.kind === 'mail') return { label: 'Email', title: String(card.title || 'New mail'), detail: '', lines: Array.isArray(card.lines) ? card.lines.map(String) : [], icon: 'i-mail', tick: null, tone: '', actions: ['mail'] };
   const id = String(card?.id ?? '');
@@ -88,7 +95,10 @@ const ACTIONS = {
   remove: { label: 'Remove', icon: 'i-trash' },
   snooze: { label: 'Snooze 10 min', icon: 'i-snooze', text: '10 min' },
   open: { label: 'Open in Obsidian', icon: 'i-open', text: 'Open' },
-  mail: { label: 'Open in Gmail', icon: 'i-open', text: 'Open' }
+  mail: { label: 'Open in Gmail', icon: 'i-open', text: 'Open' },
+  'brief-read': { label: 'Read briefing', icon: 'i-voice', text: 'Read' },
+  'brief-later': { label: 'Remind me in 10 minutes', icon: 'i-snooze', text: 'Later' },
+  'brief-dismiss': { label: 'Dismiss briefing', icon: 'i-close', text: 'Dismiss' }
 };
 
 // ——— The page's half: one list, kept up to date, and every card drawn from it ———
@@ -98,6 +108,8 @@ let state = { ok: false, now: Date.now(), count: 0, timers: [], open: [], done: 
 let skew = 0;
 let ticker = null;
 const watchers = new Set();
+const briefingCards = new Map();
+let briefingSnapshotKnown = false;
 
 const ask = (message) => chrome.runtime.sendMessage({ type: 'jester/tasks', ...message }).catch(() => null);
 
@@ -151,13 +163,171 @@ async function act(action, card) {
   return undefined;
 }
 
+/** Voice answers and card buttons share the same stored briefing. Refresh all
+ * copies, including a card in an older chat, from the authoritative state. */
+export function refreshBriefingCards(cards = [], { replace = false } = {}) {
+  const updated = new Map(cards.filter((card) => card?.kind === 'brief' && card.id).map((card) => [String(card.id), card]));
+  if (replace) {
+    briefingCards.clear();
+    briefingSnapshotKnown = true;
+  }
+  for (const [id, card] of updated) briefingCards.set(id, card);
+  for (const el of document.querySelectorAll('.card')) {
+    if (el.card?.kind !== 'brief' || (!replace && !updated.has(String(el.card.id)))) continue;
+    const next = currentBriefingCard(el.card);
+    if (JSON.stringify(el.card) === JSON.stringify(next)) continue;
+    el.card = next;
+    fill(el);
+  }
+}
+
+function currentBriefingCard(card) {
+  if (card?.kind !== 'brief' || !card.id) return card;
+  return briefingCards.get(String(card.id)) || (briefingSnapshotKnown
+    ? { ...card, offer: false, status: 'unavailable' } : card);
+}
+
+function responseCard(result, previous) {
+  if (result?.card?.kind === 'brief') return result.card;
+  const record = result?.record;
+  if (!record || String(record.id) !== String(previous.id)) return null;
+  return { ...previous, ...record.card, kind: 'brief', id: record.id, title: record.title || previous.title,
+    lines: record.lines || record.card?.lines || previous.lines, items: record.items || record.card?.items || previous.items,
+    status: record.status, offer: record.status === 'offered' };
+}
+
+async function briefingAction(el, op, itemId = '') {
+  if (el.briefingPending) return;
+  el.briefingPending = true;
+  fill(el);
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'jester/briefings', op, id: el.card.id, ...(itemId ? { itemId } : {}) });
+    if (result?.ok) {
+      const card = responseCard(result, el.card);
+      if (card) {
+        el.card = card;
+        refreshBriefingCards([card]);
+      }
+      if (result.navigate) document.dispatchEvent(new CustomEvent('jester/briefing-navigate', { detail: result.navigate }));
+      if (result.view) showBriefingView(result.view);
+      el.briefingError = '';
+    } else el.briefingError = String(result?.error || 'That action could not finish. Please try again.');
+  } catch { el.briefingError = 'That action could not finish. Please try again.'; }
+  finally { el.briefingPending = false; fill(el); }
+}
+
+/** Calendar feeds often have no original event page. Keep those event details
+ * in Jester instead of opening a subscription address or guessing a provider. */
+export function showBriefingView(view, document = globalThis.document) {
+  if (view?.kind !== 'calendar' || !Array.isArray(view.items)) return null;
+  const priorFocus = document.activeElement;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'briefing-dialog';
+  dialog.setAttribute('aria-label', String(view.title || 'Calendar'));
+  const heading = document.createElement('h2');
+  heading.textContent = String(view.title || 'Calendar');
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'briefing-dialog-close';
+  close.textContent = 'Close';
+  close.setAttribute('aria-label', 'Close calendar');
+  const finish = () => { dialog.remove(); priorFocus?.focus?.(); };
+  close.addEventListener('click', () => typeof dialog.close === 'function' ? dialog.close() : finish());
+  dialog.addEventListener('close', finish);
+  const list = document.createElement('ul');
+  list.className = 'briefing-items';
+  for (const item of view.items.slice(0, 100)) {
+    if (!item || typeof item.title !== 'string') continue;
+    const row = document.createElement('li');
+    const words = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = item.title;
+    words.append(title);
+    if (item.detail) {
+      const detail = document.createElement('p');
+      detail.textContent = String(item.detail);
+      words.append(detail);
+    }
+    if (item.source) {
+      const source = document.createElement('span');
+      source.className = 'briefing-item-source';
+      source.textContent = String(item.source);
+      words.append(source);
+    }
+    row.append(words); list.append(row);
+  }
+  dialog.append(heading, close, list);
+  document.body.append(dialog);
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', '');
+  close.focus?.();
+  return dialog;
+}
+
+function briefingDetails(el, view) {
+  if (el.card.kind !== 'brief' || !view.items?.length) return null;
+  const details = document.createElement('details');
+  details.className = 'briefing-details';
+  details.open = el.briefDetails?.open === true;
+  el.briefDetails = details;
+  const summary = document.createElement('summary');
+  summary.textContent = 'See more';
+  summary.setAttribute('aria-label', `See more: ${view.title}`);
+  details.append(summary);
+  if (view.lines?.length) {
+    const facts = document.createElement('ul');
+    facts.className = 'facts';
+    for (const line of view.lines) {
+      const fact = document.createElement('li');
+      fact.textContent = line;
+      facts.append(fact);
+    }
+    details.append(facts);
+  }
+  const list = document.createElement('ul');
+  list.className = 'briefing-items';
+  for (const item of view.items) {
+    if (!item || typeof item.title !== 'string' || !['event', 'task', 'mail', 'page', 'activity'].includes(item.kind)) continue;
+    const row = document.createElement('li');
+    const words = document.createElement('div');
+    const heading = document.createElement('strong');
+    heading.textContent = item.title;
+    words.append(heading);
+    if (item.detail) {
+      const detail = document.createElement('p');
+      detail.textContent = String(item.detail);
+      words.append(detail);
+    }
+    if (item.source) {
+      const source = document.createElement('span');
+      source.className = 'briefing-item-source';
+      source.textContent = String(item.source);
+      words.append(source);
+    }
+    row.append(words);
+    if (el.card.status !== 'unavailable' && item.id && ['event', 'task', 'mail', 'page'].includes(item.kind) && (item.kind !== 'page' || item.url)) {
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.className = 'act worded';
+      open.textContent = 'Open';
+      open.disabled = !!el.briefingPending;
+      open.setAttribute('aria-label', `Open ${item.title}`);
+      open.addEventListener('click', () => briefingAction(el, 'open', item.id));
+      row.append(open);
+    }
+    list.append(row);
+  }
+  details.append(list);
+  return details;
+}
+
 function fill(el) {
   const card = el.card;
   let view = cardView(card, state);
   // His line can reach the page before the list that holds what it made: until the list's been asked again, a card
   // that isn't in it is shown as what it's of, and not as finished.
   if (view.gone && !el.settled) view = { ...view, detail: '', tone: '', gone: false };
-  el.className = `card${el.dataset.compact ? ' compact' : ''}${view.tone ? ` ${view.tone}` : ''}${view.due ? ' timer' : ''}`;
+  el.className = `card${card.kind === 'brief' ? ' briefing-card' : ''}${el.dataset.compact ? ' compact' : ''}${view.tone ? ` ${view.tone}` : ''}${view.due ? ' timer' : ''}`;
   const parts = [];
   if (view.tick === null) {
     const glyph = document.createElement('span');
@@ -200,7 +370,7 @@ function fill(el) {
     detail.textContent = view.detail;
     words.append(detail);
   }
-  if (view.lines?.length) {
+  if (view.lines?.length && !(card.kind === 'brief' && view.items?.length)) {
     const list = document.createElement('ul');
     list.className = 'facts';
     for (const line of view.lines) {
@@ -209,6 +379,15 @@ function fill(el) {
       list.append(item);
     }
     words.append(list);
+  }
+  const details = briefingDetails(el, view);
+  if (details) words.append(details);
+  if (el.briefingError) {
+    const error = document.createElement('span');
+    error.className = 'briefing-error';
+    error.setAttribute('role', 'status');
+    error.textContent = el.briefingError;
+    words.append(error);
   }
   parts.push(words);
   const acts = document.createElement('div');
@@ -222,7 +401,10 @@ function fill(el) {
     button.setAttribute('aria-label', `${name}: ${view.title}`);
     button.append(icon(glyph));
     if (text) button.append(text);
-    button.addEventListener('click', () => act(action, card));
+    if (action.startsWith('brief-')) {
+      button.disabled = !!el.briefingPending || card.status === 'reading';
+      button.addEventListener('click', () => briefingAction(el, action.slice('brief-'.length)));
+    } else button.addEventListener('click', () => act(action, card));
     acts.append(button);
   }
   if (acts.childElementCount) parts.push(acts);
@@ -236,7 +418,7 @@ function fill(el) {
  */
 export function cardElement(card, { compact = false } = {}) {
   const el = document.createElement('div');
-  el.card = card;
+  el.card = currentBriefingCard(card);
   if (compact) el.dataset.compact = '1';
   fill(el);
   // Once it's on the page: a timer on it starts the count. One the list doesn't hold yet asks for the list.

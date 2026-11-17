@@ -1,0 +1,2 @@
+# Python 3.10+. Pin the browser and parser APIs used by worker.py.
+scrapling[fetchers]==0.5.1

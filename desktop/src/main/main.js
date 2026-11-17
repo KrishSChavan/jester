@@ -37,8 +37,14 @@ import { runDesktopAgent } from './agent/loop.js';
 import { screenText } from './agent/screen.js';
 import { createApprovalPrompt } from './approval.js';
 import { createAssistant } from './assistant.js';
+import { createWebScraper } from './web-scraper.js';
+import { createResearchPresentation } from './research-presentation.js';
+import { sourceAddress, sourcesOf } from './research-sources.js';
 import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
-import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS, briefAsked } from './briefs.js';
+import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS } from './briefs.js';
+import { briefingRequest, createBriefingManager } from './briefing-manager.js';
+import { openBriefingItem } from './briefing-actions.js';
+import { researchWeb } from '../../../jester-extension/src/background/web-research.js';
 import { createChromeLink } from './chrome-link.js';
 import { createClock } from './clock.js';
 import { createCalendars } from './calendars.js';
@@ -91,7 +97,7 @@ import { VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
-import { closeSafely, createEngineWindow, homeWindow, noteHomeScreen, reopenHome, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
+import { closeSafely, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
 
 const env = process.env;
 /** Permissions change in System Settings, behind the app's back. */
@@ -228,10 +234,11 @@ let signInTold = false;
 let mailBusy = false;
 /** Whether the user wanted Gmail watched (the switch) when last asked: null before the first asking. */
 let mailWatched = null;
-/** The brief made for someone who asked for one: the mail it told of is marked so once it's given. */
-let askedBrief = null;
 /** The morning brief, the evening wrap-up and check-ins before what's on the calendar (briefs.js). */
 let briefs = null;
+let briefingManager = null;
+let briefingResearchAbort = null;
+const briefingReadRequests = new Set();
 /** The day each brief was last given, so it's given once: {morning, evening}, by presence.js's day. */
 let briefDays = {};
 /** He's been ready once on this computer (setupState): kept, so a later launch isn't taken for a first one. */
@@ -242,6 +249,14 @@ let checkinsTold = {};
 let talking = null;
 /** The Chrome extension, linked (chrome-link.js), and where Chrome finds the relay to it. */
 let chromeLink = null;
+const webScraper = createWebScraper();
+/** A search's progress and its ×: in his window while it's open, else on the pill (research-presentation.js). */
+const researchPresentation = createResearchPresentation({
+  home: homeWindow, post, postTo,
+  overlays: () => overlays?.windows() || [],
+  stopButton: () => stopButton
+});
+onHomeVisibility((change) => researchPresentation.sync(change));
 let linkHost = null;
 let linkTransport = null;
 /** The linked browser is in front: gestures do what the extension's settings say, and it does them. */
@@ -413,6 +428,7 @@ function desktopState() {
     mail: google ? google.state() : null,
     speechModel: speech?.model || null,
     speechChoices: speech?.choices || [],
+    research: researchPresentation.state(),
     watch: watch?.state || null,
     continuous: {
       listening,
@@ -492,9 +508,10 @@ function updateListening() {
     voicePage.open();
     speech.listen(
       (text, heard) => (teaching ? tookLine(heard) : heardAloud(text, heard)),
-      () => !teaching && conversation.woken(),
+      (wake) => !teaching && conversation.woken(wake),
       // A pause that may be the end of it: he starts thinking, and says and does nothing until it is.
-      (text, early) => !teaching && (text === null ? conversation.wentOn() : conversation.paused(text, { unsure: !!early?.unsure }))
+      (text, early) => !teaching && (text === null ? conversation.wentOn() : conversation.paused(text, early)),
+      (activity) => !teaching && conversation.hearing(activity)
     );
   } else {
     speech.stopListening();
@@ -509,8 +526,8 @@ function updateListening() {
  */
 function heardAloud(text, heard) {
   // Said across him, it has his voice in it too: not a way they sound.
-  const across = conversation.speaking;
-  const turned = conversation.heard(text, { unsure: !!heard?.unsure, lag: heard?.afterMs });
+  const across = conversation.speaking || conversation.overlapped(heard?.startedAt);
+  const turned = conversation.heard(text, { unsure: !!heard?.unsure, lag: heard?.afterMs, startedAt: heard?.startedAt });
   // Their voice, or words he took as said to him: they're there, wherever in the room.
   if (turned || (voiceprint && !heard?.unsure)) presence?.seen('voice');
   if (turned && !across && heard?.learn && heard.voice && voiceprint) learnVoice(heard.voice);
@@ -565,8 +582,12 @@ const TASK_OVER = { type: MSG.VOICE, voice: { phase: 'thinking', done: true } };
  * assistant's work isn't the conversation's: its pill, and the × beside it,
  * stay while it works. Its end never reaches the pill, though, for what it did
  * is said in his window: so the conversation going on after it ends it there.
+ * Whether he's talking goes to the recognizer too, which listens for being
+ * talked over only then.
  */
 function showConversation(voice) {
+  if (voice.phase === 'speaking') speech?.setSpeaking(!voice.done);
+  else if (voice.active === false || voice.start) speech?.setSpeaking(false);
   const message = { type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } };
   const talk = talkWindow();
   if (!talk || voice.active === false || voice.done) return post(message);
@@ -578,7 +599,7 @@ function showConversation(voice) {
 function currentChat() {
   return {
     id: conversationLog.chatId(),
-    lines: conversationLog.entries().map(({ who, text, at, earlier, hidden, card }) => ({ who, text, at, ...(earlier ? { earlier: true } : {}), ...(hidden ? { hidden: true } : {}), ...(!hidden && cardOf(card) ? { card: cardOf(card) } : {}) }))
+    lines: conversationLog.entries().map(({ who, text, at, earlier, hidden, card, sources }) => ({ who, text, at, ...(earlier ? { earlier: true } : {}), ...(hidden ? { hidden: true } : {}), ...(!hidden && cardOf(card) ? { card: cardOf(card) } : {}), ...(!hidden && sourcesOf(sources).length ? { sources: sourcesOf(sources) } : {}) }))
   };
 }
 
@@ -880,6 +901,7 @@ function startChromeLink() {
     },
     onAsk: (label) => assistant.question(label),
     onVoice: () => onJester('voice'),
+    onScrape: (request, options) => webScraper.request(request, options),
     log
   });
   linkTransport = startLink({
@@ -890,6 +912,32 @@ function startChromeLink() {
     onDisconnect: () => chromeLink.disconnected()
   });
   linkTransport.ready.catch((err) => log('chrome link: can’t listen:', err.message));
+}
+
+/** Something can read pages for research: the Scrapling helper is set up, or the extension's linked. */
+const webReady = () => webScraper.ready() || !!chromeLink?.linked;
+
+/**
+ * A page for research (web-research.js). Signed-in ones, only when the user asked about Canvas or open pages
+ * (`signedIn`), through the open tab in Chrome: its cookies never leave it. Everything else anonymously, through
+ * Scrapling, or through the extension's reader when Scrapling isn't set up (never after Scrapling refused one: a
+ * private address).
+ */
+async function readWeb(request, { signal } = {}) {
+  if (request.op === 'tabs') {
+    return chromeLink?.linked ? chromeLink.web(request, { signal })
+      : { ok: false, code: 'browser_not_linked', detail: 'Link the Jester extension to read signed-in pages already open in Chrome.' };
+  }
+  if (request.op === 'scrape' && request.signedIn && chromeLink?.linked) {
+    const open = await chromeLink.web({ ...request, openOnly: true }, { signal });
+    if (signal?.aborted || (open && !['no_open_tab', 'browser_unavailable', 'timeout', 'disconnected'].includes(open.code))) return open;
+  }
+  const { signedIn, ...anonymous } = request;
+  const result = await webScraper.request(anonymous, { signal });
+  if (!signal?.aborted && ['setup_required', 'worker_failed', 'busy'].includes(result.code) && chromeLink?.linked) {
+    return chromeLink.web(anonymous, { signal });
+  }
+  return result;
 }
 
 /** With the linked browser in front, the engine goes by the extension's gestures; otherwise, the app's. */
@@ -996,10 +1044,64 @@ function syncMail() {
 
 /** A brief's been given, unasked or asked for: not again today. */
 async function briefGiven(which, made = null) {
-  briefDays = { ...briefDays, [which === 'evening' ? 'evening' : 'morning']: dayOf(Date.now()) };
-  await storage.local.set({ briefDays }).catch(() => undefined);
+  // Today's, read: not given again today. One of another day's, read again, says nothing about today.
+  if ((which === 'morning' || which === 'evening') && dayOf(made?.createdAt || Date.now()) === dayOf(Date.now())) {
+    briefDays = { ...briefDays, [which]: dayOf(Date.now()) };
+    await storage.local.set({ briefDays }).catch(() => undefined);
+  }
   // The mail it told of has been told.
   if (made?.mailIds?.length) await mail?.said(made.mailIds);
+}
+
+function briefingHistory() {
+  const old = (keeper?.list() || []).slice(0, 30).flatMap(({ id }) =>
+    (keeper.get(id)?.lines || []).map((line) => ({ ...line, chat: id })));
+  return [...old, ...(conversationLog?.entries() || [])]
+    .filter((line) => !line.hidden).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-600);
+}
+
+function publishBriefings() {
+  if (!briefingManager?.ready) return;
+  post({ type: 'jester/briefings-changed', cards: briefingManager.list().map((record) => briefingManager.card(record)) });
+}
+
+function briefingMade(record) {
+  return record ? { ...record, card: briefingManager.card(record), briefingId: record.id } : null;
+}
+
+async function readStoredBriefing(id) {
+  const result = await briefingManager.respond(id, 'read');
+  if (result.ok) clock?.remove(`brief-later-${id}`);
+  return result.ok ? briefingMade(result.record) : null;
+}
+
+async function respondToBriefing(id, op) {
+  const result = await briefingManager.respond(id, op);
+  if (result.ok && op === 'later') {
+    clock.add({ id: `brief-later-${id}`, kind: 'brief', at: result.record.laterUntil,
+      keepFor: EVENING_KEEP_MS, payload: { which: result.record.kind, briefingId: id } });
+  } else if (result.ok) clock.remove(`brief-later-${id}`);
+  return result;
+}
+
+/** Custom topic briefings can read evidence; they never start computer control. */
+async function researchForBriefing({ goal, context = '', signal }) {
+  const abort = new AbortController();
+  briefingResearchAbort?.abort();
+  briefingResearchAbort = abort;
+  const researchSignal = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+  try {
+    // The bar's Stop stops this, and nothing else at work.
+    const shown = { owner: abort, stop: () => abort.abort() };
+    researchPresentation.update({ active: true, phase: 'reading', label: 'Gathering sources for your briefing…', goal }, shown);
+    return await researchWeb({ goal, context, signal: researchSignal, model: (request) => talking(request), scrape: readWeb,
+      onStep: ({ phase, label }) => {
+        if (!researchSignal.aborted && briefingResearchAbort === abort) researchPresentation.update({ active: true, phase, label, goal }, shown);
+      } });
+  } finally {
+    if (briefingResearchAbort === abort) briefingResearchAbort = null;
+    researchPresentation.update({ active: false }, { owner: abort });
+  }
 }
 
 /**
@@ -1026,6 +1128,8 @@ function queueMorningBrief() {
   // Not in the small hours, which are still yesterday's day. JESTER_MORNING_ENDS: for a check run in the evening.
   const hour = new Date(at).getHours();
   if ((hour < DAY_STARTS && !env.JESTER_MORNING_ENDS) || hour >= (Number(env.JESTER_MORNING_ENDS) || MORNING_ENDS) || briefDays.morning === dayOf(at)) return;
+  if (briefingManager?.ready && briefingManager.list().some((record) => record.kind === 'morning'
+      && dayOf(record.createdAt) === dayOf(at) && (record.offeredAt || ['read', 'dismissed', 'later', 'reading', 'replaced'].includes(record.status)))) return;
   clock.add({ id: 'brief-morning', kind: 'brief', inMs: (Number(env.JESTER_SETTLE_MS) || SETTLE_MS) + 2000, keepFor: MORNING_KEEP_MS, payload: { which: 'morning' } });
 }
 
@@ -1181,6 +1285,7 @@ function watchFront() {
   let frontPid = null;
   setInterval(async () => {
     overlays?.track(settings?.showHud !== false);
+    researchPresentation.observe();
     if (busy || !driver) return;
     busy = true;
     try {
@@ -1277,6 +1382,51 @@ function listenToPages() {
     if (message?.type === MSG.GET_STATE && url.startsWith('jester://ext/src/calibration/')) return { settings: await loadSettings(), engine };
     if (!url.startsWith('jester://app/')) return undefined;
     switch (message?.type) {
+      case 'jester/research': {
+        if (!url.startsWith('jester://app/home/')) return { ok: false };
+        // The bar's Stop: what it shows (a search, or a briefing's reading), and nothing else at work.
+        if (message.op === 'stop') {
+          researchPresentation.stop();
+          return { ok: true };
+        }
+        if (message.op === 'open') {
+          const address = sourceAddress(message.url);
+          if (!address) return { ok: false, error: 'That source is not a valid web address.' };
+          try {
+            await shell.openExternal(address.href);
+            return { ok: true };
+          } catch { return { ok: false, error: 'The source could not be opened.' }; }
+        }
+        return { ok: false };
+      }
+      case 'jester/briefings': {
+        if (!url.startsWith('jester://app/home/') || !briefingManager?.ready) return { ok: false };
+        try {
+          const id = String(message.id || '');
+          if (message.op === 'list') return { ok: true, cards: briefingManager.list().map((record) => briefingManager.card(record)) };
+          if (message.op === 'open') return openBriefingItem({ manager: briefingManager, id, itemId: String(message.itemId || ''),
+            openExternal: (address) => shell.openExternal(address),
+            openMail: async (mailId) => {
+              const who = google?.state().email;
+              await shell.openExternal(`https://mail.google.com/mail/${who ? `?authuser=${encodeURIComponent(who)}` : ''}#inbox/${mailId}`);
+            } });
+          if (message.op === 'read') {
+            const record = briefingManager.get(id);
+            if (!record || record.status === 'reading' || briefingReadRequests.has(id)) return { ok: false, error: 'That briefing is already being read or is no longer available.' };
+            briefingReadRequests.add(id);
+            try {
+              await conversation.readBriefing(id);
+              return { ok: true, card: briefingManager.card(briefingManager.get(id)) };
+            } finally { briefingReadRequests.delete(id); }
+          }
+          if (['later', 'dismiss'].includes(message.op)) {
+            // Answered by a click: a "yes" said after it doesn't read it.
+            conversation.briefingSettled(id);
+            return respondToBriefing(id, message.op);
+          }
+          return { ok: false };
+        } catch (error) { return { ok: false, error: error.message || 'That briefing could not be opened.' }; }
+      }
       case 'jester/desktop-calibrate':
         showCalibration(pointerDisplay());
         return { ok: true };
@@ -1284,6 +1434,7 @@ function listenToPages() {
         restart();
         return { ok: true };
       case 'jester/desktop-state':
+        researchPresentation.sync();
         return desktopState();
       case 'jester/desktop-permission':
         if (message.action === 'request') await requestPermission(String(message.id));
@@ -1313,6 +1464,7 @@ function listenToPages() {
         chatForgotten = true;
         conversation.forget();
         keeper.forgetAll();
+        await briefingManager?.forgetAll();
         return { ok: true };
       // His window's Tasks panel: the list, a task added by hand, one ticked off or put back, one removed.
       // Ticking off here is the user's own click: the only other way is their saying so (tasks.js).
@@ -1499,6 +1651,7 @@ function listenToPages() {
       // screen yet, for the orb's intro: shown before its page had loaded, it missed jester/home-shown.
       case 'jester/home-screen':
         noteHomeScreen(message.screen);
+        researchPresentation.sync();
         return { ok: true, shown: !!homeWindow()?.isVisible() };
       // His window's Sleep and Wake.
       case 'jester/desktop-sleep':
@@ -1923,12 +2076,16 @@ async function start() {
     quietly: (task) => overlays.whileHidden(task),
     // A picture of the window, when its words aren't enough: with Screen Recording allowed, and not turned off in Settings.
     picture: windowShot(),
-    onBusy: (busy) => (busy ? stopButton.show() : stopButton.hide()),
+    onBusy: (busy, task) => researchPresentation.busy(busy, task),
+    onVoice: (voice, task) => researchPresentation.voice(voice, task),
+    onResearch: (state, task) => researchPresentation.update(state, { owner: task, stop: () => assistant.cancel(task) }),
     log,
     logScreens: !!env.JESTER_LOG_SCREENS,
     // Tasks go to this computer's model when no saved one can take them.
     localModel,
-    modelHooks
+    modelHooks,
+    web: readWeb,
+    webReady
   });
   // Taught phrases, learned tasks and shortcuts, kept with the app's settings, and listed in the vault's Routines note.
   learned = createLearned({ storage: storage.local, onChange: writeRoutinesNote });
@@ -1951,7 +2108,7 @@ async function start() {
     // What's the browser's (its bookmarks, tabs and pages) the linked extension does.
     browser: {
       claims: (text) => chromeLink?.claims(text, { browserInFront: browserMode }) ?? false,
-      run: (text, meant = '') => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal, meant }))
+      run: (text, meant = '', options = {}) => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal, meant, ...options }))
     }
   });
   voicePage = createVoicePage({ log });
@@ -2061,7 +2218,6 @@ async function start() {
       relevant: (text) => recollections.relevant(text, { except: conversationLog?.chatId() }),
       forget: () => recollections.forget()
     },
-    listenAfresh: () => speech.listenAfresh(),
     warm: warmUp,
     // At a pause that may be the end of what's being said, his reply is begun, and thrown away if they go on: only
     // when the model that would be asked is a paid one, where that costs a few thousandths of a cent. A free plan
@@ -2072,7 +2228,7 @@ async function start() {
     commands: {
       knows: (text) => voiceRunner.knows(text),
       risky: (text) => voiceRunner.risky(text),
-      run: (text, said) => voiceRunner.run(text, { talking: true, said })
+      run: (text, said, context) => voiceRunner.run(text, { talking: true, said, context })
     },
     // What he remembers and the user's notes, for each turn; "remember this"; notes made and opened.
     vaultMemory: {
@@ -2088,10 +2244,28 @@ async function start() {
     // Their to-do list, reminders and timers.
     tasks,
     // The day's brief and its wrap-up, when they ask for one.
-    briefs: { asked: briefAsked, compose: async (kind) => (askedBrief = await briefs.compose(kind)), given: (kind) => briefGiven(kind, askedBrief) },
+    briefs: {
+      asked: briefingRequest,
+      compose: async (request, options) => {
+        const record = await briefingManager.requested(request, options);
+        if (!record) return null;
+        // An update replaces the day's earlier one: its "later" is called off.
+        for (const id of record.replaced || []) clock.remove(`brief-later-${id}`);
+        // Nothing to say, or none kept for that day: said as it is, and nothing saved.
+        if (!record.id) return { text: record.text || '', card: null, untrusted: false };
+        return readStoredBriefing(record.id);
+      },
+      read: readStoredBriefing,
+      respond: respondToBriefing,
+      given: (_request, made) => made?.briefingId
+        ? briefingManager.respond(made.briefingId, 'read-complete', { token: made.readToken }) : undefined,
+      interrupted: (made) => made?.briefingId
+        ? briefingManager.respond(made.briefingId, 'interrupted', { token: made.readToken }) : undefined
+    },
     // The rest of what's connected, read each turn, so what he says he can do is what's true now (abilities.js).
     abilities: async () => ({
       chrome: !!chromeLink?.linked,
+      web: webReady(),
       pictures: await assistant.canSee(),
       voice: !!voiceprint,
       gestures: settings?.gesturesEnabled !== false,
@@ -2165,37 +2339,37 @@ async function start() {
   syncMail();
   // The morning brief and the evening wrap-up (briefs.js): composed when it's time to say one, and counted as given
   // only once it's been said. Away, it's held; too late to be worth it, the clock drops it.
-  briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, mailToModel: () => settings?.mailJudge !== false, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, log });
+  briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, mailToModel: () => settings?.mailJudge !== false, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, research: researchForBriefing, log });
+  briefingManager = createBriefingManager({ storage: storage.local, compose: (kind, options) => briefs.compose(kind, options),
+    composeCustom: (request) => briefs.composeCustom(request), history: briefingHistory, onChange: publishBriefings, given: briefGiven });
+  await briefingManager.start();
   ({ briefDays = {}, checkinsTold = {} } = await storage.local.get(['briefDays', 'checkinsTold']));
   setUpOnce = (await storage.local.get('setUpOnce')).setUpOnce === true;
-  let composed = null;
   /** Times a brief found a connected source not ready (the network just after waking), and waited. */
   let unreadyTries = 0;
   clock.on('brief', async (job) => {
     const which = job.payload?.which === 'evening' ? 'evening' : 'morning';
     const today = dayOf(Date.now());
-    if (settings?.[which === 'evening' ? 'briefEvening' : 'briefMorning'] === false || briefDays[which] === today) return undefined;
-    // Away: the evening's goes to their phone, if there is one; the morning's is for sitting down to.
-    if (presence.where === 'away' && (which === 'morning' || !phone.ready)) return { hold: true };
-    // Made once, and kept while he waits for a quiet moment to say it.
-    if (!composed || composed.which !== which || composed.day !== today || Date.now() - composed.at > 10 * 60_000) composed = { which, day: today, at: Date.now(), ...(await briefs.compose(which)) };
+    const laterId = job.payload?.briefingId;
+    if (!laterId && (settings?.[which === 'evening' ? 'briefEvening' : 'briefMorning'] === false || briefDays[which] === today)) return undefined;
+    // Briefings wait until they are available, including across a film or call.
+    if (presence.where === 'away' || presence.watching) return { hold: true };
+    const composed = laterId ? briefingManager.get(laterId) : await briefingManager.prepare(which);
     // Nothing to say because the weather hadn't come yet: asked again in a minute, a few times, before it's let go.
-    if (!composed.text && composed.unready && unreadyTries < 4) {
+    if (composed && !composed.text && composed.unready && unreadyTries < 4) {
       unreadyTries += 1;
-      composed = null;
       return { retryIn: 60_000 };
     }
-    // To their phone it's the facts said plainly: a model's wording of a calendar's titles isn't what's pushed.
-    const text = presence.where === 'away' ? composed.plain || composed.text : composed.text;
-    const answer = composed.text ? await teller.say({ ...job, payload: { text, card: composed.card, untrusted: composed.untrusted, title: which === 'evening' ? 'Your day' : 'This morning', priority: 2, phone: which === 'evening' } }) : undefined;
-    if (!answer) {
-      log(`brief: the ${which} one ${composed.text ? 'given' : 'had nothing to say'}`);
-      const made = composed;
-      composed = null;
-      unreadyTries = 0;
-      await briefGiven(which, made.text ? made : null);
-    }
-    return answer;
+    unreadyTries = 0;
+    if (!composed?.id || !composed.text || ['read', 'dismissed', 'reading', 'replaced'].includes(composed.status)) return undefined;
+    // Put off with Later: its own job (brief-later-<id>) asks again, not this one.
+    if (!laterId && composed.status === 'later' && composed.laterUntil > Date.now()) return undefined;
+    const name = composed.kind === 'custom' ? 'briefing' : `${composed.kind} briefing`;
+    const text = `I have your ${name}. Would you like me to read it?`;
+    // Offered once it's been said to them, not before: a line held, or dropped by the clock, is offered another time.
+    const card = briefingManager.card({ ...composed, status: 'offered' }, { offer: true });
+    const said = () => briefingManager.offer(composed.id).then(() => log(`brief: the ${which} one offered`), () => undefined);
+    return teller.say({ ...job, payload: { text, card, title: 'Your briefing', priority: 2, phone: false } }, { said });
   });
   // A word before each thing on the calendar: the calendar's own, and the clock's sum, never a model's.
   clock.on('checkin', async (job) => {
@@ -2341,6 +2515,7 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true;
     globalShortcut.unregisterAll();
     driver?.close();
+    webScraper.close();
     watch?.close();
     linkTransport?.close();
     vaultIndex?.close();

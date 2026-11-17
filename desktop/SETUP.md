@@ -69,6 +69,14 @@ minute", or "Jester, open Notes and write down milk and eggs".
 
 ## Worth adding
 
+For background web research, install Python 3.10 or newer, then from the
+repository root run `npm --prefix desktop run scraping:setup -- --browser`.
+This installs Scrapling and its isolated browser locally. To research Canvas
+or another signed-in site, also link Jester's extension, allow site access in
+its Settings, and keep that site open and signed in. Research asks before it
+needs browser or desktop interaction. The extension can search and read on
+its own when the desktop app is closed.
+
 Everything else on the Getting started screen is optional, and off until you
 turn it on. In rough order of how much it adds:
 

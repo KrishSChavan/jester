@@ -42,6 +42,7 @@
       <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4" /></symbol>
     </svg>
 
+    <div id="research-progress" class="research-progress" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div id="screens">
       <!-- The orb, and talking to him. Chats are to the left of it, Settings to the right. -->
       <section id="main" class="screen shown" data-screen="main" aria-label="Jester">
@@ -66,6 +67,7 @@
         </div>
         <!-- What's in play, as cards: timers running, reminders given or coming up (cards.js). -->
         <div id="shelf" class="shelf" aria-label="Timers and reminders in play" hidden></div>
+        <div id="briefing-shelf" class="shelf" aria-label="Briefings ready for you" hidden></div>
         <div class="stage">
           <div id="presence" class="presence">
             <canvas id="orb" aria-hidden="true"></canvas>
@@ -304,11 +306,11 @@
               <input type="checkbox" id="keepUnsureSpeech" />
             </label>
             <label class="row">
-              <span><strong>Morning brief</strong><small>When you first sit down at this computer for the day, he tells you the weather, what’s on your calendar, what’s due and what’s on your list. Once a day, a few seconds after you’re back, and not after five in the afternoon. Ask for it any time: “brief me”.</small></span>
+              <span><strong>Morning brief</strong><small>When you first sit down for the day, he announces that your briefing is ready and asks whether to read it. Say yes or choose Read, Later or Dismiss. Offered once a day when you’re available, not after five in the afternoon. Ask for a saved briefing any time: “read my morning briefing”.</small></span>
               <input type="checkbox" id="briefMorning" />
             </label>
             <div class="row">
-              <span><strong>Evening wrap-up</strong><small>At this time he tells you what got ticked off, what’s still open and what tomorrow starts with. If you’re away it goes to your phone, when that’s set up below; otherwise he keeps it until you’re back, for three hours. Ask for it any time: “wrap up my day”.</small></span>
+              <span><strong>Evening wrap-up</strong><small>At this time he prepares your day’s wrap-up, waits until you’re available, and asks before reading it. Choose Later for a reminder in ten minutes. Say “read my evening briefing” to hear the saved version, or “update my evening briefing” to refresh it.</small></span>
               <input type="time" id="eveningAt" aria-label="When the evening wrap-up is given" />
               <input type="checkbox" id="briefEvening" aria-label="Evening wrap-up" />
             </div>

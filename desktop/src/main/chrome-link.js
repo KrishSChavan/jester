@@ -13,13 +13,15 @@
  *
  * Messages are JSON objects with a `type`:
  *   from the extension: hello {version, settings}, settings {settings}, pill {voice},
- *     ask {id, label}, done {id, ok, say, trace?}, reply {id, result}, voice {}
- *   to it: welcome {version}, task {id, text, meant?}, answer {id, approved}, cancel {},
+ *     ask {id, label}, done {id, ok, say, trace?}, reply {id, result}, voice {},
+ *     scrape {id, request}, scrape-cancel {id}
+ *   to it: welcome {version, scraping}, task {id, text, meant?}, answer {id, approved}, cancel {},
+ *     scrape-result {id, result},
  *     request {id, op, ...}, op being knows {text}, aim {x, y, radius} or act {action, source, gesture}
  */
 
 /** How long each question to the extension may take before it's taken as a no. */
-export const REQUEST_MS = Object.freeze({ knows: 600, aim: 250, act: 3000 });
+export const REQUEST_MS = Object.freeze({ knows: 600, aim: 250, act: 3000, web: 35_000 });
 /** The extension's settings that say what a gesture does in Chrome. */
 const BINDING_KEYS = ['bindings', 'windowedBindings', 'swipeBindings', 'windowedSwipeBindings', 'windowedBindingsEnabled'];
 
@@ -36,13 +38,15 @@ export const browserish = (text) => BROWSERISH.test(String(text || ''));
  * @param {(voice:object) => void} [deps.onPill]  a frame for the app's pill
  * @param {(label:string) => Promise<boolean>} [deps.onAsk]  the user's yes or no to a step
  * @param {() => void} [deps.onVoice]  the extension's shortcut or gesture, for the app's mic
+ * @param {(request:object, options:{signal:AbortSignal}) => Promise<object>} [deps.onScrape] background web reader
  * @param {(...parts:any[]) => void} [deps.log]
  */
-export function createChromeLink({ send, version, onChange = () => undefined, onPill = () => undefined, onAsk = async () => false, onVoice = () => undefined, log = () => undefined }) {
+export function createChromeLink({ send, version, onChange = () => undefined, onPill = () => undefined, onAsk = async () => false, onVoice = () => undefined, onScrape, log = () => undefined }) {
   let linked = null;
   let browser = null;
   let next = 0;
   const pending = new Map();
+  const scraping = new Map();
   let task = null;
 
   function settle(id, result) {
@@ -50,15 +54,30 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
     if (!waiting) return;
     pending.delete(id);
     clearTimeout(waiting.timer);
+    waiting.cleanup?.();
     waiting.resolve(result);
   }
 
   /** A question for the extension: its answer, or `fallback` if it's gone or slow. */
-  function request(op, args, fallback = null) {
+  function request(op, args, fallback = null, { signal } = {}) {
+    if (signal?.aborted) return Promise.reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
     if (!linked) return Promise.resolve(fallback);
     const id = String(++next);
-    return new Promise((resolve) => {
-      pending.set(id, { resolve, timer: setTimeout(() => settle(id, fallback), REQUEST_MS[op] ?? 1000) });
+    return new Promise((resolve, reject) => {
+      const cancel = () => {
+        const waiting = pending.get(id);
+        if (!waiting) return;
+        pending.delete(id);
+        clearTimeout(waiting.timer);
+        waiting.cleanup?.();
+        if (op === 'web') send({ type: 'web-cancel', id });
+        reject(Object.assign(new Error('cancelled'), { name: 'AbortError' }));
+      };
+      pending.set(id, { resolve, cleanup: () => signal?.removeEventListener('abort', cancel), timer: setTimeout(() => {
+        if (op === 'web') send({ type: 'web-cancel', id });
+        settle(id, fallback);
+      }, REQUEST_MS[op] ?? 1000) });
+      signal?.addEventListener('abort', cancel, { once: true });
       if (!send({ type: 'request', id, op, ...args })) settle(id, fallback);
     });
   }
@@ -86,7 +105,7 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
       switch (message?.type) {
         case 'hello':
           linked = { version: String(message.version || ''), settings: message.settings || {} };
-          send({ type: 'welcome', version });
+          send({ type: 'welcome', version, scraping: typeof onScrape === 'function' });
           log('chrome link: linked to Jester', linked.version);
           return onChange();
         case 'settings':
@@ -104,13 +123,34 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
           if (task?.id === message.id) {
             // What the extension did, step by step (0.2.3 on): the log's only account of a browser task.
             for (const line of Array.isArray(message.trace) ? message.trace.slice(-40) : []) log('chrome', String(line).slice(0, 220));
-            finishTask({ ok: message.ok === true, text: String(message.say || '') });
+            finishTask({ ok: message.ok === true, text: String(message.say || ''), ...(typeof message.answer === 'string' ? { answer: message.answer.slice(0, 6000) } : {}), ...(Array.isArray(message.sources) ? { sources: message.sources.slice(0, 24) } : {}) });
           }
           return undefined;
         case 'reply':
           return settle(String(message.id), message.result ?? null);
         case 'voice':
           return onVoice();
+        case 'scrape': {
+          if (!linked || typeof message.id !== 'string' || message.id.length > 80 || scraping.has(message.id)) return undefined;
+          const id = message.id;
+          if (typeof onScrape !== 'function') return void send({ type: 'scrape-result', id, result: { ok: false, code: 'scrape_unavailable', detail: 'Background scraping is unavailable in this version of Jester Desktop.' } });
+          if (scraping.size >= 8) return void send({ type: 'scrape-result', id, result: { ok: false, code: 'scrape_busy', detail: 'Too many background web requests are already running.' } });
+          const controller = new AbortController();
+          scraping.set(id, controller);
+          const reply = (result) => {
+            if (scraping.get(id) !== controller) return;
+            scraping.delete(id);
+            if (linked && !controller.signal.aborted) send({ type: 'scrape-result', id, result });
+          };
+          return void Promise.resolve().then(() => onScrape(message.request, { signal: controller.signal })).then(reply,
+            () => reply({ ok: false, code: 'scrape_failed', detail: 'The background web request failed.' }));
+        }
+        case 'scrape-cancel': {
+          const controller = scraping.get(message.id);
+          scraping.delete(message.id);
+          controller?.abort();
+          return undefined;
+        }
         default:
           return undefined;
       }
@@ -120,6 +160,8 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
       const was = !!linked;
       linked = null;
       browser = null;
+      for (const controller of scraping.values()) controller.abort();
+      scraping.clear();
       for (const id of [...pending.keys()]) settle(id, null);
       finishTask({ ok: false, text: 'The link to Chrome closed before that was done.' });
       if (was) {
@@ -156,14 +198,14 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
      * @param {{signal?:AbortSignal, meant?:string}} [options]  meant: what the conversation took them to mean
      * @returns {Promise<{ok:boolean, text:string}|null>} null: cancelled
      */
-    task(text, { signal, meant = '' } = {}) {
+    task(text, { signal, meant = '', skipResearch = false } = {}) {
       if (!linked) return Promise.resolve({ ok: false, text: 'Chrome isn’t linked.' });
       cancel();
       const id = String(++next);
       return new Promise((resolve) => {
         task = { id, resolve };
         signal?.addEventListener('abort', () => task?.id === id && cancel(), { once: true });
-        if (!send({ type: 'task', id, text: String(text).slice(0, 2000), ...(meant ? { meant: String(meant).slice(0, 2000) } : {}) })) finishTask({ ok: false, text: 'Chrome isn’t linked.' });
+        if (!send({ type: 'task', id, text: String(text).slice(0, 2000), ...(meant ? { meant: String(meant).slice(0, 2000) } : {}), ...(skipResearch ? { skipResearch: true } : {}) })) finishTask({ ok: false, text: 'Chrome isn’t linked.' });
       });
     },
     get running() {
@@ -175,6 +217,8 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
     /** The link or button nearest a point on the page in front, in screen points, or null. */
     aim: ({ x, y, radius }) => request('aim', { x: Math.round(x), y: Math.round(y), radius: Math.round(radius) }),
     /** A gesture's action, done by the extension: {ok, detail}. */
-    act: (action, { source = 'pose', gesture = '' } = {}) => request('act', { action, source, gesture }, { ok: false, detail: 'Chrome didn’t answer' })
+    act: (action, { source = 'pose', gesture = '' } = {}) => request('act', { action, source, gesture }, { ok: false, detail: 'Chrome didn’t answer' }),
+    /** Read an open signed-in page through Chrome, without focusing or navigating it. */
+    web: (webRequest, options = {}) => request('web', { request: webRequest }, { ok: false, code: 'browser_unavailable', detail: 'Chrome did not answer the background web request.' }, options)
   };
 }

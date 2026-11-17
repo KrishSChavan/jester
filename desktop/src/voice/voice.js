@@ -5,8 +5,9 @@
  */
 
 const { audio, status, onPlay } = window.jesterVoice;
-/** The raw mic, as for a spoken command (src/preload/chrome-shim.cjs): what the recognizer was measured on. */
-const MIC = { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+/** The continuous mic hears the user while this same page plays Jester's
+ * voice. Browser echo cancellation keeps that output out of incoming speech. */
+const MIC = { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false };
 /** A device that changed or went away is looked for again after this long. */
 const REOPEN_MS = 1000;
 

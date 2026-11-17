@@ -708,7 +708,7 @@ async function refreshAllSites() {
   const granted = await chrome.permissions.contains(ALL_SITES);
   allSites.checked = granted;
   allSitesNote.textContent = granted
-    ? 'Jester is registered on every site. Reload open tabs for it to take effect.'
+    ? 'Jester can read public pages and your open signed-in sites in the background. Reload open tabs for the voice pill and cursor to take effect.'
     : '';
 }
 

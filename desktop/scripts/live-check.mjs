@@ -30,9 +30,8 @@
  *            pick ticking nothing; a task nobody asked for not made; the list reaching the model when asked; and
  *            cards: a timer's under his line and on the shelf, a reminder's with Snooze, a note's with Open; and the
  *            Tasks screen: its cards, a box ticked by a click, and the count on its button.
- *   brief    a word before something on a calendar, by the clock's sum; the morning brief on sitting down, once, in
- *            the model's words when they keep to the facts and plainly when they don't; the evening's when asked;
- *            each with its card, and marked as holding a calendar's words.
+ *   brief    calendar check-ins; scheduled briefing offers with Read/Later/Dismiss; consent, saved replay and explicit
+ *            refresh; expandable source details, calendar navigation, and custom briefings from recorded tasks.
  *   phone    a topic made in Settings and shown there alone; a test sent; then, with the screen locked, a reminder
  *            goes to the phone and isn't said again on unlocking; with the server failing it's held and said then.
  *   mail     Google's file chosen and a sign-in through a pretend browser and a pretend Google; new mail told with its
@@ -43,6 +42,9 @@
  *            saying Ringing; a click on either stops it, and so does talking to him. Silent here.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
  *            left alone for the next turn; Settings › Models says the order and what each has answered.
+ *   research background searches show progress in his window, source cards open only on a click, more than three
+ *            collapse, and progress moves to the pill only while his window is hidden or minimized. The worker
+ *            serves this script's fixtures: no page is fetched and no browser is opened.
  */
 
 import { spawn } from 'node:child_process';
@@ -126,6 +128,32 @@ if (!process.versions.electron) {
   const shotsAt = process.argv.indexOf('--shots');
   const SHOTS = shotsAt > 0 ? path.resolve(process.argv[shotsAt + 1] || '') : '';
   const wanted = process.argv.slice(2).filter((arg, i, all) => !arg.startsWith('-') && all[i - 1] !== '--shots');
+  // A subprocess with the real Scrapling worker's JSON protocol, held by a file so progress can be inspected.
+  // Its executable is chosen before main.js makes its scraper; the real Python environment stays untouched.
+  const researchGate = path.join(scratch, 'research-hold');
+  const researchRequests = path.join(scratch, 'research-requests.jsonl');
+  if (!wanted.length || wanted.includes('research')) {
+    const worker = path.join(scratch, 'research-worker.cjs');
+    fs.writeFileSync(worker, `#!/usr/bin/env node
+const fs = require('node:fs');
+const request = JSON.parse(fs.readFileSync(0, 'utf8'));
+fs.appendFileSync(${JSON.stringify(researchRequests)}, JSON.stringify(request) + '\\n');
+const send = () => {
+  if (fs.existsSync(${JSON.stringify(researchGate)})) return setTimeout(send, 25);
+  const group = /four/i.test(request.query || request.url || '') ? 'four' : 'three';
+  const count = group === 'four' ? 4 : 3;
+  const results = Array.from({ length: count }, (_, index) => ({
+    url: 'https://research.jester.test/' + group + '/source-' + (index + 1),
+    title: 'Research ' + group + ' source ' + (index + 1), snippet: 'A deterministic search result for the live check.'
+  }));
+  process.stdout.write(JSON.stringify(request.op === 'search'
+    ? { ok: true, results, fetchedAt: '2026-11-16T12:00:00.000Z', mode: 'scratch-search' }
+    : { ok: true, url: request.url, title: 'Research source page', text: 'A deterministic source page.', links: [], status: 200, fetchedAt: '2026-11-16T12:00:00.000Z', mode: 'scratch-page' }));
+};
+send();
+`, { mode: 0o700 });
+    process.env.JESTER_SCRAPLING_PYTHON = worker;
+  }
   const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const results = [];
   const check = (name, ok, detail = '') => {
@@ -195,13 +223,13 @@ if (!process.versions.electron) {
   /** Runs in his window's page, as its own script would. */
   const inPage = (code) => home.webContents.executeJavaScript(`(async () => { ${code} })()`, true);
   /** Types to him, and gives what he wrote back. */
-  async function type(text) {
+  async function type(text, { timeoutMs = 15000 } = {}) {
     const before = said().filter((entry) => entry.who === 'jester').length;
     await inPage(`await chrome.runtime.sendMessage({ type: 'jester/talk-type', text: ${JSON.stringify(text)} });`);
     const lines = await until(`his answer to "${text}"`, () => {
       const his = said().filter((entry) => entry.who === 'jester');
       return his.length > before ? his : null;
-    });
+    }, timeoutMs);
     return lines.at(-1).text;
   }
 
@@ -535,6 +563,7 @@ if (!process.versions.electron) {
 
     /** Step 9: a word before a class, the morning brief on sitting down, and the evening's when asked. */
     async brief({ paid }) {
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
       const setting = (patch) => inPage(`const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: { ...settings, ...${JSON.stringify(patch)} } });`);
       const entries = () => said().filter((entry) => entry.who === 'jester');
       const stamp = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
@@ -574,12 +603,36 @@ if (!process.versions.electron) {
       await until('away', () => /presence: away \(locked\)/.test(logLines().split('\n').slice(-6).join('\n')));
       powerMonitor.emit('unlock-screen');
       keys.idle = 0;
-      const brief = await until('the morning brief', () => entries().slice(beforeBrief).find((entry) => /^Morning\./.test(entry.text)), 15000).catch((err) => ({ text: err.message }));
-      check('sat down, he gives the morning brief, in the model’s words', brief.text === `Morning. Seminar is at ${clockOf(start)} in Room 1.` && brief.untrusted === true, JSON.stringify(brief));
+      const offer = await until('the morning briefing offer', () => entries().slice(beforeBrief).find((entry) => /I have your morning briefing/.test(entry.text)), 15000).catch((err) => ({ text: err.message }));
+      check('sat down, he announces the briefing and waits before reading', /Would you like me to read it/.test(offer.text) && !entries().slice(beforeBrief).some((entry) => /^Morning\./.test(entry.text)), offer.text);
+      const listBriefings = () => inPage(`return chrome.runtime.sendMessage({type:'jester/briefings',op:'list'});`);
+      const offered = await listBriefings();
+      const briefId = offered.cards?.find((card) => card.status === 'offered')?.id;
+      const controls = await until('the offer buttons', () => inPage(`const card = document.querySelector('#briefing-shelf .card'); return card ? [...card.querySelectorAll('.acts button')].map((button) => button.textContent.trim()) : null;`));
+      check('the offer has Read, Later and Dismiss in the app', JSON.stringify(controls) === JSON.stringify(['Read','Later','Dismiss']), JSON.stringify(controls));
+      await shot('briefing-offer');
+      await inPage(`const later = [...document.querySelectorAll('#briefing-shelf .card .acts button')].find(button => button.textContent.trim() === 'Later'); later?.click();`);
+      await until('the snoozed briefing', async () => (await listBriefings()).cards?.some((card) => card.id === briefId && card.status === 'later'));
+      await until('the persisted snooze job', () => jobs()?.some((job) => job.id === `brief-later-${briefId}`), 3000).catch(() => undefined);
+      check('Later schedules one reminder and does not read the content', jobs()?.filter((job) => job.id === `brief-later-${briefId}`).length === 1 && !entries().slice(beforeBrief).some((entry) => /^Morning\./.test(entry.text)), JSON.stringify(jobs()?.filter((job) => job.kind === 'brief')));
+      await home.webContents.reload();
+      await until('the reloaded briefing shelf', () => inPage(`return !!document.querySelector('#briefing-shelf .card .acts button');`));
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      check('a snoozed briefing remains available after the window reloads', (await listBriefings()).cards?.some((card) => card.id === briefId && card.status === 'later') && jobs()?.some((job) => job.id === `brief-later-${briefId}`));
+      const readButton = await inPage(`const read = [...document.querySelectorAll('#briefing-shelf .card .acts button')].find(button => button.textContent.trim() === 'Read'); const result = {found:!!read,disabled:read?.disabled,text:document.getElementById('briefing-shelf').textContent}; read?.click(); return result;`);
+      check('the pending briefing still has an enabled Read button', readButton.found && !readButton.disabled, JSON.stringify(readButton));
+      const brief = await until('the accepted briefing', () => entries().slice(beforeBrief).find((entry) => /^Morning\./.test(entry.text)), 10000).catch((err) => ({ text: err.message }));
+      await until('the read state', async () => (await listBriefings()).cards?.some((card) => card.id === briefId && card.status === 'read'));
+      check('Read plays the saved briefing and removes the snoozed reminder', brief.text === `Morning. Seminar is at ${clockOf(start)} in Room 1.` && brief.untrusted === true && !jobs()?.some((job) => job.id === `brief-later-${briefId}`), JSON.stringify(brief));
       check('from the facts alone, which the model is told are information', asked.length === 1 && new RegExp(`On their calendar today: Seminar at ${clockOf(start).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, at Room 1\\.`).test(asked[0].facts) && /Use only the facts below/.test(asked[0].system), asked[0]?.facts);
       check('with its card: the day’s facts, a line each', brief.card?.kind === 'brief' && /^Today, /.test(brief.card.title) && brief.card.lines?.some((line) => /Seminar/.test(line)), JSON.stringify(brief.card));
-      const drawn = await until('the brief’s card in his window', () => inPage(`const card = [...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.label')?.textContent === 'Brief'); return card ? [...card.querySelectorAll('.facts li')].map((li) => li.textContent) : null;`)).catch((err) => [err.message]);
-      check('drawn in his window', drawn.some((line) => /^On their calendar today: Seminar at /.test(line)), JSON.stringify(drawn));
+      const drawn = await until('the brief’s card in his window', () => inPage(`const card = [...document.querySelectorAll('#live-lines .card')].find((el) => el.querySelector('.label')?.textContent === 'Briefing'); return card?.querySelector('details') ? {summary:card.querySelector('summary').textContent,open:card.querySelector('details').open,text:card.querySelector('details').textContent} : null;`)).catch((err) => ({text:err.message}));
+      check('See more keeps the source details inside Jester', drawn.summary === 'See more' && drawn.open === false && /Seminar/.test(drawn.text), JSON.stringify(drawn));
+      await inPage(`const card = [...document.querySelectorAll('#live-lines .card')].find(el => el.querySelector('details')); card.querySelector('details').open = true; card.querySelector('details button')?.click();`);
+      const calendar = await until('the calendar details', () => inPage(`const modal = document.querySelector('dialog[open]'); return modal ? modal.textContent : null;`));
+      check('Open on an event without an external URL shows its calendar day', /Calendar/.test(calendar) && /Seminar/.test(calendar), calendar);
+      await shot('briefing-calendar');
+      await inPage(`document.querySelector('dialog[open] button')?.click();`);
       await shot('brief');
       powerMonitor.emit('lock-screen');
       keys.idle = 600;
@@ -587,15 +640,27 @@ if (!process.versions.electron) {
       powerMonitor.emit('unlock-screen');
       keys.idle = 0;
       await pause(4000);
-      check('and only once a day', entries().filter((entry) => /^Morning\./.test(entry.text)).length === 1 && /brief: the morning one given/.test(logLines()), `${entries().filter((entry) => /^Morning\./.test(entry.text)).length} briefs`);
+      check('and only one scheduled offer a day', entries().filter((entry) => /I have your morning briefing/.test(entry.text)).length === 1, `${entries().filter((entry) => /I have your morning briefing/.test(entry.text)).length} offers`);
 
       // Asked for, with a model that makes a time up: the facts are said plainly instead.
       paid.answer = (request) => (/morning brief/.test(request?.messages?.[0]?.content || '') ? { say: 'Morning. Seminar is at 3:07 AM, and it’s 99 degrees.' } : { say: 'Hello from paid.', do: '', new: false });
-      const plainly = await type('brief me');
+      const replayed = await type('read my morning briefing');
+      check('asking again replays the saved briefing without asking the model', replayed === brief.text && asked.length === 1, replayed);
+      const plainly = await type('update my morning briefing');
       check('a model that makes a time up isn’t said: the facts are, plainly', new RegExp(`^(?:Morning|Afternoon)\\. You’ve got Seminar at ${clockOf(start).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, at Room 1\\.`).test(plainly) && /said something the facts don’t/.test(logLines()), plainly);
       paid.answer = (request) => (/wrap-up of the day/.test(request?.messages?.[0]?.content || '') ? { say: 'That’s the day done.' } : { say: 'Hello from paid.', do: '', new: false });
       const wrap = await type('wrap up my day');
       check('the evening’s, when asked', wrap === 'That’s the day done.' || /^Nothing to wrap up/.test(wrap), wrap);
+      const task = await inPage(`return chrome.runtime.sendMessage({type:'jester/tasks',op:'add',text:'Finish the briefing fixture report'});`);
+      const reportId = task.open?.find(item => /briefing fixture report/.test(item.text))?.id;
+      await inPage(`return chrome.runtime.sendMessage({type:'jester/tasks',op:'done',id:${JSON.stringify(reportId)}});`);
+      paid.answer = () => ({say:'The deadline is 3:07 AM and it is 99 degrees.'});
+      const custom = await type('create a briefing for today so far');
+      // How far its records go is on its card, not read out: a briefing read aloud stays a briefing.
+      const customCard = entries().find((entry) => entry.text === custom)?.card;
+      check('a custom day-so-far briefing uses actual completed tasks, with its coverage on the card and not read out', /Completed on your task list/.test(custom) && /briefing fixture report/.test(custom) && !/Task coverage|Mail coverage/.test(custom) && /coverage|not connected/i.test(JSON.stringify(customCard?.lines || customCard || '')), `${custom} · ${JSON.stringify(customCard)}`);
+      const upcoming = await type('create an upcoming events briefing');
+      check('an upcoming-events briefing labels future scheduled plans', /Upcoming on your calendar/.test(upcoming) && /Seminar/.test(upcoming) && /future scheduled plans/.test(upcoming), upcoming);
       await inPage(`window.jesterHome.go('settings/assistant', { instant: true });`);
       const switches = await until('the switches', () => inPage(`const on = (id) => document.getElementById(id)?.checked; return document.getElementById('eveningAt')?.value ? [on('briefMorning'), on('briefEvening'), on('checkIns'), document.getElementById('eveningAt').value] : null;`));
       check('Settings has their switches, as they stand, and the evening’s hour', JSON.stringify(switches) === JSON.stringify([true, false, true, '21:00']), JSON.stringify(switches));
@@ -691,6 +756,162 @@ if (!process.versions.electron) {
       check('with the line that what it called upcoming has likely happened', /by now it has most likely happened\./.test(system));
       check('and the rule to check a date against the day', /Before you call anything upcoming, check its date against the date on the user's words/.test(system));
       check('the user’s words carry the date and time', /(?:^|\n)\[\w+day, \w+ \d+, \d{4} at \d+:\d\d.[AP]M\] what’s up\?$/.test(paid.requests.at(-1)?.messages?.at(-1)?.content || ''), paid.requests.at(-1)?.messages?.at(-1)?.content);
+    },
+
+    /** The real worker boundary, progress presenter, IPC and persisted source cards, without the live web. */
+    async research({ paid }) {
+      const { postTo } = await import(path.join(desktop, 'src/main/chrome-bridge.js'));
+      const homeEvents = [];
+      const noteHomeEvent = () => homeEvents.push({ visible: home.isVisible(), minimized: home.isMinimized(), at: Date.now() });
+      for (const event of ['show', 'hide', 'minimize', 'restore']) home.on(event, noteHomeEvent);
+      const opened = [];
+      const previousOpen = shell.openExternal;
+      shell.openExternal = async (url) => void opened.push(url);
+      const hold = () => fs.writeFileSync(researchGate, 'hold');
+      const release = () => fs.rmSync(researchGate, { force: true });
+      const requests = () => fs.existsSync(researchRequests) ? fs.readFileSync(researchRequests, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [];
+      const progress = () => inPage(`const el = document.getElementById('research-progress'); return el && { active: !el.hidden, busy: el.getAttribute('aria-busy'), text: el.textContent, stop: !!el.querySelector('.research-stop') };`);
+      const stopPill = () => BrowserWindow.getAllWindows().some((win) => !win.isDestroyed() && win.webContents.getURL().includes('/overlay/stop.html'));
+      const pillVisible = async () => {
+        const overlays = BrowserWindow.getAllWindows().filter((win) => !win.isDestroyed() && win.webContents.getURL().includes('/overlay/overlay.html'));
+        const showing = await Promise.all(overlays.map((win) => win.webContents.executeJavaScript(`document.getElementById('voice')?.hidden === false`).catch(() => false)));
+        return showing.some(Boolean);
+      };
+      const feedbackState = async () => ({
+        home: { visible: home.isVisible(), minimized: home.isMinimized(), focused: home.isFocused() },
+        desktop: await progress(), homeEvents,
+        stop: stopPill(),
+        windows: BrowserWindow.getAllWindows().map((win) => ({ url: win.webContents.getURL(), loading: win.webContents.isLoading(), visible: win.isVisible() })),
+        overlays: await Promise.all(BrowserWindow.getAllWindows().filter((win) => win.webContents.getURL().includes('/overlay/overlay.html')).map(async (win) => ({
+          url: win.webContents.getURL(), visible: win.isVisible(), page: await win.webContents.executeJavaScript(`({ hidden: document.getElementById('voice')?.hidden, face: document.getElementById('voice')?.className, task: document.getElementById('voice-task')?.textContent, step: document.getElementById('voice-step')?.textContent, frames: window.researchFrames })`)
+        })))
+      });
+      const cardRows = (root = '#live-lines') => inPage(`return [...document.querySelectorAll(${JSON.stringify(root + ' .research-sources')})].map((el) => ({ tag: el.tagName, count: el.querySelectorAll('.research-source').length, open: el.open === true, summary: el.querySelector('summary')?.textContent || '', titles: [...el.querySelectorAll('.research-source-title')].map((title) => title.textContent) }));`);
+      const answer = (group) => `The ${group} search results are ready.`;
+      paid.answer = (request) => {
+        let prompt;
+        try { prompt = JSON.parse(request?.messages?.at(-1)?.content); } catch { /* A normal chat or summary. */ }
+        if (!prompt?.goal) return { say: 'A new topic.', do: '', new: true, summary: 'Researching the fixture sources.' };
+        if (!Object.hasOwn(prompt, 'observations')) {
+          if (/\bsearch something\b/i.test(prompt.goal) && !/Search target supplied by the user:/i.test(prompt.goal)) return { route: 'clarify', scrapeConfidence: 0, reason: 'No search target was specified.', question: 'What would you like me to search for?', goal: '' };
+          if (/\brecords portal\b/i.test(prompt.goal)) return { route: 'interaction', scrapeConfidence: 12, reason: 'The records portal needs its search form filled in.', goal: prompt.goal };
+          return { route: 'scrape', scrapeConfidence: 92, reason: 'The requested public search results can be read in the background.', goal: prompt.goal };
+        }
+        const group = /four/i.test(prompt.goal) ? 'four' : 'three';
+        const found = prompt.observations?.find((note) => note.ok && note.results?.length);
+        return found ? { action: 'answer', text: answer(group), sources: [found.results[0].url] }
+          : { action: 'search', query: `research fixture ${group}` };
+      };
+      try {
+        await inPage(`window.jesterHome.go('main', { instant: true });`);
+        for (const win of BrowserWindow.getAllWindows().filter((win) => win.webContents.getURL().includes('/overlay/overlay.html'))) {
+          await win.webContents.executeJavaScript(`window.researchFrames = []; chrome.runtime.onMessage.addListener((message) => { if (['jester/overlay-active', 'jester/voice'].includes(message.type)) window.researchFrames.push(message); });`);
+        }
+        const clarify = await type('Search something');
+        check('a search without a target asks what to search before fetching anything', /what.*search/i.test(clarify) && requests().length === 0 && opened.length === 0, clarify);
+        hold();
+        const first = type('three fixture results', { timeoutMs: 60000 });
+        // Its worker is deliberately held during the visibility checks; handle a failed check without an
+        // unrelated unhandled rejection from this still-pending answer obscuring the actual diagnostic.
+        first.catch(() => undefined);
+        await until('a research worker reading', () => requests().length === 1);
+        const active = await until('research progress in his window', async () => (await progress())?.active && progress());
+        check('a background search shows Searching the internet and Stop in his window', active.busy === 'true' && active.stop && /Searching the internet/.test(active.text), JSON.stringify(active));
+        check('the model scores the clarified request and the app shows scraping confidence', /92\/100/.test(active.text), JSON.stringify(active));
+        check('a visible, unfocused desktop window keeps both floating pills hidden', home.isVisible() && !home.isFocused() && !(await pillVisible()) && !stopPill(), `visible ${home.isVisible()}, focused ${home.isFocused()}, pill ${await pillVisible()}, stop ${stopPill()}`);
+        check('research opens no browser by itself', opened.length === 0, JSON.stringify(opened));
+        await inPage(`window.jesterHome.go('settings', { instant: true });`);
+        const inSettings = await progress();
+        check('research progress stays in the desktop app on its Settings screen', inSettings.active && !(await pillVisible()) && !stopPill(), JSON.stringify(inSettings));
+        await shot('research-progress');
+        home.hide();
+        await until('research feedback while his window is hidden', async () => !home.isVisible() && (await pillVisible()) && stopPill()).catch(async (error) => { throw new Error(`${error.message}: ${JSON.stringify(await feedbackState())}`); });
+        check('hiding the desktop app moves active research feedback to the pill', await pillVisible() && stopPill());
+        home.show();
+        await until('research feedback back in his window', async () => home.isVisible() && !(await pillVisible()) && !stopPill());
+        check('showing the desktop app removes the research pill immediately', (await progress()).active && !(await pillVisible()) && !stopPill());
+        home.minimize();
+        await until('research feedback while his window is minimized', async () => home.isMinimized() && (await pillVisible()) && stopPill());
+        check('minimizing the desktop app keeps research feedback available on the pill', await pillVisible() && stopPill());
+        home.restore();
+        home.show();
+        await until('research feedback after restoring his window', async () => !home.isMinimized() && !(await pillVisible()) && !stopPill());
+        await inPage(`window.jesterHome.go('main', { instant: true });`);
+        release();
+        const three = await first;
+        const threeRows = await until('three source cards', async () => { const rows = await cardRows(); return rows.at(-1)?.count === 3 ? rows : null; });
+        const threeKept = said().find((line) => line.text === answer('three'));
+        check('the research answer is plain text with its source metadata kept separately', three === answer('three') && threeKept?.sources?.length === 3 && !/Sources:/.test(threeKept.text), JSON.stringify(threeKept));
+        check('three encountered sources are cards with Open, without a dropdown', threeRows.at(-1).tag === 'DIV' && threeRows.at(-1).titles.join('|') === 'Research three source 1|Research three source 2|Research three source 3', JSON.stringify(threeRows));
+        await inPage(`document.querySelector('#live-lines .research-source-open').click();`);
+        await until('a source opened by its button', () => opened.length === 1);
+        check('clicking Open passes the actual source URL to the system browser', opened[0] === 'https://research.jester.test/three/source-1', JSON.stringify(opened));
+        await until('research progress cleared after the answer', async () => !(await progress()).active);
+        // Its answer is the conversation's, on the pill only as any line is with his window unfocused (showConversation).
+        const pillFace = async () => (await Promise.all(BrowserWindow.getAllWindows().filter((win) => win.webContents.getURL().includes('/overlay/overlay.html')).map((win) => win.webContents.executeJavaScript(`document.getElementById('voice')?.hidden === false ? document.getElementById('voice').className : ''`).catch(() => '')))).join(' ');
+        check('finishing a search clears the searching UI, its step on the pill and its ×', !(await progress()).active && !/thinking/.test(await pillFace()) && !stopPill(), await pillFace());
+        await shot('research-three-sources');
+
+        hold();
+        const second = type('Search the internet for four fixture results');
+        await until('a second research worker reading', () => requests().length === 2);
+        await until('progress for another search', async () => (await progress()).active);
+        release();
+        await second;
+        const fourRows = await until('four source cards', async () => { const rows = await cardRows(); return rows.at(-1)?.count === 4 ? rows : null; });
+        check('more than three encountered sources start together in a collapsed dropdown', fourRows.at(-1).tag === 'DETAILS' && !fourRows.at(-1).open && fourRows.at(-1).summary === '4 sources', JSON.stringify(fourRows));
+        check('source cards include consulted results even when the model cites just one', said().find((line) => line.text === answer('four'))?.sources?.length === 4);
+        await shot('research-four-collapsed');
+        await inPage(`document.querySelector('#live-lines details.research-sources summary').click();`);
+        check('the dropdown opens all four cards', (await cardRows()).at(-1).open && (await cardRows()).at(-1).count === 4);
+        await inPage(`document.querySelector('#live-lines details.research-sources .research-source-open').click();`);
+        await until('a dropdown source opened', () => opened.length === 2);
+        check('an expanded source card opens its own URL', opened.at(-1) === 'https://research.jester.test/four/source-1', JSON.stringify(opened));
+        await shot('research-four-expanded');
+        const originalChat = (await inPage(`return chrome.runtime.sendMessage({ type: 'jester/chats', op: 'current' });`)).chat;
+        home.webContents.reload();
+        await until('his research chat after reloading', () => inPage(`return typeof window.jesterHome?.go === 'function' && document.querySelectorAll('#live-lines .research-sources').length === 2;`).catch(() => false));
+        await inPage(`window.jesterHome.go('main', { instant: true });`);
+        const reloaded = await cardRows();
+        check('reloading the desktop window retains source cards and the dropdown starts closed', reloaded.length === 2 && reloaded[0].count === 3 && reloaded[1].count === 4 && !reloaded[1].open, JSON.stringify(reloaded));
+        await type('Let us talk about painting instead');
+        const archived = await until('the research chat in history', async () => (await inPage(`return chrome.runtime.sendMessage({ type: 'jester/chats', op: 'get', id: ${JSON.stringify(originalChat.id)} });`)).chat);
+        check('chat history retains every source with its answer', archived.lines.filter((line) => line.sources?.length).map((line) => line.sources.length).join(',') === '3,4', JSON.stringify(archived.lines.map((line) => ({ text: line.text, sources: line.sources?.length }))));
+        await inPage(`window.jesterHome.go('chats', { instant: true });`);
+        await until('the research chat in the Chats screen', () => inPage(`const button = [...document.querySelectorAll('#chat-list .chat-item')].find((el) => el.querySelector('.title').textContent === ${JSON.stringify(archived.title)}); if (button) button.click(); return !!button;`));
+        const historyRows = await until('source cards in the earlier chat', async () => { const rows = await cardRows('#chat-lines'); return rows.length === 2 ? rows : null; });
+        check('opening the earlier chat renders its cards and collapsed dropdown', historyRows[0].count === 3 && historyRows[1].tag === 'DETAILS' && historyRows[1].count === 4 && !historyRows[1].open, JSON.stringify(historyRows));
+
+        await inPage(`window.jesterHome.go('main', { instant: true });`);
+        hold();
+        const beforeCancel = his().length;
+        await inPage(`return chrome.runtime.sendMessage({ type: 'jester/talk-type', text: 'Search the internet for cancelled fixture results' });`);
+        await until('a cancellable research worker reading', () => requests().length === 3);
+        await until('the research Stop button', async () => (await progress()).active);
+        await inPage(`document.querySelector('#research-progress .research-stop').click();`);
+        await until('research progress cleared by Stop', async () => !(await progress()).active);
+        release();
+        await pause(600);
+        const state = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-state' });`);
+        check('Stop cancels the background read and clears the desktop and pill state', state.research?.active === false && !(await progress()).active && !/thinking/.test(await pillFace()) && !stopPill(), JSON.stringify(state.research));
+        check('a cancelled worker cannot append a late research answer', his().length === beforeCancel, JSON.stringify(his().slice(beforeCancel)));
+        const beforeManual = requests().length;
+        const review = await type('Look up the city budget in its records portal');
+        check('a low scraping score asks before doing it by hand', /12\/100/.test(review) && /by hand/i.test(review) && requests().length === beforeManual, review);
+        const declined = await type('No');
+        check('declining low-confidence interaction starts no scrape or browser action', requests().length === beforeManual && opened.length === 2 && /won.t|declin|not|left|okay/i.test(declined), declined);
+        await type('Search something');
+        const cancelledQuestion = await type('Cancel');
+        const ordinary = await type('hello there');
+        check('cancelling a clarification releases the next topic', ordinary === 'A new topic.' && requests().length === beforeManual, `${cancelledQuestion} · ${ordinary}`);
+      } finally {
+        release();
+        if (home.isMinimized()) home.restore();
+        if (!home.isVisible()) home.show();
+        shell.openExternal = previousOpen;
+        for (const event of ['show', 'hide', 'minimize', 'restore']) home.removeListener(event, noteHomeEvent);
+        paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+      }
     },
 
     /** Paid before free, a failing one covered for and left alone, and Settings saying so. */

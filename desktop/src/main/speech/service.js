@@ -6,8 +6,8 @@
  * Float32 chunks; a voice-activity detector decides where the utterance ends,
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
- * Messages in:  start {model} · begin · listen · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
- * Messages out: ready {model, loadMs} · speech · partial {text} · final {text, decodeMs} · wake · early {text, unsure?} · resumed · heard {text, decodeMs, afterMs, early?, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · error {detail}
+ * Messages in:  start {model} · begin · listen · speaking {on} · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
+ * Messages out: ready {model, loadMs} · speech/activity {startedAt, interrupt?, verified?, text?} · partial {text} · final {text, decodeMs} · wake · early {text, startedAt, unsure?} · resumed · heard {text, startedAt, decodeMs, afterMs, early?, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · ended {startedAt} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
@@ -40,6 +40,7 @@ const sherpa = require('sherpa-onnx-node');
 const SAMPLE_RATE = 16000;
 /** Silero reads 512-sample windows. */
 const WINDOW = 512;
+const MIN_SPEECH_S = 0.2;
 /** How long the speaker must be quiet before the utterance counts as over. */
 const END_SILENCE_S = 0.6;
 /**
@@ -57,6 +58,21 @@ const PARTIAL_EVERY_MS = 500;
 const PREROLL_S = 1;
 /** voice.js gives up on a capture after 30 s; so does this. */
 const MAX_CAPTURE_S = 30;
+/**
+ * Listening, an utterance ends on a pause, or at this length: a television or music the detector takes for a voice
+ * would otherwise make one utterance that never ends, held in memory and decoded whole, with someone "talking" all
+ * the while. The detectors are refreshed every VAD_REFRESH_S below it, so the pause they allow stays the same.
+ */
+const MAX_HEARD_S = 60;
+/** Keep the native detectors below their 20 s limit, which otherwise shortens pauses and raises the threshold. */
+const VAD_REFRESH_S = 10;
+/** How often to tell the main process that the same utterance is still being spoken. */
+const ACTIVITY_S = 1;
+/** While Jester speaks, check for the user's interruption before the endpoint.
+ * The detector has already heard MIN_SPEECH_S before these samples begin. */
+const INTERRUPT_CHECK_S = 0.45;
+/** A recent slice can detect the user joining an already-active speaker echo. */
+const INTERRUPT_WINDOW_S = 1.2;
 /** This far into speech, what's been said so far is read for his name. Two reads at most: it comes first. */
 const PEEK_AT_S = [1, 2];
 /** All that's kept before speech while listening: the preroll, and a little. */
@@ -92,11 +108,13 @@ let keepDir = '';
 let learned = [];
 /** Reading the lines that make a voiceprint: each utterance comes with its voice. */
 let teaching = false;
+/** Playback is active: only then do the extra low-latency speaker/text checks. */
+let speaking = false;
 
 function freshState(listening = false) {
   // `windows` is everything since `begin`; `speechAt` the window where speech was first detected.
   // `ahead`: what was read at a pause that may be the end (readAhead), until they go on talking.
-  return { carry: new Float32Array(0), windows: [], speechAt: -1, lastPartialAt: 0, partialBusy: false, done: false, listening, peeks: 0, peeking: false, ahead: null };
+  return { carry: new Float32Array(0), windows: [], speechAt: -1, startedAt: null, activityAt: 0, interruptAt: 0, interrupting: false, interruptVerified: false, vadWindows: 0, lastPartialAt: 0, partialBusy: false, done: false, listening, peeks: 0, peeking: false, ahead: null };
 }
 
 /** The utterance: from just before speech was detected to now. */
@@ -141,9 +159,9 @@ function start(modelName) {
   if (!model || model.kind !== 'offline') throw new Error(`"${modelName}" is not an offline speech model`);
   const started = performance.now();
   recognizer = new sherpa.OfflineRecognizer(model.config(modelDir(modelName)));
-  soon = new sherpa.Vad({ sileroVad: { model: VAD_MODEL, threshold: 0.5, minSilenceDuration: EARLY_SILENCE_S, minSpeechDuration: 0.2, windowSize: WINDOW, maxSpeechDuration: 20 }, sampleRate: SAMPLE_RATE, numThreads: 1, provider: 'cpu', debug: 0 }, 30);
+  soon = new sherpa.Vad({ sileroVad: { model: VAD_MODEL, threshold: 0.5, minSilenceDuration: EARLY_SILENCE_S, minSpeechDuration: MIN_SPEECH_S, windowSize: WINDOW, maxSpeechDuration: 20 }, sampleRate: SAMPLE_RATE, numThreads: 1, provider: 'cpu', debug: 0 }, 30);
   vad = new sherpa.Vad({
-    sileroVad: { model: VAD_MODEL, threshold: 0.5, minSilenceDuration: END_SILENCE_S, minSpeechDuration: 0.2, windowSize: WINDOW, maxSpeechDuration: 20 },
+    sileroVad: { model: VAD_MODEL, threshold: 0.5, minSilenceDuration: END_SILENCE_S, minSpeechDuration: MIN_SPEECH_S, windowSize: WINDOW, maxSpeechDuration: 20 },
     sampleRate: SAMPLE_RATE,
     numThreads: 1,
     provider: 'cpu',
@@ -195,15 +213,16 @@ function keepUnsure(samples, facts) {
 }
 
 /** Decodes off the audio's path, so nothing said meanwhile is lost. Falling behind keeps only the newest. */
-async function overheard(samples, ahead = null) {
+async function overheard(samples, ahead = null, startedAt = null) {
+  const during = listens;
   if (decoding) {
-    waiting = { samples, ahead };
+    waiting = { samples, ahead, startedAt, during };
     return;
   }
   decoding = true;
   try {
-    for (let next = { samples, ahead }; next; ) {
-      await hear(next.samples, next.ahead);
+    for (let next = { samples, ahead, startedAt, during }; next; ) {
+      await hear(next.samples, next.ahead, next.startedAt, next.during);
       next = waiting;
       waiting = null;
     }
@@ -223,23 +242,23 @@ async function judge(samples) {
 }
 
 /** An utterance that's over, told. `ahead`: it was read at its last pause (readAhead), and nothing was said after. */
-async function hear(samples, ahead = null) {
+async function hear(samples, ahead, startedAt, during) {
   const began = performance.now();
-  const during = listens;
   const early = ahead ? await ahead.catch(() => null) : null;
   const { seconds, voice, score, enrolled, who, text, decodeMs } = early || (await judge(samples));
+  if (during !== listens) return;
   const round = (value) => Math.round(value * 1000) / 1000;
   if (who === 'stranger') {
     if (keepDir && score >= KEEP_FLOOR) keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds) });
-    return send({ type: 'stranger', score, enrolled, seconds });
+    return send({ type: 'stranger', startedAt, score, enrolled, seconds });
   }
   if (keepDir && who === 'maybe') keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds), text });
-  if (!text || during !== listens) return undefined;
+  if (!text) return send({ type: 'ended', startedAt });
   // The voice goes along while teaching, and when it's one more way the user sounds: kept only if this was for him.
   const keep = !!voice && (teaching || (who === 'you' && !!voiceprint && worthLearning(voice, { score, enrolled, seconds }, learned)));
   // afterMs: how long after the last word this is: the pause that ended it, then telling whose voice and what it said.
   // early: these are the words told at the pause, so what was begun on them then is this utterance's.
-  return send({ type: 'heard', text, decodeMs, afterMs: Math.round(END_SILENCE_S * 1000 + performance.now() - began), ...(early ? { early: true } : {}), score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
+  return send({ type: 'heard', text, startedAt, decodeMs, afterMs: Math.round(END_SILENCE_S * 1000 + performance.now() - began), ...(early ? { early: true } : {}), score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
 }
 
 /** One utterance over, and straight on to the next. */
@@ -247,8 +266,9 @@ function endOverheard() {
   const samples = utterance();
   // What was read at the pause is what was said, when nothing was said after it.
   const ahead = state.ahead;
+  const startedAt = state.startedAt;
   state = freshState(true);
-  if (samples.length) overheard(samples, ahead).catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
+  if (samples.length) overheard(samples, ahead, startedAt).catch((err) => send({ type: 'error', startedAt, detail: String(err?.message || err) }));
 }
 
 /**
@@ -265,7 +285,7 @@ function readAhead() {
   read
     .then((got) => {
       if (state !== during || during.ahead !== read || got.who === 'stranger' || !got.text) return;
-      send({ type: 'early', text: got.text, ...(got.who === 'maybe' ? { unsure: true } : {}) });
+      send({ type: 'early', text: got.text, startedAt: during.startedAt, ...(got.who === 'maybe' ? { unsure: true } : {}) });
     })
     .catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
 }
@@ -289,9 +309,44 @@ async function peek() {
     const { text } = await decode(samples);
     if (state !== during || !wakesEarly(text)) return;
     during.peeks = PEEK_AT_S.length;
-    send({ type: 'wake' });
+    send({ type: 'wake', startedAt: during.startedAt });
   } finally {
     during.peeking = false;
+  }
+}
+
+/**
+ * A raw VAD event may be Jester's own loudspeaker. With a voiceprint, only a
+ * confident match can interrupt; without one, send actual partial words for
+ * the conversation to compare with the line currently playing. No audio is
+ * reset or consumed: the full utterance still reaches readAhead/hear later.
+ */
+async function checkInterruption() {
+  const during = state;
+  const listening = listens;
+  during.interrupting = true;
+  try {
+    const from = Math.max(0, during.speechAt - Math.ceil(MIN_SPEECH_S * SAMPLE_RATE / WINDOW),
+      during.windows.length - Math.ceil(INTERRUPT_WINDOW_S * SAMPLE_RATE / WINDOW));
+    const samples = concat(during.windows.slice(from));
+    const seconds = samples.length / SAMPLE_RATE;
+    const current = () => state === during && listens === listening && !during.done && speaking && !teaching;
+    if (voiceprint) {
+      const voice = voiceOf(samples);
+      if (!voice) return;
+      const { score, enrolled } = scored(voice, voiceprint, learned);
+      if (!current() || judged(score, seconds) !== 'you') return;
+      during.interruptVerified = true;
+      send({ type: 'activity', startedAt: during.startedAt, interrupt: true, verified: true, unsure: false, score, enrolled, seconds });
+      return;
+    }
+    const { text } = await decode(samples);
+    if (!current() || !text) return;
+    // Repeat text checks until playback stops: a first slice may have been
+    // only echo, with the user starting later in the same VAD segment.
+    send({ type: 'activity', startedAt: during.startedAt, interrupt: true, verified: false, unsure: false, text, seconds });
+  } finally {
+    during.interrupting = false;
   }
 }
 
@@ -300,8 +355,35 @@ function keepListening() {
   sinceRestart += 1;
   if (state.speechAt >= 0) {
     const said = (state.windows.length - state.speechAt) * WINDOW;
-    if (said >= MAX_CAPTURE_S * SAMPLE_RATE) return endOverheard();
-    if (!teaching && !decoding && !state.peeking && said >= PEEK_AT_S[state.peeks] * SAMPLE_RATE) {
+    if (said >= MAX_HEARD_S * SAMPLE_RATE) return endOverheard();
+    if (said - state.activityAt >= ACTIVITY_S * SAMPLE_RATE) {
+      state.activityAt = said;
+      send({ type: 'activity', startedAt: state.startedAt });
+    }
+    if (speaking && !teaching && !decoding && !state.peeking && !state.interrupting && !state.interruptVerified &&
+      said - state.interruptAt >= INTERRUPT_CHECK_S * SAMPLE_RATE) {
+      state.interruptAt = said;
+      checkInterruption().catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
+    }
+    // A native detector holds its own audio and tightens its endpoint after 20 s.
+    // Refresh it during ongoing speech, replaying a second to preserve a pause
+    // already in progress. The utterance's audio and start time stay intact.
+    state.vadWindows += 1;
+    if (state.vadWindows * WINDOW >= VAD_REFRESH_S * SAMPLE_RATE && vad.isDetected() && soon?.isDetected()) {
+      const recent = state.windows.slice(-Math.ceil(PREROLL_S * SAMPLE_RATE / WINDOW));
+      vad.reset();
+      soon.reset();
+      for (const window of recent) {
+        vad.acceptWaveform(window);
+        soon.acceptWaveform(window);
+      }
+      // Segments wholly within the replay were already handled on the first pass.
+      while (!vad.isEmpty()) vad.pop();
+      while (!soon.isEmpty()) soon.pop();
+      state.vadWindows = recent.length;
+      sinceRestart = recent.length;
+    }
+    if (!teaching && !decoding && !state.peeking && !state.interrupting && said >= PEEK_AT_S[state.peeks] * SAMPLE_RATE) {
       peek().catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
     }
     return;
@@ -335,7 +417,10 @@ async function audio(samples) {
     vad.acceptWaveform(window);
     if (vad.isDetected() && state.speechAt < 0) {
       state.speechAt = state.windows.length - 1;
-      send({ type: 'speech' });
+      // Account for the detector's minimum speech and the rest of this audio
+      // packet: starting just before the reply window closes still counts.
+      state.startedAt = Math.round(Date.now() - ((buffer.length - at - WINDOW) / SAMPLE_RATE + MIN_SPEECH_S) * 1000);
+      send({ type: 'speech', startedAt: state.startedAt });
     }
     if (state.listening && soon) {
       soon.acceptWaveform(window);
@@ -347,7 +432,7 @@ async function audio(samples) {
       if (!soon.isEmpty()) {
         while (!soon.isEmpty()) soon.pop();
         // Not over another reading: one utterance is read at a time.
-        if (state.speechAt >= 0 && !state.ahead && !teaching && !decoding && !state.peeking && vad.isEmpty()) readAhead();
+        if (state.speechAt >= 0 && !state.ahead && !teaching && !decoding && !state.peeking && !state.interrupting && vad.isEmpty()) readAhead();
       }
     }
     // The detector hands back a segment once the speaker has been quiet for
@@ -391,6 +476,9 @@ port.on('message', async ({ data }) => {
       case 'voiceprint':
         voiceprint = data.print ? Float32Array.from(data.print) : null;
         learned = voiceprint && Array.isArray(data.learned) ? data.learned.map((voice) => Float32Array.from(voice)) : [];
+        break;
+      case 'speaking':
+        speaking = data.on === true;
         break;
       case 'teaching':
         teaching = !!data.on;

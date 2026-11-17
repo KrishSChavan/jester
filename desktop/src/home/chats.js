@@ -6,6 +6,7 @@
  */
 
 import { cardElement } from './cards.js';
+import { sourceCardsElement } from './research.js';
 
 const $ = (id) => document.getElementById(id);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -42,6 +43,10 @@ export function lineElement(line) {
   item.textContent = line.text;
   // What the line was about, to look at and act on: the timer it set, the reminder, the note (cards.js).
   if (line.card && !line.hidden) item.append(cardElement(line.card));
+  if (line.who === 'jester' && !line.hidden) {
+    const sources = sourceCardsElement(line.sources);
+    if (sources) item.append(sources);
+  }
   return item;
 }
 

@@ -51,6 +51,11 @@ export const ABILITIES = Object.freeze([
   },
   { id: 'learn', can: () => 'Learn the user’s own commands ("when I say focus mode, open Notes and put it on the left"; "forget focus mode"), and do a task that worked again, faster, the next time it’s asked for.' },
   {
+    id: 'web', on: (state) => !!state.web,
+    // On only when something can read pages: the Scrapling helper set up, or Chrome linked (main.js webReady).
+    can: () => 'Search the web and read pages in the background, without touching the screen, and answer with the sources it read; with Chrome linked, it reads Canvas and pages already open there too, when asked about them. When reading can’t do it, it asks before doing it by hand.'
+  },
+  {
     id: 'pictures',
     on: (state) => !!state.pictures,
     can: () => 'The laptop can also look at a picture of a window when its words aren’t enough.'

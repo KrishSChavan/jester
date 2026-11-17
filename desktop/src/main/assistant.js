@@ -20,6 +20,8 @@ import { replaySteps } from './agent/replay.js';
 import { post } from './chrome-bridge.js';
 import { LOCAL_KEEP_ALIVE } from './conversation.js';
 import { createModelJob } from './model-jobs.js';
+import { researchWeb, signedInAsked } from '../../../jester-extension/src/background/web-research.js';
+import { decideSearchRoute, missingSearchTarget, searchRequestIntent } from '../../../jester-extension/src/background/search-routing.js';
 
 /** A question nobody answers is a no. */
 const APPROVAL_MS = 60000;
@@ -63,7 +65,7 @@ const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {{paidFirst?:Function, onFailed?:Function, onUsed?:Function}} [deps.modelHooks]  model-jobs.js's: the order
  *   the saved models are tried in, one that failed and who covers for it, and what a reply cost
  */
-export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }), modelHooks = {} }) {
+export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }), modelHooks = {}, web = null, webReady = () => !!web, onVoice = null, onResearch = () => undefined }) {
   const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, picture, quietly, exclude, platform });
   /** The models set for actions in Settings, and this computer's for when they can't. */
   const model = createModelJob({
@@ -86,16 +88,16 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
   let starting = Promise.resolve();
 
   /** A task begun: the one before it stopped, and given a moment to finish its step, so two never act at once. */
-  function begin(caption) {
+  function begin(caption, { kind = 'task' } = {}) {
     const turn = starting.then(async () => {
       const before = current;
       before?.controller.abort();
       if (before) await Promise.race([before.done, pause(STOP_MS)]);
       let finished;
-      const task = { controller: new AbortController(), caption, step: '', done: new Promise((resolve) => (finished = resolve)) };
+      const task = { controller: new AbortController(), caption, kind, step: '', done: new Promise((resolve) => (finished = resolve)) };
       task.finish = finished;
       current = task;
-      onBusy(true);
+      onBusy(true, { kind });
       return task;
     });
     starting = turn.catch(() => undefined);
@@ -105,10 +107,11 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     task.finish();
     if (current !== task) return;
     current = null;
-    onBusy(false);
+    onBusy(false, { kind: task.kind });
   };
 
   function show(voice) {
+    if (onVoice) return onVoice(voice, { kind: current?.kind || 'task' });
     post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } });
   }
 
@@ -142,6 +145,61 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
   return {
     /** Whether a model is set up to take commands. */
     ready: () => model.ready(),
+
+    /** Research owns the usual stop button and approvals, without observing the
+     * desktop. A failed read can enter UI control only after an explicit yes. */
+    // Only with something to read pages with (webReady): otherwise a search opens in the browser, as before.
+    canResearch: (goal) => !!web && webReady() && searchRequestIntent(goal),
+    async research(goal, { context = '' } = {}) {
+      if (!web || !webReady() || !searchRequestIntent(goal)) return { handled: false };
+      const task = await begin('Searching the internet', { kind: 'research' });
+      let decision = null;
+      const progress = (phase, label, active = true) => {
+        if (current !== task || task.controller.signal.aborted) return;
+        onResearch({ active, phase, label, goal: decision?.goal || goal,
+          ...(decision ? { scrapeConfidence: decision.scrapeConfidence, strategyReason: decision.reason } : {}) }, task);
+        if (active) working(label);
+      };
+      /** Asks before doing it by hand, saying what would be done; a score only when the model gave one. `tried`:
+       * reading was tried and failed, so the score was for trying and isn't said. */
+      const interaction = async (why, { tried = false } = {}) => {
+        progress('review', why, false);
+        const what = String(decision.goal || goal).replace(/\s+/g, ' ').slice(0, 140);
+        const lead = tried ? 'I couldn’t read this in the background'
+          : `Scraping looks unreliable for this${Number.isFinite(decision.scrapeConfidence) ? ` (${decision.scrapeConfidence}/100)` : ''}`;
+        const allowed = await ask(`${lead}: ${String(why || 'background reading isn’t enough').slice(0, 220).replace(/[.!?\s]+$/, '')}. Should I do “${what}” by hand instead`, task.controller.signal);
+        if (task.controller.signal.aborted) return null;
+        return allowed ? { handled: false, approvedInteraction: true, goal: decision.goal || goal, why,
+          scrapeConfidence: decision.scrapeConfidence, strategyReason: decision.reason }
+          : { handled: true, ok: false, text: 'Okay, I left your browser and desktop as they were.' };
+      };
+      try {
+        if (!missingSearchTarget(goal)) progress('routing', 'Choosing how to search…');
+        decision = await decideSearchRoute({ goal, context, model, signal: task.controller.signal });
+        if (task.controller.signal.aborted) return null;
+        if (decision.route === 'clarify') {
+          const question = decision.question || 'What would you like me to search for?';
+          progress('clarifying', question, false);
+          return { handled: true, ok: true, text: question, clarification: { goal, question } };
+        }
+        if (decision.route !== 'scrape' || decision.scrapeConfidence < 70) return await interaction(decision.reason);
+        progress('searching', 'Finding relevant sources…');
+        const result = await researchWeb({ goal: decision.goal || goal, signedIn: signedInAsked(goal), context, model, scrape: web, signal: task.controller.signal,
+          onStep: ({ phase, label }) => progress(phase === 'reading' ? 'reading' : 'thinking', phase === 'thinking' ? 'Putting the answer together…' : label) });
+        if (task.controller.signal.aborted) return null;
+        if (result.handled) return result;
+        decision = { ...decision, reason: result.why || 'Background reading could not finish this.' };
+        return await interaction(decision.reason, { tried: true });
+      } catch (error) {
+        if (task.controller.signal.aborted || error?.name === 'AbortError') return null;
+        // A dependency or model error never silently starts computer control.
+        return { handled: true, ok: false, text: error?.message || 'Background research could not start.' };
+      } finally {
+        // Its own bar only: a search begun since has the bar now (research-presentation.js owner).
+        onResearch({ active: false }, task);
+        end(task);
+      }
+    },
 
     /** Whether a task could be shown a picture of a window: one can be taken, and a model for actions reads it. */
     canSee: async () => host.canPicture() && (await model.canSee().catch(() => false)),
@@ -285,9 +343,10 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     },
 
     /** Stops the task running, and resolves once it has (or after a moment). */
-    async cancel() {
+    /** `only`: stop that task, if it's still the one at work (a search's Stop, clicked as it ended). */
+    async cancel(only = null) {
       const task = current;
-      if (!task) return;
+      if (!task || (only && task !== only)) return;
       task.controller.abort();
       working(STOPPING);
       await Promise.race([task.done, pause(STOP_MS)]);

@@ -996,10 +996,296 @@ body.opening .hint {
   align-items: flex-start;
 }
 
+.briefing-card {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.briefing-card .words {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.briefing-card .acts {
+  flex-wrap: wrap;
+}
+
+.briefing-details {
+  margin-top: 10px;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.briefing-details > summary {
+  cursor: pointer;
+  color: var(--text);
+  width: fit-content;
+  border-radius: 5px;
+}
+
+.briefing-details > summary:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+
+.briefing-items {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.briefing-items > li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--edge);
+}
+
+.briefing-items > li > div {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.briefing-items strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.briefing-items p {
+  margin: 5px 0;
+  white-space: pre-wrap;
+}
+
+.briefing-item-source {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+}
+
+.briefing-error {
+  display: block;
+  margin-top: 7px;
+  color: var(--bad);
+  font-size: 12px;
+}
+
+.briefing-card .act:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+.briefing-dialog {
+  position: relative;
+  width: min(620px, calc(100vw - 48px));
+  max-height: calc(100vh - 80px);
+  padding: 25px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 18px;
+  background: var(--raised);
+  color: var(--text);
+  box-shadow: 0 20px 70px #0008;
+}
+
+.briefing-dialog::backdrop {
+  background: #08060cbf;
+}
+
+.briefing-dialog h2 {
+  margin: 0 70px 20px 0;
+  font-size: 20px;
+  font-weight: 500;
+}
+
+.briefing-dialog-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  padding: 6px 10px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--raised-hi);
+}
+
+.briefing-dialog .briefing-items {
+  color: var(--dim);
+  font-size: 14px;
+}
+
 /* On a line of the chat: under what he said of it. */
 .line.carded .card {
   width: min(420px, 100%);
   margin-top: 9px;
+}
+
+/* Research stays in the window when its desktop pill is out of view. */
+.research-progress {
+  position: fixed;
+  z-index: 5;
+  top: var(--bar);
+  left: 20px;
+  right: 20px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 54px;
+  padding: 9px 13px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 13px;
+  background: var(--raised);
+}
+
+body.researching .screen > .top {
+  margin-bottom: 64px;
+}
+
+.research-spinner {
+  flex: none;
+  width: 17px;
+  height: 17px;
+  border: 2px solid var(--edge-hi);
+  border-top-color: var(--orb);
+  border-radius: 50%;
+  animation: research-spin 0.9s linear infinite;
+}
+
+.research-progress-words {
+  flex: 1;
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.research-progress-words strong {
+  font-weight: 550;
+}
+
+.research-progress-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: 11.5px;
+}
+
+.research-confidence {
+  flex: none;
+  padding: 4px 7px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 6px;
+  color: var(--dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.research-stop,
+.research-source-open {
+  flex: none;
+  padding: 5px 10px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.research-stop:hover,
+.research-source-open:hover {
+  background: var(--raised-hi);
+  color: var(--text);
+  border-color: var(--ring);
+}
+
+.research-stop:disabled,
+.research-source-open:disabled {
+  opacity: 0.5;
+}
+
+.research-sources {
+  width: min(440px, 100%);
+  margin-top: 12px;
+  white-space: normal;
+}
+
+.research-sources-heading {
+  margin: 0 0 7px;
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.research-dropdown > summary {
+  width: fit-content;
+  padding: 5px 9px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.research-dropdown > summary:hover {
+  color: var(--text);
+  border-color: var(--edge-hi);
+  background: var(--raised);
+}
+
+.research-dropdown[open] > summary {
+  margin-bottom: 9px;
+}
+
+.research-source-list {
+  display: grid;
+  gap: 7px;
+}
+
+.research-source {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  background: var(--raised);
+}
+
+.research-source-words {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.research-source-domain {
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1.2;
+}
+
+.research-source-title {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.research-source-error {
+  color: var(--warn);
+  font-size: 11px;
+}
+
+@keyframes research-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .research-spinner { animation: none; }
 }
 
 /* The shelf over the orb: what's in play, one line a card. */
@@ -1010,6 +1296,17 @@ body.opening .hint {
   justify-content: center;
   gap: 8px;
   padding: 2px 20px 0;
+}
+
+#briefing-shelf {
+  max-height: 34vh;
+  overflow-y: auto;
+  padding-bottom: 6px;
+}
+
+#briefing-shelf > .card {
+  width: 100%;
+  max-width: 720px;
 }
 
 .card.compact {

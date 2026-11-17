@@ -10,10 +10,13 @@
 import { ACTIONS, MSG, ENGINE, loadSettings, mergeSettings, post } from '../common/constants.js';
 import { loadEnv } from '../common/env.js';
 import { runAssistant } from './assistant.js';
+import { researchWeb, webReadIntent } from './web-research.js';
+import { decideSearchRoute, searchRequestIntent } from './search-routing.js';
+import { createBrowserWebReader } from './web-reader.js';
 import { loadConnection, loadConnections, connectionSummary, saveConnection, clearConnection, listConnectionModels, reorderConnections } from '../common/credentials.js';
 import { createPooledModelClient, nextModelCooldown } from './model-pool.js';
 import { createRealInput } from './real-input.js';
-import { abortableDelay, supportsImages } from './model-client.js';
+import { abortableDelay, normalizeModelConfig, requestModel, supportsImages } from './model-client.js';
 import { webPage, requiresConfirmation } from '../common/agent-permissions.js';
 import { BROWSER_READS } from '../common/agent-actions.js';
 import { createBrowserTools, publicAddress } from './browser-tools.js';
@@ -1178,6 +1181,8 @@ const ANSWER_ERROR_EXTRA_MS = 3000;
 
 /** The run in flight, or null. Holds the pill, and can be cancelled. */
 let assistantRun = null;
+/** Reservations also cover async setup, before a task has a tab or a controller. */
+let assistantGeneration = 0;
 /** Engine frames are ignored until this passes, so an answer isn't painted over. */
 let pillHeldUntil = 0;
 
@@ -1210,6 +1215,48 @@ const CONTINUE = /^(keep (going|at it|trying)|carry on|continu\w*|go on|finish (
 const FOLLOW_UP_KEY = 'recentCommands';
 const FOLLOW_UP_TTL_MS = 120000;
 const FOLLOW_UP_LIMIT = 3;
+
+// A clarification is conversation state, not a paused browser plan. Keep its
+// original expiry across worker restarts and serialize writes so cancellation
+// cannot be undone by an older storage.set finishing later.
+const SEARCH_CLARIFICATION_KEY = 'pendingSearchClarification';
+const SEARCH_CLARIFICATION_TTL_MS = 120000;
+let pendingSearchClarification = null;
+let searchClarificationRevision = 0;
+let searchClarificationWrites = Promise.resolve();
+const searchClarificationReady = chrome.storage.session.get(SEARCH_CLARIFICATION_KEY).then(saved => {
+  const pending = saved?.[SEARCH_CLARIFICATION_KEY];
+  if (searchClarificationRevision || !pending || typeof pending.goal !== 'string' || typeof pending.question !== 'string') return;
+  if (pending.expiresAt > Date.now() && pending.expiresAt <= Date.now() + SEARCH_CLARIFICATION_TTL_MS) {
+    pendingSearchClarification = {...pending,goal:pending.goal.slice(0,2000),question:pending.question.slice(0,300)};
+  } else clearSearchClarification();
+}).catch(() => undefined);
+
+function clearSearchClarification() {
+  searchClarificationRevision++;
+  pendingSearchClarification = null;
+  searchClarificationWrites = searchClarificationWrites.then(() => chrome.storage.session.remove(SEARCH_CLARIFICATION_KEY)).catch(() => undefined);
+  return searchClarificationWrites;
+}
+
+async function rememberSearchClarification(goal, question, generation, fromDesktop) {
+  if (generation !== assistantGeneration) return false;
+  const pending = {goal:String(goal).slice(0,2000),question:String(question).slice(0,300),expiresAt:Date.now()+SEARCH_CLARIFICATION_TTL_MS,fromDesktop};
+  searchClarificationRevision++;
+  pendingSearchClarification = pending;
+  searchClarificationWrites = searchClarificationWrites.then(() => {
+    if (pendingSearchClarification === pending && generation === assistantGeneration) return chrome.storage.session.set({[SEARCH_CLARIFICATION_KEY]:pending});
+  }).catch(() => undefined);
+  await searchClarificationWrites;
+  return pendingSearchClarification === pending && generation === assistantGeneration;
+}
+
+const SEARCH_CANCEL = /^(?:(?:please\s+)?(?:cancel|stop|forget|drop)(?:\s+(?:the\s+)?(?:search|that|it))?|never\s*mind|no(?:\s+thanks)?)[.!?]*$/i;
+function replacesSearchClarification(text) {
+  const command = spokenCommand(text) || String(text).trim();
+  return searchRequestIntent(command) || webReadIntent(command) || !!quickBrowserAction(command) || !!parseBrowserIntent(command) ||
+    /^(?:open|close|play|pause|resume|click|type|press|send|submit|delete|buy|book|set|create|write|launch|switch|turn|help|explain|tell\s+me)\b/i.test(command);
+}
 
 async function recentCommands() {
   const saved = (await chrome.storage.session.get(FOLLOW_UP_KEY).catch(() => ({})))?.[FOLLOW_UP_KEY];
@@ -1287,15 +1334,18 @@ async function refreshModelCooldown(tabId) {
   await showModelCooldown(tabId,nextModelCooldown(connections));
 }
 
-function cancelAssistant() {
+function cancelAssistant({preserveSearchClarification = false} = {}) {
+  const generation = ++assistantGeneration;
+  if (!preserveSearchClarification) clearSearchClarification();
   pillHeldUntil = 0;
   releaseBadge();
-  if (!assistantRun) return;
+  if (!assistantRun) return generation;
   const run = assistantRun;
   assistantRun = null;
   run.abort();
   clearApproval(false);
   realInput.release(run.tabId);
+  return generation;
 }
 
 /**
@@ -1348,7 +1398,7 @@ function clearApproval(approved = false) {
   clearTimeout(current.timer); current.resolve(approved); publishApproval();
 }
 
-async function requestApproval(run, label) {
+async function requestApproval(run, label, {directQuestion = false} = {}) {
   if (run.signal.aborted) return false;
   // Linked, Jester Desktop asks, and hears the yes or no; the popup can still answer.
   if (desktop.linked) return new Promise(resolve => {
@@ -1358,8 +1408,8 @@ async function requestApproval(run, label) {
     publishApproval();
     desktop.ask(label,run.signal).then(yes => { if (approval?.id === id) clearApproval(yes); });
   });
-  const action = String(label).replace(/\s+/g, ' ').trim().slice(0, 80);
-  await showPill(run,{phase:'thinking',step:`Allow “${action}”? Say yes or no.`},{notify:true});
+  const action = String(label).replace(/\s+/g, ' ').trim().slice(0,directQuestion ? 350 : 80);
+  await showPill(run,{phase:'thinking',step:directQuestion ? `${action} Say yes or no.` : `Allow “${action}”? Say yes or no.`},{notify:true});
   if (run.signal.aborted || assistantRun !== run) return false;
   return new Promise(resolve => {
     const id = crypto.randomUUID();
@@ -1610,6 +1660,25 @@ const REAL_INPUT = new Set(['click','hover','type','press_key']);
 /** Long enough for hover reveals and mouse-move-dismissed layers to react. */
 const REAL_MOVE_SETTLE_MS = 100;
 const browserTools = createBrowserTools();
+const browserWebReader = createBrowserWebReader();
+
+/** The desktop's reader couldn't run at all: only then is the page read here instead. A refusal (a private
+ * address, a bad URL) stands: the reader here checks names, not where they lead. */
+const DESKTOP_UNAVAILABLE = new Set(['setup_required','worker_failed','busy','scrape_busy','scrape_unavailable','scrape_failed','timeout']);
+
+/** Signed-in pages are read in Chrome only when the user asked about them (request.signedIn, web-research.js);
+ * public ones anonymously, through the desktop's Scrapling when it's linked. */
+async function readLiveWeb(request, options) {
+  if (request?.op === 'tabs' || (request?.op === 'scrape' && request.signedIn && await browserWebReader.canReadOpen(request.url))) {
+    return browserWebReader(request, options);
+  }
+  if (desktop.scraping) {
+    const result = await desktop.scrape(request, options);
+    if (options?.signal?.aborted) throw Object.assign(new Error('cancelled'), {name:'AbortError'});
+    if (result?.ok || !DESKTOP_UNAVAILABLE.has(result?.code)) return result;
+  }
+  return browserWebReader(request, options);
+}
 const realInput = createRealInput({
   // Dismissing Chrome's debugging bar means "stop debugging": the run carries on with synthetic events.
   onUserCancel:tabId => { if (assistantRun?.tabId === tabId) assistantRun.syntheticOnly = true; }
@@ -1679,13 +1748,110 @@ async function executeReal(run,action,options) {
     return fallBack();
   }
 }
+/** A web request gets background evidence before any page observation, focus or input. */
+async function handleWebResearch(command, understood, {fromDesktop,generation,clarification = null}) {
+  if (generation !== assistantGeneration) return null;
+  const controller = new AbortController();
+  const run = {tabId:null,goal:understood || command,signal:controller.signal,abort:() => controller.abort(),fromDesktop};
+  assistantRun = run;
+  const live = () => generation === assistantGeneration && assistantRun === run && !run.signal.aborted;
+  // A tab ID is only for the answer's pill. Reading its DOM is the reader's explicit, task-scoped operation.
+  const tab = fromDesktop ? (await frontView()).tab : await visibleTab();
+  if (!live()) return null;
+  run.tabId = tab?.id ?? null;
+  await dropTask();
+  if (!live()) return null;
+  let result;
+  let strategy = null;
+  try {
+    const config = await loadConnection();
+    const migrated = (await chrome.storage.local.get('modelConnectionConfigured')).modelConnectionConfigured;
+    const legacy = config || migrated ? null : await loadEnv();
+    const env = config || (legacy?.aiOk ? {provider:'groq',protocol:'openai-compatible',baseUrl:'https://api.groq.com/openai/v1',model:legacy.aiModel || 'llama-3.3-70b-versatile',key:legacy.aiKey} : {});
+    const client = config ? createPooledModelClient({
+      onPacing:({waitMs}) => live() ? showPill(run,{phase:'thinking',step:`Waiting ${Math.ceil(waitMs/1000)}s for the model`}) : undefined
+    }) : requestModel;
+    const model = options => client({...options,env,config:normalizeModelConfig(env),signal:run.signal});
+    const previousCommands = await recentCommands();
+    const context = previousCommands.length || clarification ? JSON.stringify({previousCommands,...(clarification ? {searchClarification:clarification} : {})}) : '';
+    if (!live()) return null;
+    strategy = await decideSearchRoute({goal:run.goal,context,model,signal:run.signal});
+    if (!live()) return null;
+    if (strategy.route === 'clarify') {
+      const question = String(strategy.question || 'What would you like me to search for?').slice(0,300);
+      if (!await rememberSearchClarification(clarification?.originalGoal || run.goal,question,generation,fromDesktop) || !live()) return null;
+      result = {ok:true,text:question,clarification:{goal:clarification?.originalGoal || run.goal,question}};
+    } else {
+      run.goal = strategy.goal;
+      if (strategy.route === 'scrape') {
+        await showPill(run,{phase:'thinking',step:'Reading live web data'});
+        if (!live()) return null;
+        result = await researchWeb({goal:run.goal,model,
+          scrape:(request, options) => readLiveWeb(request,{...options,signal:run.signal}),
+          signal:run.signal,
+          onStep:step => live() ? showPill(run,{phase:'thinking',step:typeof step === 'string' ? step : step?.label || step?.status || 'Reading live web data'}) : undefined,
+          context
+        });
+      } else result = {handled:false,ok:false,why:strategy.reason};
+    }
+    if (!live()) return null;
+    if (result?.handled === false) {
+      const why = String(result.why || 'Background reading could not get enough information.').slice(0,190);
+      // A read that failed has no score: the model's was for trying, and a made-up 0/100 would say otherwise.
+      const tried = strategy.route === 'scrape';
+      if (tried) strategy = {...strategy,scrapeConfidence:null,reason:why};
+      const what = String(strategy.goal || run.goal || '').replace(/\s+/g,' ').slice(0,140);
+      const lead = tried ? 'I couldn’t read this in the background'
+        : `Scraping looks unreliable for this${Number.isFinite(strategy.scrapeConfidence) ? ` (${strategy.scrapeConfidence}/100)` : ''}`;
+      const question = `${lead}: ${why.replace(/[.!?\s]+$/,'')}. Should I do “${what}” by hand instead?`;
+      const assessment = {text:question,sources:[],at:Date.now(),scrapeConfidence:strategy.scrapeConfidence,strategyReason:strategy.reason};
+      await chrome.storage.session.set({lastWebResult:assessment});
+      if (!live()) return null;
+      post({type:'jester/research-result',result:assessment});
+      const approved = await requestApproval(run,question,{directQuestion:true});
+      if (!live()) return null;
+      if (approved) {
+        assistantRun = null;
+        clearApproval(false);
+        return {approvedInteraction:true,goal:run.goal,scrapeConfidence:strategy.scrapeConfidence,strategyReason:strategy.reason};
+      }
+      result = {ok:false,text:`${why} Browser interaction was not approved.`};
+    }
+  } catch (error) {
+    if (assistantRun !== run || run.signal.aborted || error?.name === 'AbortError') return null;
+    result = {ok:false,text:String(error?.message || error).slice(0,350)};
+  }
+  if (assistantRun !== run || run.signal.aborted) return null;
+  const say = String(result?.text || 'Background reading could not get the requested data.').trim();
+  const outcome = {ok:result?.ok === true,say,...(typeof result?.answer === 'string' ? {answer:result.answer} : {}),...(Array.isArray(result?.sources) ? {sources:result.sources} : {}),
+    ...(result?.clarification ? {clarification:result.clarification} : {}),
+    ...(strategy ? {scrapeConfidence:strategy.scrapeConfidence,strategyReason:strategy.reason} : {})};
+  const webResult = {text:say.slice(0,16000),sources:(outcome.sources || []).slice(0,8).map(source => ({
+    url:String(source?.url || '').slice(0,4096),title:String(source?.title || '').slice(0,300),fetchedAt:String(source?.fetchedAt || '').slice(0,60)
+  })),at:Date.now(),...(strategy ? {scrapeConfidence:strategy.scrapeConfidence,strategyReason:strategy.reason} : {}),
+    ...(outcome.clarification ? {clarification:outcome.clarification} : {})};
+  await chrome.storage.session.set({lastWebResult:webResult});
+  if (!live()) return null;
+  post({type:'jester/research-result',result:webResult});
+  if (!outcome.clarification) await rememberCommand(command,outcome);
+  if (!live()) return null;
+  assistantRun = null;
+  clearApproval(false);
+  if (!fromDesktop) await reply(run.tabId,{phase:'answer',text:say,ok:outcome.ok});
+  else releaseBadge();
+  if (generation !== assistantGeneration) return null;
+  await recordAction({source:'voice',action:'ASSISTANT',label:`Voice: ${command.slice(0,70)}`,ok:outcome.ok,detail:say});
+  if (outcome.clarification && !fromDesktop && generation === assistantGeneration) post({type:MSG.VOICE_CONTROL,action:'start'});
+  return outcome;
+}
+
 /**
  * `fromDesktop`: Jester Desktop heard it and hands it over (desktop-link.js); its pill
  * shows the task, and it says the outcome, which this returns: {ok, say}, or null.
  * `meant`: what the words were taken to mean in conversation with Jester Desktop,
  * which has what came before ("try now": try what).
  */
-async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = false, meant = ''} = {}) {
+async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = false, meant = '', skipResearch = false} = {}) {
   let command = String(text || '').trim().slice(0,2000);
   let understood = fromDesktop ? String(meant || '').trim().slice(0,2000) : '';
   if (!command && !explicitResume) return null;
@@ -1696,16 +1862,46 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
     clearApproval(answer === 'yes');
     if (answer) return null;
   }
-  await taskReady;
+  // Claim this command synchronously. Older storage/tab lookups must not revive a superseded task.
+  const generation = cancelAssistant({preserveSearchClarification:true});
+  await Promise.all([taskReady,searchClarificationReady]);
+  if (generation !== assistantGeneration) return null;
   const settings = await getSettings();
+  if (generation !== assistantGeneration) return null;
   // Jester Desktop's mic heard it, whatever this one's voice switch says.
   if (!settings.enabled) return fromDesktop ? {ok:false,say:'Jester is off in Chrome: turn it on from its toolbar button.'} : null;
   if (!settings.voiceEnabled && !fromDesktop) return null;
-  cancelAssistant();
+  let clarification = null;
+  const pending = pendingSearchClarification;
+  await clearSearchClarification();
+  if (generation !== assistantGeneration) return null;
+  if (pending && pending.expiresAt > Date.now() && pending.fromDesktop === fromDesktop && !skipResearch && !explicitResume) {
+    if (SEARCH_CANCEL.test(spokenCommand(command) || command)) {
+      const say = 'Okay, I stopped the search.';
+      const tab = fromDesktop ? (await frontView()).tab : await visibleTab();
+      if (generation !== assistantGeneration) return null;
+      if (!fromDesktop) await reply(tab?.id ?? null,{phase:'answer',text:say,ok:true});
+      return {ok:true,say};
+    }
+    if (!replacesSearchClarification(understood || command)) {
+      clarification = {originalGoal:pending.goal,question:pending.question,answer:understood || command};
+      understood = `Search request: ${pending.goal}\nClarification from the user: ${understood || command}`;
+    }
+  }
+  if (!skipResearch && !explicitResume && (clarification || searchRequestIntent(understood || command))) {
+    const researched = await handleWebResearch(command,understood,{fromDesktop,generation,clarification});
+    if (generation !== assistantGeneration) return null;
+    if (!researched?.approvedInteraction) return researched;
+    understood = researched.goal;
+  }
+  // Bring Chrome forward only when this task needs its visible controls.
+  if (fromDesktop) await bringChromeForward(() => generation === assistantGeneration);
+  if (generation !== assistantGeneration) return null;
   // Whatever tab you're looking at, Chrome's own pages included: browser commands work there.
   // Jester Desktop's own window has the focus while the user types to it, so its
   // tasks take the tab in Chrome's front window, which it was brought forward for.
   const tab = fromDesktop ? (await frontView()).tab : await visibleTab();
+  if (generation !== assistantGeneration) return null;
   const tabId = tab?.id ?? null;
   const resume = explicitResume ? pausedTask() : continuation(command,tabId);
   if ((explicitResume || CONTINUE.test(command)) && (!resume || resume.tabId !== tabId)) {
@@ -1721,6 +1917,7 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
   }
   // A new request replaces whatever was paused; its goal is the only one now.
   if (!resume) await dropTask();
+  if (generation !== assistantGeneration) return null;
   if (!tab) return fromDesktop ? {ok:false,say:'No Chrome window is open.'} : null;
   const controller = new AbortController();
   // `tabId` changes as the task opens and switches tabs.
@@ -1735,6 +1932,7 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
     await chrome.storage.session.set({[TASK_KEY]:{snapshot,tabId:run.tabId,expiresAt}});
   };
   await showPill(run,{phase:'thinking'});
+  if (generation !== assistantGeneration || assistantRun !== run || run.signal.aborted) return null;
   let result;
   try {
     // "click" in combined mode is deterministic and uses the current gaze target.
@@ -1770,6 +1968,7 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
       }) : undefined;
       // A continuation's goal is the paused one, so it carries no follow-up context.
       const previous = resume ? [] : await recentCommands();
+      if (generation !== assistantGeneration || assistantRun !== run || run.signal.aborted) return null;
       result = await runAssistant({text:command,resume,previous,env:env||{},signal:controller.signal,
         ...(understood && !resume ? {meant:understood} : {}),
         ...(pooledModel ? {modelClient:pooledModel} : {}),host:{
@@ -2008,23 +2207,26 @@ async function aimAt({x, y, radius}) {
  * used comes forward, or with none open (Chrome still running), a new one opens,
  * as clicking Chrome in the Dock would.
  */
-async function bringChromeForward() {
-  if (await visibleTab()) return;
+async function bringChromeForward(live = () => true) {
+  if (!live() || await visibleTab() || !live()) return;
   const last = await chrome.windows.getLastFocused({windowTypes:['normal']}).catch(() => null);
+  if (!live()) return;
   if (last?.id === undefined) await chrome.windows.create({focused:true}).catch(() => undefined);
   else await chrome.windows.update(last.id,{focused:true,...(last.state === 'minimized' ? {state:'normal'} : {})}).catch(() => undefined);
+  if (!live()) return;
   invalidateActiveTab();
 }
 
 const desktop = createDesktopLink({
   version: chrome.runtime.getManifest?.().version || '',
   settings: getSettings,
-  task: async (_id, text, meant) => {
-    await bringChromeForward();
-    return handleVoiceCommand(text,false,{fromDesktop:true,meant});
+  task: async (_id, text, meant, options) => {
+    return handleVoiceCommand(text,false,{fromDesktop:true,meant,skipResearch:options?.skipResearch === true});
   },
   cancel: () => cancelAssistant(),
-  request: async (op, args) => {
+  request: async (op, args, options) => {
+    // A desktop read never delegates back to the desktop: signed-in data comes directly from Chrome.
+    if (op === 'web') return browserWebReader(args.request,options);
     if (op === 'knows') return browserKnows(args.text);
     if (op === 'aim') return aimAt(args);
     if (op === 'act') {
@@ -2185,7 +2387,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         await taskReady;
         const settings = await getSettings();
-        const { history = [] } = await chrome.storage.session.get('history');
+        const { history = [], lastWebResult = null } = await chrome.storage.session.get(['history','lastWebResult']);
         const target = await resolveTarget();
         // This worker may have been evicted and restarted since the engine last
         // reported, in which case `engineStatus` is stale. Ask it to re-send.
@@ -2194,6 +2396,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           settings,
           engine: engineStatus,
           history,
+          webResult:lastWebResult,
           hasTarget: !!target,
           voiceBlocked,
           approval:approval ? {id:approval.id,label:approval.label} : null,

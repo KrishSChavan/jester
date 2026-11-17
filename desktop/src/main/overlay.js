@@ -61,7 +61,16 @@ export function createOverlays() {
     for (const display of displays) {
       const win = windows.get(display.id);
       if (win) win.setBounds(display.bounds);
-      else windows.set(display.id, makeWindow(display));
+      else {
+        const created = makeWindow(display);
+        windows.set(display.id, created);
+        created.webContents.on('did-finish-load', () => {
+          // track() may have picked a display before this renderer subscribed.
+          // Restore that cached selection so feedback can appear when the app
+          // is later hidden without requiring the pointer to change displays.
+          postTo(created.webContents, { type: 'jester/overlay-active', display: active, showHud });
+        });
+      }
     }
     active = null;
   }

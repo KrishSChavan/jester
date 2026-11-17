@@ -471,7 +471,7 @@ test('a command given on purpose does not ask', async () => {
   assert.equal(known.shown.find((voice, i) => i > 0 && voice.phase === 'heard').matched, false);
 });
 
-test('he never answers himself: while he talks and just after, only stop gets through', async () => {
+test('he never answers himself: while he talks and just after, only stop gets through, and without a voiceprint nothing after it does', async () => {
   const j = jester();
   let finish;
   j.speaker.hold = new Promise((resolve) => (finish = resolve));
@@ -516,6 +516,54 @@ test('his name alone waits for the rest, for a while', async () => {
   j.pass(60000);
   await j.conversation.heard('Nice weather today.');
   assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 1);
+});
+
+test('an answer begun inside the reply window is accepted after a long response and decode', async () => {
+  for (const question of [false, true]) {
+    const j = jester({ knowsYou: true, reply: { say: question ? 'Where would you like to travel?' : 'Hello there.', do: '' } });
+    if (question) await j.conversation.heard('Jester, help me plan a holiday');
+    else await j.conversation.heard('Jester.');
+    const startedAt = j.pass(question ? 19900 : 7900);
+    j.conversation.hearing({ startedAt });
+    j.pass(65000);
+    j.conversation.hearing({ startedAt });
+    assert.equal(j.shown.at(-1).start, true, 'the listening pill stays up throughout the answer');
+    await j.conversation.heard('A long explanation of the itinerary and every place to visit.', { startedAt, unsure: true });
+    assert.equal(j.entries.filter((entry) => entry.who === 'you').at(-1).text, 'A long explanation of the itinerary and every place to visit.');
+  }
+});
+
+test('speech outside the reply window, before it opened, or after a reset is still ignored', async () => {
+  for (const kind of ['late', 'before', 'reset']) {
+    const j = jester();
+    await j.conversation.heard('Jester.');
+    const startedAt = kind === 'late' ? j.pass(8000) : kind === 'before' ? 999 : j.pass(1000);
+    j.pass(60000);
+    if (kind === 'reset') j.conversation.reset();
+    const shown = j.shown.length;
+    j.conversation.hearing({ startedAt });
+    assert.equal(j.shown.length, shown, kind);
+    await j.conversation.heard('A separate conversation in the room.', { startedAt });
+    assert.deepEqual(j.entries, [], kind);
+  }
+});
+
+test('ongoing speech keeps a wake indicator alive beyond its initial twelve seconds', () => {
+  const j = jester();
+  j.conversation.woken({ startedAt: 1000 });
+  j.pass(45000);
+  j.conversation.hearing({ startedAt: 1000 });
+  assert.equal(j.shown.at(-1).start, true);
+  assert.equal(j.conversation.announce('An unrelated reminder.'), null);
+});
+
+test('a different utterance cannot keep an old wake indicator alive', () => {
+  const j = jester();
+  j.conversation.woken({ startedAt: 1000 });
+  j.pass(45000);
+  const shown = j.shown.length;
+  j.conversation.hearing({ startedAt: 46000 });
+  assert.equal(j.shown.length, shown);
 });
 
 test('the start of what is still being said wakes him only when it opens with his name', () => {
@@ -599,7 +647,7 @@ test('his own voice coming back is not the user, even past the quiet moment', as
   });
   await conversation.heard('Jester, I had a bad day');
   await new Promise((resolve) => setTimeout(resolve, 350));
-  assert.equal(afresh, 1, 'what was mid-utterance when he stopped goes');
+  assert.equal(afresh, 0, 'the microphone keeps the interruption; echoes are screened without resetting its audio');
   time += 2000;
   // As the Mac's mic really heard him, seven seconds on.
   await conversation.heard('Jester, that sounds like a rough day. Maybe take a break while grabbing the bottom.');
@@ -1625,7 +1673,7 @@ test('the voices Settings offers are the model’s own, and a setting that names
 });
 
 // 2026-11-16: "when he stops listening he doesn't respond to any trigger phrase."
-test('talked over by name, in a voice that’s surely theirs, he gives way; and what he lets pass is logged by its shape', async () => {
+test('talked over in the user’s voice he gives way without his name; uncertain speech is logged by shape', async () => {
   const logs = [];
   const world = (options = {}) => {
     const j = jester({ knowsYou: true, log: (...parts) => logs.push(parts.join(' ')), ...options });
@@ -1641,16 +1689,16 @@ test('talked over by name, in a voice that’s surely theirs, he gives way; and 
 
   const a = world();
   await tick();
-  // Without his name, or in a voice that only may be theirs, he's still only hearing himself.
-  await a.conversation.heard('what time is it?');
+  // A voice that only may be theirs is not enough to cut off playback.
+  await a.conversation.heard('what time is it?', { unsure: true });
   await a.conversation.heard('Jester, what time is it?', { unsure: true });
   assert.deepEqual(theirs(a), []);
   assert.deepEqual(logs.splice(0), ['heard and let pass: he was talking (4 words, no name in it)', 'heard and let pass: he was talking (5 words, his name first)']);
-  // By name, in their own voice: he stops, and answers that.
-  await a.conversation.heard('Jester, what time is it?');
+  // Their own voice is enough: he stops and answers without his name.
+  await a.conversation.heard('what time is it?');
   assert.deepEqual(theirs(a), ['what time is it?']);
   assert.ok(a.speaker.stops >= 1);
-  assert.ok(logs.splice(0).includes('talked over, by name: he gives way'));
+  assert.ok(logs.splice(0).includes('talked over: listening'));
 
   // With no voiceprint there's no telling them from his own voice in the mic: as before, only "stop".
   const b = world({ knowsYou: false });

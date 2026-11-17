@@ -33,7 +33,7 @@ const SAMPLE_RATE = 16000;
 /** A service that died is started again after this long, if something is listening. */
 const REVIVE_MS = 1000;
 
-/** A voice that began this long ago with nothing come of it isn't someone mid-sentence any more. */
+/** If speech activity stops arriving, don't stay busy forever after a lost mic or service. */
 const HEARING_MS = 10_000;
 
 export function startSpeech({ log = () => undefined } = {}) {
@@ -52,6 +52,8 @@ export function startSpeech({ log = () => undefined } = {}) {
   let waker = null;
   /** Told what's been said so far at a pause that may be its end, and when they went on talking after all. */
   let pauser = null;
+  /** Speech starts and stays active, including across a long answer. */
+  let activity = null;
   /** The user's voice, sent to each service as it starts. */
   let voiceprint = null;
   /** Other ways the user's been heard to sound (voiceprint.js). */
@@ -59,6 +61,8 @@ export function startSpeech({ log = () => undefined } = {}) {
   /** Where voices he wasn't sure of are kept for tuning, or '' (the user's choice, off until made). */
   let keepDir = '';
   let teaching = false;
+  /** Kept across utility-process reloads so interruption checks follow playback. */
+  let speaking = false;
 
   function send(message) {
     if (!current || current.contents.isDestroyed()) return;
@@ -69,6 +73,7 @@ export function startSpeech({ log = () => undefined } = {}) {
     clearTimeout(idleTimer);
     const child = service;
     service = null;
+    soundAt = 0;
     if (current) send({ type: 'error', detail: 'service-ended' });
     current = null;
     child?.kill();
@@ -84,8 +89,9 @@ export function startSpeech({ log = () => undefined } = {}) {
     }, IDLE_MS);
   }
 
-  /** When a voice last began, with what it said still to come; 0 with none. No voice goes on longer than HEARING_MS unbroken. */
+  /** Last speech activity, and which utterance it belongs to; an older decode can't clear a newer voice. */
   let soundAt = 0;
+  let soundStartedAt = null;
 
   function load() {
     if (service || quitting) return service;
@@ -96,9 +102,12 @@ export function startSpeech({ log = () => undefined } = {}) {
     child.on('message', (message) => {
       if (service !== child) return;
       if (message?.type === 'ready') return log('speech loaded:', message.model, `${message.loadMs} ms`);
-      // A voice has begun, and until what it said arrives (or doesn't, as a stranger's), someone's talking.
-      if (message?.type === 'speech') soundAt = Date.now();
-      else if (message?.type === 'heard' || message?.type === 'stranger' || message?.type === 'final' || message?.type === 'error') soundAt = 0;
+      if (message?.type === 'speech' || message?.type === 'activity') {
+        soundAt = Date.now();
+        soundStartedAt = message.startedAt;
+        if (listener && !current) activity?.(message);
+      } else if (['heard', 'stranger', 'ended', 'final', 'error'].includes(message?.type) &&
+        (message.startedAt === undefined || message.startedAt === soundStartedAt)) soundAt = 0;
       if (message?.type === 'heard') {
         // Every score, for tuning voiceprint.js against a real voice.
         // The voiceprint's own score too, when what was learned from use raised it.
@@ -106,7 +115,7 @@ export function startSpeech({ log = () => undefined } = {}) {
         if (message.score !== null) log(`speech: ${message.unsure ? 'maybe your voice: with his name, or as an answer to him' : 'your voice'} (${message.score.toFixed(2)}${raised}, ${message.seconds.toFixed(1)} s)`);
         return void listener?.(message.text, message);
       }
-      if (message?.type === 'wake') return void waker?.();
+      if (message?.type === 'wake') return void waker?.(message);
       if (message?.type === 'early') return void pauser?.(message.text, message);
       if (message?.type === 'resumed') return void pauser?.(null);
       if (message?.type === 'stranger') return log(`speech: not your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
@@ -127,6 +136,7 @@ export function startSpeech({ log = () => undefined } = {}) {
       // Let go on purpose, or replaced: nothing to tidy.
       if (service !== child) return;
       service = null;
+      soundAt = 0;
       if (current) send({ type: 'error', detail: 'service-ended' });
       current = null;
       if (quitting) return;
@@ -138,6 +148,7 @@ export function startSpeech({ log = () => undefined } = {}) {
     child.postMessage({ type: 'voiceprint', print: voiceprint, learned });
     child.postMessage({ type: 'keep', dir: keepDir });
     child.postMessage({ type: 'teaching', on: teaching });
+    child.postMessage({ type: 'speaking', on: speaking });
     return child;
   }
 
@@ -227,18 +238,30 @@ export function startSpeech({ log = () => undefined } = {}) {
     },
     /**
      * Every utterance from now on goes to `onHeard`, until stopListening; `onWake` hears his name as it's said.
-     * `onPause(text, {unsure})`: what's been said so far, at a pause that may be its end (it's `onHeard`'s, marked
+     * `startedAt` on wake, pause, activity and heard identifies the same utterance, from when speech began.
+     * `onPause(text, {unsure, startedAt})`: what's been said so far, at a pause that may be its end (it's `onHeard`'s, marked
      * `early`, if it was); `onPause(null)` when they went on talking instead.
+     * `onActivity({startedAt})`: the utterance has begun or is still being spoken.
+     * With `interrupt:true`, it is a verified user's voice, or partial `text`
+     * without a voiceprint that the conversation must screen for playback echo.
      */
-    listen(onHeard, onWake = () => undefined, onPause = () => undefined) {
+    listen(onHeard, onWake = () => undefined, onPause = () => undefined, onActivity = () => undefined) {
       listener = onHeard;
       waker = onWake;
       pauser = onPause;
+      activity = onActivity;
       clearTimeout(idleTimer);
       resume();
     },
     /** Whatever's being heard right now doesn't count: he's just stopped talking, and it's him. */
     listenAfresh: () => resume(),
+    /** Playback, for low-latency interruption checks. Never resets the mic. */
+    setSpeaking(on) {
+      const next = on === true;
+      if (next === speaking) return;
+      speaking = next;
+      service?.postMessage({ type: 'speaking', on: speaking });
+    },
     /** @param {number[]|null} print */
     /** `known`: other ways the user's been heard to sound, learned from use; they count only with a voiceprint. */
     setVoiceprint(print, known = []) {
@@ -266,6 +289,7 @@ export function startSpeech({ log = () => undefined } = {}) {
       listener = null;
       waker = null;
       pauser = null;
+      activity = null;
       if (!current) service?.postMessage({ type: 'abort' });
       rest();
     }

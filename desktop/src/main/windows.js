@@ -44,6 +44,13 @@ export function createEngineWindow(log) {
 let home = null;
 /** What the window shows: 'main' (the orb), 'chats', 'chat', 'settings' or 'settings/<page>' (home/screens.js). */
 let homeScreen = 'main';
+const homeListeners = new Set();
+/** Observe visibility without moving or focusing the window. */
+export function onHomeVisibility(listener) {
+  homeListeners.add(listener);
+  return () => homeListeners.delete(listener);
+}
+const changedHome = (visible) => { for (const listener of homeListeners) listener({ visible }); };
 
 const showable = (screen) => (/^(main|chats|settings(\/[a-z-]+)?)$/.test(String(screen)) ? String(screen) : 'main');
 
@@ -113,8 +120,11 @@ export function showHome({ screen = 'main', quiet = false } = {}) {
   home.on('closed', () => {
     home = null;
     homeScreen = 'main';
+    changedHome(false);
     leaveDockIfAlone();
   });
+  for (const event of ['show', 'restore']) home.on(event, () => changedHome(true));
+  for (const event of ['hide', 'minimize']) home.on(event, () => changedHome(false));
   home.loadURL(`${HOME_PAGE}#${goTo}`);
   return home;
 }

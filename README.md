@@ -61,6 +61,45 @@ enter the model ID and your Google AI Studio key, then **Add model**. Free-tier
 availability and limits depend on the provider and project; changing provider
 does not replace the local shortcuts that reduce request usage.
 
+## Background web research
+
+If you say “search something” without a topic, Jester asks what to search for.
+Your next reply supplies the topic. The model scores whether background reading
+can complete the request from 0 to 100. At 70 or above it can try scraping;
+below 70, or when interaction is needed, it asks before using computer controls.
+The pending question clears after two minutes, cancellation, or a new task.
+
+Ask Jester to search, look something up, or research your Canvas assignments or
+open pages. It reads in the background first and returns sources and retrieval
+times. If reading cannot finish, it asks before using browser or desktop
+controls. Explicit commands such as opening a site or playing music still work
+as before. Full research answers and clickable sources appear in the
+extension popup's **Research results** card.
+
+The extension works with the desktop app closed. In Jester Settings, allow
+**Also run on every other site** for public searches and the sites you want it
+to read, or grant those sites individually through Chrome. Keep Canvas open
+and signed in for coursework research. Jester can read its current page and
+follow same-origin document links using that session, without exporting
+cookies or changing your tabs. A snapshot of an open page reflects what that
+page has loaded; it is not an automatic page refresh.
+
+For Scrapling's public-page parsing and isolated JavaScript rendering, install
+the local helper and run the desktop app:
+
+```sh
+npm --prefix desktop run scraping:setup -- --browser
+```
+
+This needs Python 3.10 or newer and installs
+[Scrapling 0.5.1](https://github.com/D4Vinci/Scrapling/releases/tag/v0.5.1)
+and its browser under `desktop/.scrapling/`. Link the extension to Jester
+Desktop to share it. Without the helper, the extension uses background web
+requests and its existing signed-in pages; pages that need fresh JavaScript
+rendering or a login step may require the interaction approval. No paid
+scraping service is needed. Your configured AI model still plans research and
+reads the extracted text; its normal usage charges apply.
+
 ## Development
 
 Run `npm test` from this repository root. Tests use mocked browser/model APIs;

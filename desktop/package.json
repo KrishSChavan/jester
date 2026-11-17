@@ -15,6 +15,7 @@
     "app": "node scripts/jester-app.mjs",
     "icons": "node scripts/make-icons.mjs",
     "models": "node scripts/fetch-models.mjs vad voice parakeet-110m kokoro",
+    "scraping:setup": "node scripts/setup-scraping.mjs",
     "talk-check": "node scripts/talk-check.mjs",
     "live-check": "node scripts/live-check.mjs",
     "hear-check": "node scripts/hear-check.mjs",

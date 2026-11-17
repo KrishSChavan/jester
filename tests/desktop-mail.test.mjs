@@ -67,7 +67,8 @@ test('signing in: Google’s own page, asked for reading mail only, and answered
   assert.deepEqual(w.logs, ['google: a sign-in client was kept', 'google: signed in']);
   assert.ok(!JSON.stringify(w.google.state()).includes('refresh-1') && !JSON.stringify(w.google.state()).includes('not-a-real-secret'));
   // And they're kept sealed, away from pages (chrome-bridge.js needs Electron, so it's read, not run).
-  assert.match(readFileSync(new URL('../desktop/src/main/chrome-bridge.js', import.meta.url), 'utf8'), /PRIVATE_KEYS = Object\.freeze\(\[[^\]]*'google', 'mail'\]\)/);
+  const bridge = readFileSync(new URL('../desktop/src/main/chrome-bridge.js', import.meta.url), 'utf8');
+  for (const key of ['google', 'mail', 'briefingSnapshots']) assert.match(bridge, new RegExp(`PRIVATE_KEYS = Object\\.freeze\\(\\[[^\\]]*'${key}'`));
 });
 
 test('signing in: an answer that isn’t to this asking, a no, and half a yes', async () => {

@@ -35,15 +35,16 @@ const NO_END = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|etc|e\.g|i\.e|No|a\.m|p\.m)|\b[A
 const MAC_VOICE = 'Daniel';
 
 /** What a line for the pill should be, to the ear: no symbols, no "·", and not too long. */
-export function spokenLine(text) {
+export function spokenLine(text, { limit = SPOKEN_CHARS } = {}) {
   const line = String(text ?? '')
     .replace(/\s*\([^)]*[⌘⌥⌃⇧][^)]*\)/g, '')
     .replace(/([.!?…])?\s+·\s+/g, (_, end) => `${end || '.'} `)
     .replace(/[*_#`~]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  if (line.length <= SPOKEN_CHARS) return line;
-  const cut = line.slice(0, SPOKEN_CHARS);
+  const most = Number.isFinite(limit) ? Math.max(1, Math.min(16000, limit)) : SPOKEN_CHARS;
+  if (line.length <= most) return line;
+  const cut = line.slice(0, most);
   const sentence = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
   return sentence > 0 ? cut.slice(0, sentence + 1) : `${cut.slice(0, cut.lastIndexOf(' '))}…`;
 }
@@ -66,12 +67,14 @@ export function writtenLine(text) {
  */
 export function systemVoice({ platform = process.platform, spawnImpl = spawn, muted = false } = {}) {
   let child = null;
+  let generation = 0;
   const macArgs = (voice) => [...(voice ? ['-v', voice] : []), ...(muted ? ['-o', path.join(os.tmpdir(), 'jester-say.aiff')] : []), '-f', '-'];
   const WINDOWS_SPEECH = 'Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak([Console]::In.ReadToEnd())';
 
   /** Text goes in on stdin: it's what was said, and never an argument. */
-  const run = (file, args, text) =>
+  const run = (file, args, text, mine) =>
     new Promise((resolve) => {
+      if (mine !== generation) return resolve(null);
       const started = spawnImpl(file, args, { stdio: ['pipe', 'ignore', 'ignore'] });
       child = started;
       const over = (code) => {
@@ -86,13 +89,17 @@ export function systemVoice({ platform = process.platform, spawnImpl = spawn, mu
 
   return {
     async say(text) {
-      if (platform === 'win32') return void (await run('powershell.exe', ['-NoProfile', '-Command', WINDOWS_SPEECH], text));
+      const mine = ++generation;
+      child?.kill();
+      child = null;
+      if (platform === 'win32') return void (await run('powershell.exe', ['-NoProfile', '-Command', WINDOWS_SPEECH], text, mine));
       if (platform !== 'darwin') return undefined;
       // A Mac may not have this voice: its default will do.
-      if ((await run('say', macArgs(MAC_VOICE), text)) === 1) await run('say', macArgs(), text);
+      if ((await run('say', macArgs(MAC_VOICE), text, mine)) === 1 && mine === generation) await run('say', macArgs(), text, mine);
       return undefined;
     },
     stop() {
+      generation += 1;
       child?.kill();
       child = null;
     }
@@ -230,11 +237,15 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
         }
       };
       const pieces = spokenPieces(text);
-      const early = ahead?.text === pieces[0] && ahead.pace === pace ? ahead.made : null;
+      const early = ahead?.text === pieces[0] && ahead.pace === pace ? ahead : null;
+      if (ahead && ahead !== early) ahead.controller.abort();
       ahead = null;
-      let next = pieces.length ? early || made(pieces[0], signal, pace) : null;
+      const dropEarly = () => early?.controller.abort();
+      if (early) signal.addEventListener('abort', dropEarly, { once: true });
+      let next = pieces.length ? early?.made || made(pieces[0], signal, pace) : null;
       for (let index = 0; index < pieces.length; index++) {
         const sound = await next;
+        if (index === 0) signal.removeEventListener('abort', dropEarly);
         if (signal.aborted) return;
         if (!sound) {
           // His own voice isn't there, or failed part-way: the computer's says what's left.
@@ -257,10 +268,13 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
     },
     /** A line that's about to be said, after the one being said now: its start is made meanwhile, so no gap. */
     prepare(text, { pace = 1 } = {}) {
+      ahead?.controller.abort();
       const [first] = spokenPieces(text);
-      ahead = first ? { text: first, pace, made: made(first, undefined, pace) } : null;
+      const preparing = new AbortController();
+      ahead = first ? { text: first, pace, controller: preparing, made: made(first, preparing.signal, pace) } : null;
     },
     stop() {
+      ahead?.controller.abort();
       ahead = null;
       controller?.abort();
       stopPlaying();

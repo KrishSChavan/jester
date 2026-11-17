@@ -30,11 +30,20 @@ import { ago, askedToForget, mayAskToForget, verbatim } from './vault-memory.js'
 import { PATHS } from './vault.js';
 import { ringStopAsked } from './ring.js';
 import { addressed, nameAt } from './wake.js';
+import { sourcesOf } from './research-sources.js';
+import { searchRequestIntent } from '../../../jester-extension/src/background/search-routing.js';
 
 /** How long he waits for more: after just his name, and after answering, with no need to say it again. */
 const OPEN_MS = 8000;
 /** And after a question of his, which wants an answer: long enough to think of one. */
 const ASKED_MS = 20000;
+/**
+ * "What should I search for?" and "Would you like me to read it?" can be answered with his name this long after.
+ * Without it, the search's is a question of his like any other (ASKED_MS, and only with a voiceprint); a yes,
+ * "later" or "dismiss" to the briefing needs no name for ASKED_MS after it's said, as a yes to a task's doesn't.
+ */
+const SEARCH_ANSWER_MS = 2 * 60 * 1000;
+const BRIEF_ANSWER_MS = 2 * 60 * 1000;
 /** His name heard with the user still talking: he listens this long for the end of it. */
 const WOKEN_MS = 12000;
 /** His own voice can still be on its way through the recognizer this long after he stops. */
@@ -70,8 +79,6 @@ const ABILITIES_MS = 1500;
 /** A reply begun at a pause waits this long for the utterance to be over before it's dropped: the pause is 0.6 s. */
 const PENDING_MS = 3000;
 const LATE = Symbol('late');
-/** His voice dies away in the room for about this long after the audio ends. */
-const FADE_MS = 300;
 /** What he said can be heard back this long after, through a slow speaker: see echoes. */
 const ECHO_MS = 30000;
 /** This much of what's heard being words he just said makes it him, not the user. */
@@ -92,6 +99,15 @@ const STOP = /^\W*(?:stop|cancel|never ?mind|stop it|stop talking|shut up|be qui
 /** A question's answer is all of what's said: "okay so what" isn't a yes. */
 const YES = /^\W*(?:yes|yeah|yep|yup|sure|ok|okay|do it|go ahead|please do|allow)(?: please)?\W*$/i;
 const NO = /^\W*(?:no|nope|don'?t|do not|cancel|stop|never ?mind)(?: thanks| thank you)?\W*$/i;
+
+/** Only a direct reply to an offered briefing starts its playback. */
+export function briefingReply(text) {
+  const line = String(text ?? '').replace(/[‘’]/g, "'").replace(/[.!?,]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (YES.test(line) || /^(?:please )?(?:read|play)(?: me)? (?:it|that|the briefing|my briefing)(?: (?:please|aloud|out loud))?$/i.test(line)) return 'read';
+  if (/^(?:later|not now|maybe later|remind me later|in (?:ten|10) minutes)(?: please)?$/i.test(line)) return 'later';
+  if (NO.test(line) || /^(?:dismiss|skip)(?: (?:it|that|the briefing))?(?: please)?$/i.test(line)) return 'dismiss';
+  return '';
+}
 
 /**
  * `remember` and `note` only when asked for: Ollama's grammar puts them after the rest, if at all. Groq and
@@ -227,8 +243,11 @@ Said right after you've reminded them of one, "done" or "snooze ten minutes" is 
   const notesLine = notes ? `\nYou keep the user's notes yourself, in Obsidian: asked to make a note, add to a note or list, or open one, set "note" to {"title":"its name","add":"the words to add"} or {"title":"its name","open":true}, and leave "do" empty. ${tasks ? 'A shopping list or any other list of theirs is a note you keep, not an app\'s; their to-do list is the one "task" keeps.' : 'A to-do list, a shopping list or any list of theirs is a note you keep, not an app\'s.'} Asked what a note says, answer from the brackets and leave "note" out: open one only when they ask you to open it. Writing in an app they name is still "do".` : '';
   const knownLine = `Asked what you know or remember about them, pick the three or four things that matter most from the brackets and say them in two short sentences, the way a friend would, never all of it.${notes ? ' Then, in one more, say it\'s all in the About me note in their vault, theirs to read or change, and offer to open it.' : ''} Only when the brackets say you've learned nothing about them yet, say so instead, and that you pick things up as you talk.`;
   const knows = [live.where && 'where the user is and the weather there (and in a place they ask about)', live.calendars && 'their calendars, all of them combined'].filter(Boolean);
+  // With the web read in the background (abilities.js `web`), what's live and not in the brackets is searched for.
+  const searched = 'never answer from memory: set "do" to "search the web for" and their question, and the laptop reads it in the background and tells what its sources say.';
   const liveLine = knows.length
-    ? `The brackets before the user's words hold what's live: ${knows.join(', and ')}. Answer from them as fact. When the user is talking about something else, leave ${live.calendars ? 'the weather and their calendars' : 'the weather'} out of it${live.calendars ? ', unless something on them starts within the hour: then a few words about it at the end' : ''}.${live.calendars ? ' A question about their day, schedule or calendar is yours to answer from them, not the laptop\'s, unless they ask for an app or site to be opened: leave "do" empty, and when what they ask about isn\'t there, say it isn\'t on their calendars.' : ''}${live.where ? ' Give the weather from them too, never a search for it; for a place they aren\'t there for, offer to search.' : ''} Beyond that you have no live information, so never give news, prices, scores or anything else recent as fact: offer to search instead.`
+    ? `The brackets before the user's words hold what's live: ${knows.join(', and ')}. Answer from them as fact. When the user is talking about something else, leave ${live.calendars ? 'the weather and their calendars' : 'the weather'} out of it${live.calendars ? ', unless something on them starts within the hour: then a few words about it at the end' : ''}.${live.calendars ? ' A question about their day, schedule or calendar is yours to answer from them, not the laptop\'s, unless they ask for an app or site to be opened: leave "do" empty, and when what they ask about isn\'t there, say it isn\'t on their calendars.' : ''}${live.where ? ` Give the weather from them too, never a search for it; for a place they aren't there for, ${can.web ? 'search for it' : 'offer to search'}.` : ''} Beyond that you have no live information, so ${can.web ? `for news, prices, scores or anything else recent, ${searched}` : 'never give news, prices, scores or anything else recent as fact: offer to search instead.'}`
+    : can.web ? `You have no live information, so for the weather, news, prices, scores or anything recent, ${searched}`
     : 'You have no live information, so never give weather, news, prices, scores or anything recent as fact: offer to search instead.';
   const bracketed = knows.length
     ? `what you know right now: ${[live.where && 'where they are and the weather', live.calendars && 'their calendars, which hold invitations from other people'].filter(Boolean).join(', ')}, and anything quoted from your memory and their notes, which may include saved web pages`
@@ -239,7 +258,7 @@ You talk with the user out loud, so talk the way a friend does: one to three sho
 Reply with JSON: {"say":"what you say out loud","do":"a command for the laptop, or empty","new":false}. ${leftOut}
 Set "new" to true when what the user just said has nothing to do with the conversation so far, so a different subject has begun. Set it to false when it carries on from what you were talking about, or when there's nothing before it.
 Fill in "do" whenever the user wants something done on the laptop: an app, site or bookmark opened, something played or written, or something looked up on it and told back to them, like what's due on a class site or whether an email came. The laptop sees its own screen and does all of that, so never say you can't: hand it over. "do" is one plain command holding all of it, like "play Gunna on Spotify" or "open Notes and write down milk", in the user's own words, with every detail they gave: their times and dates as they said them, and a site or bookmark by the name they used, never a web address they didn't say. Then "say" is a few words like "On it", and never claims it's done: the laptop reports that itself. A question about what you can do isn't a request: answer it. When you can't tell who or what they mean (which person, which "it" or "that"), ask one short question and leave "do" empty, rather than guess. A request that's only loose ("play some music") isn't unclear: hand it over as it is. Never ask whether to do a thing and do it in the same reply.
-To search the internet, set "do" to "search the web for" and the words. That opens the results in the browser for the user to read. ${liveLine}${notesLine}${tasksLine}
+To search the internet, set "do" to "search the web for" and the words. ${can.web ? 'That researches in the background and returns the results with sources.' : 'That opens the results in the browser for the user to read.'} ${liveLine}${notesLine}${tasksLine}
 Asked to remember something ("remember this", "remember that…", "don't forget…"), copy the words to keep into "remember", word for word but never the asking itself: for just "remember this" or "remember that", the user's own words before it. Leave "do" empty, and say you'll remember it.
 Asked to forget something, or not to keep something they said, set "forget" to what, in a few of their words, leave "do" empty, and say only that you will: what was forgotten is told to them for you. "Don't forget…" asks you to remember, and "forget it" after a request only calls it off.
 ${knownLine}
@@ -571,7 +590,6 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  *   run's `said`: the user's own words, when `text` is the model's command for them
  * @param {{asking:boolean, running:boolean, answer:Function, cancel:Function, confirm:(label:string) => Promise<boolean>}} deps.assistant
  * @param {(voice:object) => void} deps.show  a frame for the pill
- * @param {() => void} [deps.listenAfresh]  whatever's mid-utterance doesn't count
  * @param {() => boolean} [deps.knowsYou]  a voiceprint is keeping everyone else out
  * @param {{recall:(text:string, history:{who:string, text:string}[]) => Promise<{block:string, used?:{rel:string}[]}>,
  *   remember:(request:{text:string, transcript:{who:string, text:string}[]}) => Promise<{ok:boolean, title?:string, why?:string}>,
@@ -593,19 +611,27 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, listenAfresh = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, ring = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, ring = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
   /** A reply begun at a pause that may be the end of what's being said (paused): the next turn's, if those were its words. */
   let pending = null;
   let pendingTimer = null;
+  let searchClarification = null;
+  let briefingOffer = null;
   let ponders = 0;
   /** What he's saying, in order: one line at a time. */
   let queue = Promise.resolve();
   let hushes = 0;
   let talking = 0;
+  let currentSpeech = null;
+  /** One utterance can interrupt before its final transcript is ready. */
+  let interruption = null;
+  const overlaps = new Set();
+  let overlapGeneration = 0;
   let quietUntil = 0;
+  let openSince = 0;
   let openUntil = 0;
   /** What he's said lately, for telling his voice from the user's. */
   let lately = [];
@@ -613,6 +639,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   let lastConnected = {};
   /** He's shown he's listening, for what's still being said. */
   let wokenEarly = false;
+  let wokenStartedAt;
   /** When that was: what was being said may never arrive (a stranger's, or the mic closed on it). */
   let wokenAt = 0;
   /** Times listening has ended (reset): a line being said then was cut off with nobody there to hear it. */
@@ -636,8 +663,51 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     lately = lately.filter((line) => now() - line.at < ECHO_MS);
     const words = wordsOf(text);
     if (words.length < 3) return false;
-    const his = new Set(lately.flatMap((line) => line.words));
+    const his = new Set([...lately.flatMap((line) => line.words), ...(currentSpeech?.words || [])]);
     return words.filter((word) => his.has(word)).length / words.length >= ECHO_SHARE;
+  }
+
+  /** Short partials can be pure playback too: the normal echo filter needs at
+   * least three words, but an early "yes" or "hello" needs screening as well. */
+  function playbackEcho(text) {
+    const words = wordsOf(text);
+    if (!words.length) return true;
+    if (words.length >= 3) return echoes(text);
+    const his = new Set([...(currentSpeech?.words || []), ...lately.filter((line) => now() - line.at < ECHO_MS).flatMap((line) => line.words)]);
+    return words.every((word) => his.has(word));
+  }
+
+  /** Once a screened interruption owns the floor, shared words are normal
+   * ("tomorrow" correcting "today"). Only a literal playback phrase is echo. */
+  function repeatedPlayback(text) {
+    const words = wordsOf(text);
+    if (!words.length) return true;
+    const phrase = ` ${words.join(' ')} `;
+    return [currentSpeech?.words || [], ...lately.filter((line) => now() - line.at < ECHO_MS).map((line) => line.words)]
+      .some((line) => ` ${line.join(' ')} `.includes(phrase));
+  }
+
+  /**
+   * Talking over him, with no "stop" in it: a voice the voiceprint is sure is theirs, and never words he's just said.
+   * Without a voiceprint, only "stop" does it, as before: his own voice comes back through the speakers garbled
+   * past any echo check (2026-11-06), and so does a television's.
+   */
+  function cutsIn(meant, unsure) {
+    return !!meant && knowsYou() && !unsure && !playbackEcho(meant);
+  }
+
+  /** A yes, "later" or "dismiss" to his offer of a briefing, begun while it can be answered without his name. */
+  function answersOffer(meant, startedAt) {
+    const at = Number.isFinite(startedAt) ? startedAt : now();
+    return !!briefingOffer && at >= briefingOffer.askedAt && at < (briefingOffer.answerBy ?? briefingOffer.expiresAt) && !!briefingReply(meant);
+  }
+
+  function overlappedSpeech(startedAt) {
+    if (!Number.isFinite(startedAt)) return false;
+    if (overlaps.has(startedAt)) return true;
+    if (currentSpeech?.overlapGeneration === overlapGeneration && startedAt >= currentSpeech.startedAt && startedAt <= now()) return true;
+    // A very short reply may finish before its first VAD event reaches us.
+    return lately.some((line) => line.overlapGeneration === overlapGeneration && startedAt >= line.startedAt && startedAt <= line.at);
   }
 
   const keep = (entries) => {
@@ -652,25 +722,31 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   let pace = 1;
 
   async function speakNow(line, { more = null, hush = hushes, clock = null } = {}) {
+    const speech = { hush, startedAt: now(), overlapGeneration, words: wordsOf(line), interrupted: false };
+    currentSpeech = speech;
     talking += 1;
     show({ phase: 'speaking', text: line });
     const said = [line];
     try {
       await speaker.say(line, { onSound: () => clock?.sound(), pace });
+      if (hush !== hushes) return;
       const rest = more ? await more : '';
       if (rest && hush === hushes) {
         said.push(rest);
+        speech.words = wordsOf(said.join(' '));
         show({ phase: 'speaking', text: `${line} ${rest}` });
         await speaker.say(rest, { pace });
       }
     } finally {
       talking -= 1;
-      quietUntil = now() + QUIET_MS;
-      lately.push({ at: now(), words: wordsOf(said.join(' ')) });
-      if (!talking) {
+      if (currentSpeech === speech) currentSpeech = null;
+      quietUntil = speech.interrupted ? 0 : now() + QUIET_MS;
+      lately.push({ at: now(), startedAt: speech.startedAt, overlapGeneration: speech.overlapGeneration, words: wordsOf(said.join(' ')) });
+      if (!talking && !speech.interrupted) {
         show({ phase: 'speaking', done: true });
-        // Anything that began while he talked has him in it: it goes, however it ends.
-        setTimeout(listenAfresh, FADE_MS);
+        // Keep the microphone's current utterance: it may be the user cutting
+        // in. Echo cancellation, speaker matching and text screening reject
+        // playback without throwing away the user's first words.
       }
     }
   }
@@ -681,10 +757,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * pill's copy cut short). `ok`: false shows it there as something that went wrong.
    * @returns {Promise<void>} once said
    */
-  function say(text, { written = false, ok = true, clock = null, card = null, untrusted = false } = {}) {
+  function say(text, { written = false, ok = true, clock = null, card = null, sources = null, untrusted = false, full = false } = {}) {
     // `card`: what the line is about (a timer, a reminder, a note), for his window to show with it. `untrusted`: it
     // holds other people's words (a calendar's titles).
-    const more = card || untrusted ? [{ ...(card ? { card } : {}), ...(untrusted ? { untrusted: true } : {}) }] : [];
+    const sourceCards = sourcesOf(sources);
+    const more = card || sourceCards.length || untrusted ? [{ ...(card ? { card } : {}), ...(sourceCards.length ? { sources: sourceCards } : {}), ...(untrusted ? { untrusted: true } : {}) }] : [];
     if (written) {
       const line = writtenLine(text);
       if (!line) return Promise.resolve();
@@ -692,13 +769,14 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       show({ phase: 'answer', text: line.length > PILL_CHARS ? `${line.slice(0, PILL_CHARS - 1).trimEnd()}…` : line, ok });
       return Promise.resolve();
     }
-    const line = spokenLine(text);
+    const line = spokenLine(text, full ? { limit: 16000 } : undefined);
     if (!line) return Promise.resolve();
-    memory.add('jester', line, ...more);
+    // Research stays complete in chat even when its spoken version is shorter.
+    memory.add('jester', sourceCards.length ? writtenLine(text) : line, ...more);
     const hush = hushes;
     const spoken = queue.then(() => (hush === hushes ? speakNow(line, { hush, clock }) : undefined));
     queue = spoken.catch((err) => log('couldn’t say it:', err.message));
-    return queue;
+    return full ? spoken : queue;
   }
 
   /**
@@ -780,11 +858,45 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     speaker.stop();
   }
 
+  /** Stop output immediately, but leave the user's ongoing audio untouched. */
+  function listenInstead({ startedAt, verified = false } = {}) {
+    if (currentSpeech) currentSpeech.interrupted = true;
+    const began = Number.isFinite(startedAt) ? startedAt : now();
+    interruption = { startedAt: began, verified };
+    if (overlaps.size >= 8) overlaps.delete(overlaps.values().next().value);
+    overlaps.add(began);
+    // An answer still being generated must not resume behind the interruption.
+    // A task awaiting its yes/no retains that question and its result.
+    if (!assistant.running && !assistant.asking) {
+      turns += 1;
+      controller?.abort();
+      controller = null;
+    }
+    dropPending();
+    hush();
+    quietUntil = 0;
+    show({ phase: 'speaking', done: true });
+    // With a voiceprint he listens on, for what they say next without his name. Without one, as ever, only what
+    // was being said when he stopped is theirs: his own voice could carry on from here (2026-11-06).
+    if (knowsYou()) {
+      stayOpen(ASKED_MS);
+      openSince = Math.min(openSince, began);
+    }
+    wokenEarly = true;
+    wokenStartedAt = began;
+    wokenAt = now();
+    log('talked over: listening');
+  }
+
   /** The pill listens on, for what's said next. */
   function stayOpen(ms = OPEN_MS) {
-    openUntil = now() + ms;
+    openSince = now();
+    openUntil = openSince + ms;
     show({ active: true, start: true, hold: ms });
   }
+
+  // The window is for starting an answer. Recognition may finish much later.
+  const withinWindow = (startedAt = now()) => openUntil > 0 && startedAt >= openSince && startedAt < openUntil;
 
   /**
    * What his memory and the user's notes hold on what was said, given the moment it takes and no longer.
@@ -923,9 +1035,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * `typed`: the turn was typed, so what the command did is written even if something's been said since, which it
    * interrupts nothing by; spoken, a newer turn has the floor. A conversation that's over gets nothing (`epoch`).
    */
-  async function act(text, { overheard, stale, before, said, answer = say, typed = false }) {
+  async function act(text, { overheard, stale, before, said, answer = say, typed = false, context = '' }) {
     acting += 1;
     const mine = epoch;
+    const reset = resets;
     try {
       if (overheard && (await commands.risky(text)) && !stale()) {
         const allowed = await assistant.confirm(`Do “${text.replace(/[.!?]+$/, '')}”`);
@@ -934,10 +1047,20 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         if (!allowed) return void (await say('Okay, I won’t.', { written: typing }));
       }
       if (stale()) return;
-      const { outcome } = await commands.run(text, said);
+      const { outcome } = await commands.run(text, said, context);
       await before;
       if (mine !== epoch || (stale() && !typed)) return;
-      if (outcome) await answer(outcome.text, { ok: outcome.ok !== false });
+      // Arm before speaking: the user may answer over the question itself.
+      // A replaced turn can still be written, but can never own a new follow-up.
+      const question = reset === resets && !stale() && outcome?.clarification;
+      if (question) {
+        searchClarification = { goal: question.goal || said || text, question: question.question || outcome.text,
+          context, askedAt: now(), expiresAt: now() + SEARCH_ANSWER_MS };
+        if (!typed && knowsYou()) stayOpen(ASKED_MS);
+      }
+      // An answer read off web pages holds their words: what could do harm asks first after it, as after a calendar's.
+      const sources = outcome?.ok !== false ? sourcesOf(outcome?.sources) : [];
+      if (outcome) await answer(outcome.ok !== false && outcome.answer || outcome.text, { ok: outcome.ok !== false, sources, untrusted: sources.length > 0 });
       else if (!stale()) show({ active: false });
     } finally {
       acting -= 1;
@@ -1004,14 +1127,15 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * (think), and it's the turn's own if those turn out to be the words (turn). Nothing is said, shown, kept or done
    * here: a command is never begun on, only thought about.
    */
-  async function ponder(said) {
+  async function ponder(said, { startedAt } = {}) {
     dropPending();
+    if ((searchClarification && searchClarification.expiresAt > now()) || (briefingOffer && briefingOffer.expiresAt > now())) return;
     const { woken, rest } = addressed(said);
     const meant = woken ? rest : String(said).trim();
     // As overheard() would take it, and only then: words that turn a ringing timer off are never his model's.
     if (ring?.ringing() && ringStopAsked(meant)) return;
     if (!meant || talking || now() < quietUntil || assistant.asking || assistant.running || echoes(meant)) return;
-    if (!woken && now() >= openUntil) return;
+    if (!woken && !withinWindow(startedAt)) return;
     const mine = ponders;
     const during = turns;
     try {
@@ -1027,7 +1151,13 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     pendingTimer.unref?.();
   }
 
-  async function turn(text, { overheard, typed = false, unsure = false, lag = NaN }) {
+  async function turn(text, { overheard, typed = false, unsure = false, lag = NaN, startedAt, briefingId = '' } = {}) {
+    const beganAt = Number.isFinite(startedAt) ? startedAt : now();
+    const clarification = searchClarification && beganAt >= searchClarification.askedAt && searchClarification.expiresAt > beganAt ? searchClarification : null;
+    searchClarification = null;
+    const offeredBrief = briefingOffer && beganAt >= briefingOffer.askedAt && briefingOffer.expiresAt > beganAt ? briefingOffer : null;
+    briefingOffer = null;
+    interruption = null;
     const mine = ++turns;
     const stale = () => mine !== turns;
     const clock = stopwatch(lag);
@@ -1048,7 +1178,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     pace = paceFor(moodOf(text, memory.current(), now()));
     if (typed) typedTurn = mine;
     // Typed to, he writes back; spoken to, he speaks.
-    const answer = (line, { ok = true, card = null, untrusted = false } = {}) => say(line, { written: typed, ok, card, untrusted });
+    const answer = (line, { ok = true, card = null, sources = null, untrusted = false, full = false } = {}) => say(line, { written: typed, ok, card, sources, untrusted, full });
     /** What was kept this turn, as a card: the note he was asked to remember. */
     const keptCard = () => (lastKept?.turn === mine && lastKept.rel ? { kind: 'remembered', rel: lastKept.rel, title: lastKept.title } : null);
     // What came before is over, unless a task it asked for is still at work: then this is still that conversation
@@ -1057,22 +1187,69 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     let ended = !acting && memory.idleFor() >= NEW_AFTER_MS ? memory.startNew() : [];
     if (ended.length) archive(ended);
     const history = memory.current(HISTORY);
+    const researchContext = JSON.stringify(history.slice(-12).map(({ who, text: line }) => ({ who, text: String(line || '').slice(0, 1200) }))).slice(-12000);
     memory.add('you', text);
     // Reaching here at all, overheard, is what a voiceprint says it was them, unless it only maybe was.
     show({ phase: 'heard', text, matched: overheard && knowsYou() && !unsure });
     answering += 1;
     try {
+      const readBrief = async (made, request = null) => {
+        if (!made) return void (await answer('That briefing is not available.'));
+        const atHush = hushes;
+        const atReset = resets;
+        let completed = false;
+        try {
+          const empty = (request?.kind ?? request) === 'evening' ? 'Nothing to wrap up: nothing was on your list or your calendar today.'
+            : 'Nothing to brief you on: your calendar and your list are empty.';
+          await answer(made.text || empty, { card: made.card, untrusted: made.untrusted, full: true });
+          completed = !stale() && atHush === hushes && atReset === resets;
+          if (completed && made.text) await Promise.resolve(briefs?.given?.(request, made));
+        } finally {
+          if (!completed) await Promise.resolve(briefs?.interrupted?.(made));
+        }
+      };
+      const briefResponse = offeredBrief ? briefingReply(text) : '';
+      if (briefingId || (briefResponse && briefs?.read)) {
+        begun?.controller.abort();
+        const id = briefingId || offeredBrief.id;
+        if (!briefingId && briefResponse !== 'read') {
+          await briefs.respond?.(id, briefResponse);
+          if (!stale()) await answer(briefResponse === 'later' ? 'Okay, I’ll ask again in ten minutes.' : 'Okay, I’ve dismissed that briefing. You can ask for it later.');
+          return;
+        }
+        const made = await briefs?.read?.(id);
+        if (stale()) return void (await Promise.resolve(briefs?.interrupted?.(made)));
+        await readBrief(made);
+        return;
+      }
+      if (clarification) {
+        begun?.controller.abort();
+        if (STOP.test(text) || TAKEN_BACK.test(text) || NO.test(text)) {
+          await answer('Okay, I cancelled that search.');
+          return;
+        }
+        // A topic such as "news" is the answer. A complete new request replaces
+        // the pending search and follows its usual route.
+        const replacement = searchRequestIntent(text) || /^(?:(?:actually|instead|please)\s+)*(?:open|close|quit|type|press|click|play|pause|set|create|send|delete|remember|forget|show|tell|write|read|what(?:'s| is) the time|how (?:are you|do you work))\b/i.test(text);
+        if (!replacement) {
+          const goal = `${clarification.goal}\nSearch target supplied by the user: ${text}`;
+          const context = `${clarification.context}\n${JSON.stringify([{ who: 'jester', text: clarification.question }, { who: 'you', text }])}`.slice(-14000);
+          if (!stale()) await act(goal, { overheard: false, stale, answer, typed, context });
+          return;
+        }
+      }
       // A timer set, cancelled or asked after: the clock's, on their own words, with no model to wait for.
       // Asked for the day's brief or its wrap-up in so many words: the same one he gives unasked (briefs.js).
       const brief = briefs?.asked(text) || '';
       if (brief) {
         begun?.controller.abort();
         show({ phase: 'thinking', task: '', step: '' });
-        const made = await briefs.compose(brief);
-        if (stale()) return;
-        await answer(made.text || (brief === 'evening' ? 'Nothing to wrap up: nothing was on your list or your calendar today.' : 'Nothing to brief you on: your calendar and your list are empty.'), { card: made.card, untrusted: made.untrusted });
-        // Asked for and given, it isn't given again unasked the same day.
-        if (made.text) await Promise.resolve(briefs.given?.(brief)).catch(() => undefined);
+        const briefController = new AbortController();
+        controller = briefController;
+        const made = await briefs.compose(brief, { signal: briefController.signal });
+        if (stale() || briefController.signal.aborted) return void (await Promise.resolve(briefs?.interrupted?.(made)));
+        if (controller === briefController) controller = null;
+        await readBrief(made, brief);
         if (!stale() && knowsYou() && !typed) stayOpen();
         return;
       }
@@ -1089,7 +1266,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         begun?.controller.abort();
         // After a line that held someone else's words (a calendar's titles, in a brief), a command that could do harm
         // asks first, as if it had been overheard.
-        if (!stale()) await act(text, { overheard: overheard || history.some((entry) => entry.untrusted), stale, answer, typed });
+        if (!stale()) await act(text, { overheard: overheard || history.some((entry) => entry.untrusted), stale, answer, typed, context: researchContext });
         return;
       }
       if (stale()) return void begun?.controller.abort();
@@ -1226,7 +1403,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // than theirs, so what could do harm asks first, as if overheard.
       // What they asked for is what's done: asked to open something, it isn't merely selected.
       reply.do = asAsked(reply.do, text);
-      if (reply.do) return void (await act(reply.do, { overheard: overheard || theirs || around.untrusted || history.some((entry) => entry.untrusted), stale, before: spoken, said: text, answer, typed }));
+      if (reply.do) return void (await act(reply.do, { overheard: overheard || theirs || around.untrusted || history.some((entry) => entry.untrusted), stale, before: spoken, said: text, answer, typed, context: researchContext }));
       await spoken;
       // Without a voiceprint anyone could carry on from here, and he'd answer his own echo. Typed to, nobody's talking.
       // A question of his is waited on for longer.
@@ -1260,7 +1437,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * could be someone else's.
    * @returns {Promise<void>|null} his turn, or null when it wasn't one
    */
-  function overheard(text, { unsure = false, lag = NaN } = {}) {
+  function overheard(text, { unsure = false, lag = NaN, startedAt } = {}) {
     const { woken, rest } = addressed(text);
     const meant = woken ? rest : String(text).trim();
     if (!meant && !woken) return null;
@@ -1268,22 +1445,42 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // voice that only may be theirs will do, and so will his name alone.
     if (ring?.ringing() && (ringStopAsked(meant) || (woken && !meant))) {
       ring.stop('their saying so');
-      // Said across a line of his, "stop" is for him as well.
-      if ((talking || now() < quietUntil) && STOP.test(meant)) hush();
+      // Stopping an alert or calling his name while it is spoken also gives
+      // the user the floor for whatever follows.
+      if ((talking || now() < quietUntil) && (STOP.test(meant) || (woken && !meant))) {
+        listenInstead({ startedAt, verified: !unsure && knowsYou() });
+        return Promise.resolve();
+      }
       return null;
     }
-    // Hearing himself: while he talks and just after, only "stop" counts. Unless it's them, by name, with something
-    // to say: a voice the voiceprint is sure of isn't his (his own scores as a stranger's), so they're talking over
-    // him, and he gives way. Never in a voice that only may be theirs, and never without a voiceprint to tell.
+    let cutIn = Number.isFinite(startedAt) && interruption?.startedAt === startedAt ? interruption : null;
+    const overlapped = overlappedSpeech(startedAt);
+    // Short output echoes such as "yes" still need screening after the quiet
+    // guard expires; they must never become an approval of his own question.
+    if (overlapped && !cutIn && !(knowsYou() && !unsure) && playbackEcho(meant)) return passed(text, 'playback echo');
+    // A verified speaker or a screened early transcript can take the floor
+    // without his name. Bare VAD, an unsure speaker and playback cannot.
     if (talking || now() < quietUntil) {
       if (STOP.test(meant)) {
-        hush();
-        return null;
+        searchClarification = null;
+        briefingOffer = null;
+        if (!cutIn) listenInstead({ startedAt, verified: !unsure && knowsYou() });
+        if (assistant.asking) assistant.answer(false);
+        else if (assistant.running) assistant.cancel();
+        return Promise.resolve();
       }
-      if (!(woken && meant && !unsure && knowsYou() && !assistant.asking && !echoes(meant))) return passed(text, talking ? 'he was talking' : 'he’d just stopped talking');
-      log('talked over, by name: he gives way');
+      if (!cutIn) {
+        if (!cutsIn(meant, unsure)) return passed(text, talking ? 'he was talking' : 'he’d just stopped talking');
+        listenInstead({ startedAt, verified: !unsure && knowsYou() });
+        cutIn = interruption;
+      }
     }
-    if (echoes(meant)) {
+    // A short interruption can finish after playback's quiet guard expires.
+    if (!cutIn && overlapped && cutsIn(meant, unsure)) {
+      listenInstead({ startedAt, verified: !unsure && knowsYou() });
+      cutIn = interruption;
+    }
+    if ((cutIn ? !cutIn.verified && repeatedPlayback(meant) : echoes(meant))) {
       log('that was me:', JSON.stringify(text));
       return null;
     }
@@ -1305,25 +1502,26 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       assistant.cancel();
       return null;
     }
+    if (cutIn && /^(?:stop|stop talking|quiet|wait|hold on|hang on|one (?:moment|second)|actually|uh|um)\W*$/i.test(meant)) return Promise.resolve();
     // Without his name it's for him only just after he's spoken to them. Then a voice that only may be theirs is
     // taken for theirs: it's an answer to him, seconds after he spoke (2026-11-15: every "yes" to a question of his
     // scored as maybe, and went unheard).
-    if (!woken && now() >= openUntil) return passed(text, 'not said to him');
+    if (!woken && !cutIn && !withinWindow(startedAt) && !answersOffer(meant, startedAt)) return passed(text, 'not said to him');
     if (!meant) {
       stayOpen();
       return Promise.resolve();
     }
-    return turn(meant, { overheard: true, unsure, lag });
+    return turn(meant, { overheard: true, unsure, lag, startedAt });
   }
 
   return {
     /** A finished utterance from the always-on mic, for him or not; `unsure` as for overheard(). `lag`: how long after the last word it got here, for the log. */
-    heard(text, { unsure = false, lag = NaN } = {}) {
+    heard(text, { unsure = false, lag = NaN, startedAt } = {}) {
       const early = wokenEarly;
       wokenEarly = false;
-      const turned = overheard(text, { unsure, lag });
+      const turned = overheard(text, { unsure, lag, startedAt });
       // He looked up at his name, and it wasn't him they wanted after all.
-      if (!turned && early && !assistant.running) show({ active: false });
+      if (!turned && early && !assistant.running && !interruption) show({ active: false });
       return turned ?? undefined;
     },
     /** His name, with the user still talking: he's listening, before they're done. */
@@ -1332,16 +1530,40 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      * (`thinkAhead`), and says and does nothing. If those were the words, heard() carries on from there.
      * @returns {Promise<void>}
      */
-    paused(text) {
-      return ponder(text).catch((err) => log('couldn’t think ahead:', err.message));
+    paused(text, timing = {}) {
+      return ponder(text, timing).catch((err) => log('couldn’t think ahead:', err.message));
+    },
+    /** Speech that began in time keeps the pill listening until its words arrive. */
+    hearing({ startedAt, interrupt = false, verified = false, text = '', unsure = false } = {}) {
+      if (Number.isFinite(startedAt) && currentSpeech && !currentSpeech.interrupted) {
+        if (overlaps.size >= 8 && !overlaps.has(startedAt)) overlaps.delete(overlaps.values().next().value);
+        overlaps.add(startedAt);
+      }
+      if (interrupt && (talking || now() < quietUntil) && !currentSpeech?.interrupted && !unsure) {
+        const yours = verified && knowsYou();
+        // Without a voiceprint, only a "stop" so far (cutsIn).
+        const stopped = !knowsYou() && STOP.test(text) && !playbackEcho(text);
+        if (yours || stopped) listenInstead({ startedAt, verified: yours });
+      }
+      if (Number.isFinite(startedAt) && interruption?.startedAt === startedAt) {
+        wokenAt = now();
+        show({ active: true, start: true, hold: WOKEN_MS });
+        return;
+      }
+      if (talking || now() < quietUntil || assistant.asking || assistant.running) return;
+      const named = wokenEarly && startedAt === wokenStartedAt;
+      if (!named && !withinWindow(startedAt)) return;
+      if (named) wokenAt = now();
+      show({ active: true, start: true, hold: WOKEN_MS });
     },
     /** They went on talking after the pause: what was begun then is dropped. */
     wentOn() {
       dropPending();
     },
-    woken() {
+    woken({ startedAt } = {}) {
       if (talking || now() < quietUntil || assistant.asking || assistant.running) return;
       wokenEarly = true;
+      wokenStartedAt = startedAt;
       wokenAt = now();
       // What he'll need for the answer gets ready while the rest is said.
       try {
@@ -1377,6 +1599,14 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       }
       return turn(said, { overheard: false, typed });
     },
+    /** A briefing answered by a click (Later, Dismiss): his spoken offer of it is over. */
+    briefingSettled(id) {
+      if (briefingOffer?.id === String(id)) briefingOffer = null;
+    },
+    /** Read, clicked on a briefing's card: said aloud, even with the mic off. A task at work carries on. */
+    readBriefing(id) {
+      return turn('Read my briefing', { overheard: false, briefingId: String(id) });
+    },
     /** The last thing said to him was typed: the assistant's questions about it are written, not asked aloud. */
     get typing() {
       return typing;
@@ -1391,8 +1621,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     },
     /** He's saying something, or only just has: what the mic hears now has his voice in it. */
     get speaking() {
-      return talking > 0 || now() < quietUntil;
+      return (talking > 0 && !currentSpeech?.interrupted) || now() < quietUntil;
     },
+    /** Mixed playback audio must never train the user's voiceprint. */
+    overlapped: overlappedSpeech,
     /** How often he's been told to stop talking: one more than before a line means it was cut off by them. */
     get hushes() {
       return hushes;
@@ -1418,9 +1650,14 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       pace = 1;
       const mine = turns;
       const reset = resets;
+      const offer = card?.kind === 'brief' && card.offer === true && card.id
+        ? { id: String(card.id), askedAt: now(), expiresAt: now() + BRIEF_ANSWER_MS } : null;
+      // The newest line he's said unasked is what a "yes" answers: another one after an offer takes its place.
+      briefingOffer = offer;
       const told = Promise.resolve(say(text, { written, card, untrusted })).then(() => {
+        if (offer && briefingOffer === offer) offer.answerBy = now() + ASKED_MS;
         if (reset !== resets && !written) return false;
-        if (mine === turns && !written && knowsYou()) stayOpen();
+        if (mine === turns && !written && knowsYou()) stayOpen(offer ? ASKED_MS : OPEN_MS);
         return true;
       });
       keep(ended);
@@ -1432,6 +1669,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     hush,
     /** Starts over, with nothing kept: what he was answering, or a task's result to come, is dropped with the rest. */
     forget() {
+      searchClarification = null;
+      briefingOffer = null;
+      overlapGeneration += 1;
+      interruption = null;
+      overlaps.clear();
       epoch += 1;
       turns += 1;
       typedTurn = 0;
@@ -1450,6 +1692,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      * A task's stays, and so does a typed turn at work: it never needed the mic.
      */
     reset() {
+      searchClarification = null;
+      briefingOffer = null;
+      overlapGeneration += 1;
+      interruption = null;
+      overlaps.clear();
       resets += 1;
       wokenEarly = false;
       openUntil = 0;
@@ -1463,6 +1710,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     },
     /** The conversation going on is over (another chat's been picked up): nothing more of it is said or written. */
     end() {
+      searchClarification = null;
+      briefingOffer = null;
+      overlapGeneration += 1;
+      interruption = null;
+      overlaps.clear();
       epoch += 1;
       turns += 1;
       typedTurn = 0;
