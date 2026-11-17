@@ -48,10 +48,23 @@ function action(id, status, platform) {
 }
 
 /**
+ * The name System Settings lists this app under, when it isn't "Jester": on a Mac, the app bundle the
+ * executable is in. Run from source it's Jester.app (scripts/jester-app.mjs), but `npx electron .` runs npm's
+ * own Electron.app, which macOS lists as "Electron". '' when it's Jester, or not a Mac.
+ * @param {string} execPath  process.execPath
+ * @param {string} platform  process.platform
+ */
+export function listedAsFor(execPath, platform) {
+  if (platform !== 'darwin') return '';
+  const bundle = /([^/]+)\.app\/Contents\/MacOS\/[^/]+$/.exec(String(execPath || ''))?.[1] || '';
+  return bundle && bundle !== 'Jester' ? bundle : '';
+}
+
+/**
  * @param {string} platform  process.platform
  * @param {Record<string, string>} statuses  'granted' | 'not-determined' | 'denied' | 'restricted' | 'unknown'
  * @param {{listedAs?:string}} [options]  listedAs: the name System Settings shows for Jester, when it isn't
- *   "Jester" (run from source, it's Electron)
+ *   "Jester" (listedAsFor)
  */
 export function permissionItems(platform, statuses, { listedAs = '' } = {}) {
   return Object.entries(PERMISSIONS)

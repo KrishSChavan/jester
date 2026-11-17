@@ -50,8 +50,8 @@ with a button to where it's done. Three things are needed before he's any use:
 1. **Let him hear you and work the computer.** macOS has to allow the
    microphone, Accessibility, and the camera. The camera is for hand gestures,
    which are on to begin with: if you don't want them, click his icon in the
-   menu bar and turn Gestures off, and he stops asking for it. He'll be listed
-   as "Electron" in System Settings, because that's what runs him from source.
+   menu bar and turn Gestures off, and he stops asking for it. He's listed as
+   "Jester" in System Settings, with his raised-hand icon.
 2. **Give him a model to think with.** In Settings › Models, choose the
    service, paste your key and press Add model, leaving **Talking** ticked: a
    model that isn't ticked for Talking can't answer you. With Ollama running,
@@ -151,6 +151,6 @@ a password or a card number.
   its key is wrong: Settings › Models says which.
 - **Chrome won't link.** The extension has to be loaded from the
   `jester-extension` folder next to the `desktop` folder Jester runs from.
-- **He can't click or type.** Accessibility isn't allowed for "Electron":
+- **He can't click or type.** Accessibility isn't allowed for "Jester":
   System Settings › Privacy & Security › Accessibility.
 - **Anything else.** His log is at `~/Library/Logs/Jester/dev.log`.

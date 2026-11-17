@@ -1,5 +1,7 @@
 # Speech models are tens of megabytes; scripts/fetch-models.mjs downloads them.
 models/
+# Jester.app: npm's Electron under his name and icon (scripts/jester-app.mjs makes it).
+app.noindex/
 # Rust build output.
 native/jester-driver/target/
 # The watch's Bluetooth helper (npm run watch), and Xcode's per-user files.

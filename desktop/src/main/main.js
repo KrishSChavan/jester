@@ -321,8 +321,8 @@ function installMediaPermissions() {
 
 /**
  * Where this computer is, by a hidden page of Jester's asking Chromium, which asks Location Services on a Mac (its
- * Core Location provider): precise to tens of metres on Wi-Fi. The first time, macOS asks whether "Electron" (Jester
- * in development) may know; a position waits for that answer, so it's first asked from Settings (`timeoutMs` 90 s).
+ * Core Location provider): precise to tens of metres on Wi-Fi. The first time, macOS asks whether "Jester" may know;
+ * a position waits for that answer, so it's first asked from Settings (`timeoutMs` 90 s).
  * The page goes once it has answered.
  * @returns {Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, code?:number, message?:string}>}
  */

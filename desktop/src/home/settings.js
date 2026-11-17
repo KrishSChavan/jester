@@ -792,7 +792,7 @@ function renderDay() {
         : location.town
           ? `${location.town}, from ${mac ? 'Location Services' : 'Windows’ location'}.${shared}`
           : location.locating
-            ? `Finding where this ${mac ? 'Mac' : 'computer'} is… If ${mac ? 'macOS' : 'Windows'} asks whether ${mac ? 'Electron' : 'Jester'} may use your location, allow it.`
+            ? `Finding where this ${mac ? 'Mac' : 'computer'} is… If ${mac ? 'macOS' : 'Windows'} asks whether Jester may use your location, allow it.`
             : `Jester asks ${mac ? 'Location Services' : 'Windows'} where you are when you talk to him, at most every 15 minutes.${shared}`;
   $('location-problem').textContent = source === 'here' ? locationProblem(location.problem) : '';
   $('place-form').hidden = source !== 'place';

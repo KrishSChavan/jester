@@ -10,8 +10,8 @@
  * Jester asks, it's "not asked", and Allow… asks.
  */
 
-import { app, desktopCapturer, shell, systemPreferences } from 'electron';
-import { permissionItems } from './permission-list.js';
+import { desktopCapturer, shell, systemPreferences } from 'electron';
+import { listedAsFor, permissionItems } from './permission-list.js';
 
 /** Long enough for macOS to put up its question; the answer comes later, in System Settings. */
 const SCREEN_ASK_MS = 3000;
@@ -65,8 +65,8 @@ export function readStatuses(platform = process.platform) {
 }
 
 export function readPermissions(platform = process.platform) {
-  // Run from source, it's Electron that macOS lists and asks about.
-  return permissionItems(platform, readStatuses(platform), { listedAs: platform === 'darwin' && !app.isPackaged ? 'Electron' : '' });
+  // Run on npm's own Electron.app rather than Jester.app, it's "Electron" that macOS lists and asks about.
+  return permissionItems(platform, readStatuses(platform), { listedAs: listedAsFor(process.execPath, platform) });
 }
 
 /** Shows the OS prompt where there is one; resolves when it is answered. */

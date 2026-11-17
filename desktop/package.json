@@ -12,6 +12,8 @@
     "driver": "node scripts/build-driver.mjs",
     "watch": "node scripts/build-watch.mjs",
     "launcher": "node scripts/make-launcher.mjs",
+    "app": "node scripts/jester-app.mjs",
+    "icons": "node scripts/make-icons.mjs",
     "models": "node scripts/fetch-models.mjs vad voice parakeet-110m kokoro",
     "talk-check": "node scripts/talk-check.mjs",
     "live-check": "node scripts/live-check.mjs",

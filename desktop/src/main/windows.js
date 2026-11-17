@@ -14,6 +14,11 @@ const PRELOAD = path.join(here, '../preload/chrome-shim.cjs');
 const HOME_PAGE = 'jester://app/home/home.html';
 /** Behind the page while it loads: the window never flashes white. */
 const HOME_GROUND = '#08060c';
+/**
+ * His icon on the window and the taskbar, where the window says what it is (Windows; Linux takes a PNG). A Mac
+ * takes the app's icon from Jester.app instead.
+ */
+const ICON = { win32: '../../icons/Jester.ico', linux: '../../icons/jester.png' }[process.platform];
 
 const pageDefaults = { preload: PRELOAD, contextIsolation: true, sandbox: true };
 
@@ -92,6 +97,7 @@ export function showHome({ screen = 'main', quiet = false } = {}) {
     // The page draws to the top of the window, around the window's own buttons.
     titleBarStyle: 'hidden',
     ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 18, y: 20 } } : { titleBarOverlay: { color: HOME_GROUND, symbolColor: '#a79bbe', height: 56 } }),
+    ...(ICON ? { icon: path.join(here, ICON) } : {}),
     webPreferences: pageDefaults
   });
   home.once('ready-to-show', () => {
@@ -206,6 +212,7 @@ export function showCalibration(display, { quiet = false } = {}) {
     // answers both at once instead of animating the window, and a page left
     // waiting on an animation that never ran is a page that has frozen.
     fullscreen: true,
+    ...(ICON ? { icon: path.join(here, ICON) } : {}),
     webPreferences: pageDefaults
   });
   calibration.once('ready-to-show', () => {

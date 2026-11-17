@@ -32,6 +32,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { jesterApp } from './jester-app.mjs';
 
 const here = fileURLToPath(import.meta.url);
 const desktop = path.resolve(path.dirname(here), '..');
@@ -88,7 +89,7 @@ if (process.versions.electron && process.env.JESTER_TASK_SEAL) {
   fs.writeFileSync(logFile, '');
   const env = { ...process.env, JESTER_TASK_CHECK: scratch };
   delete env.ELECTRON_RUN_AS_NODE;
-  const electronApp = path.join(desktop, 'node_modules/electron/dist/Electron.app');
+  const electronApp = jesterApp();
   if (actModel()) {
     const sealed = spawnSync(path.join(electronApp, 'Contents/MacOS/Electron'), [here], { stdio: 'inherit', env: { ...env, JESTER_TASK_SEAL: actModel() } });
     if (sealed.status !== 0) process.exit(1);
@@ -112,7 +113,8 @@ if (process.versions.electron && process.env.JESTER_TASK_SEAL) {
   });
 } else {
   const { app, BrowserWindow } = await import('electron');
-  // Started on a script, Electron calls itself "Electron", and the keychain item the models are sealed with is Jester's.
+  // Started on a script, Electron doesn't read Jester's package.json for its name, and the keychain item the models
+  // are sealed with is named after him.
   app.setName('Jester');
   const scratch = process.env.JESTER_TASK_CHECK;
   const say = (...parts) => console.log('task-check:', ...parts);

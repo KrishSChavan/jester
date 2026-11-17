@@ -5,7 +5,7 @@
 
 const BLUETOOTH_TROUBLE = {
   off: 'Turn Bluetooth on to use your watch.',
-  denied: 'Bluetooth is off for Electron: turn it on in System Settings › Privacy & Security › Bluetooth.',
+  denied: 'Bluetooth is off for Jester: turn it on in System Settings › Privacy & Security › Bluetooth.',
   unsupported: 'This Mac can’t do what the watch needs over Bluetooth.',
   failed: 'Bluetooth wouldn’t start. Try turning it off and on.'
 };

@@ -119,15 +119,33 @@ words alone (below, Memory and Obsidian).
 
 - `npm run launcher` (macOS, once) — puts a **Jester** app in /Applications
   (or ~/Applications): double-click it, or open it from Launchpad, Spotlight,
-  the Dock or Login Items. It starts the same Electron as `dev:mac` on this
+  the Dock or Login Items. It starts the same Jester.app as `dev:mac` on this
   checkout — the current code, and the permissions already given to
-  "Electron" — logging to `~/Library/Logs/Jester/dev.log`; with Jester
-  running, it brings up his window. Its large icon sizes are scaled up from the
-  extension's 128 px one.
+  "Jester" — logging to `~/Library/Logs/Jester/dev.log`; with Jester
+  running, it brings up his window.
 - `npm start` — the app. Add `JESTER_LOG=1` to see gestures, cursor frames and CPU.
 - `npm run dev:mac` — the same, launched through `open` so macOS asks for the
-  camera and Accessibility on behalf of "Electron" rather than the terminal or
+  camera and Accessibility on behalf of "Jester" rather than the terminal or
   VS Code. Output: `~/Library/Logs/Jester/dev.log`, echoed to the terminal.
+- `npm run icons` — redraws his icon (`scripts/make-icons.mjs`: the art is
+  code) into `icons/`: `jester.svg`, `jester.png`, `Jester.icns` for macOS and
+  `Jester.ico` for Windows' window and taskbar.
+
+**Jester.app.** On a Mac, all three run him in `app.noindex/Jester.app`, made
+by `scripts/jester-app.mjs` (`npm run app` makes it on its own): npm's
+Electron.app cloned (APFS clones, so no extra disk space) and renamed, so the
+Dock, the menu bar, Activity Monitor, the permission prompts and System
+Settings say **Jester**, with his icon, not "Electron". Its bundle ID is
+`com.jester.desktop`; its helpers are "Jester Helper (Renderer)" and so on,
+which Electron finds by the app's name; its prompts say what the camera,
+microphone, Bluetooth and location are for. The executable inside keeps
+Electron's name, because Electron sets `app.isPackaged` from it. Nothing is
+re-signed: npm's Electron is ad-hoc signed by the linker and its Info.plist
+isn't sealed. It's remade when Electron is upgraded or the icon changes,
+except while it's running. Spotlight skips `.noindex` folders, so it doesn't
+show up there beside the launcher. macOS ties permissions to the bundle ID, so
+moving from Electron.app asked for them all again, for "Jester"; the old
+"Electron" rows in System Settings can be removed.
 
 The app lives in the menu bar. His window opens by itself, on the orb, while
 Camera or Accessibility is missing, saying so, with Settings › Permissions a click
@@ -336,10 +354,10 @@ macOS lists an app under Screen Recording only once it has asked to see the
 screen, and Electron reads the status as granted or denied, never "not asked".
 So until Jester asks, the row says "Not allowed yet", and its Allow… takes a
 one-pixel look at the screen: macOS's prompt comes up and Jester joins the
-list (as "Electron" when run from source). After that the button opens the
-list. Once allowed, macOS wants Jester restarted; run from source, restart it
-yourself: "Quit & Reopen" reopens Electron.app without Jester's folder, which
-should start plain Electron (not yet seen).
+list. After that the button opens the list. Once allowed, macOS wants Jester
+restarted; run from source, restart it yourself: "Quit & Reopen" reopens
+Jester.app without Jester's folder, which should start plain Electron's
+default app (not yet seen).
 
 `JESTER_LOG_SCREENS=1` keeps the last picture beside the logs as
 `last-picture.jpg` (~/Library/Logs/Jester on a Mac), to see what the model saw.
@@ -1013,8 +1031,8 @@ changed; `vault.js` checks every write, and never writes through a note that's a
 link to a file elsewhere. Stop using leaves the vault alone from then on, deleting
 nothing in it (only the search index, `vault-index.json`). Settings is the only
 place a vault is first read, because on a Mac one in Documents, Desktop or iCloud
-makes macOS ask (in a dev build, for "Electron"); refused, Settings gives the steps
-(Privacy Settings › Files and Folders › Electron › the folder, then Try again) and
+makes macOS ask (for "Jester"); refused, Settings gives the steps
+(Privacy Settings › Files and Folders › Jester › the folder, then Try again) and
 reads it again when its window comes back to the front. With no vault to use, a
 note asked for goes to the computer's own apps, as before.
 
@@ -1738,9 +1756,9 @@ location is Location Services, read by Chromium's Core Location provider (Electr
 page of Jester's, `jester://app/where/where.html`, the only page given the
 `geolocation` permission, and only while Settings says so (`locating` in main.js).
 Wi-Fi positioning, to tens of metres. Chosen in Settings, a position is asked for
-at once and waited on for 90 s, since macOS asks first (in a dev build, for
-"Electron": its Info.plist has no location usage string, and whether macOS asks
-without one is unchecked: see below); after that, when he's talked to and the last
+at once and waited on for 90 s, since macOS asks first (for "Jester": Jester.app's
+Info.plist carries a location usage string, which npm's Electron.app lacked; the
+prompt itself is unchecked: see below); after that, when he's talked to and the last
 is over 15 minutes old (the turn uses the last one meanwhile), and when the
 computer wakes or unlocks, never on a timer. "Where am I?", "near me" and the like
 wait up to 3 s for a fresh one. One that can't be had isn't tried again for two
@@ -2040,7 +2058,7 @@ models decode in under 35 ms.
 ## Checks that need you at the Mac
 
 1. **Input**: `npm run dev:mac -- spikes/input-in-electron.mjs`. Allow
-   "Electron" under Privacy & Security › Accessibility when asked; the check
+   "Jester" under Privacy & Security › Accessibility when asked; the check
    clicks only inside its own window and stops if anything else comes to the
    front. Results: the window, the terminal, `spikes/input-report.json`.
 2. **Camera**: `npm run dev:mac`. His window opens saying Jester needs the camera;
@@ -2174,6 +2192,17 @@ models decode in under 35 ms.
     `ring: stopped by their saying so`, and for a second press of Play that
     wasn't made, `not pressed twice`.
 
+18. **Jester.app** (built and drawn here; the renamed helpers ran a hidden
+    window; it hasn't been run as Jester or asked for anything): quit Jester,
+    run `npm run launcher` once, and open him. Since macOS keeps permissions
+    by app, it asks again, this time for "Jester": the camera, the microphone,
+    Accessibility (Settings › Permissions has the steps), and later Screen
+    Recording, Bluetooth, location and the Downloads folder as they're used.
+    A keychain prompt for "Jester Safe Storage" may also come up once: Always
+    Allow, or his saved models can't be read. The Dock, the menu bar's bold
+    name, ⌘-Tab, Activity Monitor and the prompts should all say Jester with
+    the raised hand. The old "Electron" rows in System Settings can then go.
+
 ## Things learned the hard way
 
 - VS Code sets `ELECTRON_RUN_AS_NODE=1` for its terminals, and `open` passes it
@@ -2188,8 +2217,9 @@ models decode in under 35 ms.
 - This repository is in ~/Downloads, which macOS guards: an app launched with
   `open` must be allowed into Downloads (one prompt), and `open --stdout`
   can't write there at all.
-- npm's Electron.app is ad-hoc signed; macOS ties the permissions it grants to
-  that exact build, so they reset when Electron is upgraded.
+- npm's Electron.app is ad-hoc signed, and so is Jester.app, its renamed copy;
+  macOS ties the permissions it grants to that exact build, so they reset when
+  Electron is upgraded.
 - macOS's accessibility hit test (`AXUIElementCopyElementAtPosition` on the
   system-wide element) fails outright under an Electron window drawn over the
   display, click-through or not — Jester's own overlay. Other apps' overlays

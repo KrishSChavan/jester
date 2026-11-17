@@ -5,9 +5,9 @@
  * Run it at the Mac, from desktop/:
  *   npm run dev:mac -- spikes/input-in-electron.mjs
  *
- * dev:mac launches through `open`, which makes Electron its own app as far as
- * macOS is concerned, so the Accessibility permission is asked for — and
- * granted to — "Electron", not the terminal or VS Code that started it. The
+ * dev:mac launches through `open`, which makes Electron (as Jester.app) its own
+ * app as far as macOS is concerned, so the Accessibility permission is asked
+ * for — and granted to — "Jester", not the terminal or VS Code that started it. The
  * results show in the window, in the terminal and in spikes/input-report.json.
  *
  * Before every click it checks that this window is in front and that the
@@ -60,7 +60,7 @@ app.whenReady().then(async () => {
   if (dryRun) hello.permissions = { ...hello.permissions, accessibility: true, postEvents: true };
   if (!hello.permissions.accessibility || !hello.permissions.postEvents) {
     await driver.call('trust', { prompt: true });
-    await status('Allow "Electron" under System Settings › Privacy & Security › Accessibility.\nThis window waits up to 90 seconds, then carries on by itself.');
+    await status('Allow "Jester" under System Settings › Privacy & Security › Accessibility.\nThis window waits up to 90 seconds, then carries on by itself.');
     for (let waited = 0; waited < 90_000 && !(hello.permissions.accessibility && hello.permissions.postEvents); waited += 1500) {
       await pause(1500);
       hello = await driver.call('hello');

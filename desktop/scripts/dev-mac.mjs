@@ -6,8 +6,9 @@
  *
  * Started from a terminal, Electron counts as part of that terminal (or of VS
  * Code), and macOS would ask whether *VS Code* may use the camera and control
- * the computer. Started through `open`, Electron is its own app, the prompts
- * name "Electron", and the permissions stay with it.
+ * the computer. Started through `open`, it's its own app: Jester.app, npm's
+ * Electron renamed with his icon (jester-app.mjs makes it), so the prompts
+ * name "Jester" and the permissions stay with him.
  *
  * Its output goes to ~/Library/Logs/Jester/dev.log (or JESTER_DEV_LOG), which
  * this prints as it grows: `open` can't write into ~/Downloads on the app's behalf, as macOS
@@ -19,9 +20,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { jesterApp } from './jester-app.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const electronApp = path.join(root, 'node_modules/electron/dist/Electron.app');
 // JESTER_DEV_LOG: somewhere else, so a test run leaves a running Jester's log alone.
 const logFile = process.env.JESTER_DEV_LOG ? path.resolve(process.env.JESTER_DEV_LOG) : path.join(os.homedir(), 'Library/Logs/Jester/dev.log');
 
@@ -29,8 +30,11 @@ if (process.platform !== 'darwin') {
   console.error('dev:mac is for macOS; use npm start elsewhere.');
   process.exit(1);
 }
-if (!fs.existsSync(electronApp)) {
-  console.error('Electron is not downloaded yet; run: node node_modules/electron/install.js');
+let electronApp;
+try {
+  electronApp = jesterApp();
+} catch (err) {
+  console.error(err.message);
   process.exit(1);
 }
 
@@ -66,6 +70,6 @@ child.on('exit', (code) => {
   process.exit(code ?? 0);
 });
 process.on('SIGINT', () => {
-  // Quit the Electron that `open` started: the one whose arguments name this entry.
-  spawnSync('pkill', ['-f', `Electron.app/Contents/MacOS/Electron ${entry}`]);
+  // Quit the Jester that `open` started: the one whose arguments name this entry.
+  spawnSync('pkill', ['-f', `${electronApp}/Contents/MacOS/Electron ${entry}`]);
 });
