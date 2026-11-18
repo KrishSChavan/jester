@@ -7,7 +7,7 @@ import { abilitiesPart } from '../desktop/src/main/abilities.js';
 import { createBriefs } from '../desktop/src/main/briefs.js';
 import { cardOf } from '../desktop/src/main/chat-archive.js';
 import { clientIn, createGoogle, GMAIL, SCOPE } from '../desktop/src/main/google.js';
-import { createMail, decoded, important, MAIL_WORDS, mailCard, mailLine, messageOf, senderOf, steering } from '../desktop/src/main/mail.js';
+import { createMail, decoded, fromPerson, important, MAIL_WORDS, mailCard, mailLine, messageOf, senderOf, steering } from '../desktop/src/main/mail.js';
 import { createSituation } from '../desktop/src/main/situation.js';
 import { cardView } from '../desktop/src/home/cards.js';
 
@@ -140,7 +140,16 @@ test('a message as he keeps it: who from, its subject, its opening words, and no
   assert.equal(senderOf('=?UTF-8?B?U8O4cmVu?= <s@example.dk>'), 'Søren');
   assert.equal(decoded('=?utf-8?Q?Re:_Caf=C3=A9_plans?='), 'Re: Café plans');
   const raw = { id: 'm1', threadId: '18f3a2b4c5d6e7f8', labelIds: ['INBOX', 'UNREAD', 'IMPORTANT'], snippet: 'Hi &#39;all&#39; &amp; welcome​ to the  lab', internalDate: '1794800000000', payload: { headers: [{ name: 'From', value: '"Sarah Lee" <sarah@psu.edu>' }, { name: 'Subject', value: 'Lab report feedback' }], body: { data: 'never-read' } } };
-  assert.deepEqual(messageOf(raw), { id: 'm1', thread: '18f3a2b4c5d6e7f8', from: 'Sarah Lee', subject: 'Lab report feedback', opening: 'Hi \'all\' & welcome to the lab', at: 1794800000000, labels: ['INBOX', 'UNREAD', 'IMPORTANT'] });
+  assert.deepEqual(messageOf(raw), { id: 'm1', thread: '18f3a2b4c5d6e7f8', from: 'Sarah Lee', subject: 'Lab report feedback', opening: 'Hi \'all\' & welcome to the lab', at: 1794800000000, labels: ['INBOX', 'UNREAD', 'IMPORTANT'], person: true });
+});
+
+test('a person writing, by address and Gmail’s filing, never by the words: whom he’d offer to draft a reply to', () => {
+  assert.equal(fromPerson('"Sarah Lee" <sarah@psu.edu>', ['INBOX', 'CATEGORY_PERSONAL']), true);
+  assert.equal(fromPerson('sam.lee@gmail.com'), true);
+  for (const from of ['<noreply@canvas.example>', 'Canvas <notifications@instructure.com>', 'GitHub <no-reply@github.com>', '"Penn State" <updates@psu.edu>', 'MAILER-DAEMON@x.com', 'Shop <info@shop.com>', 'Nobody'])
+    assert.equal(fromPerson(from), false, from);
+  assert.equal(fromPerson('"Sarah Lee" <sarah@psu.edu>', ['CATEGORY_PROMOTIONS']), false, 'filed with the offers');
+  assert.equal(fromPerson('"Sarah Lee" <sarah@psu.edu>', ['CATEGORY_UPDATES']), false, 'filed with the notices');
 });
 
 test('important: by Gmail’s own labels', () => {

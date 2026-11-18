@@ -246,6 +246,7 @@ function renderPictures() {
   $('briefMorning').checked = settings.briefMorning !== false;
   $('briefEvening').checked = settings.briefEvening !== false;
   $('checkIns').checked = settings.checkIns !== false;
+  $('offerWork').checked = settings.offerWork !== false;
   if (document.activeElement !== $('eveningAt')) $('eveningAt').value = /^\d\d:\d\d$/.test(settings.eveningAt || '') ? settings.eveningAt : '21:00';
   const recording = (desktop?.permissions || []).find((item) => item.id === 'screen');
   $('pictures-hint').textContent = `When a window’s words aren’t enough, the assistant may send a model that reads pictures one of that window: up to three a task, never with a password field showing.${recording && !recording.granted ? ' Needs Screen Recording, under Permissions.' : ''}`;
@@ -1040,7 +1041,7 @@ $('speechModel').addEventListener('change', (event) => save({ speechModel: event
 $('continuousAssistant').addEventListener('change', (event) => save({ continuousAssistant: event.target.checked }));
 $('agentScreenshots').addEventListener('change', (event) => save({ agentScreenshots: event.target.checked }));
 $('keepUnsureSpeech').addEventListener('change', (event) => save({ keepUnsureSpeech: event.target.checked }));
-for (const id of ['briefMorning', 'briefEvening', 'checkIns']) $(id).addEventListener('change', (event) => save({ [id]: event.target.checked }));
+for (const id of ['briefMorning', 'briefEvening', 'checkIns', 'offerWork']) $(id).addEventListener('change', (event) => save({ [id]: event.target.checked }));
 $('eveningAt').addEventListener('change', (event) => /^\d\d:\d\d$/.test(event.target.value) && save({ eveningAt: event.target.value }));
 $('memoryConversations').addEventListener('change', (event) => save({ memoryConversations: event.target.checked }));
 for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], ['vault-open', 'open'], ['known-open', 'about'], ['vault-privacy', 'privacy'], ['vault-reindex', 'reindex']]) {

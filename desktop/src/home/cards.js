@@ -50,6 +50,13 @@ export function cardView(card, state = {}) {
       icon: /evening/i.test(card.title || '') ? 'i-moon' : 'i-sun', tick: null, tone: '',
       actions: card.id && status !== 'unavailable' ? ['brief-read', ...(offer ? ['brief-later', 'brief-dismiss'] : [])] : [] };
   }
+  // Work he's offered to do (offers.js): one, as itself; several, a row each, with what's said of how it's going.
+  if (card?.kind === 'offers') {
+    const rows = offerRows(Array.isArray(card.ids) ? card.ids.map(String) : [], state.offers || new Map());
+    if (rows.length === 1) return { label: { doing: 'Doing it', done: 'Done', failed: 'Didn’t work', declined: 'Offered', expired: 'Offered', gone: 'Offered' }[rows[0].status] || 'Want me to?', title: rows[0].title, detail: rows[0].detail, icon: 'i-pulse', tick: null, tone: rows[0].tone, actions: rows[0].actions, offerIds: rows[0].actions.length ? [rows[0].id] : [] };
+    const waiting = rows.some((row) => row.actions.length);
+    return { label: waiting ? 'Want me to?' : 'Offered', title: `${['', 'One', 'Two', 'Three'][rows.length] || rows.length} things I could do`, detail: '', icon: 'i-pulse', tick: null, tone: '', actions: [], rows };
+  }
   // New mail: who and what, and the conversation to open in Gmail when it's just the one.
   if (card?.kind === 'mail') return { label: 'Email', title: String(card.title || 'New mail'), detail: '', lines: Array.isArray(card.lines) ? card.lines.map(String) : [], icon: 'i-mail', tick: null, tone: '', actions: ['mail'] };
   const id = String(card?.id ?? '');
@@ -89,6 +96,22 @@ export function shelfOf(state = {}, now = Date.now()) {
   return { cards: all.slice(0, SHELF_MOST), more: Math.max(0, all.length - SHELF_MOST) };
 }
 
+/**
+ * What each offer shows: its title, why it's offered or how it went, and the buttons while it waits on an answer.
+ * @param {string[]} ids
+ * @param {Map<string, {label:string, why?:string, status:string, result?:string}>} known  offers.js list, by id
+ */
+export function offerRows(ids, known) {
+  return ids.map((id) => {
+    const offer = known.get(id);
+    if (!offer) return { id, title: 'Something I offered', detail: 'No longer on offer', status: 'gone', tone: 'gone', actions: [] };
+    const waiting = ['open', 'asked', 'later'].includes(offer.status);
+    const detail = { doing: 'Doing it…', done: offer.result || 'Done', failed: offer.result || 'Couldn’t do it', declined: 'Not doing it', expired: 'No longer on offer', later: offer.why ? `${offer.why} · I’ll ask again later` : 'I’ll ask again later' }[offer.status] || offer.why || '';
+    const tone = offer.status === 'done' ? 'done-offer' : ['declined', 'expired', 'failed'].includes(offer.status) ? 'gone' : '';
+    return { id, title: String(offer.label || ''), detail, status: String(offer.status || ''), tone, actions: waiting ? ['offer-yes', 'offer-later', 'offer-no'] : [] };
+  });
+}
+
 const ACTIONS = {
   quiet: { label: 'Stop the ringing', icon: 'i-close', text: 'Stop' },
   cancel: { label: 'Cancel', icon: 'i-close' },
@@ -98,7 +121,10 @@ const ACTIONS = {
   mail: { label: 'Open in Gmail', icon: 'i-open', text: 'Open' },
   'brief-read': { label: 'Read briefing', icon: 'i-voice', text: 'Read' },
   'brief-later': { label: 'Remind me in 10 minutes', icon: 'i-snooze', text: 'Later' },
-  'brief-dismiss': { label: 'Dismiss briefing', icon: 'i-close', text: 'Dismiss' }
+  'brief-dismiss': { label: 'Dismiss briefing', icon: 'i-close', text: 'Dismiss' },
+  'offer-yes': { label: 'Yes, do it', icon: 'i-tick', text: 'Yes' },
+  'offer-later': { label: 'Not now: ask again later', icon: 'i-snooze', text: 'Not now' },
+  'offer-no': { label: 'No: don’t offer it again', icon: 'i-close', text: 'No' }
 };
 
 // ——— The page's half: one list, kept up to date, and every card drawn from it ———
@@ -110,6 +136,8 @@ let ticker = null;
 const watchers = new Set();
 const briefingCards = new Map();
 let briefingSnapshotKnown = false;
+/** What he's offered to do, by id (offers.js), as main last said. */
+const offersKnown = new Map();
 
 const ask = (message) => chrome.runtime.sendMessage({ type: 'jester/tasks', ...message }).catch(() => null);
 
@@ -161,6 +189,78 @@ async function act(action, card) {
   const op = { done: { op: 'done', on: true }, undo: { op: 'done', on: false }, remove: { op: 'remove' }, cancel: { op: 'remove' }, snooze: { op: 'snooze', minutes: 10 }, quiet: { op: 'quiet' } }[action];
   if (op) took(await ask({ ...op, id: card.id }));
   return undefined;
+}
+
+/** What he's offered, as it stands now: every card that shows one is drawn again. */
+export function tookOffers(list) {
+  if (!Array.isArray(list)) return;
+  for (const offer of list) if (offer?.id) offersKnown.set(String(offer.id), offer);
+  for (const el of document.querySelectorAll('.card')) if (el.card?.kind === 'offers' || el.card?.offerIds?.length) fill(el);
+}
+
+/** Their click on an offer's Yes, Not now or No: main does it, and says how it went. */
+async function offerAction(el, op, ids) {
+  if (el.offerPending) return;
+  el.offerPending = true;
+  el.offerError = '';
+  fill(el);
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'jester/offers', op, ids });
+    if (Array.isArray(result?.offers)) tookOffers(result.offers);
+    if (!result?.ok) el.offerError = String(result?.error || 'That didn’t go through. Try again.');
+  } catch {
+    el.offerError = 'That didn’t go through. Try again.';
+  } finally {
+    el.offerPending = false;
+    fill(el);
+  }
+}
+
+/** An offer's three buttons. */
+function offerButtons(el, row) {
+  return row.actions.filter((name) => ACTIONS[name]).map((action) => {
+    const { label: name, icon: glyph, text } = ACTIONS[action];
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `act worded${action === 'offer-yes' ? ' yes' : ''}`;
+    button.title = name;
+    button.setAttribute('aria-label', `${name}: ${row.title}`);
+    button.disabled = !!el.offerPending;
+    button.append(icon(glyph), text);
+    button.addEventListener('click', () => offerAction(el, action.slice('offer-'.length), [row.id]));
+    return button;
+  });
+}
+
+/** Offers under a card (new mail's reply to draft), or the rows of several: a line each, with its buttons. */
+function offerList(el, rows) {
+  if (!rows.length) return null;
+  const list = document.createElement('ul');
+  list.className = 'offer-rows';
+  for (const row of rows) {
+    const item = document.createElement('li');
+    if (row.tone) item.className = row.tone;
+    const words = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = row.title;
+    words.append(title);
+    if (row.detail) {
+      const detail = document.createElement('span');
+      detail.className = 'detail';
+      detail.textContent = row.detail;
+      words.append(detail);
+    }
+    item.append(words);
+    const buttons = offerButtons(el, row);
+    if (buttons.length) {
+      const acts = document.createElement('div');
+      acts.className = 'acts';
+      acts.append(...buttons);
+      item.append(acts);
+    }
+    list.append(item);
+  }
+  return list;
 }
 
 /** Voice answers and card buttons share the same stored briefing. Refresh all
@@ -323,11 +423,12 @@ function briefingDetails(el, view) {
 
 function fill(el) {
   const card = el.card;
-  let view = cardView(card, state);
+  let view = cardView(card, { ...state, offers: offersKnown });
   // His line can reach the page before the list that holds what it made: until the list's been asked again, a card
   // that isn't in it is shown as what it's of, and not as finished.
   if (view.gone && !el.settled) view = { ...view, detail: '', tone: '', gone: false };
-  el.className = `card${card.kind === 'brief' ? ' briefing-card' : ''}${el.dataset.compact ? ' compact' : ''}${view.tone ? ` ${view.tone}` : ''}${view.due ? ' timer' : ''}`;
+  const offered = view.rows || (card.offerIds?.length ? offerRows(card.offerIds.map(String), offersKnown) : null);
+  el.className = `card${card.kind === 'brief' ? ' briefing-card' : ''}${offered || card.kind === 'offers' ? ' offer-card' : ''}${el.dataset.compact ? ' compact' : ''}${view.tone ? ` ${view.tone}` : ''}${view.due ? ' timer' : ''}`;
   const parts = [];
   if (view.tick === null) {
     const glyph = document.createElement('span');
@@ -382,6 +483,15 @@ function fill(el) {
   }
   const details = briefingDetails(el, view);
   if (details) words.append(details);
+  const rows = offered ? offerList(el, offered) : null;
+  if (rows) words.append(rows);
+  if (el.offerError) {
+    const error = document.createElement('span');
+    error.className = 'briefing-error';
+    error.setAttribute('role', 'status');
+    error.textContent = el.offerError;
+    words.append(error);
+  }
   if (el.briefingError) {
     const error = document.createElement('span');
     error.className = 'briefing-error';
@@ -404,6 +514,10 @@ function fill(el) {
     if (action.startsWith('brief-')) {
       button.disabled = !!el.briefingPending || card.status === 'reading';
       button.addEventListener('click', () => briefingAction(el, action.slice('brief-'.length)));
+    } else if (action.startsWith('offer-')) {
+      if (action === 'offer-yes') button.classList.add('yes');
+      button.disabled = !!el.offerPending;
+      button.addEventListener('click', () => offerAction(el, action.slice('offer-'.length), view.offerIds || []));
     } else button.addEventListener('click', () => act(action, card));
     acts.append(button);
   }

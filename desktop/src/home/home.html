@@ -75,6 +75,7 @@
         <!-- What's in play, as cards: timers running, reminders given or coming up (cards.js). -->
         <div id="shelf" class="shelf" aria-label="Timers and reminders in play" hidden></div>
         <div id="briefing-shelf" class="shelf" aria-label="Briefings ready for you" hidden></div>
+        <div id="offer-shelf" class="shelf" aria-label="Things he could do for you" hidden></div>
         <div class="stage">
           <div id="presence" class="presence">
             <canvas id="orb" aria-hidden="true"></canvas>
@@ -313,7 +314,7 @@
               <input type="checkbox" id="keepUnsureSpeech" />
             </label>
             <label class="row">
-              <span><strong>Morning brief</strong><small>When you first sit down for the day, he announces that your briefing is ready and asks whether to read it. Say yes or choose Read, Later or Dismiss. Offered once a day when you’re available, not after five in the afternoon. Ask for a saved briefing any time: “read my morning briefing”.</small></span>
+              <span><strong>Morning brief</strong><small>When you first sit down for the day, he says your briefing is ready, how much the day holds and how many things he could do for you, and asks whether to read it. Say yes or choose Read, Later or Dismiss. Offered once a day when you’re available, not after five in the afternoon. Ask for a saved briefing any time: “read my morning briefing”.</small></span>
               <input type="checkbox" id="briefMorning" />
             </label>
             <div class="row">
@@ -324,6 +325,10 @@
             <label class="row">
               <span><strong>A word before what’s on your calendar</strong><small>Fifteen minutes before each class or event with a time, he says it’s coming and where. Needs a calendar connected (Weather and calendars).</small></span>
               <input type="checkbox" id="checkIns" />
+            </label>
+            <label class="row">
+              <span><strong>Offer to do things for you</strong><small>At the end of a brief, with new mail, and before a call, he offers what he could do about it: open what’s due, move something overdue, draft a reply in Gmail (never sent), open the call, or with a paid model, look something up or set a reminder. Say yes, “just the first”, “not now” or no, or use the buttons on its card. Nothing is sent, bought or deleted, and “no” means he won’t offer that again.</small></span>
+              <input type="checkbox" id="offerWork" />
             </label>
             <div class="row">
               <span>

@@ -42,6 +42,7 @@ import { createResearchPresentation } from './research-presentation.js';
 import { sourceAddress, sourcesOf } from './research-sources.js';
 import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
 import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS } from './briefs.js';
+import { callOffer, createOfferRunner, createOffers, draftOffer, openerLine, personal } from './offers.js';
 import { briefingRequest, createBriefingManager } from './briefing-manager.js';
 import { openBriefingItem } from './briefing-actions.js';
 import { researchWeb } from '../../../jester-extension/src/background/web-research.js';
@@ -248,6 +249,9 @@ let mailWatched = null;
 /** The morning brief, the evening wrap-up and check-ins before what's on the calendar (briefs.js). */
 let briefs = null;
 let briefingManager = null;
+/** Work he offers to do, and what came of each offer (offers.js); and the doing of what isn't a command. */
+let offers = null;
+let runOffer = null;
 let briefingResearchAbort = null;
 const briefingReadRequests = new Set();
 /** The day each brief was last given, so it's given once: {morning, evening}, by presence.js's day. */
@@ -1034,8 +1038,11 @@ async function checkMail() {
   const due = mail.unsaid();
   if (!due.length) return undefined;
   if (quiet) return void log(`mail: ${due.length} kept for the morning`);
+  // Someone who wrote to them, with the linked Chrome there: he offers to draft a reply in Gmail, and leave it unsent.
+  const writer = settings?.offerWork !== false && chromeLink?.linked ? due.find((message) => personal(message) && /^[0-9a-f]{6,32}$/.test(message.thread || '')) : null;
+  const offered = writer && offers ? await offers.propose([draftOffer(writer)], { source: 'mail' }).catch(() => []) : [];
   // A line like any other he tells: said, sent to their phone or held, by where they are. Other people's words.
-  clock.add({ kind: 'say', inMs: 0, keepFor: 12 * 3600_000, payload: { text: mailLine(due), card: mailCard(due), untrusted: true, title: 'Email', priority: 3 } });
+  clock.add({ kind: 'say', inMs: 0, keepFor: 12 * 3600_000, payload: { text: mailLine(due), card: mailCard(due), untrusted: true, title: 'Email', priority: 3, ...(offered.length ? { offers: offered } : {}) } });
   await mail.said(due.map((message) => message.id));
   return undefined;
 }
@@ -1107,8 +1114,28 @@ function publishBriefings() {
   post({ type: 'jester/briefings-changed', cards: briefingManager.list().map((record) => briefingManager.card(record)) });
 }
 
+/** What he's offered and what came of it, for his window's cards; and how that stood when it was last sent. */
+let offersShown = '';
+const offersKey = () => offers.list().map((offer) => `${offer.id}:${offer.status}`).join(',');
+function publishOffers() {
+  if (!offers?.ready) return;
+  offersShown = offersKey();
+  post({ type: 'jester/offers-changed', offers: offers.list() });
+}
+
+/** Whether he offers work at all (Settings › Assistant and voice), and what there is to do it with. */
+const offering = () => ({ on: settings?.offerWork !== false, chrome: !!chromeLink?.linked, web: webReady() });
+
+/** A brief as composed, with what it found to offer kept (offers.js) and named on it by id. */
+async function withOffers(made, source) {
+  if (!made?.offers?.length || !offers) return made ? { ...made, offers: undefined } : made;
+  const kept = await offers.propose(made.offers, { source }).catch((err) => (log('offers: couldn’t keep them:', err.message), []));
+  return { ...made, offers: undefined, offerIds: kept.map((offer) => offer.id) };
+}
+
 function briefingMade(record) {
-  return record ? { ...record, card: briefingManager.card(record), briefingId: record.id } : null;
+  // What it offered and is still waiting on an answer: asked once it's been read.
+  return record ? { ...record, card: briefingManager.card(record), briefingId: record.id, offers: settings?.offerWork === false ? [] : offers?.waiting(record.offerIds) || [] } : null;
 }
 
 async function readStoredBriefing(id) {
@@ -1517,6 +1544,22 @@ function listenToPages() {
         }
         return { ok: false };
       }
+      // What he's offered to do: the list for its cards, and their click on Yes, Not now or No.
+      case 'jester/offers': {
+        if (!url.startsWith('jester://app/home/') || !offers?.ready) return { ok: false };
+        const ids = (Array.isArray(message.ids) ? message.ids : []).map(String).filter(Boolean).slice(0, 3);
+        if (message.op === 'yes' && ids.length) {
+          const named = ids.map((id) => offers.get(id)).filter((offer) => offer && ['open', 'asked', 'later'].includes(offer.status));
+          if (!named.length) return { ok: false, error: 'That’s already been answered.', offers: offers.list() };
+          // Said aloud, as a briefing read from its card is: not waited for, it may take a while. Kept as theirs is a
+          // plain yes: the offer's name holds a calendar's or a sender's words, which aren't the user's.
+          void conversation.takeOffers(named.map((offer) => offer.id), named.length === 1 ? 'Yes, do that.' : 'Yes, do those.').catch((err) => log('offers: couldn’t do them:', err.message));
+        } else if ((message.op === 'later' || message.op === 'no') && ids.length) {
+          await offers.answer(ids, message.op);
+          conversation.offersSettled(ids);
+        }
+        return { ok: true, offers: offers.list() };
+      }
       case 'jester/briefings': {
         if (!url.startsWith('jester://app/home/') || !briefingManager?.ready) return { ok: false };
         try {
@@ -1588,6 +1631,7 @@ function listenToPages() {
         conversation.forget();
         keeper.forgetAll();
         await briefingManager?.forgetAll();
+        await offers?.forgetAll();
         return { ok: true };
       // His window's Tasks panel: the list, a task added by hand, one ticked off or put back, one removed.
       // Ticking off here is the user's own click: the only other way is their saying so (tasks.js).
@@ -2331,6 +2375,12 @@ async function start() {
   });
   // A clock file lost or set aside mustn't lose a reminder: each is put back on it.
   tasks.reschedule();
+  // Work he offers to do (offers.js): kept, so a "no" outlasts a restart, and shown in his window to answer.
+  offers = createOffers({ storage: storage.local, log, onChange: publishOffers });
+  await offers.start();
+  runOffer = createOfferRunner({ tasks, calendars, openExternal: (url) => shell.openExternal(url) });
+  // Past its time an offer is over, with nothing else changing: his window is told, looked at each minute.
+  setInterval(() => offers.ready && offersKey() !== offersShown && publishOffers(), 60_000).unref?.();
   situation = createSituation({
     whereabouts,
     weather,
@@ -2413,6 +2463,13 @@ async function start() {
     tasks,
     // Their own scripts: run by "run", or kept with a task to run later.
     scripts,
+    // Work he offers to do, answered (offers.js): kept as asked, put off or turned down, and done here or as a command.
+    work: {
+      asked: (ids) => offers.asked(ids),
+      answer: (ids, op) => offers.answer(ids, op),
+      run: (offer) => runOffer(offer),
+      finish: (id, outcome) => offers.finish(id, outcome)
+    },
     // The day's brief and its wrap-up, when they ask for one.
     briefs: {
       asked: briefingRequest,
@@ -2454,7 +2511,9 @@ async function start() {
     where: () => presence.where,
     // With the mic closed he has no voice: it's written, on the pill and in his window.
     // Not across the lines being read to teach him their voice, or anyone mid-sentence.
-    announce: (text, card, more) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening, card, untrusted: more?.untrusted === true })),
+    // What he'd offer to do about it, if it's still waiting on an answer by the time it's said (held while they were away).
+    announce: (text, card, more) => (teaching || (listening && speech.hearing) ? null : conversation.announce(text, { written: !listening, card, untrusted: more?.untrusted === true,
+      offers: more?.offers?.length && settings?.offerWork !== false ? offers?.waiting(more.offers.map((offer) => offer.id)) || [] : [] })),
     release: () => clock.release(),
     // Held, or waiting on another try at their phone: back, they're told now.
     held: () => clock.held + clock.waiting,
@@ -2542,8 +2601,9 @@ async function start() {
   syncMail();
   // The morning brief and the evening wrap-up (briefs.js): composed when it's time to say one, and counted as given
   // only once it's been said. Away, it's held; too late to be worth it, the clock drops it.
-  briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, mailToModel: () => settings?.mailJudge !== false, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, research: researchForBriefing, log });
-  briefingManager = createBriefingManager({ storage: storage.local, compose: (kind, options) => briefs.compose(kind, options),
+  briefs = createBriefs({ whereabouts, weather, calendars, tasks, mail, mailToModel: () => settings?.mailJudge !== false, presence, units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()), request: briefWriter, research: researchForBriefing,
+    offering, lately: () => recollections?.all?.() || [], log });
+  briefingManager = createBriefingManager({ storage: storage.local, compose: async (kind, options) => withOffers(await briefs.compose(kind, options), kind),
     composeCustom: (request) => briefs.composeCustom(request), history: briefingHistory, onChange: publishBriefings, given: briefGiven });
   await briefingManager.start();
   ({ briefDays = {}, checkinsTold = {} } = await storage.local.get(['briefDays', 'checkinsTold']));
@@ -2567,8 +2627,9 @@ async function start() {
     if (!composed?.id || !composed.text || ['read', 'dismissed', 'reading', 'replaced'].includes(composed.status)) return undefined;
     // Put off with Later: its own job (brief-later-<id>) asks again, not this one.
     if (!laterId && composed.status === 'later' && composed.laterUntil > Date.now()) return undefined;
-    const name = composed.kind === 'custom' ? 'briefing' : `${composed.kind} briefing`;
-    const text = `I have your ${name}. Would you like me to read it?`;
+    // As Duet opens its own: how much the day holds, and how much he could do for them.
+    const waiting = settings?.offerWork === false ? [] : offers?.waiting(composed.offerIds) || [];
+    const text = openerLine({ kind: composed.kind, count: composed.count || 0, offers: waiting.length, at: Date.now() });
     // Offered once it's been said to them, not before: a line held, or dropped by the clock, is offered another time.
     const card = briefingManager.card({ ...composed, status: 'offered' }, { offer: true });
     const said = () => briefingManager.offer(composed.id).then(() => log(`brief: the ${which} one offered`), () => undefined);
@@ -2578,7 +2639,10 @@ async function start() {
   clock.on('checkin', async (job) => {
     if (settings?.checkIns === false) return undefined;
     const text = briefs.checkinLine(job.payload || {});
-    const answer = text ? await teller.say({ ...job, payload: { text, untrusted: true, title: 'Coming up', priority: 4 } }) : undefined;
+    // A call with a link: he offers to open it (offers.js), looked up on the calendar when it's opened.
+    const call = text && settings?.offerWork !== false && job.payload?.call ? callOffer(job.payload) : null;
+    const offered = call && offers ? await offers.propose([call], { source: 'checkin' }).catch(() => []) : [];
+    const answer = text ? await teller.say({ ...job, payload: { text, untrusted: true, title: 'Coming up', priority: 4, ...(offered.length ? { offers: offered } : {}) } }) : undefined;
     if (text && !answer) {
       checkinsTold = { ...checkinsTold, [job.id]: job.payload.start };
       await storage.local.set({ checkinsTold }).catch(() => undefined);

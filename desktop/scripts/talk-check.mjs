@@ -418,6 +418,10 @@ if (run && !process.versions.electron) {
   const BRIEF_CASES = [
     { text: '(the morning brief, on sitting down)', briefing: 'morning', say: /4(?::00)?\s*(?:pm|p\.m\.)?|four/i },
     { text: '(the evening wrap-up)', briefing: 'evening', say: /10(?::00)?|ten|lab/i },
+    // 2026-11-18: what he could do, found by rule and by this model's ideas (offers.js): an idea the app left out
+    // (off its fact, a time made up, a look-up that would buy something) counts as wrong; none at all is fine.
+    { text: '(the morning brief, and what he could do)', briefing: 'morning', offering: true },
+    { text: '(the evening wrap-up, and what he could do)', briefing: 'evening', offering: true },
     // Step 11: which of six new emails are worth telling of (a professor's change, a roommate's ask and a hold on an
     // account are; a newsletter, a receipt and one written to steer him aren't).
     { text: '(new mail: which is worth telling)', judging: true }
@@ -445,7 +449,7 @@ if (run && !process.versions.electron) {
     if (want.written) return reply.do || reply.note?.add || (reply.task?.op === 'add' && taskBook.asked(want.text, '', 'add', reply.task.text)) ? [] : ['nothing written: no "do", no "note" and no task'];
     if (want.forgetting || want.judging) return reply.picked ? [reply.picked] : [];
     // A brief: the model's words are his only when they kept to the facts; then they should hold the day's.
-    if (want.briefing) return [...(reply.picked ? [reply.picked] : []), ...(want.say && !want.say.test(reply.say) ? ['"say" misses it'] : []), ...(String(reply.say).split(/\s+/).length > 95 ? ['too long'] : [])];
+    if (want.briefing) return [...(reply.picked ? [reply.picked] : []), ...(want.say && !want.say.test(reply.say) ? ['"say" misses it'] : []), ...(!want.offering && String(reply.say).split(/\s+/).length > 95 ? ['too long'] : [])];
     if (!want.doAny && !!reply.do !== !!want.do) found.push(want.do ? 'no "do"' : '"do" set');
     const kept = keptOf(reply, want);
     if (want.remember && !want.remember.test(kept)) found.push(kept ? `kept the wrong words, ${JSON.stringify(kept)}` : 'nothing kept');
@@ -636,10 +640,16 @@ if (run && !process.versions.electron) {
                 presence: { state: () => ({ satToday: 5 * 3600000 }) },
                 request: job,
                 now: () => morning,
-                log: (...parts) => logs.push(parts.join(' '))
+                log: (...parts) => logs.push(parts.join(' ')),
+                ...(want.offering ? { offering: () => ({ on: true, chrome: false, web: true }), lately: () => [{ at: day(-1, 20), summary: 'The user said they have a CMPSC 465 midterm on Thursday and are worried about dynamic programming.' }] } : {})
               });
               const out = await briefs.compose(want.briefing);
-              reply = { say: out.text, do: '', remember: '', note: null, picked: logs.length ? logs.join('; ') : '' };
+              if (want.offering) {
+                // What's offered, after what's said: the model's ideas marked so. Only the ideas left out are wrong.
+                const offered = (out.offers || []).map((offer) => `${offer.idea ? 'idea: ' : ''}${offer.ask}`).join(' | ') || 'nothing offered';
+                const left = logs.filter((line) => /offers: an idea was left out|no ideas of the model/.test(line));
+                reply = { say: `${out.text}  →  ${offered}`, do: '', remember: '', note: null, picked: left.join('; ') };
+              } else reply = { say: out.text, do: '', remember: '', note: null, picked: logs.length ? logs.join('; ') : '' };
             } else if (want.forgetting) {
               // The app's own forgetting, over what he keeps (LEARNED, KEPT, two earlier conversations), with this
               // model picking: what went is what's judged.

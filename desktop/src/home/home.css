@@ -1311,6 +1311,94 @@ body.researching .screen > .top {
   max-width: 720px;
 }
 
+#offer-shelf {
+  max-height: 30vh;
+  overflow-y: auto;
+  padding-bottom: 6px;
+}
+
+#offer-shelf > .card {
+  width: 100%;
+  max-width: 720px;
+}
+
+/* Work he's offered to do: a row each, with Yes, Not now and No. */
+.offer-card {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.offer-card .words {
+  min-width: 0;
+  flex: 1 1 200px;
+}
+
+.offer-card .acts {
+  flex-wrap: wrap;
+}
+
+.offer-rows {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.offer-rows > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--edge);
+}
+
+.offer-rows > li > div:first-child {
+  flex: 1 1 200px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.offer-rows strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.offer-rows .detail {
+  color: var(--dim);
+  font-size: 12.5px;
+}
+
+.offer-rows > li.gone {
+  opacity: 0.6;
+}
+
+.offer-rows > li.done-offer .detail,
+.card.done-offer .detail {
+  color: var(--ok);
+}
+
+.card .act.yes {
+  border-color: var(--ring-fill);
+  background: var(--ring-fill);
+  color: var(--text);
+}
+
+.card .act.yes:hover {
+  background: var(--ring);
+  color: var(--text);
+}
+
+.card .act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .card.compact {
   max-width: 360px;
   gap: 9px;

@@ -1598,9 +1598,11 @@ answer the rules would accept.
 
 ## The morning brief, the evening wrap-up, and a word before class
 
-Scheduled briefings announce themselves and wait for permission to read.
-Jester says “I have your morning briefing. Would you like me to read it?”
-Answer yes, or use **Read**, **Later** (ten minutes), or **Dismiss**. He waits
+Scheduled briefings announce themselves and wait for permission to read, the
+way Claude Duet opens its own: “Good morning. Your brief’s ready: three things
+today, and two I could do for you. Want me to read it?” (the evening’s: “Good
+evening. Your wrap-up’s ready…”). Answer yes, or use **Read**, **Later** (ten
+minutes), or **Dismiss**. He waits
 until you are available and does not read across a film or call. The schedule
 remains in Settings › Assistant and voice.
 
@@ -2255,6 +2257,78 @@ Parakeet 110M 39/44, WER 7.1%; Kroko streaming 39/44, WER 7.3% (licence
 CC-BY-SA, marketed for hobby use); Moonshine tiny 35/44, WER 14.8%. The small
 models decode in under 35 ms.
 
+## Things he offers to do (Claude Duet's next steps)
+
+Claude Duet ends its morning brief with what it could do next ("One thing jumped
+out… Want me to dig in?") and waits for a yes. Jester does the same
+(`offers.js`): at the end of the brief and the wrap-up, with new mail, and
+before a call on the calendar, he offers what he could do about it, and does it
+on a yes.
+
+    Two things I could do: draft a reply to Sam Lee, and move “Call the dentist”
+    to 12:00 PM. Want me to do both? I won’t send anything.
+
+- **What he offers**, found by rule from what the brief already knows, so it's
+  always about something real: a reply to someone who wrote (a person, by the
+  address and Gmail's filing, never a service; only with the linked Chrome),
+  drafted in Gmail and left there unsent; what's due today, opened at its own
+  page (a Canvas assignment's link on the calendar, never the calendar's feed);
+  something overdue on the list, moved to noon, five or eight, whichever is an
+  hour off; in the evening, what's still open, carried to tomorrow at the same
+  time; and before a video call, its link opened.
+- **A paid model's ideas**, up to two more, and only two kinds: a look on the web
+  (read only: nothing bought, sent, booked or signed up for) or a reminder at a
+  time. Each has to come from one of the day's numbered facts (or what was
+  talked about in the last two days), in that fact's own words, and is checked
+  like the brief is (`strays`): a time or number the facts don't have and it's
+  dropped. So is a look-up that would do something, and a copy of something
+  already offered or already on the list. Free and local models offer only what
+  the rules find.
+- **How to answer**: yes (all of them), some ("just the first", "the last two",
+  "the Canvas one", "no, just the second", "not the reply"), "not now" (offered
+  again in the next brief while it still fits, at most three times), or no
+  (never offered again: it's remembered for a month). Typed or said; said, a
+  yes needs no name for 20 seconds after he asks, as a yes to a briefing offer
+  doesn't. A question about them ("which one's the dentist?") is answered, and
+  the offer still stands. Anything else isn't an answer: "open Spotify" isn't a
+  yes to "open Homework 6". Each offer is also a card with **Yes**, **Not now**
+  and **No**, on his line and on a shelf over the orb while it waits, and its
+  card says how it went.
+- **How it's done**: decided here, never by a model. A link is looked up on the
+  calendar when it's opened, so a meeting's passcode is never written to disk;
+  a task moved or a reminder added is said in a line ("Moved “Call the dentist”
+  to 12:00 PM."); a reply to draft or a look-up is said as begun ("On it: I’ll
+  draft a reply to Sam Lee.") and then done as any command is, through the
+  linked Chrome or research, which still ask before anything's sent. The draft
+  is named by its Gmail thread's id, so the mail's own words never reach the
+  command.
+
+Off in Settings › Assistant and voice › Offer to do things for you. The log says
+how many were offered, taken up, put off or turned down, and why an idea was
+left out, never what they were. `npm run live-check -- offers` runs it in the
+real app: a call's link before it, what's due and a model's reminder after the
+brief (its look-up that would buy something left out), "just the first", the
+other put off and then taken with a click on its card, and nothing offered
+twice.
+
+Measured (2026-11-18, `npm run talk-check -- saved:anthropic --only self --match
+"could do" --show`, the made-up day with "a CMPSC 465 midterm on Thursday" talked
+about yesterday, 3 tries each): Claude Haiku 5.5 and Sonnet 5.5 each 6 of 6, every
+idea kept ("look up dynamic programming practice problems for the CMPSC 465
+midterm"), none left out; about 3¢ for both.
+
+A second reading found five faults, each now a test: with one thing offered,
+"not the call" opened the call; "I already called the dentist", "cancel the
+dentist" and "move it to 3 pm" were taken as a yes to moving it (to noon); a mixed
+answer ("not the homework, yes the dentist") turned both down for a month; any
+question at all kept the offer standing, so a yes to his next question went to
+the offer; a newer turn while a yes was being kept left it "Doing it…" for good;
+and a click on one card put another offer off. So now: any no in it but the
+plain forms, a word that isn't the offer's own, or a time that isn't his, and it
+isn't an answer; words that only name what it's about need its doing word ("move
+the dentist one"); without his name, only a bare yes, later or no; and only a
+question about them keeps them, unless his answer asked something itself.
+
 ## Your own scripts: Controls
 
 Built 2026-11-18, from the user's request: "attach a folder for scripts for him to execute … control my bluetooth
@@ -2516,6 +2590,17 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     a folder **without** a `jester.json` drafted by your real talking model (try a copy of a script folder), the
     menu bar's Lights submenu, and the Ask first question by voice. The log's `scripts:` and `voice: scripts`
     lines say what ran.
+
+23. **Things he offers to do** (built 2026-11-18; run in the real app on a scratch profile with a pretend
+    calendar and scripted models, never with your own Jester, calendar or Gmail): restart Jester. The next
+    morning brief should open "Good morning. Your brief's ready: … things today, and … I could do for you",
+    and after it's read, end with what he could do. Try "yes", "just the first", "not now" and "no", and the
+    buttons on the card over the orb. With Chrome linked and Gmail signed in, new mail from a person should
+    end "Want me to draft a reply to …? I won't send it."; say yes and check Gmail's Drafts: it should be there,
+    unsent. Before a call with a Zoom or Meet link in its place, "Want me to open the call?". Still unverified:
+    a real Canvas assignment link opening, a reply really drafted by your extension, your talking model's own
+    ideas (how often they're worth it, and whether one ever reads as made up), and how "yes" scores with your
+    voice from across the room. The log's `offers:` lines say what was offered and what came of it.
 
 ## Things learned the hard way
 

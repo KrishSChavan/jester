@@ -185,6 +185,9 @@ export function createBriefingManager({ storage, compose, composeCustom, history
       ...(Number.isFinite(record.offeredAt) ? { offeredAt: record.offeredAt } : {}),
       ...(Number.isFinite(record.readAt) ? { readAt: record.readAt } : {}),
       ...(record.unready ? { unready: true } : {}), ...(record.missing ? { missing: true } : {}),
+      // How many things the day holds ("three things today"), and the work he offered with it (offers.js).
+      ...(Number.isInteger(record.count) && record.count >= 0 ? { count: Math.min(record.count, 99) } : {}),
+      ...(Array.isArray(record.offerIds) && record.offerIds.length ? { offerIds: record.offerIds.filter((id) => typeof id === 'string' && id.length <= 80).slice(0, 3) } : {}),
       ...(Array.isArray(record.coverage) ? { coverage: record.coverage.map((line) => safeText(line, 2000)).filter(Boolean).slice(0, 24) }
         : safeText(record.coverage, 2000) ? { coverage: safeText(record.coverage, 2000) } : {}) };
   }

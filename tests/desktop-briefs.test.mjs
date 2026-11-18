@@ -120,7 +120,8 @@ test('nothing connected and nothing on the list: nothing to say', async () => {
   // The list alone is enough for one, and it holds nobody else's words.
   const some = createBriefs({ tasks: { list: () => ({ open: [{ id: '1', text: 'Buy stamps' }], done: [] }) }, now: () => at(13) });
   const { items, ...made } = await some.compose('morning');
-  assert.deepEqual(made, { text: 'Afternoon. And one thing with no date.', plain: 'Afternoon. And one thing with no date.', card: { kind: 'brief', title: 'Today, Monday, Nov 16', lines: ['Also on their list, with no date: one thing.'] }, untrusted: false, mailIds: [] });
+  // Nothing today to count, and nothing to offer: offering is off unless it's asked for (offers.js).
+  assert.deepEqual(made, { text: 'Afternoon. And one thing with no date.', plain: 'Afternoon. And one thing with no date.', card: { kind: 'brief', title: 'Today, Monday, Nov 16', lines: ['Also on their list, with no date: one thing.'] }, untrusted: false, mailIds: [], count: 0, offers: [] });
   assert.equal(items[0].kind, 'task');
   assert.equal(items[0].taskId, '1');
 });
@@ -141,7 +142,7 @@ test('check-ins: a word before each thing with a time, by the clock’s own sum'
   const w = world({ now: at(8, 42) });
   const jobs = w.briefs.checkins();
   assert.match(jobs[0].id, new RegExp(`^checkin-[a-z0-9]+-${at(16)}$`));
-  assert.deepEqual(jobs.map(({ id, ...job }) => job), [{ at: at(15, 45), keepFor: 15 * MIN, payload: { title: 'CMPSC 465 Lecture', place: 'Westgate E201', start: at(16) } }], 'today’s lecture; nothing for what’s due, or beyond a day');
+  assert.deepEqual(jobs.map(({ id, ...job }) => ({ ...job, payload: { ...job.payload, key: typeof job.payload.key } })), [{ at: at(15, 45), keepFor: 15 * MIN, payload: { title: 'CMPSC 465 Lecture', place: 'Westgate E201', start: at(16), key: 'string' } }], 'today’s lecture; nothing for what’s due, or beyond a day; known again on the calendar by its key');
   assert.equal(w.briefs.checkins()[0].id, jobs[0].id, 'the same id each time it’s asked');
   assert.deepEqual(w.briefs.checkins(30)[0].at, at(15, 30));
   w.now = at(15, 45);

@@ -25,7 +25,8 @@ import { DAY_STARTS } from './presence.js';
 import { dueWords } from './tasks.js';
 import { CONDITIONS } from './weather.js';
 import { sourceAddress, sourcesOf } from './research-sources.js';
-import { secretIn } from './vault-memory.js';
+import { ago, secretIn } from './vault-memory.js';
+import { IDEAS_SCHEMA, IDEAS_SYSTEM, eventKey, ideaOffers, meetingLink, offerCandidates } from './offers.js';
 
 /** A first sit-down after this hour gets no morning brief: the evening's is the next thing. */
 export const MORNING_ENDS = 17;
@@ -99,7 +100,7 @@ async function morningFacts({ whereabouts, weather, calendars, tasks, mail, unit
     // The weather's connected and didn't come (the network's not up yet, just after waking): worth another try.
     unready: !!whereabouts?.connected && !sky,
     // Mail found worth telling and not told yet: what came in the night, kept for now. The newest three by name.
-    mail: (mail?.unsaid?.() || []).slice(-3).map(({ id, thread, from, subject, at }) => ({ id, thread, from: titled(from), subject: titled(subject), at })),
+    mail: (mail?.unsaid?.() || []).slice(-3).map(({ id, thread, from, subject, at, person }) => ({ id, thread, from: titled(from), subject: titled(subject), at, person: person === true })),
     mailMore: Math.max(0, (mail?.unsaid?.() || []).length - 3),
     mailIds: (mail?.unsaid?.() || []).map((message) => message.id),
     events: all.filter((event) => !event.allDay && event.start >= at - 5 * MIN).map(eventOf),
@@ -143,7 +144,8 @@ async function eveningFacts({ whereabouts, weather, calendars, tasks, presence, 
     events: next.filter((event) => !event.allDay && event.start >= tomorrow).map(eventOf),
     due: next.filter((event) => event.allDay && event.start >= tomorrow).map(eventOf),
     tasksTomorrow: list.open.filter((task) => Number.isFinite(task.due) && task.due >= tomorrow && task.due < dayStart(base, 2)),
-    sat: presence?.state?.().satToday || 0
+    sat: presence?.state?.().satToday || 0,
+    tomorrow
   };
 }
 
@@ -158,8 +160,9 @@ const hashed = (text) => {
 const placed = (text) => titled(String(text ?? '').replace(/\bhttps?:\/\/\S+/gi, ' '));
 /** An event whose whole title was a secret is still an event. */
 const eventTitle = (title) => titled(title) || (String(title ?? '').trim() ? 'An event' : '');
+// `key`: how it's known again on the calendar (offers.js), by its own title, not the one tidied to be said.
 const eventOf = ({ uid, title, place, start, end, allDay, url, calendars }) => ({ title: eventTitle(title), place: placed(place), start, end, allDay: !!allDay,
-  ...(uid ? { uid } : {}), ...(sourceAddress(url) ? { url: sourceAddress(url).href } : {}),
+  key: eventKey({ uid, title, start }), ...(uid ? { uid } : {}), ...(sourceAddress(url) ? { url: sourceAddress(url).href } : {}),
   ...(Array.isArray(calendars) ? { calendars: calendars.map((name) => titled(name)).slice(0, 8) } : {}) });
 
 /**
@@ -437,8 +440,44 @@ function cardOf(facts, lines) {
  * @param {(request:object) => Promise<{json:object}>} [deps.request]  the model he talks through; none: said plainly
  * @param {() => boolean|Promise<boolean>} [deps.writes]  whether that model is one to write a brief; if not, plainly
  */
-export function createBriefs({ whereabouts = null, weather = null, calendars = null, tasks, mail = null, presence = null, units = () => 'fahrenheit', request = null, research = null, writes = () => true, mailToModel = () => true, now = Date.now, log = () => undefined }) {
+export function createBriefs({ whereabouts = null, weather = null, calendars = null, tasks, mail = null, presence = null, units = () => 'fahrenheit', request = null, research = null, writes = () => true, mailToModel = () => true, offering = () => ({ on: false }), lately = () => [], now = Date.now, log = () => undefined }) {
   const deps = { whereabouts, weather, calendars, tasks, mail, presence, units, now };
+
+  /**
+   * What he could do for them, from the day's facts (offers.js): by rule, and with a model that's been seen to keep
+   * to the facts (`mayWrite`), up to two ideas of its own, each tied to one of them.
+   */
+  async function offersFor(facts, lines, { mayWrite, signal }) {
+    const can = await Promise.resolve(offering()).catch(() => ({ on: false }));
+    if (!can?.on) return [];
+    const found = offerCandidates(facts, { chrome: !!can.chrome });
+    if (!request || !mayWrite) return found;
+    try {
+      const date = new Date(facts.at);
+      const stamp = `[${date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}, ${clock(facts.at)}]`;
+      // What was talked about lately is a fact of theirs too (an exam mentioned yesterday), with when it was.
+      const talked = (await Promise.resolve(lately()).catch(() => []))
+        .filter((item) => Number.isFinite(item?.at) && item.at >= facts.at - 2 * 864e5 && item.summary && !secretIn(item.summary))
+        .slice(0, 4).map((item) => `Talked about ${ago(item.at, facts.at)}: ${String(item.summary).slice(0, 240)}`);
+      const all = [...lines, ...talked];
+      const list = tasks.list();
+      const already = [...found.map((offer) => offer.label), ...list.open.slice(0, 20).map((task) => `On their list: ${task.text}`)];
+      const { json } = await request({ system: IDEAS_SYSTEM(!!can.web), prompt: `${stamp}\n${all.map((line, index) => `${index + 1}. ${line}`).join('\n')}${already.length ? `\nAlready offered or on their list: ${already.join('; ')}.` : ''}`,
+        schema: IDEAS_SCHEMA, maxOutputTokens: 400, ...(signal ? { signal } : {}) });
+      const ideas = ideaOffers(json, { lines: all, stamp, now: facts.at, web: !!can.web, existing: [...found, ...list.open.map((task) => ({ kind: 'task', label: task.text, ask: task.text }))], strays, log });
+      if (ideas.length) log(`brief: ${ideas.length} idea${ideas.length === 1 ? '' : 's'} of the model’s to offer`);
+      return [...found, ...ideas];
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      log(`brief: no ideas of the model’s (${err.message})`);
+      return found;
+    }
+  }
+
+  /** How many things the day holds, for "three things today": what's on, what's due, what's late, what came in. */
+  const counted = (facts) => (facts.kind === 'morning'
+    ? facts.events.length + facts.due.length + facts.tasks.overdue.length + facts.tasks.given.length + facts.tasks.today.length + (facts.mail?.length || 0) + (facts.mailMore || 0)
+    : facts.open.length + facts.events.length + facts.due.length + facts.tasksTomorrow.length);
 
   return {
     /**
@@ -460,29 +499,36 @@ export function createBriefs({ whereabouts = null, weather = null, calendars = n
       const untrusted = [...(facts.events || []), ...(facts.due || []), ...(facts.mail || [])].length > 0;
       const card = cardOf(facts, lines);
       const items = scheduledItems(facts, lines);
+      const count = counted(facts);
       // Only a model that's been seen to keep to the facts writes it (main.js: a paid one). qwen3.5:9b gave a wrap-up
       // "seventy-five degree weather" and a lecture an end time, and what it makes up in words can't be caught.
-      if (!request) return { text: fallback, plain: fallback, card, items, untrusted, mailIds };
+      if (!request) return { text: fallback, plain: fallback, card, items, untrusted, mailIds, count, offers: await offersFor(facts, lines, { mayWrite: false, signal }) };
+      let mayWrite = false;
+      let text = fallback;
       try {
         // Their mail goes to a model only if they've let a model see it (Settings › Email): else, plainly.
-        const mayWrite = await writes();
+        mayWrite = await writes();
         const maySeeMail = !mailIds.length || await mailToModel();
         check();
-        if (!mayWrite || !maySeeMail) return { text: fallback, plain: fallback, card, items, untrusted, mailIds };
-        const date = new Date(facts.at);
-        const stamp = `[${date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}, ${clock(facts.at)}]`;
-        const { json } = await request({ system: SYSTEM(kind), prompt: `${stamp}\n${lines.join('\n')}`, schema: BRIEF_SCHEMA, maxOutputTokens: BRIEF_TOKENS, ...(signal ? { signal } : {}) });
-        check();
-        const said = String(json?.say ?? '').replace(/\s+/g, ' ').trim();
-        const wrong = strays(said, [stamp, ...lines]);
-        if (!wrong) return { text: said, plain: fallback, card, items, untrusted, mailIds };
-        log(`brief: the model’s ${kind} brief said something the facts don’t (${wrong}), so they’re said plainly`);
+        mayWrite &&= maySeeMail;
+        if (mayWrite) {
+          const date = new Date(facts.at);
+          const stamp = `[${date.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}, ${clock(facts.at)}]`;
+          const { json } = await request({ system: SYSTEM(kind), prompt: `${stamp}\n${lines.join('\n')}`, schema: BRIEF_SCHEMA, maxOutputTokens: BRIEF_TOKENS, ...(signal ? { signal } : {}) });
+          check();
+          const said = String(json?.say ?? '').replace(/\s+/g, ' ').trim();
+          const wrong = strays(said, [stamp, ...lines]);
+          if (!wrong) text = said;
+          else log(`brief: the model’s ${kind} brief said something the facts don’t (${wrong}), so they’re said plainly`);
+        }
       } catch (err) {
         // Stopped by whoever asked for it: over. Stopped otherwise (the reading's own Stop): said plainly.
         check();
         log(`brief: no model for the ${kind} brief (${err.message}), so it’s said plainly`);
       }
-      return { text: fallback, plain: fallback, card, items, untrusted, mailIds };
+      const offers = await offersFor(facts, lines, { mayWrite, signal });
+      check();
+      return { text, plain: fallback, card, items, untrusted, mailIds, count, offers };
     },
     /** A retrospective uses only timestamped records in the requested interval.
      * Research is read-only; an unavailable source never authorizes interaction. */
@@ -599,8 +645,9 @@ export function createBriefs({ whereabouts = null, weather = null, calendars = n
       return calendars
         .between(at, at + 24 * 3600_000)
         .filter((event) => !event.allDay && event.start > at + MIN)
-        .map((event) => ({ ...eventOf(event), uid: hashed(`${event.uid ?? ''}|${event.title ?? ''}|${event.place ?? ''}`) }))
-        .map((event) => ({ id: `checkin-${event.uid}-${event.start}`, at: event.start - lead * MIN, keepFor: lead * MIN, payload: { title: event.title, place: event.place, start: event.start } }));
+        // A call's link is seen here, on the calendar's own words, and kept only as that there is one.
+        .map((event) => ({ ...eventOf(event), uid: hashed(`${event.uid ?? ''}|${event.title ?? ''}|${event.place ?? ''}`), call: !!meetingLink(event) }))
+        .map((event) => ({ id: `checkin-${event.uid}-${event.start}`, at: event.start - lead * MIN, keepFor: lead * MIN, payload: { title: event.title, place: event.place, start: event.start, key: event.key, ...(event.call ? { call: true } : {}) } }));
     },
     /** A check-in, as it's said at the moment it's said: how long there is by then. '' once it's begun. */
     checkinLine({ title, place, start }) {

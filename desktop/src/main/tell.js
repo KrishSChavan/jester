@@ -47,8 +47,9 @@ export function lateLine(text, meant, at) {
 /**
  * @param {object} deps
  * @param {() => 'here'|'near'|'away'} deps.where
- * @param {(text:string, card:object|null, more:{untrusted:boolean}) => Promise<boolean|void>|null} deps.announce  says it
- *   (with the job's `payload.card`, for his window to show, and whether it holds other people's words, `payload.untrusted`),
+ * @param {(text:string, card:object|null, more:{untrusted:boolean, offers?:object[]}) => Promise<boolean|void>|null} deps.announce  says it
+ *   (with the job's `payload.card`, for his window to show, whether it holds other people's words, `payload.untrusted`,
+ *   and the work he'd offer to do about it, `payload.offers`),
  *   and answers false when it was cut off with
  *   nobody listening; null when now isn't the moment
  * @param {() => Promise<void>} deps.release  what's held is tried again (clock.js)
@@ -109,7 +110,8 @@ export function createTeller({ where, announce, release, held, phone = async () 
         log('telling: a line, shown and not said: something’s playing');
         return undefined;
       }
-      const said = announce(line, job.payload.card || null, { untrusted: job.payload.untrusted === true });
+      // Work he could do about it (offers.js), asked with it: only when it's said here, never to a phone.
+      const said = announce(line, job.payload.card || null, { untrusted: job.payload.untrusted === true, ...(Array.isArray(job.payload.offers) && job.payload.offers.length ? { offers: job.payload.offers } : {}) });
       if (!said) return { retryIn: busyMs };
       // Cut off as the screen locked or the lid closed: nobody heard it out, so it's still to tell.
       if ((await said) === false) {

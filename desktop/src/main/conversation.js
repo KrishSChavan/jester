@@ -33,6 +33,7 @@ import { addressed, nameAt } from './wake.js';
 import { sourcesOf } from './research-sources.js';
 import { searchRequestIntent } from '../../../jester-extension/src/background/search-routing.js';
 import { timedWords } from './script-words.js';
+import { BARE_ANSWER, offerAsked, offerReply, offersLine } from './offers.js';
 
 /** How long he waits for more: after just his name, and after answering, with no need to say it again. */
 const OPEN_MS = 8000;
@@ -638,7 +639,7 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, ring = null, scripts = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, work = null, ring = null, scripts = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
@@ -647,6 +648,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   let pendingTimer = null;
   let searchClarification = null;
   let briefingOffer = null;
+  /** Work he's just offered to do (offers.js), waiting on a yes: {list:[{id, ask, label, kind}], askedAt, expiresAt, answerBy?}. */
+  let workOffer = null;
   let ponders = 0;
   /** What he's saying, in order: one line at a time. */
   let queue = Promise.resolve();
@@ -723,10 +726,80 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     return !!meant && knowsYou() && !unsure && !playbackEcho(meant);
   }
 
-  /** A yes, "later" or "dismiss" to his offer of a briefing, begun while it can be answered without his name. */
+  /**
+   * A yes, "later" or "dismiss" to his offer of a briefing, or an answer to work he's offered ("just the first"),
+   * begun while it can be answered without his name.
+   */
   function answersOffer(meant, startedAt) {
     const at = Number.isFinite(startedAt) ? startedAt : now();
-    return !!briefingOffer && at >= briefingOffer.askedAt && at < (briefingOffer.answerBy ?? briefingOffer.expiresAt) && !!briefingReply(meant);
+    if (briefingOffer && at >= briefingOffer.askedAt && at < (briefingOffer.answerBy ?? briefingOffer.expiresAt) && briefingReply(meant)) return true;
+    // Without his name, only a bare yes, later or no: "just the first" or "move the dentist one" needs his name, or
+    // the window a voiceprint opens after he's spoken (withinWindow), as anything else said to him does.
+    return !!workOffer && at >= workOffer.askedAt && at < (workOffer.answerBy ?? workOffer.expiresAt) && BARE_ANSWER.test(String(meant).trim()) && !!offerReply(meant, workOffer.list);
+  }
+
+  /**
+   * Work he could do, offered: "Two things I could do: …. Want me to do both?" With `lead`, after a line of his own
+   * (new mail): just the question, said with it by announce(). Its answer is waited on as a briefing offer's is.
+   */
+  async function askOffers(list, { written = false } = {}) {
+    const asked = (Array.isArray(list) ? list : []).filter((offer) => offer?.id && offer.ask).slice(0, 3)
+      .map(({ id, ask, label, kind, assure, untrusted }) => ({ id, ask, label, kind, ...(assure ? { assure } : {}), ...(untrusted ? { untrusted: true } : {}) }));
+    const line = offersLine(asked);
+    if (!line || !work) return false;
+    const mine = { list: asked, askedAt: now(), expiresAt: now() + BRIEF_ANSWER_MS };
+    workOffer = mine;
+    const reset = resets;
+    // Named from a calendar or a mail ("open Homework 6", "draft a reply to Sam Lee"): other people's words.
+    await say(line, { written, card: { kind: 'offers', ids: asked.map((offer) => offer.id) }, untrusted: asked.some((offer) => offer.untrusted) });
+    if (workOffer === mine) mine.answerBy = now() + ASKED_MS;
+    // Cut off as listening ended: nobody heard them asked, and they're asked another time.
+    if (reset !== resets && !written) return false;
+    await Promise.resolve(work.asked?.(asked.map((offer) => offer.id))).catch(() => undefined);
+    return true;
+  }
+
+  /**
+   * Their answer to what he offered: yes to all or some (the rest put off, to come up again), not now, or no. What's
+   * done here (a task moved, a page opened) is said in a line; what's a command (a reply drafted in Chrome, a look on
+   * the web) is said as begun, then done as any command is, and how it went is said when it's done.
+   * @param {{op:'yes'|'later'|'no', ids:string[]}} reply
+   * @param {{list?:object[], answer:Function, stale:Function, typed:boolean}} context  list: what was asked
+   */
+  async function answerOffers({ op, ids }, { list = [], answer, stale, typed }) {
+    if (op !== 'yes') {
+      await work.answer(ids, op);
+      if (stale()) return;
+      return void (await answer(op === 'later' ? 'Okay, I’ll bring it up again later.' : ids.length > 1 ? 'Okay, I’ll leave those.' : 'Okay, I’ll leave it.'));
+    }
+    const taken = await work.answer(ids, 'yes');
+    const rest = list.map((offer) => offer.id).filter((id) => !ids.includes(id));
+    if (rest.length) await work.answer(rest, 'later');
+    // Something newer said meanwhile: what was taken up isn't left "doing" for ever. It can be offered again.
+    if (stale()) {
+      for (const offer of taken) await work.finish(offer.id, { ok: false, text: 'Stopped before it began.' });
+      return;
+    }
+    if (!taken.length) return void (await answer('That’s already been dealt with.'));
+    const card = { kind: 'offers', ids: taken.map((offer) => offer.id) };
+    const untrusted = taken.some((offer) => offer.untrusted);
+    const said = [];
+    const commands = [];
+    for (const offer of taken) {
+      const done = await Promise.resolve(work.run(offer)).catch((err) => ({ ok: false, text: `That didn’t work: ${err.message}` }));
+      if (done?.command) commands.push({ offer, command: done.command });
+      else {
+        said.push(done?.text || 'Done.');
+        await work.finish(offer.id, { ok: !!done?.ok, text: done?.text || '' });
+      }
+    }
+    const begun = commands.length === 1 ? `On it: I’ll ${commands[0].offer.ask}.` : commands.length ? `Now I’ll ${commands.map(({ offer }) => offer.ask).join(', then ')}.` : '';
+    const spoken = answer([...said, begun].filter(Boolean).join(' '), { card, untrusted });
+    for (const { offer, command } of commands) {
+      const outcome = await act(command, { overheard: offer.untrusted === true, stale, before: spoken, answer, typed, context: '' });
+      await work.finish(offer.id, outcome ? { ok: outcome.ok !== false, text: outcome.text || '' } : { ok: false, text: 'It was stopped before it finished.' });
+    }
+    await spoken;
   }
 
   function overlappedSpeech(startedAt) {
@@ -1069,21 +1142,28 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     try {
       if (overheard && (await commands.risky(text)) && !stale()) {
         const allowed = await assistant.confirm(`Do “${text.replace(/[.!?]+$/, '')}”`);
-        if (stale()) return;
+        if (stale()) return null;
         // Refused the way it was answered: typed, it's written.
-        if (!allowed) return void (await say('Okay, I won’t.', { written: typing }));
+        if (!allowed) {
+          await say('Okay, I won’t.', { written: typing });
+          return null;
+        }
       }
       // One of the user's scripts with "Ask first" on (scripts.js): said aloud, anyone in the room may have said it.
       const asks = !typed && commands.scriptsAsk ? await commands.scriptsAsk(text) : null;
       if (asks && !stale()) {
         const allowed = await assistant.confirm(`Run ${scripts?.label?.(asks) || `“${text.replace(/[.!?]+$/, '')}”`}`);
-        if (stale()) return;
-        if (!allowed) return void (await say('Okay, I won’t.', { written: typing }));
+        if (stale()) return null;
+        if (!allowed) {
+          await say('Okay, I won’t.', { written: typing });
+          return null;
+        }
       }
-      if (stale()) return;
+      if (stale()) return null;
       const { outcome } = await commands.run(text, said, context);
       await before;
-      if (mine !== epoch || (stale() && !typed)) return;
+      // What it came to is handed back however it's said, or not: work he offered is marked done by it (offers.js).
+      if (mine !== epoch || (stale() && !typed)) return outcome;
       // Arm before speaking: the user may answer over the question itself.
       // A replaced turn can still be written, but can never own a new follow-up.
       const question = reset === resets && !stale() && outcome?.clarification;
@@ -1096,6 +1176,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       const sources = outcome?.ok !== false ? sourcesOf(outcome?.sources) : [];
       if (outcome) await answer(outcome.ok !== false && outcome.answer || outcome.text, { ok: outcome.ok !== false, sources, untrusted: sources.length > 0 });
       else if (!stale()) show({ active: false });
+      return outcome;
     } finally {
       acting -= 1;
     }
@@ -1189,12 +1270,16 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     pendingTimer.unref?.();
   }
 
-  async function turn(text, { overheard, typed = false, unsure = false, lag = NaN, startedAt, briefingId = '' } = {}) {
+  async function turn(text, { overheard, typed = false, unsure = false, lag = NaN, startedAt, briefingId = '', offerIds = null } = {}) {
     const beganAt = Number.isFinite(startedAt) ? startedAt : now();
     const clarification = searchClarification && beganAt >= searchClarification.askedAt && searchClarification.expiresAt > beganAt ? searchClarification : null;
     searchClarification = null;
     const offeredBrief = briefingOffer && beganAt >= briefingOffer.askedAt && briefingOffer.expiresAt > beganAt ? briefingOffer : null;
     briefingOffer = null;
+    const offeredWork = workOffer && beganAt >= workOffer.askedAt && workOffer.expiresAt > beganAt ? workOffer : null;
+    workOffer = null;
+    /** Asked about what he offered, and not answered: it still stands once he's said what it is. */
+    let offerStands = null;
     interruption = null;
     const mine = ++turns;
     const stale = () => mine !== turns;
@@ -1245,6 +1330,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         } finally {
           if (!completed) await Promise.resolve(briefs?.interrupted?.(made));
         }
+        // Heard to the end, it ends with what he could do for them (offers.js), and waits on a yes.
+        if (completed && made.offers?.length && !stale() && (await askOffers(made.offers, { written: typed })) && !stale() && knowsYou() && !typed) stayOpen(ASKED_MS);
       };
       const briefResponse = offeredBrief ? briefingReply(text) : '';
       if (briefingId || (briefResponse && briefs?.read)) {
@@ -1260,6 +1347,18 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         await readBrief(made);
         return;
       }
+      // An answer to the work he offered: yes, some of it, not now, or no. Or their click on its card's Yes.
+      const workAnswer = !work ? null : offerIds ? { op: 'yes', ids: offerIds } : offeredWork ? offerReply(text, offeredWork.list) : null;
+      if (workAnswer) {
+        begun?.controller.abort();
+        // A click on one card is about that one: what else he's waiting on an answer for still waits.
+        if (offerIds && offeredWork && !offeredWork.list.some((offer) => offerIds.includes(offer.id))) offerStands = offeredWork;
+        await answerOffers(workAnswer, { list: offerIds ? [] : offeredWork?.list || [], answer, stale, typed });
+        if (!stale() && knowsYou() && !typed) stayOpen();
+        return;
+      }
+      // A question about what he offered ("which one's the dentist?"), and only that: it still stands once he's said.
+      if (offeredWork && offerAsked(text, offeredWork.list)) offerStands = offeredWork;
       if (clarification) {
         begun?.controller.abort();
         if (STOP.test(text) || TAKEN_BACK.test(text) || NO.test(text)) {
@@ -1288,7 +1387,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         if (stale() || briefController.signal.aborted) return void (await Promise.resolve(briefs?.interrupted?.(made)));
         if (controller === briefController) controller = null;
         await readBrief(made, brief);
-        if (!stale() && knowsYou() && !typed) stayOpen();
+        // Ended with work offered, it's already waiting on the answer, for longer.
+        if (!stale() && knowsYou() && !typed && !workOffer) stayOpen();
         return;
       }
       tasks?.touched?.({ fresh: true });
@@ -1493,6 +1593,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       early?.drop();
       if (typedTurn === mine) typedTurn = 0;
       keep(ended);
+      // What he offered still stands after a question about it, for as long as it did: "okay, do the first one". Not
+      // when his answer asked something of its own: a yes is to that.
+      const asksBack = /\?["”’')\]]*\s*$/.test(memory.current(1).at(-1)?.who === 'jester' ? String(memory.current(1).at(-1).text) : '');
+      if (offerStands && !stale() && !workOffer && !asksBack && offerStands.expiresAt > now()) workOffer = { ...offerStands, askedAt: beganAt, answerBy: now() + ASKED_MS };
     }
   }
 
@@ -1540,6 +1644,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       if (STOP.test(meant)) {
         searchClarification = null;
         briefingOffer = null;
+        workOffer = null;
         if (!cutIn) listenInstead({ startedAt, verified: !unsure && knowsYou() });
         if (assistant.asking) assistant.answer(false);
         else if (assistant.running) assistant.cancel();
@@ -1679,6 +1784,20 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     briefingSettled(id) {
       if (briefingOffer?.id === String(id)) briefingOffer = null;
     },
+    /** Work he offered, answered by a click (Not now, No): it's no longer what a "yes" would answer. */
+    offersSettled(ids = []) {
+      if (workOffer?.list.some((offer) => ids.includes(offer.id))) workOffer = null;
+    },
+    /**
+     * Their click on Yes on what he offered: done as if they'd said yes to just those, and said aloud, as a briefing
+     * read from its card is. `words`: what's kept in the conversation as theirs ("Yes: open Homework 6").
+     */
+    takeOffers(ids = [], words = 'Yes') {
+      const picked = ids.map(String).filter(Boolean);
+      if (!picked.length) return Promise.resolve();
+      if (workOffer?.list.some((offer) => picked.includes(offer.id))) workOffer = null;
+      return turn(String(words || 'Yes').slice(0, 200), { overheard: false, offerIds: picked });
+    },
     /** Read, clicked on a briefing's card: said aloud, even with the mic off. A task at work carries on. */
     readBriefing(id) {
       return turn('Read my briefing', { overheard: false, briefingId: String(id) });
@@ -1714,11 +1833,15 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      *   lid closed), so nobody heard it to the end. null when now isn't the moment: he's mid-sentence or mid-task,
      *   they're talking, or he's waiting on what they'll say next
      */
-    announce(text, { written = false, card = null, untrusted = false } = {}) {
+    announce(text, { written = false, card = null, untrusted = false, offers = null } = {}) {
       // His name heard, with the rest still being said: unless it never came.
       const lookingUp = wokenEarly && now() - wokenAt < WOKEN_MS;
       if (answering || talking || acting || pending || lookingUp || assistant.asking || assistant.running || now() < openUntil || now() < quietUntil) return null;
-      const line = written ? writtenLine(text) : spokenLine(text);
+      // Work he could do about it (offers.js: a reply to draft, a call to open), asked with it: "Want me to…?"
+      const asks = work && Array.isArray(offers) ? offers.filter((offer) => offer?.id && offer.ask).slice(0, 3)
+        .map(({ id, ask, label, kind, assure }) => ({ id, ask, label, kind, ...(assure ? { assure } : {}) })) : [];
+      const whole = asks.length ? `${String(text).trim()} ${offersLine(asks, { inline: true })}` : text;
+      const line = written ? writtenLine(whole) : spokenLine(whole);
       if (!line) return Promise.resolve(true);
       // What came before, long enough ago, is over: this begins the next conversation, as their words would.
       const ended = memory.idleFor() >= NEW_AFTER_MS ? memory.startNew() : [];
@@ -1728,12 +1851,18 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       const reset = resets;
       const offer = card?.kind === 'brief' && card.offer === true && card.id
         ? { id: String(card.id), askedAt: now(), expiresAt: now() + BRIEF_ANSWER_MS } : null;
+      const offered = asks.length ? { list: asks, askedAt: now(), expiresAt: now() + BRIEF_ANSWER_MS } : null;
       // The newest line he's said unasked is what a "yes" answers: another one after an offer takes its place.
       briefingOffer = offer;
-      const told = Promise.resolve(say(text, { written, card, untrusted })).then(() => {
+      workOffer = offered;
+      // Its card shows what he offered, to be answered with a click as well.
+      const shown = offered ? (card ? { ...card, offerIds: asks.map((item) => item.id) } : { kind: 'offers', ids: asks.map((item) => item.id) }) : card;
+      const told = Promise.resolve(say(whole, { written, card: shown, untrusted })).then(async () => {
         if (offer && briefingOffer === offer) offer.answerBy = now() + ASKED_MS;
+        if (offered && workOffer === offered) offered.answerBy = now() + ASKED_MS;
         if (reset !== resets && !written) return false;
-        if (mine === turns && !written && knowsYou()) stayOpen(offer ? ASKED_MS : OPEN_MS);
+        if (offered) await Promise.resolve(work.asked?.(asks.map((item) => item.id))).catch(() => undefined);
+        if (mine === turns && !written && knowsYou()) stayOpen(offer || offered ? ASKED_MS : OPEN_MS);
         return true;
       });
       keep(ended);
@@ -1747,6 +1876,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     forget() {
       searchClarification = null;
       briefingOffer = null;
+      workOffer = null;
       overlapGeneration += 1;
       interruption = null;
       overlaps.clear();
@@ -1770,6 +1900,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     reset() {
       searchClarification = null;
       briefingOffer = null;
+      workOffer = null;
       overlapGeneration += 1;
       interruption = null;
       overlaps.clear();
@@ -1788,6 +1919,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     end() {
       searchClarification = null;
       briefingOffer = null;
+      workOffer = null;
       overlapGeneration += 1;
       interruption = null;
       overlaps.clear();

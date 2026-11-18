@@ -32,6 +32,8 @@
  *            Tasks screen: its cards, a box ticked by a click, and the count on its button.
  *   brief    calendar check-ins; scheduled briefing offers with Read/Later/Dismiss; consent, saved replay and explicit
  *            refresh; expandable source details, calendar navigation, and custom briefings from recorded tasks.
+ *   offers   work he offers to do, as Claude Duet does: a call's link before it, what's due and a model's reminder at
+ *            the end of a brief; answered typed, in part ("just the first"), and by a click on its card's Yes.
  *   phone    a topic made in Settings and shown there alone; a test sent; then, with the screen locked, a reminder
  *            goes to the phone and isn't said again on unlocking; with the server failing it's held and said then.
  *   mail     Google's file chosen and a sign-in through a pretend browser and a pretend Google; new mail told with its
@@ -688,8 +690,10 @@ if (process.argv[2] === 'serve') {
       await until('away', () => /presence: away \(locked\)/.test(logLines().split('\n').slice(-6).join('\n')));
       powerMonitor.emit('unlock-screen');
       keys.idle = 0;
-      const offer = await until('the morning briefing offer', () => entries().slice(beforeBrief).find((entry) => /I have your morning briefing/.test(entry.text)), 15000).catch((err) => ({ text: err.message }));
-      check('sat down, he announces the briefing and waits before reading', /Would you like me to read it/.test(offer.text) && !entries().slice(beforeBrief).some((entry) => /^Morning\./.test(entry.text)), offer.text);
+      const offer = await until('the morning briefing offer', () => entries().slice(beforeBrief).find((entry) => /Your brief’s ready/.test(entry.text)), 15000).catch((err) => ({ text: err.message }));
+      // As Duet opens its own: how much the day holds (the seminar, and whatever earlier scenarios left on the list
+      // and in the mail), and nothing else said before they say yes.
+      check('sat down, he says the brief’s ready and what the day holds, and waits before reading', /^Good (?:morning|afternoon)\. Your brief’s ready: (?:one thing|(?:two|three|four|five|six|seven|eight|nine|ten|\d+) things) today\. Want me to read it\?$/.test(offer.text) && !entries().slice(beforeBrief).some((entry) => /^Morning\./.test(entry.text)), offer.text);
       const listBriefings = () => inPage(`return chrome.runtime.sendMessage({type:'jester/briefings',op:'list'});`);
       const offered = await listBriefings();
       const briefId = offered.cards?.find((card) => card.status === 'offered')?.id;
@@ -725,7 +729,7 @@ if (process.argv[2] === 'serve') {
       powerMonitor.emit('unlock-screen');
       keys.idle = 0;
       await pause(4000);
-      check('and only one scheduled offer a day', entries().filter((entry) => /I have your morning briefing/.test(entry.text)).length === 1, `${entries().filter((entry) => /I have your morning briefing/.test(entry.text)).length} offers`);
+      check('and only one scheduled offer a day', entries().filter((entry) => /Your brief’s ready/.test(entry.text)).length === 1, `${entries().filter((entry) => /Your brief’s ready/.test(entry.text)).length} offers`);
 
       // Asked for, with a model that makes a time up: the facts are said plainly instead.
       paid.answer = (request) => (/morning brief/.test(request?.messages?.[0]?.content || '') ? { say: 'Morning. Seminar is at 3:07 AM, and it’s 99 degrees.' } : { say: 'Hello from paid.', do: '', new: false });
@@ -752,6 +756,99 @@ if (process.argv[2] === 'serve') {
       await inPage(`window.jesterHome.go('main', { instant: true });`);
       // Off again, and the calendar gone: the scenarios after this are left alone.
       await setting({ briefMorning: false, checkIns: false });
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+    },
+
+    /**
+     * 2026-11-18: work he offers to do, as Claude Duet does: before a call (open it), at the end of a brief (open
+     * what's due, and a paid model's reminder), answered typed, in part, and with a click on its card.
+     */
+    async offers({ paid }) {
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      const setting = (patch) => inPage(`const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: { ...settings, ...${JSON.stringify(patch)} } });`);
+      const entries = () => said().filter((entry) => entry.who === 'jester');
+      const stamp = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+      const ymd = (ms) => { const d = new Date(ms); return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`; };
+      const local = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+      const opened = [];
+      shell.openExternal = async (url) => void opened.push(url);
+      const listOffers = () => inPage(`return chrome.runtime.sendMessage({ type: 'jester/offers', op: 'list' });`);
+      // An assignment due today with its own page, and a call fifteen minutes and a few seconds off, its link in its place.
+      const start = Math.ceil((Date.now() + 15 * 60000 + 6000) / 1000) * 1000;
+      const prior = feed.text;
+      feed.text = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//jester//live-check//EN',
+        'BEGIN:VEVENT', 'UID:hw6', `DTSTAMP:${stamp(Date.now())}`, `DTSTART;VALUE=DATE:${ymd(Date.now())}`, `DTEND;VALUE=DATE:${ymd(Date.now() + 864e5)}`, 'SUMMARY:Homework 6', 'URL:https://canvas.jester.test/courses/1/assignments/6', 'END:VEVENT',
+        'BEGIN:VEVENT', 'UID:standup', `DTSTAMP:${stamp(Date.now())}`, `DTSTART:${stamp(start)}`, `DTEND:${stamp(start + 1800000)}`, 'SUMMARY:Standup', 'LOCATION:https://psu.zoom.us/j/845123?pwd=abc', 'END:VEVENT',
+        'END:VCALENDAR'].join('\r\n');
+      const added = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-day', op: 'calendar-add', url: ${JSON.stringify(feed.url)}, name: 'School' });`);
+      if (!added?.ok) await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-day', op: 'calendar-refresh' });`);
+      await setting({ offerWork: true, checkIns: true });
+
+      // Before the call: the word that it's coming, and would he open it.
+      const before = entries().length;
+      const word = await until('the check-in', () => entries().slice(before).find((entry) => /^Standup starts in/.test(entry.text)), 20000).catch((err) => ({ text: err.message }));
+      check('before a call he says it’s coming and offers to open it, never saying the link', /^Standup starts in 1[45] minutes\. Want me to open the call\?$/.test(word.text) && !/zoom|pwd/.test(JSON.stringify(word)), word.text);
+      check('its card offers it, to answer with a click', word.card?.kind === 'offers' && word.card.ids?.length === 1, JSON.stringify(word.card));
+      const callDone = await type('yes');
+      check('a yes opens the call’s link, looked up on the calendar', callDone === 'The call’s opening in your browser.' && opened.at(-1) === 'https://psu.zoom.us/j/845123?pwd=abc', `${callDone} · ${opened.join(', ')}`);
+      check('the link was never kept with the offer', !/zoom|pwd/.test(fs.readFileSync(storageFile, 'utf8')), 'a link in storage-local.json');
+
+      // The brief: what's due, opened; and the paid model's idea, a reminder to start on it.
+      const ideas = [];
+      paid.answer = (request) => {
+        const system = request?.messages?.[0]?.content || '';
+        const prompt = request?.messages?.at(-1)?.content || '';
+        if (/morning brief/.test(system)) return { say: 'Morning. Homework 6 is due today, and you have Standup soon.' };
+        if (/things you could do for them/.test(system)) {
+          ideas.push(prompt);
+          const line = Number(prompt.match(/^(\d+)\. Due today/m)?.[1] || 0);
+          return { ideas: [{ line, kind: 'remind', what: 'start Homework 6', at: local(Date.now() + 2 * 3600000), why: 'Due today' }, { line, kind: 'look up', what: 'buy Homework 6 answers', why: 'Due today' }] };
+        }
+        return { say: 'Hello from paid.', do: '', new: false };
+      };
+      const beforeBrief = entries().length;
+      await type('update my morning briefing');
+      const question = await until('his offers, after the brief', () => entries().slice(beforeBrief).find((entry) => /I could do/.test(entry.text)), 15000).catch((err) => ({ text: err.message }));
+      // (After the other scenarios, something they left overdue is offered too: "Three things I could do: …".)
+      check('read to the end, the brief ends with what he could do: by rule and the model’s idea, its look-up that would buy something left out', /^(?:Two|Three) things I could do: open Homework 6[,;] .*remind you (?:tomorrow )?at \d+:\d\d [AP]M to start Homework 6\. (?:Want me to do both|Which should I do)\?$/.test(question.text) && !/buy|answers/i.test(question.text) && ideas.length === 1, question.text);
+      check('the model was given the day’s facts numbered, to tie each idea to one', /^\d+\. Due today, by their calendar: Homework 6\.$/m.test(ideas[0] || ''), (ideas[0] || '').slice(0, 300));
+      const rows = await until('the offer rows', () => inPage(`const card = [...document.querySelectorAll('#live-lines .card')].at(-1); const rows = card ? [...card.querySelectorAll('.offer-rows li')].map((li) => [li.querySelector('strong').textContent, [...li.querySelectorAll('button')].map((b) => b.textContent.trim()).join('+')].join(' | ')) : []; return rows.length ? rows : null;`)).catch((err) => [err.message]);
+      check('his line has them as a card, a row each with Yes, Not now and No', rows.length >= 2 && rows.every((row) => / \| Yes\+Not now\+No$/.test(row)) && /^Open Homework 6/.test(rows[0]) && rows.some((row) => /^Remind you/.test(row)), rows.join(' / '));
+      const shelf = await until('the offer shelf', () => inPage(`const el = document.getElementById('offer-shelf'); return !el.hidden && el.querySelectorAll('.offer-rows li').length >= 2 ? el.textContent : null;`)).catch((err) => err.message);
+      check('and on the shelf over the orb while they wait on an answer', /Open Homework 6/.test(shelf), shelf);
+      await shot('offers');
+      const first = await type('just the first');
+      check('“just the first” opens what’s due, from its calendar page', first === 'Homework 6’s open in your browser.' && opened.at(-1) === 'https://canvas.jester.test/courses/1/assignments/6', `${first} · ${opened.at(-1)}`);
+      const state = await listOffers();
+      const remind = state.offers?.find((offer) => offer.kind === 'remind');
+      check('the one not picked is put off, still waiting', remind?.status === 'later' && state.offers.find((offer) => offer.kind === 'open' && offer.label === 'Open Homework 6')?.status === 'done', JSON.stringify(state.offers?.map((offer) => [offer.kind, offer.status])));
+      const left = await until('only the put-off one on the shelf', () => inPage(`const el = document.getElementById('offer-shelf'); const rows = [...el.querySelectorAll('.offer-rows li, .card')]; return !el.hidden && /Remind you/.test(el.textContent) && !/Open Homework 6/.test(el.textContent) ? el.textContent : null;`)).catch((err) => err.message);
+      check('the shelf keeps only what still waits', /Remind you/.test(left), left);
+      // A click on its Yes: done as if said, and said.
+      const beforeClick = entries().length;
+      // Its own Yes: the row's, among others still waiting, or the card's when it's the only one.
+      await inPage(`const shelf = document.getElementById('offer-shelf'); const row = [...shelf.querySelectorAll('.offer-rows li')].find((li) => /^Remind you/.test(li.querySelector('strong')?.textContent || '')); const scope = row || shelf.querySelector('.card'); const yes = [...scope.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Yes'); yes?.click(); return !!yes;`);
+      const set = await until('the reminder set by a click', () => entries().slice(beforeClick).find((entry) => /remind you/.test(entry.text)), 10000).catch((err) => ({ text: err.message }));
+      check('Yes on its card sets the reminder, and he says so', /^Okay, I’ll remind you (?:tomorrow )?at \d+:\d\d [AP]M: start Homework 6\.$/.test(set.text) && taskFile().some((task) => task.text === 'Start Homework 6' && Number.isFinite(task.due)), set.text);
+      const gone = () => inPage(`const el = document.getElementById('offer-shelf'); return el.hidden || !/Homework 6/.test(el.textContent);`);
+      await until('the answered ones off the shelf', gone, 5000).catch(() => undefined);
+      check('answered, they’re off the shelf', await gone());
+      // Turned down: never offered again.
+      paid.answer = (request) => (/things you could do for them/.test(request?.messages?.[0]?.content || '') ? { ideas: [] } : /morning brief/.test(request?.messages?.[0]?.content || '') ? { say: 'Morning. Homework 6 is due today.' } : { say: 'Hello from paid.', do: '', new: false });
+      const beforeAgain = entries().length;
+      await type('update my morning briefing');
+      await pause(1500);
+      check('what was done isn’t offered again', !entries().slice(beforeAgain).some((entry) => /could do|Want me to/.test(entry.text) && /Homework 6/.test(entry.text)), entries().slice(beforeAgain).map((entry) => entry.text).join(' | '));
+      check('the log says how many and what came of them, never what they were', /offers: [23] to offer \(morning\)/.test(logLines()) && /offers: 1 taken up/.test(logLines()) && /offers: an idea was left out \((?:a look-up that would do something|not a kind he can do)\)/.test(logLines()) && !/offers:.*Homework/.test(logLines()), logLines().split('\n').filter((line) => /offers:/.test(line)).join(' | '));
+      await inPage(`window.jesterHome.go('settings/assistant', { instant: true });`);
+      const toggle = await until('the switch', () => inPage(`return document.getElementById('offerWork') ? document.getElementById('offerWork').checked : null;`).then((on) => (on === null ? null : { on })));
+      check('Settings has the switch, on', toggle.on === true, JSON.stringify(toggle));
+      await inPage(`window.jesterHome.go('main', { instant: true });`);
+      // Left as they were: the reminder off the list, the calendar as before, and he offers nothing in another scenario.
+      for (const task of taskFile().filter((task) => task.text === 'Start Homework 6')) await inPage(`return chrome.runtime.sendMessage({ type: 'jester/tasks', op: 'remove', id: ${JSON.stringify(task.id)} });`);
+      feed.text = prior;
+      await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-day', op: 'calendar-refresh' });`);
+      await setting({ offerWork: false, checkIns: false });
       paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
     },
 
@@ -1228,7 +1325,7 @@ if (process.argv[2] === 'serve') {
       JSON.stringify({
         // This computer's model unticked: with Ollama running, a test would load the user's own.
         // His briefs and check-ins are off until their own scenario: nothing he says unasked lands in another's.
-        settings: { enabled: false, voiceEnabled: false, continuousAssistant: false, watchEnabled: false, localModelUses: [], cameraDeviceId: '', longRange: false, memoryVault: vaultDir, briefMorning: false, briefEvening: false, checkIns: false },
+        settings: { enabled: false, voiceEnabled: false, continuousAssistant: false, watchEnabled: false, localModelUses: [], cameraDeviceId: '', longRange: false, memoryVault: vaultDir, briefMorning: false, briefEvening: false, checkIns: false, offerWork: false },
         // The free one saved first: only its plan puts it second.
         modelConnections: [model('free', free, 'free'), model('paid', paid, 'paid')]
       })

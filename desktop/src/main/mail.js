@@ -74,9 +74,23 @@ export function senderOf(from) {
   return (name || address.split('@')[0] || 'someone').slice(0, 60);
 }
 
+/** An address that's a service's, not a person's: nobody reads what's written back to it. */
+const SERVICE_ADDRESS = /^(?:no-?reply|do-?not-?reply|donotreply|notifications?|notify|alerts?|news(?:letter)?s?|digest|mailer(?:-daemon)?|bounces?|updates?|info|support|help|hello|team|marketing|billing|receipts?|orders?|accounts?|security|calendar-notification|postmaster)\b/i;
+/**
+ * Whether a message reads as a person writing to them, by its address and Gmail's own filing: what he'd offer to
+ * draft a reply to (offers.js). Never by its words.
+ */
+export function fromPerson(from, labels = []) {
+  const address = /<([^>]+)>/.exec(decoded(from))?.[1] || decoded(from).trim();
+  const local = address.split('@')[0] || '';
+  if (!address.includes('@') || SERVICE_ADDRESS.test(local)) return false;
+  return !labels.some((label) => ['CATEGORY_PROMOTIONS', 'CATEGORY_SOCIAL', 'CATEGORY_UPDATES', 'CATEGORY_FORUMS'].includes(label));
+}
+
 /** A message as he keeps it, from Gmail's (format=metadata): no body, ever. */
 export function messageOf(raw) {
   const header = (name) => (raw?.payload?.headers || []).find((item) => String(item?.name).toLowerCase() === name)?.value || '';
+  const labels = Array.isArray(raw?.labelIds) ? raw.labelIds.map(String) : [];
   return {
     id: String(raw?.id ?? ''),
     thread: String(raw?.threadId ?? ''),
@@ -84,7 +98,8 @@ export function messageOf(raw) {
     subject: plain(decoded(header('subject'))).slice(0, 120),
     opening: plain(raw?.snippet).slice(0, 200),
     at: Number(raw?.internalDate) || 0,
-    labels: Array.isArray(raw?.labelIds) ? raw.labelIds.map(String) : []
+    labels,
+    person: fromPerson(header('from'), labels)
   };
 }
 
@@ -135,7 +150,7 @@ const JUDGE = `You help decide which new emails are worth interrupting someone f
 export function createMail({ google, storage, request = null, judged = () => true, now = Date.now, log = () => undefined }) {
   /** Gmail's history id he's read up to; '' before the first look. */
   let mark = '';
-  /** What he's told of lately: {id, thread, from, subject, at}. */
+  /** What he's told of lately: {id, thread, from, subject, at, person?}. */
   let told = [];
   let checking = null;
   /** Times he's been reset (signed out, another account): a look begun before one ends with nothing. */
@@ -213,7 +228,7 @@ export function createMail({ google, storage, request = null, judged = () => tru
     const picked = await worth(found.filter(important));
     if (over()) return [];
     mark = reached;
-    told.push(...picked.map(({ id, thread, from, subject, at }) => ({ id, thread, from, subject, at: at || now() })));
+    told.push(...picked.map(({ id, thread, from, subject, at, person }) => ({ id, thread, from, subject, at: at || now(), ...(person ? { person: true } : {}) })));
     fresh();
     await save();
     if (added.size) log(`mail: ${added.size} new, ${picked.length} worth telling`);

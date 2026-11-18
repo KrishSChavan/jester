@@ -59,7 +59,10 @@ function keptLine(entry, fallbackAt, { follows = '' } = {}) {
 
 /** A line's card as it's kept: what it's of and where to find it, each a short string, and nothing else. */
 export function cardOf(card) {
-  if (!card || typeof card !== 'object' || !['task', 'note', 'remembered', 'brief', 'mail'].includes(card.kind)) return null;
+  if (!card || typeof card !== 'object' || !['task', 'note', 'remembered', 'brief', 'mail', 'offers'].includes(card.kind)) return null;
+  // Work he offered (offers.js): only which ones, by id. What they are, and how each went, is main's to say.
+  const ids = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && id && id.length <= 80).slice(0, 3) : []);
+  if (card.kind === 'offers') return ids(card.ids).length ? { kind: 'offers', ids: ids(card.ids) } : null;
   const short = (value, most) => (typeof value === 'string' && value ? value.slice(0, most) : undefined);
   const kept = { kind: card.kind, id: short(card.id, card.kind === 'brief' ? 160 : 40), type: short(card.type, 12), text: short(card.text, 200), title: short(card.title, 120), rel: short(card.rel, 300), snippet: short(card.snippet, 160) };
   // Briefing snapshots keep their detailed coverage notes as well as facts;
@@ -69,7 +72,8 @@ export function cardOf(card) {
   const items = card.kind === 'brief' ? briefingItemsOf(card.items) : [];
   const status = card.kind === 'brief' && ['ready', 'offered', 'reading', 'read', 'later', 'dismissed', 'replaced'].includes(card.status) ? card.status : '';
   return { ...Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined)), ...(lines.length ? { lines } : {}),
-    ...(items.length ? { items } : {}), ...(card.kind === 'brief' && typeof card.offer === 'boolean' ? { offer: card.offer } : {}), ...(status ? { status } : {}) };
+    ...(items.length ? { items } : {}), ...(card.kind === 'brief' && typeof card.offer === 'boolean' ? { offer: card.offer } : {}), ...(status ? { status } : {}),
+    ...(card.kind === 'mail' && ids(card.offerIds).length ? { offerIds: ids(card.offerIds) } : {}) };
 }
 
 /** Briefing links are displayed from stored metadata; clicks still resolve the

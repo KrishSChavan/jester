@@ -12,7 +12,7 @@ import { chatElements, createChats, dividerElement, lineElement } from './chats.
 import { createOrb, ORB_STATES } from './orb.js';
 import { createScreens } from './screens.js';
 import { createTasksPanel } from './tasks.js';
-import { cardElement, refreshBriefingCards, refreshCards, shelfOf, watchCards } from './cards.js';
+import { cardElement, refreshBriefingCards, refreshCards, shelfOf, tookOffers, watchCards } from './cards.js';
 import { onRender, save, showing, startSettings, state } from './settings.js';
 import { renderResearchState } from './research.js';
 
@@ -427,6 +427,19 @@ function drawBriefings(cards = []) {
   $('briefing-shelf').replaceChildren(...waiting.map((card) => cardElement(card)));
 }
 
+// What he's offered to do and is waiting on an answer for, as Duet keeps what needs you: one card, a row each, with
+// Yes, Not now and No. What's been answered leaves the shelf, and stays on the line he offered it on.
+let offerShelfKey = '';
+function drawOffers(list = []) {
+  tookOffers(list);
+  const waiting = list.filter((offer) => ['open', 'asked', 'later'].includes(offer.status)).slice(0, 3).map((offer) => offer.id);
+  const key = waiting.join(',');
+  if (key === offerShelfKey) return;
+  offerShelfKey = key;
+  $('offer-shelf').hidden = waiting.length === 0;
+  $('offer-shelf').replaceChildren(...(waiting.length ? [cardElement({ kind: 'offers', ids: waiting })] : []));
+}
+
 // The shelf over the orb: what's in play right now, as cards. Timers running, reminders given and not ticked, and
 // those coming up in the next few hours. Drawn again only when what's on it changes: a card keeps itself current.
 let shelved = '';
@@ -539,6 +552,9 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'jester/briefings-changed':
       drawBriefings(message.cards);
       break;
+    case 'jester/offers-changed':
+      drawOffers(message.offers);
+      break;
     // Opened again from the menu bar or the Dock: to the screen asked for, with the intro if it wasn't on screen.
     case 'jester/home-go':
       screens.go(message.screen, { instant: !!message.intro });
@@ -584,6 +600,7 @@ chrome.runtime
 mood(document.body.dataset.state);
 chrome.runtime.sendMessage({ type: 'jester/chats', op: 'current' }).then((reply) => reply?.chat && drawChat(reply.chat));
 chrome.runtime.sendMessage({ type: 'jester/briefings', op: 'list' }).then((reply) => reply?.ok && drawBriefings(reply.cards));
+chrome.runtime.sendMessage({ type: 'jester/offers', op: 'list' }).then((reply) => reply?.ok && drawOffers(reply.offers)).catch(() => undefined);
 document.addEventListener('jester/briefing-navigate', (event) => {
   if (event.detail === 'tasks') screens.go('tasks');
 });
