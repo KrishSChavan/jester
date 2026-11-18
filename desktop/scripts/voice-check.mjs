@@ -47,7 +47,7 @@ if (!process.versions.electron) {
   const own = flags.filter((arg, index) => !arg.startsWith('--') && !['--voice', '--pace'].includes(flags[index - 1]));
   const pace = Number(named('--pace')) || 1;
 
-  /** The kinds of thing he says: short, long, with figures, names and a list. `hear`: what must be heard back. */
+  /** The kinds of thing he says: short, long, with figures, names and a list. `hear`: what must be heard back; `never`: what mustn't. */
   const LINES = own.length
     ? own.map((say) => ({ say, hear: [] }))
     : [
@@ -60,6 +60,8 @@ if (!process.versions.electron) {
         { say: 'Your exam is tomorrow morning at nine. You asked me to remind you to bring your calculator, and the bus leaves at ten past eight from the usual stop.', hear: ['exam', 'tomorrow', 'nine', 'calculator', 'bus', 'eight', 'stop'] },
         { say: 'Dynamic programming is a way of solving a big problem by breaking it into smaller ones that overlap.', hear: ['dynamic', 'programming', 'solving', 'problem', 'breaking', 'smaller', 'overlap'] },
         { say: 'That costs $12.50, about 15% less than last week.', hear: ['twelve', 'dollars', 'fifty', 'fifteen', 'percent', 'less', 'week'] },
+        // sherpa turns a colon into a comma: "11:00" was "eleven zero zero" and "7:05" "seven zero five" until speaker.js wrote times out.
+        { say: 'Your alarm is set for 7:05 AM, and the meeting is at 11:00 on 11/17.', hear: ['alarm', 'seven', 'five', 'meeting', 'eleven', 'november'], never: ['zero', 'slash', 'thousand'] },
         { say: 'I couldn’t find that in your notes. Shall I look on YouTube instead?', hear: ['find', 'notes', 'shall', 'look', 'youtube', 'instead'] }
       ];
 
@@ -83,7 +85,7 @@ if (!process.versions.electron) {
   };
 
   /** Words as the recognizer writes them and as figures are said, for comparing: "4" and "four" are one word. */
-  const FIGURES = { 3: 'three', 4: 'four', 8: 'eight', 9: 'nine', 10: 'ten', 12: 'twelve', 15: 'fifteen', 50: 'fifty', 72: 'seventy' };
+  const FIGURES = { 3: 'three', 4: 'four', 5: 'five', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten', 11: 'eleven', 12: 'twelve', 15: 'fifteen', 17: 'seventeen', 50: 'fifty', 72: 'seventy' };
   const words = (text) =>
     String(text)
       .toLowerCase()
@@ -141,7 +143,7 @@ if (!process.versions.electron) {
           }
           const back = await readBack(to16k(joined, all[0].rate));
           const got = new Set(words(back.text || ''));
-          const missing = line.hear.filter((word) => !got.has(word));
+          const missing = [...line.hear.filter((word) => !got.has(word)), ...(line.never || []).filter((word) => got.has(word)).map((word) => `“${word}” was said`)];
           if (missing.length) failed += 1;
           report = `\n      heard back: “${back.text || back.detail}”${missing.length ? `\n      ✗ not heard: ${missing.join(', ')}` : line.hear.length ? '  ✓' : ''}`;
         }

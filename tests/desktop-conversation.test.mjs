@@ -12,7 +12,7 @@ import { createVault } from '../desktop/src/main/vault.js';
 import { createVaultMemory } from '../desktop/src/main/vault-memory.js';
 import { nameAt } from '../desktop/src/main/wake.js';
 import { averageVoice, judged, likeness, sounds, TEACHING_LINES } from '../desktop/src/main/voiceprint.js';
-import { createSpeaker, forEar, runsOn, spokenLine, spokenPieces, SPOKEN_CHARS } from '../desktop/src/main/speaker.js';
+import { createSpeaker, forEar, runsOn, spokenLine, spokenPieces, SPOKEN_CHARS, yearWords } from '../desktop/src/main/speaker.js';
 import { startKokoro } from '../desktop/src/main/kokoro.js';
 import { DEFAULT_VOICE, kokoroConfig, kokoroThreads, trimmed, voiceNamed, VOICES, wav } from '../desktop/src/main/voice/voices.js';
 
@@ -1468,8 +1468,8 @@ test('his own voice speaks when it’s there, and the computer’s does otherwis
 test('a line is made and played a sentence at a time, and a long first sentence in two', () => {
   assert.deepEqual(spokenPieces('Done.'), ['Done.']);
   assert.deepEqual(spokenPieces('It’s ten past four. Your exam is at nine! Shall I set an alarm?'), ['It’s ten past four.', 'Your exam is at nine!', 'Shall I set an alarm?']);
-  // Not a sentence's end: a title, a time of day, a figure.
-  assert.deepEqual(spokenPieces('Dr. Patel rang at 4 p.m. about version 3.5 of the form.'), ['Dr. Patel rang at 4 p.m. about version 3.5 of the form.']);
+  // Not a sentence's end: a title (said whole before his voice is given it), a time of day, a figure.
+  assert.deepEqual(spokenPieces('Dr. Patel rang at 4 p.m. about version 3.5 of the form.'), ['Doctor Patel rang at 4 p.m. about version 3.5 of the form.']);
   // A long opening sentence would be most of a second before any sound: its first clause comes first.
   assert.deepEqual(spokenPieces('I’ve put milk and eggs on your shopping list, and the weather looks clear until this evening. Anything else?'), [
     'I’ve put milk and eggs on your shopping list,',
@@ -1515,7 +1515,7 @@ test('what’s written for the eye is put the way it’s said, before his voice 
   said('Only $0.99, or £3.05, or €1.5 million.', 'Only 99 cents, or 3 pounds and 5 pence, or 1.5 million euros.');
   said('It’s 72°F now and 18°C in London, 40° in the oven.', 'It’s 72 degrees Fahrenheit now and 18 degrees Celsius in London, 40 degrees in the oven.');
   said('You walked 1,200 steps and 3.5 km at 6 km/h.', 'You walked 1,200 steps and 3.5 kilometres at 6 kilometres an hour.');
-  said('The meeting is at 10:30 AM on Nov 15, 2026.', 'The meeting is at 10:30 AM on November 15, 2026.');
+  said('The meeting is at 10:30 AM on Nov 15, 2026.', 'The meeting is at ten thirty AM on November 15, twenty twenty-six.');
   said('Due Fri, 3rd Dec. Then Sat, Jan. 4.', 'Due Friday, 3rd December Then Saturday, January 4.');
   said('Open 24/7, from 7-9 PM, pages 3–5.', 'Open twenty-four seven, from 7 to 9 PM, pages 3 to 5.');
   said('Call 555-0132, or 814-555-0132.', 'Call 5 5 5, 0 1 3 2, or 8 1 4, 5 5 5, 0 1 3 2.');
@@ -1524,9 +1524,45 @@ test('what’s written for the eye is put the way it’s said, before his voice 
   // Words that only look like one of those are left alone.
   const plain = 'The sun sat low in May, and I may march on. No. I said no.';
   said(plain, plain);
-  said('It ended 3-2 on 2026-11-15.', 'It ended 3 to 2 on November 15, 2026.');
+  said('It ended 3-2 on 2026-11-15.', 'It ended 3 to 2 on November 15, twenty twenty-six.');
   // What he's given to say comes in pieces already put that way.
   assert.deepEqual(spokenPieces('That’s $5. Due Nov 15.'), ['That’s 5 dollars.', 'Due November 15.']);
+});
+
+test('a time is said as one, never "eleven zero zero": sherpa turns its colon into a comma before Kokoro reads it', () => {
+  const said = (text, as) => assert.equal(forEar(text), as);
+  said('It’s 11:00.', 'It’s eleven o’clock.');
+  said('Your alarm is set for 7:05 AM.', 'Your alarm is set for seven oh five AM.');
+  said('Done at 4:45 p.m. Then rest.', 'Done at four forty-five PM. Then rest.');
+  said('It’s 12:00 PM, and it runs 9:30–10:15.', 'It’s noon, and it runs nine thirty to ten fifteen.');
+  said('Lunch at 12 PM, bed at 11:59 PM, up at 12 a.m.', 'Lunch at noon, bed at eleven fifty-nine PM, up at midnight.');
+  said('Open 10am-2pm.', 'Open 10am to 2pm.');
+  // A 24-hour time in the twelve hours he speaks in; seconds without AM or PM are how long; "0:45" is left.
+  said('At 17:45 or 00:30, 0:45 left, it took 1:05:30.', 'At five forty-five PM or twelve thirty AM, 0:45 left, it took 1 hour 5 minutes and 30 seconds.');
+  said('John 3:16 and a 16:9 screen.', 'John three sixteen and a 16:9 screen.');
+});
+
+test('dates, fractions, years and the rest of what Kokoro read sign by sign', () => {
+  const said = (text, as) => assert.equal(forEar(text), as);
+  said('On 11/17, then 12/1, due 11/17/2026 or by 3/4.', 'On November 17th, then December 1st, due November 17th, twenty twenty-six or by March 4th.');
+  said('Use 1/2 cup, 1 1/2 tsp and ¾ of it.', 'Use a half cup, 1 and a half teaspoon and three quarters of it.');
+  said('Rated 4/5, 8/10, 7.5/10, 55/57, or 50/50.', 'Rated 4 out of 5, 8 out of 10, 7.5 out of 10, 55 out of 57, or fifty-fifty.');
+  said('In 2026, up from the 1990s, the ’90s, her 20s, 2020-2024.', 'In twenty twenty-six, up from the nineteen nineties, the nineties, her twenties, twenty twenty to twenty twenty-four.');
+  assert.deepEqual([2000, 2009, 2010, 1905, 1900, 2100].map(yearWords), ['two thousand', 'two thousand nine', 'twenty ten', 'nineteen oh five', 'nineteen hundred', 'twenty-one hundred']);
+  said('Raised $1.2B, $3M and $100k: 10k steps, 3M users, a 5k run, 2x faster, 1920x1080, 30s.', 'Raised 1.2 billion dollars, 3 million dollars and 100 thousand dollars: 10 thousand steps, 3 million users, a 5k run, 2 times faster, 1920 by 1080, 30 seconds.');
+  said('It’s 1 km, 1 hr, 5 mi, 100 mL, 5 ft 10 in, 2 wks.', 'It’s 1 kilometre, 1 hour, 5 miles, 100 millilitres, 5 feet 10 inches, 2 weeks.');
+  said('A pen w/ ink, w/o a cap, and/or on/off. N/A.', 'A pen with ink, without a cap, and or on or off. not applicable.');
+  said('Go to www.google.com or https://example.com/news/today.', 'Go to google dot com or example dot com slash news slash today.');
+  said('See [the docs](https://x.com/a) and sources [1] [2, 3].', 'See the docs and sources.');
+  said('Home → Settings → Voice 👍 🇺🇸', 'Home, then Settings, then Voice');
+  said('It’s ~10 more, roughly ~5, if x < 5 or y > 3.', 'It’s about 10 more, roughly 5, if x less than 5 or y more than 3.');
+  said('Mr. Smith, Mrs. Jones, Ms. Lee, Dr. Patel and Prof. Kim.', 'Mister Smith, Missus Jones, Miz Lee, Doctor Patel and Professor Kim.');
+  said('Visit St. Louis, then Main St. Then Mt. Everest. Bob Lee Jr. is on Elm Ave. now.', 'Visit Saint Louis, then Main Street. Then Mount Everest. Bob Lee Junior is on Elm Avenue now.');
+  said('The ETA is 10 min. Read the FAQ. We flew to NYC, AKA the Big Apple.', 'The E.T.A. is 10 minutes. Read the F.A.Q. We flew to New York City, also known as the Big Apple.');
+  said('Ollama is up, approx. 5 min. Wait... ok. Hmm… let me think.', 'Ohllama is up, about 5 minutes. Wait, ok. Hmm, let me think.');
+  // What Kokoro already says right is left alone.
+  const right = 'The AI in the US needs your ID, the IT desk and a URL, at 6am. I’ve a to-do list.';
+  said(right, right);
 });
 
 test('each piece is made while the one before plays, and one that fails leaves the rest to the computer’s voice', async () => {
