@@ -700,11 +700,46 @@ function renderMemory() {
       'Each chat becomes a note in your vault’s Claude or ChatGPT folder, word for word but for lines that look like a password or key, and Jester answers from them like your other notes. ' +
       'Importing again updates only the chats carried on since, replacing those notes.'
     : 'Once there’s a vault: your chats from Claude and ChatGPT, imported a note each.';
+  renderLearning(memory);
   $('vault-search').textContent = !memory.root
     ? 'Once there’s a vault: by meaning, with nomic-embed-text in Ollama, or by words without it.'
     : memory.reading || !search
       ? 'Reading the vault…'
       : `${search.notes} note${search.notes === 1 ? '' : 's'} read · ${search.mode === 'meaning' ? `by meaning (${search.model})` : search.mode === 'words' ? 'by words' : 'off'}${search.error && search.error !== 'denied' ? ` · ${search.error}` : ''}`;
+}
+
+/**
+ * Learning from the imported chats: how many there are and how many he's read, the run as it goes, and how it ended.
+ * One button starts it, and stops it while it runs.
+ */
+let wasLearning = false;
+function renderLearning(memory) {
+  const chats = memory.chats;
+  const run = memory.learning;
+  const many = (count, one, more) => `${count.toLocaleString()} ${count === 1 ? one : more}`;
+  // A run just over: what he knows is counted again, for the row above.
+  if (wasLearning && !run?.running) vaultOp('known').catch(() => undefined);
+  wasLearning = !!run?.running;
+  $('learn-row').hidden = !memory.root || !(chats?.chats || run?.running);
+  if ($('learn-row').hidden) return;
+  const left = chats ? chats.chats - chats.learned : 0;
+  $('learn-hint').textContent =
+    'Imported, a chat is only found when a question happens to match it. Learn from them has the model ticked for Talking read each chat once: what you wrote in it and how each reply began, ' +
+    'never what you pasted or a line left out as a secret. A sentence on what it was about is kept in the chat’s note, so he finds it better, and the lasting things you said about yourself ' +
+    '(school, work, people, projects) go into About me, at most 60 a run, yours to edit or delete. With a paid Claude model, 1,000 chats take about seven minutes and 15¢.';
+  const button = $('chats-learn');
+  button.disabled = false;
+  button.textContent = run?.running ? 'Stop' : left && chats.learned ? 'Carry on' : left || !chats ? 'Learn from them' : 'Learned';
+  button.disabled = !run?.running && !!chats && !left;
+  const status = $('learn-status');
+  status.classList.toggle('error', !run?.running && !!run?.error);
+  if (run?.running) {
+    status.textContent = run.phase === 'facts' ? 'Choosing what goes into About me…' : `Reading your chats: ${run.done.toLocaleString()} of ${run.total.toLocaleString()}${run.failed ? ` (${run.failed} couldn’t be read)` : ''}. You can leave this page: it carries on.`;
+    return;
+  }
+  const counted = chats ? `${many(chats.chats, 'chat', 'chats')} imported; he’s read ${chats.learned === chats.chats ? (chats.chats === 1 ? 'it' : 'all of them') : chats.learned.toLocaleString()}.` : '';
+  const ended = !run?.finished ? '' : run.error ? ` It stopped: ${run.error}` : ` Last time: ${many(run.done, 'chat', 'chats')} read${run.failed ? `, ${run.failed} couldn’t be` : ''}, ${run.added ? `${many(run.added, 'thing', 'things')} added to About me` : 'nothing new for About me'}.`;
+  status.textContent = `${counted}${ended}`;
 }
 
 /** What an import of chats did, in a sentence or two; `error` when nothing came of it. */
@@ -1013,6 +1048,7 @@ for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], 
 }
 $('vault-use').addEventListener('click', (event) => vaultOp('use', event.currentTarget.dataset.path));
 $('chats-import').addEventListener('click', () => importChats().catch(() => undefined));
+$('chats-learn').addEventListener('click', () => vaultOp(desktop?.memory?.learning?.running ? 'learn-stop' : 'learn').catch(() => undefined));
 $('locationSource').addEventListener('change', (event) => {
   // The place is asked for before it's chosen: until one's set, there's nothing to tell the weather of.
   namingPlace = event.target.value === 'place' && !desktop?.day?.place;

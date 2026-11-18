@@ -1171,11 +1171,47 @@ chat whose `updated` is later than its note's, at the same path, and never over 
 note that isn't that chat's (a user's note of the same name gets `… 2.md` beside it).
 These two folders are written only by an import: `vault.writable` (Jester's own
 writes) is still `Jester/` and `Notes/`. Recall labels them for the model: "Your
-chat with Claude “…”, March 14 (8 months ago) › Claude said: …", so Claude's
+chat with Claude “…”, March 14 (8 months ago) › Claude’s reply began: …", so Claude’s
 answer is never taken for something the user said. Measured on that export: 286
 notes (12 chats with nothing shown skipped), 6.6 MB, in 0.5 s; again in 0.13 s.
-Not yet seen: a real ChatGPT export (built from its documented shape: `mapping`,
-`current_node`, `content.parts`), and Claude's projects or memories parts.
+The user's real import (2026-11-17, in his log): ChatGPT 1,362 chats, Claude 286,
+488 lines left out. Claude's projects and memories parts aren't read.
+
+**Searching them.** Cut like any note, those 1,648 chats were 82,467 pieces: a
+155 MB index on its way to 390 MB, rewritten whole at every save, and an hour of
+Ollama. So an imported chat (`isImportedChat`: `type: chat` in `Claude/` or
+`ChatGPT/`) is searched by what it's about (its first piece: summary, topics,
+people, what was said about the user) and by how each message began (its first two
+parts, about 600 characters), never by what's folded in it, its code, or the line
+of tools: 24,011 pieces. Vectors are kept in the file a byte a number (index
+version 3), and a piece's `embedText` only until it's embedded: 34 MB for all of
+it, and a search of it takes 33 ms. Recall says "Claude’s reply began: …", so the
+start of an answer isn't taken for the whole.
+
+**Learning from them** (`chat-learn.js`). Imported, a chat is found only when a
+question matches a line of it: after the import above, "what do you know about
+me?" got the same five facts as before. Settings › Memory › Learn from them has
+the talking model read each chat once: the user's own words (1,200 characters a
+message) and how each reply began (240), never what was pasted, made, or left out
+as a secret; a long chat is its start and its end (6,000 characters). It answers
+with a one-sentence `summary`, `topics`, `people` and what the user said about
+themselves, which are written into the chat's own properties (`about_you`, as
+"Section: fact"); a fact is kept only if a telling word of it is in what the user
+wrote, and a person only if they named them. A note with a `summary` has been
+read, so a run stopped or quit carries on. Then every `about_you` not in About me
+and not offered before goes to the model as a numbered list, oldest first with its
+month, and it answers with the numbers worth keeping (at most 60 a run; 200 at a
+time when there are more, then the picks from each other): those go into About me,
+dated by their chat. The model only picks, so nothing is reworded on the way in,
+and what's been offered is kept in `chat-learning.json`, so a fact the user
+deletes isn't put back. Three chats are read at once; four failures in a row, or a
+key refused, end the run with the reason in Settings. Asked what he knows, he's
+also told how many chats there are, over which years, what they're mostly about,
+and whether he's learned from them. Measured on 60 of the user's own chats with
+Claude Haiku 5.5: 26 s, under 1¢ (so about 12 minutes and 25¢ for all 1,648), 31
+facts found, all traceable to their words, 14 picked. The first prompts picked a
+rough patch with someone and a project's stack over an IBM co-op: both prompts now
+say a passing mood or trouble is no fact, nor how a project is built.
 
 Each of Jester's notes says what it is in its properties (`type`: profile,
 conversations, remembered; a `jester/…` tag; its day), the same way every time, and
@@ -2382,6 +2418,17 @@ models decode in under 35 ms.
     one of those chats would know: the model should be told "Your chat with
     Claude …". For ChatGPT: Settings › Data controls › Export data, wait for
     the email, and import its zip the same way; the log has `import: ChatGPT …`.
+    (Done by the user 2026-11-17: 1,362 ChatGPT and 286 Claude chats.)
+
+21. **Learning from your chats** (built 2026-11-17; run on 60 of your chats in
+    a scratch vault, never on your vault): restart Jester, and give Settings ›
+    Memory a few minutes: Search should come back to about 1,660 notes read
+    (the index is rebuilt smaller; `vault-index.json` should end near 35 MB,
+    not 155). Then click Learn from them. It counts up to 1,648 over about 12
+    minutes, then says how many things went into About me (at most 60). Open
+    About me and delete what's wrong or what you'd rather he didn't say aloud:
+    it won't come back. Then ask "what do you know about me?". The log has
+    `learning: done: … chat(s) read, … fact(s) into About me`.
 
 ## Things learned the hard way
 

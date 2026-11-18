@@ -549,6 +549,21 @@ const bullets = (text) =>
     .map((line) => plain(/^\s*[-*]\s+(.+)$/.exec(line)?.[1]).replace(/\.$/, ''))
     .filter(Boolean);
 
+/**
+ * The chats imported from Claude and ChatGPT, for when he's asked what he knows: how many, over which years, what
+ * they're mostly about once he's learned from them, and that they're searched as they're asked about, so he neither
+ * claims to know them all by heart nor says he has nothing of them.
+ * @param {{chats:number, learned:number, sources:Record<string, number>, topics:string[], from:number|null, to:number|null}|null} imported
+ */
+function importedLine(imported) {
+  if (!imported?.chats) return '';
+  const sources = Object.entries(imported.sources || {}).sort((a, b) => b[1] - a[1]).map(([name, count]) => `${count.toLocaleString('en-US')} with ${name}`);
+  const years = imported.from && imported.to ? (imported.from === imported.to ? `, from ${imported.from}` : `, from ${imported.from} to ${imported.to}`) : '';
+  const about = listOf(imported.topics).length ? ` They’re mostly about: ${imported.topics.join(', ')}.` : '';
+  const how = imported.learned >= imported.chats ? 'What they showed about the user is above; the chats themselves are found for you when a question bears on one, so offer to look something up in them.' : 'You haven’t learned from them yet (Settings › Memory › Learn from them does that): until then a chat is only found when a question bears on it.';
+  return `Their vault also has ${imported.chats === 1 ? 'one chat' : `${imported.chats.toLocaleString('en-US')} chats`} they imported (${sources.join(', ')})${years}.${about} ${how}`;
+}
+
 /** Something found, by kind, told by where it is: what it is ("- Note “Grocery list” (Notes)") and what it says, as one line. */
 function itemParts(hit, date) {
   const rel = String(hit.rel);
@@ -570,9 +585,11 @@ function itemParts(hit, date) {
   const heading = plain(hit.heading).split(' › ').filter((part) => part && part !== title).join(' › ');
   // A chat they imported from Claude or ChatGPT (chat-import.js): who said it, so the model never takes the other's
   // answer for something the user said, and when.
-  const imported = hit.type === 'chat' && IMPORTED_IN.find((folder) => rel.startsWith(`${folder}/`));
-  if (imported) {
-    const who = /^You\b/.test(heading) ? ' › you said' : new RegExp(`^${imported}\\b`).test(heading) ? ` › ${imported} said` : '';
+  const source = hit.type === 'chat' && IMPORTED_IN.find((folder) => rel.startsWith(`${folder}/`));
+  if (source) {
+    const imported = source;
+    // How a reply began is all that's searched of it (vault-index.js): said so, so the start isn't taken for the whole.
+    const who = /^You\b/.test(heading) ? ' › you said' : new RegExp(`^${imported}\\b`).test(heading) ? ` › ${imported}’s reply began` : '';
     const day = dayOf(rel, date, false);
     return { label: `- Your chat with ${imported} “${title}”${day ? `, ${day}` : ''}${who}`, says: flat(hit.text), theirs: true };
   }
@@ -737,7 +754,7 @@ function recalled(facts, hits, date, asked, leftOut = () => undefined, textOf = 
         `They’ve also asked you to remember ${everything.rememberedCount === 1 ? 'one thing' : `${everything.rememberedCount} things`} word for word${kept.length < everything.rememberedCount ? `; the newest ${kept.length} are` : everything.rememberedCount === 1 ? ', which is' : ', which are'} about: ${kept.map((note) => `“${cut(plain(note.title), 60)}”`).join('; ')}`
       : '';
     for (const note of kept) used.push({ rel: note.rel, heading: '' });
-    return { block: `[${[about, also].filter(Boolean).join('\n')}]`, used };
+    return { block: `[${[about, also, importedLine(everything.imported)].filter(Boolean).join('\n')}]`, used };
   }
   const whole = known.length > 0 && known.join('; ').length <= ABOUT_CHARS;
   const about = whole ? [...known] : [];
@@ -788,7 +805,7 @@ function titleFor(words) {
 
 const topicsOf = (title) => unique((title.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) || []).filter((word) => !SMALL.has(word))).slice(0, 3);
 /** Facts compared as About me compares them: case, spacing and punctuation don't count, but + and # do (C, C++, C#). */
-const factKey = (text) => (plain(text).toLowerCase().match(NAME_WORD) || []).join(' ');
+export const factKey = (text) => (plain(text).toLowerCase().match(NAME_WORD) || []).join(' ');
 const sectionOf = (name) => SECTIONS.find((section) => section.toLowerCase() === plain(name).toLowerCase()) || 'Other';
 
 /** A fact as About me keeps it: one line, without "The user" or a full stop. */
@@ -810,7 +827,7 @@ const headline = (text) => trimmed(trimmed(plain(text)).split(' ').slice(0, 6).j
 const strings = (value) => listOf(value).filter((item) => typeof item === 'string');
 
 /** The model's account of a conversation, checked: anything not as asked, too long, or secret is left out. */
-function checked(json, known, entries, log) {
+export function checked(json, known, entries, log) {
   const summary = typeof json?.summary === 'string' ? cut(plain(json.summary), SUMMARY_CHARS) : '';
   if (!summary) throw new Error('The model didn’t sum up the conversation.');
   let title = (typeof json.title === 'string' && headline(json.title)) || titleFor(entries.find(yours)?.text) || 'A conversation';
@@ -1055,7 +1072,8 @@ export function createVaultMemory({
   now = Date.now,
   log = () => undefined,
   openExternal = async () => undefined,
-  keepConversations = () => true
+  keepConversations = () => true,
+  imported = () => null
 }) {
   function current() {
     try {
@@ -1156,7 +1174,13 @@ export function createVaultMemory({
         } catch (err) {
           log('memory: couldn’t list what was remembered:', err.message);
         }
-        return recalled(facts, [], date, [], leftOut, () => '', { sections, remembered: remembered.slice(0, REMEMBERED_SHOWN), rememberedCount: remembered.length });
+        let chats = null;
+        try {
+          chats = imported?.() || null;
+        } catch {
+          /* not counted: left unsaid */
+        }
+        return recalled(facts, [], date, [], leftOut, () => '', { sections, remembered: remembered.slice(0, REMEMBERED_SHOWN), rememberedCount: remembered.length, imported: chats });
       }
       const query = queryFor(said, history);
       let hits = [];

@@ -551,21 +551,65 @@ test('a note it can’t read is said once, not rebuilt for at every refresh, and
   assert.equal((await index.search('where is the spare key'))[0].rel, 'Notes/Private.md');
 });
 
+test('an imported chat is searched by what it’s about and how each message began, not every line of it', () => {
+  const long = Array.from({ length: 30 }, (_, i) => `Paragraph ${i} of a long answer about budgeting, with enough words in it to fill a line of the note and then some more.`).join('\n\n');
+  const body = [
+    '# Budget plan',
+    '',
+    'A chat with Claude, started Saturday, March 14, 2026 at 10:05 AM, imported from Claude’s export. [Open it on claude.ai](https://claude.ai/chat/abc)',
+    '',
+    '## You · 10:05 AM',
+    '',
+    'Help me plan a budget for the summer.',
+    '',
+    '> [!quote]- Pasted: statement.txt',
+    '> rent 900 and groceries 300',
+    '',
+    '## Claude · 10:06 AM',
+    '',
+    long,
+    '',
+    '```python',
+    'total = rent + groceries',
+    '```',
+    '',
+    '_Claude used: searched “budget templates”_',
+    '(Jester left out a line here: it looked like it held an API key.)'
+  ].join('\n');
+  const data = { type: 'chat', source: 'Claude', chat_id: 'abc', tags: ['chat/claude'], summary: 'The user planned a summer budget.', topics: ['budget'], people: ['Sam'], about_you: ['School and work: Interns at Acme'] };
+  const chunks = chunkNote({ rel: 'Claude/2026/2026-03-14 Budget plan.md', title: 'Budget plan', data, body });
+  // What it's about, whole, with where it's from; then the question; then the reply's first two parts only.
+  assert.deepEqual(chunks.map((chunk) => chunk.heading), ['Budget plan', 'Budget plan › You · 10:05 AM', 'Budget plan › Claude · 10:06 AM', 'Budget plan › Claude · 10:06 AM']);
+  assert.equal(chunks[0].text, '- summary: The user planned a summer budget.\n- topics: budget\n- people: Sam\n- about_you: School and work: Interns at Acme\n\nA chat with Claude, started Saturday, March 14, 2026 at 10:05 AM.');
+  assert.equal(chunks[1].text, 'Help me plan a budget for the summer.');
+  assert.match(chunks[2].text, /^Paragraph 0 of a long answer/);
+  const all = chunks.map((chunk) => chunk.embedText).join('\n');
+  assert.doesNotMatch(all, /rent 900|total = rent|budget templates|left out a line|Paragraph 29|claude\.ai/);
+  // Its topics and people are in its first piece, not on every piece: learning them later embeds one piece again, not all.
+  assert.doesNotMatch(chunks[1].embedText, /topics|Sam/);
+  assert.match(chunks[1].embedText, /^search_document: Budget plan › You · 10:05 AM\ntype: chat; folder: Claude\/2026; tags: chat\/claude\nHelp me plan/);
+  // A note of the user's own typed `chat`, elsewhere, is searched whole like any other.
+  const own = chunkNote({ rel: 'Notes/Budget plan.md', title: 'Budget plan', data: { type: 'chat' }, body });
+  assert.ok(own.length > 8 && own.some((chunk) => /Paragraph 29/.test(chunk.text)));
+});
+
 test('the index is kept in its file and used again; another model or vault starts afresh', async (t) => {
   const first = setup({ t });
   await first.index.refresh();
   const stored = JSON.parse(fs.readFileSync(first.file, 'utf8'));
-  assert.equal(stored.version, 2);
+  assert.equal(stored.version, 3);
   assert.equal(stored.model, 'nomic-embed-text');
   assert.equal(stored.root, '/vaults/Jester Desktop');
   const people = stored.notes['Jester/About me.md'].chunks[2];
   assert.equal(people.heading, 'About me › People');
   assert.match(people.hash, /^[0-9a-f]{32}$/);
-  const bytes = Buffer.from(people.vector, 'base64');
-  const vector = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
-  const expected = fakeVector(people.embedText);
-  const length = Math.hypot(...expected);
-  assert.deepEqual([...vector].map((x) => x.toFixed(5)), expected.map((x) => (x / length).toFixed(5)), 'a base64 Float32Array, at length 1');
+  // A byte a number, the largest 127: a quarter of the floats, and the same direction to within a rounding.
+  const bytes = [...new Int8Array(Buffer.from(people.vector, 'base64'))];
+  const header = chunkNote(first.vault.read('Jester/About me.md'))[2].embedText;
+  const expected = fakeVector(header);
+  const most = Math.max(...expected.map(Math.abs));
+  assert.deepEqual(bytes, expected.map((x) => Math.round((x / most) * 127)), 'base64 of signed bytes');
+  assert.equal(people.embedText, undefined, 'what it was embedded from isn’t kept once it has been');
   assert.deepEqual(fs.readdirSync(first.dir), ['vault-index.json'], 'written whole: no .tmp left');
 
   // The app starts again: found straight away, nothing embedded again.

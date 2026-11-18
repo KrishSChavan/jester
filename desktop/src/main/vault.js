@@ -60,7 +60,8 @@ const README = [
   '- [[Jester/Index|Index]]: a map of this vault, folder by folder.',
   '- Notes: notes you asked Jester to make or add to (“add eggs to my grocery list”). Jester changes these only when you ask.',
   '- Claude and ChatGPT: the chats you imported from their exports (Jester’s Settings › Memory), a note each by year, word for word but for ' +
-    'lines that look like a password or key. Importing again rewrites only the chats carried on since.',
+    'lines that look like a password or key. Importing again rewrites only the chats carried on since. Once Jester has learned from them ' +
+    '(Settings › Memory), each note’s properties say what the chat was about, and what you said about yourself in it.',
   '',
   '## What Jester keeps',
   '- In this vault, conversations are kept as summaries and facts, not word for word: your exact words are kept here only when you ask Jester to remember something. ' +
@@ -1175,6 +1176,23 @@ export function createVault({ root, fs = nodeFs, now = Date.now, trash = null })
       const next = unique(name);
       put(next, text, IMPORTED_IN);
       return next;
+    },
+
+    /**
+     * What an imported chat was about, kept in its own note's properties once it's been read (chat-learn.js): a
+     * `summary`, its `topics` and `people`, and `about_you`, what the user said about themselves in it, each as
+     * "Section: fact". Only a chat's note in Claude/ or ChatGPT/, and nothing else in it changes.
+     * @param {string} rel
+     * @param {{summary:string, topics?:string[], people?:string[], about?:{section:string, fact:string}[]}} learned
+     * @returns {string} the note
+     */
+    learnedChat(rel, { summary, topics = [], people = [], about = [] } = {}) {
+      const old = writablePath(rel, IMPORTED_IN) ? textOf(rel) : null;
+      if (old === null || parseFrontmatter(old).data.type !== 'chat') throw Object.assign(new Error(`“${rel}” isn’t an imported chat.`), { code: 'not_a_chat' });
+      const said = about.map((item) => `${sectionFor(item?.section)}: ${cleanFact(item?.fact)}`).filter((line) => !/: $/.test(line));
+      const props = { summary: inline(summary, 400), topics: labels(topics, true), ...(labels(people).length ? { people: labels(people) } : {}), ...(said.length ? { about_you: said } : {}) };
+      put(rel, withProperties(old, props), IMPORTED_IN);
+      return rel;
     },
 
     /** The link that opens a note in Obsidian, by its path as the disk spells it. */

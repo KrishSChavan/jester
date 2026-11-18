@@ -761,7 +761,7 @@ send();
           created_at: at(0),
           updated_at: at(1),
           chat_messages: [
-            { uuid: 'q', sender: 'human', created_at: at(0), content: [{ type: 'text', text: 'How old are the rings of Saturn?' }], parent_message_uuid: '00000000-0000-4000-8000-000000000000' },
+            { uuid: 'q', sender: 'human', created_at: at(0), content: [{ type: 'text', text: 'I’m in the astronomy club at school. How old are the rings of Saturn?' }], parent_message_uuid: '00000000-0000-4000-8000-000000000000' },
             { uuid: 'a', sender: 'assistant', created_at: at(1), content: [{ type: 'thinking', thinking: 'Not to be kept.' }, { type: 'text', text: 'Saturn’s rings are thought to be young, perhaps 100 to 400 million years old.' }], parent_message_uuid: 'q' }
           ]
         }
@@ -784,7 +784,7 @@ send();
         const pad = (n) => String(n).padStart(2, '0');
         const rel = `Claude/${started.getFullYear()}/${started.getFullYear()}-${pad(started.getMonth() + 1)}-${pad(started.getDate())} Saturn’s rings.md`;
         const note = fs.existsSync(inVault(rel)) ? fs.readFileSync(inVault(rel), 'utf8') : '';
-        check('the chat is a note in the vault’s Claude folder, by year, its thinking left out', /\n## You · 3:00 PM\n\nHow old are the rings of Saturn\?\n\n## Claude · 3:01 PM\n\nSaturn’s rings are thought to be young/.test(note) && !/Not to be kept/.test(note), note.slice(0, 400) || `no ${rel}`);
+        check('the chat is a note in the vault’s Claude folder, by year, its thinking left out', /\n## You · 3:00 PM\n\nI’m in the astronomy club at school\. How old are the rings of Saturn\?\n\n## Claude · 3:01 PM\n\nSaturn’s rings are thought to be young/.test(note) && !/Not to be kept/.test(note), note.slice(0, 400) || `no ${rel}`);
         check('the log says how many, never what', /import: Claude 1 new, 0 updated, 0 unchanged, 0 empty; 0 line\(s\) left out/.test(logLines()) && !/Saturn/.test(logLines()));
         await shot('chats-imported');
         await inPage(`document.getElementById('chats-import').click();`);
@@ -795,7 +795,36 @@ send();
         paid.answer = () => ({ say: 'Claude said they’re young: maybe 100 to 400 million years.', do: '', new: false });
         await type('what did Claude tell me about how old Saturn’s rings are?');
         const given = lastSaid(paid);
-        check('asked about it, the model is told it was Claude who said so, and when', /- Your chat with Claude “Saturn’s rings”, \w+ \d+ \(3 days ago\) › Claude said: Saturn’s rings are thought to be young/.test(given), given.slice(0, 600));
+        check('asked about it, the model is told it was Claude who said so, and when', /- Your chat with Claude “Saturn’s rings”, \w+ \d+ \(3 days ago\) › Claude’s reply began: Saturn’s rings are thought to be young/.test(given), given.slice(0, 600));
+
+        // Learn from them: the chat read by the talking model, what it was about kept in its note, and a fact picked for About me.
+        const read = [];
+        paid.answer = (request) => {
+          const system = request?.messages?.[0]?.content || '';
+          const shown = request?.messages?.at(-1)?.content || '';
+          if (/which they imported into their notes/.test(system)) {
+            read.push(shown);
+            return { summary: 'The user asked how old Saturn’s rings are and learned they are young.', topics: ['astronomy', 'saturn'], people: [], facts: [{ section: 'School and work', fact: 'Is in the astronomy club at school' }, { section: 'Other', fact: 'Owns a telescope' }] };
+          }
+          if (/Pick the ones worth Jester keeping/.test(system)) return { keep: [1] };
+          return { say: 'You’re in the astronomy club.', do: '', new: false };
+        };
+        await until('the count of chats', () => inPage(`return /1 chat imported; he’s read 0\\./.test(document.getElementById('learn-status').textContent);`));
+        check('Settings says how many chats there are to learn from', (await inPage(`return document.getElementById('chats-learn').textContent;`)) === 'Learn from them');
+        await shot('chats-to-learn');
+        await inPage(`document.getElementById('chats-learn').click();`);
+        const learnt = await until('learning over', () => inPage(`const text = document.getElementById('learn-status').textContent; return /Last time:/.test(text) ? text : '';`), 20000).catch((err) => err.message);
+        check('Learn from them reads the chat and says what came of it', learnt === '1 chat imported; he’s read it. Last time: 1 chat read, 1 thing added to About me.' && (await inPage(`return document.getElementById('chats-learn').disabled;`)), learnt);
+        check('the model was given their words and how the reply began, not Claude’s thinking', read.length === 1 && /^Chat with Claude on \w+ \d+, \d{4}, called “Saturn’s rings”\.\n\nUser: I’m in the astronomy club at school\. How old are the rings of Saturn\?\nClaude: Saturn’s rings are thought/.test(read[0]) && !/Not to be kept/.test(read[0]), read[0]);
+        const learntNote = fs.readFileSync(inVault(rel), 'utf8');
+        check('what the chat was about is in its note’s properties, a fact only if they wrote it', /\nsummary: The user asked how old Saturn’s rings are and learned they are young\.\ntopics:\n  - astronomy\n  - saturn\nabout_you:\n  - "School and work: Is in the astronomy club at school"\n---/.test(learntNote) && !/telescope/.test(learntNote), learntNote.slice(0, 500));
+        const aboutMe = fs.readFileSync(inVault('Jester/About me.md'), 'utf8');
+        check('and the fact picked is in About me, dated by the chat', new RegExp(`- Is in the astronomy club at school <!-- noted ${started.getFullYear()}-${pad(started.getMonth() + 1)}-${pad(started.getDate())} -->`).test(aboutMe), aboutMe);
+        check('the log says how it went, never what was learned', /learning: done: 1 chat\(s\) read, 0 not, 1 fact\(s\) into About me/.test(logLines()) && !/astronomy/.test(logLines()));
+        await shot('chats-learned');
+        await type('what do you know about me?');
+        const known = lastSaid(paid);
+        check('asked what he knows, he’s told the fact and of the chats behind it', /School and work: [^\n]*Is in the astronomy club at school/.test(known) && /Their vault also has one chat they imported \(1 with Claude\), from \d{4}\. They’re mostly about: astronomy, saturn\. What they showed about the user is above/.test(known), known.slice(0, 900));
       } finally {
         dialog.showOpenDialog = realDialog;
         paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });

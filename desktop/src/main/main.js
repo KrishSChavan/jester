@@ -92,6 +92,7 @@ import { createWhereabouts } from './whereabouts.js';
 import { trayModel } from './tray-menu.js';
 import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault.js';
 import { importChats } from './chat-import.js';
+import { createChatLearner } from './chat-learn.js';
 import { createVaultIndex } from './vault-index.js';
 import { createVaultMemory, secretIn } from './vault-memory.js';
 import { createVoicePage } from './voice-page.js';
@@ -202,6 +203,8 @@ let learned = null;
 let vault = null;
 let vaultIndex = null;
 let vaultMemory = null;
+/** Reads the chats imported from Claude and ChatGPT, when the user says to, for what they show about them (chat-learn.js). */
+let chatLearner = null;
 /** Why the chosen vault can't be used: 'missing', 'denied', or an error's own words; '' when it can. */
 let vaultProblem = '';
 /** A read of the vault asked for here (opening it, Read again) is under way: Settings says so, not "0 notes read". */
@@ -855,7 +858,10 @@ function memoryState() {
     reading: vaultReading,
     search: vaultIndex?.status() || null,
     detected: obsidianVaults(),
-    conversations: settings?.memoryConversations !== false
+    conversations: settings?.memoryConversations !== false,
+    // The chats imported from Claude and ChatGPT, as last counted, and the run that learns from them.
+    chats: (vault && chatLearner?.counted()) || null,
+    learning: chatLearner?.status() || null
   };
 }
 
@@ -1606,6 +1612,9 @@ function listenToPages() {
       case 'jester/desktop-memory': {
         let imported;
         if (message.op === 'import' && vault) imported = await importChatsChosen();
+        // Learning from them runs on after this answers: Settings hears how it's going as the state is posted.
+        else if (message.op === 'learn' && vault) chatLearner.start().then(() => refreshVault());
+        else if (message.op === 'learn-stop') chatLearner.stop();
         else if (message.op === 'choose') {
           const picked = await dialog.showOpenDialog({
             title: 'Choose your Obsidian vault',
@@ -1624,6 +1633,8 @@ function listenToPages() {
         else if (message.op === 'privacy') await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders');
         else if (message.op === 'reindex') refreshVault({ retry: true });
         await refresh();
+        // The imported chats are counted when the Memory page opens and after an import: it reads every one's properties.
+        if (vault && !chatLearner.status().running && (message.op === 'known' || imported || !chatLearner.counted())) chatLearner.count();
         // How much he knows, counted only when Settings asks: it walks the vault.
         return { ...desktopState(), memory: { ...memoryState(), known: knownCounts() }, ...(imported ? { imported } : {}) };
       }
@@ -2168,7 +2179,26 @@ async function start() {
     request: talking,
     log,
     openExternal: (url) => shell.openExternal(url),
-    keepConversations: () => settings?.memoryConversations !== false
+    keepConversations: () => settings?.memoryConversations !== false,
+    imported: () => chatLearner?.counted()
+  });
+  // A run tells Settings how it's going, at most twice a second: three chats a second are read.
+  let learningTold = 0;
+  let learningDue = null;
+  chatLearner = createChatLearner({
+    vault: () => vault,
+    request: talking,
+    file: path.join(app.getPath('userData'), 'chat-learning.json'),
+    log,
+    onChange: () => {
+      const wait = 500 - (Date.now() - learningTold);
+      if (learningDue) return;
+      learningDue = setTimeout(() => {
+        learningDue = null;
+        learningTold = Date.now();
+        post(desktopState());
+      }, Math.max(0, wait));
+    }
   });
   // The vault's opened before the conversation log is: one left from the last run ends as the log loads, and is
   // summed up knowing what About me holds, kept in the vault, and kept at all only if Remember conversations is on.

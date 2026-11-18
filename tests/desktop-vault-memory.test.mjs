@@ -421,9 +421,25 @@ test('recall: a chat imported from Claude or ChatGPT says whose words they were,
   assert.equal(block, [
     '[From your memory and the user’s Obsidian notes, in case it helps:',
     '- Your chat with Claude “Planning the trip”, March 14 (8 months ago) › you said: Plan a trip to Boston for my sister’s graduation',
-    '- Your chat with ChatGPT “Recipe ideas”, November 9 (yesterday) › ChatGPT said: Try a frittata or shakshuka.',
+    '- Your chat with ChatGPT “Recipe ideas”, November 9 (yesterday) › ChatGPT’s reply began: Try a frittata or shakshuka.',
     '- Note “Prompts I like” (Claude): Explain it like a tutor.]'
   ].join('\n'));
+});
+
+test('asked what he knows, he’s told of the chats they imported: how many, what about, and whether he’s learned from them', async () => {
+  const vault = fakeVault({ facts: [['People', 'Roommate is Sam Lee']] });
+  const counted = { chats: 1648, learned: 1648, sources: { ChatGPT: 1362, Claude: 286 }, topics: ['resume', 'python'], from: 2023, to: 2026 };
+  const memory = createVaultMemory({ vault: () => vault, index: fakeIndex(), request: fakeModel({}), now: () => NOW, imported: () => counted });
+  const { block } = await memory.recall('what do you know about me?');
+  assert.match(block, /^\[Everything you’ve learned about the user \(the About me note in their vault\):\nPeople: Roommate is Sam Lee\n/);
+  assert.match(block, /\nTheir vault also has 1,648 chats they imported \(1,362 with ChatGPT, 286 with Claude\), from 2023 to 2026\. They’re mostly about: resume, python\. What they showed about the user is above; .*offer to look something up in them\.\]$/);
+  // Not read yet: he says so, rather than that there's nothing in them.
+  counted.learned = 0;
+  counted.topics = [];
+  assert.match((await memory.recall('what do you know about me?')).block, /from 2023 to 2026\. You haven’t learned from them yet \(Settings › Memory › Learn from them does that\)/);
+  // None imported, or never counted: nothing said of them.
+  const none = createVaultMemory({ vault: () => vault, index: fakeIndex(), request: fakeModel({}), now: () => NOW });
+  assert.doesNotMatch((await none.recall('what do you know about me?')).block, /imported/);
 });
 
 test('recall: a short follow-up is searched with the user’s line before it; anything longer as it was said', async () => {

@@ -30,10 +30,10 @@
 import { createHash } from 'node:crypto';
 import nodeFs from 'node:fs';
 import path from 'node:path';
-import { PATHS } from './vault.js';
+import { IMPORTED_IN, PATHS } from './vault.js';
 
 /** Raised whenever what a piece is made of changes: a note that hasn't changed isn't read again, so its old pieces would stay. */
-const VERSION = 2;
+const VERSION = 3;
 const DOCUMENT = 'search_document: ';
 const QUERY = 'search_query: ';
 const KEEP_ALIVE = '10m';
@@ -172,10 +172,11 @@ const listOf = (value, separator) =>
  * The folder, the user's own filing, only goes in what's embedded (vault-eval.mjs: MRR 0.84 to 0.88 by meaning):
  * as words, "car" would find everything in Car/.
  */
-function labelsOf(data, folder = '') {
+function labelsOf(data, folder = '', chat = false) {
   const type = typeof data?.type === 'string' ? data.type.trim() : '';
-  // A day's topics and people are all its conversations': each one's are in its own section.
-  const day = type === 'conversations';
+  // A day's topics and people are all its conversations': each one's are in its own section. An imported chat's are in
+  // its first piece, and come later than its pieces do (chat-learn.js): on every piece, each would be embedded twice.
+  const day = type === 'conversations' || chat;
   return [
     ['type', type ? [type] : []],
     ['folder', folder ? [folder] : []],
@@ -350,6 +351,34 @@ function withProperties(found, said, name) {
 }
 
 /**
+ * How much of each message of an imported chat is searched: its first parts (about 600 characters). The user's own
+ * 1,648 chats, every part of every message, were 82,467 pieces and a 390 MB index (2026-11-17); so, 24,011. A
+ * question finds a chat by what was asked in it and how each answer began, and the note has the rest.
+ */
+const CHAT_PARTS = 2;
+/** Whether a note is a chat imported from Claude or ChatGPT (chat-import.js): by its type and where it is. */
+export const isImportedChat = (rel, data) => data?.type === 'chat' && IMPORTED_IN.includes(String(rel).split('/')[0]);
+
+/**
+ * An imported chat's words as they're searched: without what's folded in it (text pasted in, files and artifacts
+ * made), its code, the line of tools used, lines left out as secrets, and the line saying where it came from.
+ */
+function chatWords(body) {
+  const kept = [];
+  let fence = '';
+  for (const line of String(body ?? '').split(/\r?\n/)) {
+    const mark = /^ {0,3}(`{3,}|~{3,})/.exec(line)?.[1];
+    if (mark && (!fence || (mark[0] === fence[0] && mark.length >= fence.length))) {
+      fence = fence ? '' : mark;
+      continue;
+    }
+    if (fence || /^>/.test(line) || /^_(?:Claude|ChatGPT) used: /.test(line) || /^\s*\(Jester left out a line here: /.test(line)) continue;
+    kept.push(/^A chat with (?:Claude|ChatGPT)\b/.test(line) ? line.replace(/, imported from .*$/, '.') : line);
+  }
+  return kept.join('\n');
+}
+
+/**
  * A note in the pieces it's searched by: one per heading (#, ##, ###; About me's sections and a day's
  * conversations each their own, however short), a long one cut at blank lines and line ends, but for a
  * day's conversation, which the model is given by its summary. Its other properties are the first piece's
@@ -362,12 +391,17 @@ export function chunkNote({ rel, title, data, body }) {
   const name = String(title ?? '').trim() || nameOf(rel);
   const type = typeof data?.type === 'string' ? data.type.trim() : '';
   const folder = path.posix.dirname(String(rel));
-  const labels = labelsOf(data, folder === '.' ? '' : folder);
+  const chat = isImportedChat(rel, data);
+  const labels = labelsOf(data, folder === '.' ? '' : folder, chat);
   const day = type === 'conversations';
-  const found = withProperties(sections(clean(body)), propertiesOf(data, day), name);
+  // Where a chat is from is said by its folder and its first line already.
+  const said = chat ? Object.fromEntries(Object.entries(data).filter(([key]) => key !== 'source' && key !== 'model')) : data;
+  const found = withProperties(sections(clean(chat ? chatWords(body) : body)), propertiesOf(said, day), name);
   // A day's conversations stay whole, however long: the model is given each by its summary, which fits, and a
-  // conversation in two pieces would take both of what a search gives of its day.
-  const pieces = found.flatMap(({ heads, text }) => (day ? [text] : split(text)).map((part) => ({ heads, text: part })));
+  // conversation in two pieces would take both of what a search gives of its day. An imported chat's messages are
+  // searched by how they begin (CHAT_PARTS); what it's about (its first piece: summary, topics, people) is whole.
+  const parts = (heads, text) => (day ? [text] : chat && heads.length > 1 ? split(text).slice(0, CHAT_PARTS) : split(text));
+  const pieces = found.flatMap(({ heads, text }) => parts(heads, text).map((part) => ({ heads, text: part })));
   return pieces.map(({ heads, text }, i) => {
     const heading = heads.join(' › ');
     const header = !heads.length ? name : heads[0].toLowerCase() === name.toLowerCase() ? heading : `${name} › ${heading}`;
@@ -375,22 +409,29 @@ export function chunkNote({ rel, title, data, body }) {
   });
 }
 
-const encode = (vector) => Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength).toString('base64');
-function decode(text) {
-  if (typeof text !== 'string' || !text) return null;
-  const bytes = Buffer.from(text, 'base64');
-  if (!bytes.length || bytes.length % 4) return null;
-  // Copied, not viewed: a Buffer's bytes needn't sit where a Float32Array can start.
-  const vector = new Float32Array(bytes.length / 4);
-  new Uint8Array(vector.buffer).set(bytes);
-  return vector;
-}
 /** At length 1, so a dot product is the cosine. */
 function unit(values) {
   const vector = Float32Array.from(values);
   const length = Math.hypot(...vector) || 1;
   for (let i = 0; i < vector.length; i++) vector[i] /= length;
   return vector;
+}
+/**
+ * A vector as the file keeps it: a byte a number (its largest is 127), a quarter of what the floats take, which is
+ * most of the file once chats are imported (24,000 pieces: about 100 MB as floats, 34 MB so). Read back at length 1, its cosines are
+ * within a few thousandths of the floats'.
+ */
+function encode(vector) {
+  let most = 0;
+  for (const value of vector) most = Math.max(most, Math.abs(value));
+  const bytes = Buffer.alloc(vector.length);
+  for (let i = 0; i < vector.length; i++) bytes.writeInt8(most ? Math.round((vector[i] / most) * 127) : 0, i);
+  return bytes.toString('base64');
+}
+function decode(text) {
+  if (typeof text !== 'string' || !text) return null;
+  const bytes = Buffer.from(text, 'base64');
+  return bytes.length ? unit(new Int8Array(bytes.buffer, bytes.byteOffset, bytes.length)) : null;
 }
 
 /**
@@ -597,7 +638,8 @@ export function createVaultIndex({
     try {
       const notes = {};
       for (const [rel, note] of Object.entries(state.notes)) {
-        notes[rel] = { ...note, chunks: note.chunks.map((chunk) => ({ ...chunk, vector: chunk.vector ? encode(chunk.vector) : null })) };
+        // What a piece is embedded from is kept only until it has been: it's the piece's own text again, with its headings.
+        notes[rel] = { ...note, chunks: note.chunks.map(({ embedText, ...chunk }) => (chunk.vector ? { ...chunk, vector: encode(chunk.vector) } : { ...chunk, embedText, vector: null })) };
       }
       fs.mkdirSync(path.dirname(file), { recursive: true });
       // Written beside it and swapped in: a crash never leaves half an index.
