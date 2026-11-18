@@ -22,16 +22,26 @@ if [ "$(id -u)" = 0 ]; then
   exit 1
 fi
 
+# A new server updates itself for its first minutes after boot, holding apt's lock: wait for that, not fail.
+apt_wait() {
+  command -v cloud-init >/dev/null && sudo cloud-init status --wait >/dev/null 2>&1 || true
+  while sudo fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    echo "Waiting for the system's own updates to finish…"
+    sleep 10
+  done
+}
+apt() { apt_wait; sudo apt-get -o DPkg::Lock::Timeout=600 "$@"; }
+
 say "System packages"
-sudo apt-get update -y
-sudo apt-get install -y git curl ca-certificates bzip2 xvfb xauth python3-venv \
+apt update -y
+apt install -y git curl ca-certificates bzip2 xvfb xauth python3-venv \
   libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 libdrm2 libgtk-3-0t64 libgbm1 libasound2t64 \
   libxss1 libxshmfence1 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libpango-1.0-0 libcairo2
 
 if ! command -v node >/dev/null || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
   say "Node 22"
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
-  sudo apt-get install -y nodejs
+  apt install -y nodejs
 fi
 
 say "Jester"
@@ -61,7 +71,7 @@ ollama pull nomic-embed-text
 ollama pull qwen3.5:2b
 
 say "Syncthing (your Obsidian vault, kept the same as your Mac's)"
-sudo apt-get install -y syncthing
+apt install -y syncthing
 sudo systemctl enable --now "syncthing@$USER"
 mkdir -p "$VAULT"
 
