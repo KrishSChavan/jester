@@ -54,6 +54,8 @@ else
 fi
 cd "$REPO/desktop"
 npm ci
+# Electron's own download is a postinstall step, which npm can leave undone: done here if it was.
+[ -x node_modules/electron/dist/electron ] || node node_modules/electron/install.js
 # Electron's sandbox helper must be root's and setuid on Ubuntu 24.04, which otherwise refuses its sandbox.
 sudo chown root:root node_modules/electron/dist/chrome-sandbox
 sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
