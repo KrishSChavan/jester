@@ -46,6 +46,7 @@
         waiting.get(frame.id)?.(frame.reply ?? undefined);
         waiting.delete(frame.id);
       } else if (frame.t === 'msg') {
+        if (frame.message?.type === 'jester/open-url') openUrl(frame.message);
         for (const listener of messageListeners) {
           try {
             listener(frame.message, frame.sender, () => undefined);
@@ -192,8 +193,68 @@
     sound.play().catch(over);
   }
 
-  // A click or a key here makes this the browser he's talking to.
-  addEventListener('pointerdown', claim, { capture: true });
-  addEventListener('keydown', claim, { capture: true });
+  // ---------------------------------------------------------------------------
+  // A page his server can't open itself: a sign-in
+  // ---------------------------------------------------------------------------
+  //
+  // Google's sign-in sends the browser back to a port on the computer that asked, which here is his server. The tab
+  // it lands on shows nothing; its address is what he needs, pasted here.
+
+  function openUrl({ url, landing }) {
+    if (!/^https:\/\//.test(String(url))) return;
+    const tab = window.open(url, '_blank', 'noopener');
+    if (landing) askForLanding(url, !tab);
+  }
+
+  function askForLanding(url, blocked) {
+    document.getElementById('jester-landing')?.remove();
+    const box = document.createElement('form');
+    box.id = 'jester-landing';
+    box.className = 'jester-landing';
+    const words = document.createElement('p');
+    words.textContent = blocked
+      ? 'Your browser kept the sign-in from opening. Open it, sign in, then paste the address of the page it ends on (it starts with http://127.0.0.1 and says it can’t be reached).'
+      : 'Sign in in the tab that opened. It ends on a page that can’t be reached: copy that page’s whole address from the address bar and paste it here.';
+    const open = document.createElement('a');
+    open.href = url;
+    open.target = '_blank';
+    open.rel = 'noopener';
+    open.textContent = 'Open the sign-in';
+    const input = document.createElement('input');
+    input.type = 'url';
+    input.placeholder = 'http://127.0.0.1:…/?state=…&code=…';
+    input.required = true;
+    const error = document.createElement('p');
+    error.className = 'error';
+    error.setAttribute('role', 'alert');
+    const send = document.createElement('button');
+    send.type = 'submit';
+    send.className = 'primary';
+    send.textContent = 'Finish signing in';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.onclick = () => box.remove();
+    box.onsubmit = async (event) => {
+      event.preventDefault();
+      send.disabled = true;
+      const reply = await ask({ t: 'msg', message: { type: 'jester/sign-in-return', url: input.value } });
+      send.disabled = false;
+      if (reply?.ok) box.remove();
+      else error.textContent = reply?.error || 'His server didn’t answer.';
+    };
+    const buttons = document.createElement('div');
+    buttons.append(cancel, send);
+    box.append(words, open, input, error, buttons);
+    document.body.append(box);
+    input.focus();
+  }
+
+  // A click or a key here makes this the browser he's talking to. Not in Jester's own app on a Mac, whose window this
+  // is when it uses him in the cloud: the Mac's own voice page is his ears there, and it claims him itself.
+  if (!/\bElectron\//.test(navigator.userAgent)) {
+    addEventListener('pointerdown', claim, { capture: true });
+    addEventListener('keydown', claim, { capture: true });
+  }
   connect();
 })();

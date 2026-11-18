@@ -187,6 +187,7 @@
             <button class="row go" type="button" data-go="settings/day"><span class="glyph"><svg class="icon-svg"><use href="#i-calendar" /></svg></span><span class="label">Weather and calendars</span><span class="aside" id="sum-day"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/mail"><span class="glyph"><svg class="icon-svg"><use href="#i-mail" /></svg></span><span class="label">Email</span><span class="aside" id="sum-mail"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/models"><span class="glyph"><svg class="icon-svg"><use href="#i-chip" /></svg></span><span class="label">Models</span><span class="aside" id="sum-models"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/cloud"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Jester in the cloud</span><span class="aside" id="sum-cloud"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/chrome"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Chrome</span><span class="aside" id="sum-chrome"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/gestures"><span class="glyph"><svg class="icon-svg"><use href="#i-hand" /></svg></span><span class="label">Gestures and shortcuts</span><span class="aside" id="sum-gestures"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/activity"><span class="glyph"><svg class="icon-svg"><use href="#i-pulse" /></svg></span><span class="label">Activity</span><span class="aside" id="sum-activity"></span><svg class="chev"><use href="#i-forward" /></svg></button>
@@ -583,6 +584,38 @@
             <div class="row">
               <span><strong id="chrome-link-title">Jester in Chrome</strong><small id="chrome-link-hint"></small></span>
               <span id="chrome-link-state" class="value"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- His brain on a server (main/cloud-link.js, main/web-gateway.js): this Mac his hands, eyes and ears. -->
+      <section id="page-cloud" class="screen page" data-screen="settings/cloud" aria-labelledby="cloud-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="cloud-heading">Jester in the cloud</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <div class="row">
+              <span><strong id="cloud-title">Use Jester in the cloud</strong><small id="cloud-hint"></small></span>
+              <span id="cloud-state" class="value"></span>
+            </div>
+          </div>
+          <form id="cloud-form" class="cards">
+            <label class="row">
+              <span><strong>Server link</strong><small>The link his server printed when it started, ending in ?key=…: it’s kept encrypted on this computer. Jester restarts to use it.</small></span>
+              <input id="cloud-link" type="password" spellcheck="false" autocomplete="off" placeholder="https://jester.your-tailnet.ts.net/?key=…" />
+            </label>
+            <div class="row">
+              <span id="cloud-error" class="error" role="alert"></span>
+              <button id="cloud-use" type="submit" class="primary">Use it</button>
+            </div>
+          </form>
+          <div class="cards" id="cloud-off-card">
+            <div class="row">
+              <span><strong>Stop using it</strong><small>Back to Jester on this Mac alone: his own conversation, memory and reminders here. The server keeps its own.</small></span>
+              <button id="cloud-off" type="button">Stop</button>
             </div>
           </div>
         </div>

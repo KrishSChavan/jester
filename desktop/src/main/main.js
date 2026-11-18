@@ -30,6 +30,8 @@
  *                             ears and mouth. Keys are sealed with a key file, not a keychain.
  *   JESTER_WEB_PORT=n         with SERVER: the website's port on 127.0.0.1 (8770)
  *   JESTER_WEB_KEY=key        with SERVER: the key the website asks for (made and kept in the data folder otherwise)
+ *   JESTER_VAULT=path         with SERVER: the Obsidian vault (synced from the Mac): a server has no folder picker
+ *   JESTER_GOOGLE_CLIENT=file with SERVER: Google's client file, for Gmail, in place of picking it in Settings
  */
 
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, utilityProcess } from 'electron';
@@ -47,7 +49,9 @@ import { createResearchPresentation } from './research-presentation.js';
 import { sourceAddress, sourcesOf } from './research-sources.js';
 import { addRemotePage, fromRemote, installBridge, onMessage, onStorageChanged, post, postRemote, postTo, remoteStorage, storage } from './chrome-bridge.js';
 import { createFileSealer } from './file-sealer.js';
-import { createRemoteVoicePage, createWebGateway, makeKey } from './web-gateway.js';
+import { createRemoteVoicePage, createWebGateway, landingAddress, makeKey } from './web-gateway.js';
+import { createRemoteHands } from './remote-hands.js';
+import { createCloudLink, parseCloudLink } from './cloud-link.js';
 import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS } from './briefs.js';
 import { callOffer, createOfferRunner, createOffers, draftOffer, openerLine, personal } from './offers.js';
 import { briefingRequest, createBriefingManager } from './briefing-manager.js';
@@ -110,7 +114,7 @@ import { VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
-import { closeSafely, controlsWindow, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, showCalibration, showControls, showHome, showSettings, showTalk, talkWindow } from './windows.js';
+import { closeSafely, controlsWindow, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showControls, showHome, showSettings, showTalk, talkWindow } from './windows.js';
 
 const env = process.env;
 /** His brain on a server, his window a website: see JESTER_SERVER above. */
@@ -474,7 +478,10 @@ function desktopState() {
     },
     memory: memoryState(),
     day: dayState(),
-    fakeMedia: !!env.JESTER_FAKE_MEDIA
+    fakeMedia: !!env.JESTER_FAKE_MEDIA,
+    // On a server: whether the Mac's connected. On a Mac: whether it uses him in the cloud, and where.
+    server: SERVER ? { mac: !!remoteHands?.connected } : null,
+    cloud: cloudTarget ? { on: true, server: cloudTarget.origin, connected: !!cloudLink?.connected } : { on: false }
   };
 }
 
@@ -527,7 +534,8 @@ function updateTray() {
  */
 function updateListening() {
   if (!conversation) return;
-  const on = (!!settings?.continuousAssistant || !!teaching) && !voiceProblem() && !away.size;
+  // In the cloud the conversation is the server's, and so is when the mic opens (cloud-link.js).
+  const on = !cloudTarget && (!!settings?.continuousAssistant || !!teaching) && !voiceProblem() && !away.size;
   if (on === listening) return;
   listening = on;
   log(on ? 'continuous assistant: listening' : 'continuous assistant: stopped');
@@ -1688,7 +1696,11 @@ function listenToPages() {
       case 'jester/mail': {
         try {
           if (message.op === 'client') {
-            const picked = await dialog.showOpenDialog({ title: 'Choose the file from Google', buttonLabel: 'Use this file', properties: ['openFile'], filters: [{ name: 'Google client', extensions: ['json'] }], defaultPath: app.getPath('downloads') });
+            // A server has no file picker: the file is the one JESTER_GOOGLE_CLIENT names.
+            if (SERVER && !env.JESTER_GOOGLE_CLIENT) throw new Error('On the server, put Google’s file on it and name it in JESTER_GOOGLE_CLIENT (server/README.md).');
+            const picked = SERVER
+              ? { canceled: false, filePaths: [path.resolve(env.JESTER_GOOGLE_CLIENT)] }
+              : await dialog.showOpenDialog({ title: 'Choose the file from Google', buttonLabel: 'Use this file', properties: ['openFile'], filters: [{ name: 'Google client', extensions: ['json'] }], defaultPath: app.getPath('downloads') });
             const file = picked.filePaths[0];
             if (picked.canceled || !file) return { ok: true, ...google.state() };
             if (fs.statSync(file).size > 100_000) throw new Error('That isn’t the file from Google: it’s far too big.');
@@ -1764,7 +1776,11 @@ function listenToPages() {
         // Learning from them runs on after this answers: Settings hears how it's going as the state is posted.
         else if (message.op === 'learn' && vault) chatLearner.start().then(() => refreshVault());
         else if (message.op === 'learn-stop') chatLearner.stop();
-        else if (message.op === 'choose') {
+        else if (message.op === 'choose' && SERVER) {
+          // A server has no folder picker: its vault is the one JESTER_VAULT names, synced from the Mac.
+          if (env.JESTER_VAULT) await saveSettings({ memoryVault: vaultRootIn(path.resolve(env.JESTER_VAULT)) || path.resolve(env.JESTER_VAULT) });
+          settings = await loadSettings();
+        } else if (message.op === 'choose') {
           const picked = await dialog.showOpenDialog({
             title: 'Choose your Obsidian vault',
             properties: ['openDirectory'],
@@ -1819,8 +1835,32 @@ function listenToPages() {
       // His window. A sentence typed is a command given on purpose, and he writes back.
       case 'jester/talk-type':
         presence?.seen('typed');
+        // In the cloud, typed here is said to him there; his answer's in his window, which is the server's.
+        if (cloudTarget) {
+          showTalk();
+          return cloudLink?.told(String(message.text).slice(0, 2000)) ? { ok: true } : { ok: false, error: 'Jester’s server isn’t reachable right now.' };
+        }
         conversation.told(String(message.text).slice(0, 2000), { typed: true });
         return { ok: true };
+      // On a server: the address Google's sign-in landed on, pasted in a browser (web/shim.js), taken to his own port.
+      case 'jester/sign-in-return':
+        return SERVER ? signInReturned(String(message.url || '')) : undefined;
+      // Settings › Jester in the cloud: his server's link saved (checked first), or forgotten. Either restarts him.
+      case 'jester/desktop-cloud': {
+        if (SERVER) return { ok: false, error: 'This is the server.' };
+        if (message.op === 'off') {
+          await storage.local.remove('cloudBrain');
+          setTimeout(restart, 300);
+          return { ok: true };
+        }
+        const target = parseCloudLink(message.link);
+        if (!target) return { ok: false, error: 'That isn’t the link his server printed: it starts with https:// and ends with ?key=…' };
+        const reached = await fetch(target.page, { redirect: 'manual', signal: AbortSignal.timeout(8000) }).then((response) => response.status, (err) => err.message);
+        if (reached !== 303) return { ok: false, error: reached === 401 ? 'The server says that key isn’t its own.' : `Couldn’t reach the server (${reached}). Is Tailscale on, on this Mac?` };
+        await storage.local.set({ cloudBrain: { link: String(message.link).trim() } });
+        setTimeout(restart, 300);
+        return { ok: true };
+      }
       // Typing to him: his model loads meanwhile, rather than after they press Return. Only this computer's needs it.
       case 'jester/talk-typing':
         talking.savedOnes().then(async (saved) => !saved.length && warmOllama({ model: (await talking.localOne())?.model }));
@@ -2181,6 +2221,34 @@ async function selfTestAgent() {
 /** On a server: the last time anything was done in a browser with his window open (presence's idle seconds). */
 let webActiveAt = Date.now();
 let webGateway = null;
+/** On a server: the Mac's hands, when it's connected (remote-hands.js). */
+let remoteHands = null;
+/** On a Mac using him in the cloud: the server's link ("https://…/?key=…", parsed), and the line to it (cloud-link.js). */
+let cloudTarget = null;
+let cloudLink = null;
+/** What the Mac can do, for the server's conversation: worked out every few seconds, as some of it is asked of a model. */
+let macAbilities = { computer: 'Mac' };
+
+/** A sign-in's page, opened on a server: where's open is the browsers with his window, which ask for the address it lands on. */
+let signInPage = null;
+function openInBrowser(url) {
+  signInPage = url;
+  postRemote({ type: 'jester/open-url', url, landing: true });
+}
+
+/**
+ * Google sends the browser back to http://127.0.0.1:<port>/?state=…&code=…, which on a phone or laptop is nothing:
+ * the port is the server's. The user pastes that address, and it's taken to the port here. Only that one: the port
+ * the sign-in opened, its root, with the sign-in's own state, so a page can't use this to reach anything else here.
+ */
+async function signInReturned(pasted) {
+  const local = landingAddress(pasted, signInPage);
+  if (!local) return { ok: false, error: 'That isn’t the address this sign-in ended on. Copy it from the address bar of the tab Google left you on.' };
+  const status = await fetch(local, { redirect: 'error', signal: AbortSignal.timeout(5000) }).then((response) => response.status, () => 0);
+  if (status !== 200) return { ok: false, error: 'That sign-in is over. Start it again from Settings › Email.' };
+  signInPage = null;
+  return { ok: true };
+}
 
 /** The key his website asks for: JESTER_WEB_KEY, or one made on first run and kept in the data folder. */
 function webKey() {
@@ -2201,15 +2269,31 @@ function webKey() {
  */
 function startWebGateway() {
   const key = webKey();
+  remoteHands = createRemoteHands({
+    // The Mac's task has a question: asked in the conversation, aloud or written, and answered there.
+    onAsk: (label) => conversation?.ask(label),
+    onTold: (text) => {
+      webActiveAt = Date.now();
+      conversation?.told(text, { typed: true });
+    },
+    onChange: () => post(desktopState()),
+    log
+  });
   webGateway = createWebGateway({
     key,
     port: Number(env.JESTER_WEB_PORT) || 8770,
     log,
     onConnect: (client) => {
+      // The Mac is his hands (and maybe his ears); a browser is his window.
+      if (client.role === 'mac') return remoteHands.join(client);
       webActiveAt = Date.now();
       client.leave = addRemotePage(client);
     },
-    onClose: (client) => client.leave?.(),
+    onClose: (client) => {
+      client.leave?.();
+      remoteHands.leave(client);
+    },
+    onOther: (client, frame) => remoteHands.frame(client, frame),
     onMessage: (client, message) => {
       webActiveAt = Date.now();
       return fromRemote(client, message);
@@ -2226,6 +2310,87 @@ function startWebGateway() {
     (port) => console.log(`Jester's window: open http://127.0.0.1:${port}/?key=${key} (through Tailscale, https://<this server>.<tailnet>.ts.net/?key=${key})`),
     (err) => console.error('Jester’s window couldn’t start:', err.message)
   );
+}
+
+/**
+ * "Use Jester in the cloud": this Mac is the hands, eyes and ears of his brain on a server (cloud-link.js). His window
+ * is the server's website; the mic, when the server opens it, is heard there; what the server asks done is done here.
+ */
+function startCloudLink() {
+  setCloudPage(cloudTarget.page, { onFocus: () => cloudLink?.claim() });
+  let voiceOpen = false;
+  cloudLink = createCloudLink({
+    link: cloudTarget,
+    log,
+    onVoice: (op) => {
+      const open = op === 'open';
+      if (open === voiceOpen) return;
+      voiceOpen = open;
+      log(open ? 'cloud: the server is listening through this Mac' : 'cloud: the server stopped listening here');
+      if (open) {
+        speech.divert((samples) => cloudLink.audio(samples));
+        voicePage.open();
+      } else {
+        speech.divert(null);
+        voicePage.close();
+      }
+    },
+    onPlay: (sound) => {
+      if (sound.stop) return voicePage.stop();
+      // Only with the voice page open (the server listening here): his voice is played by it.
+      if (!voiceOpen) return cloudLink.status({ ended: sound.id });
+      voicePage.play(sound.bytes, sound.type).catch((err) => log('cloud: couldn’t play his voice:', err.message)).finally(() => cloudLink.status({ ended: sound.id }));
+    },
+    onHands: handsAsked,
+    handsState: () => ({ running: assistant.running, asking: assistant.asking, abilities: macAbilities }),
+    idleSeconds: () => powerMonitor.getSystemIdleTime(),
+    onChange: () => post(desktopState())
+  });
+  refreshMacAbilities();
+  setInterval(refreshMacAbilities, 5000).unref?.();
+}
+
+/** What the Mac can do, as abilities.js counts it: sent to the server with the hands' state. */
+async function refreshMacAbilities() {
+  macAbilities = {
+    computer: process.platform === 'darwin' ? 'Mac' : 'computer',
+    chrome: !!chromeLink?.linked,
+    web: webReady(),
+    pictures: await assistant.canSee().catch(() => false),
+    gestures: settings?.gesturesEnabled !== false,
+    watch: !!watch?.state?.paired,
+    scripts: (scripts?.count || 0) > 0
+  };
+}
+
+/** The server's conversation asks the Mac's hands (remote-hands.js): done as this Mac's own conversation would have. */
+async function handsAsked(frame) {
+  const text = String(frame.text || '').slice(0, 4000);
+  switch (frame.op) {
+    case 'knows':
+      return voiceRunner.knows(text);
+    case 'risky':
+      return voiceRunner.risky(text);
+    case 'scriptsAsk':
+      return voiceRunner.scriptsAsk(text);
+    case 'run': {
+      const { outcome } = await voiceRunner.run(text, { talking: true, said: frame.said, context: frame.context || {} });
+      // Plain data only: what's said, its card and sources, never a function.
+      return { outcome: outcome ? JSON.parse(JSON.stringify(outcome)) : null };
+    }
+    case 'confirm':
+      return assistant.confirm(String(frame.label || '').slice(0, 300));
+    case 'answer':
+      assistant.answer(!!frame.yes);
+      return true;
+    case 'reask':
+      return assistant.reask();
+    case 'cancel':
+      await assistant.cancel();
+      return true;
+    default:
+      throw new Error(`Not something the Mac does: ${frame.op}`);
+  }
 }
 
 async function start() {
@@ -2248,6 +2413,8 @@ async function start() {
   // A server asks no OS for a camera or a mic: browsers ask for their own.
   permissions = SERVER ? [] : readPermissions();
   if (SERVER) startWebGateway();
+  // "Use Jester in the cloud": set in Settings, taken up at launch (changing it restarts him).
+  else cloudTarget = parseCloudLink((await storage.local.get('cloudBrain')).cloudBrain?.link);
 
   // JESTER_NO_OVERLAY (tests): no windows over the displays, toasts dropped.
   overlays = env.JESTER_NO_OVERLAY || SERVER
@@ -2261,12 +2428,16 @@ async function start() {
   // Whether they're at the computer: asked of the system's own count of quiet seconds, never of the camera. On a
   // server, nobody sits at it: it's how long since anything was done in a browser that has his window open.
   presence = createPresence({
-    idleSeconds: () => (SERVER ? (Date.now() - webActiveAt) / 1000 : powerMonitor.getSystemIdleTime()),
+    idleSeconds: () => (SERVER ? Math.min((Date.now() - webActiveAt) / 1000, remoteHands?.idleSeconds() ?? Infinity) : powerMonitor.getSystemIdleTime()),
     keptAwake: process.platform === 'darwin' && !SERVER ? () => macScreenKeptAwake(runFile) : undefined,
     file: path.join(app.getPath('userData'), 'presence.json'),
     tickMs: Number(env.JESTER_TICK_MS) || undefined,
     log,
-    onChange: (where) => teller?.moved(where),
+    onChange: (where) => {
+      teller?.moved(where);
+      // Back at the Mac: it's the Mac he's talking to, if he's in the cloud.
+      if (where === 'here') cloudLink?.claim();
+    },
     // The day's first sit-down is when the morning brief belongs: and any later one, until it's been given.
     onArrive: () => queueMorningBrief()
   });
@@ -2324,7 +2495,8 @@ async function start() {
     exclude: process.pid,
     // A question can be answered aloud: the mic opens for it, or is open, and he asks it.
     // Asked of someone typing to him, it's written, mic or no mic.
-    listen: (label) => (listening || conversation.typing ? conversation.ask(label) : !voiceProblem() && engineHost.voice('start')),
+    // In the cloud, the conversation is the server's: it asks.
+    listen: (label) => (cloudLink?.connected ? cloudLink.ask(label) : listening || conversation.typing ? conversation.ask(label) : !voiceProblem() && engineHost.voice('start')),
     // macOS reads no app's controls while a Jester overlay is up (README): the pill blinks out meanwhile.
     quietly: (task) => overlays.whileHidden(task),
     // A picture of the window, when its words aren't enough: with Screen Recording allowed, and not turned off in Settings.
@@ -2427,6 +2599,11 @@ async function start() {
   // The vault's opened before the conversation log is: one left from the last run ends as the log loads, and is
   // summed up knowing what About me holds, kept in the vault, and kept at all only if Remember conversations is on.
   settings = await loadSettings();
+  // A server's vault is the one it was started with, synced from the Mac.
+  if (SERVER && env.JESTER_VAULT && !settings.memoryVault) {
+    await saveSettings({ memoryVault: path.resolve(env.JESTER_VAULT) });
+    settings = await loadSettings();
+  }
   openVault();
   // Where the user is, the weather and their calendars: nothing until they're connected in Settings.
   const showDay = () => post(desktopState());
@@ -2442,7 +2619,8 @@ async function start() {
   });
   // A calendar read again may have moved a class: the check-ins before each follow it.
   calendars = createCalendars({ storage: storage.local, log, onChange: () => (showDay(), syncBriefs()) });
-  calendars.start().catch((err) => log('calendar: couldn’t start:', err.message));
+  // In the cloud, the server reads their calendars.
+  if (!cloudTarget) calendars.start().catch((err) => log('calendar: couldn’t start:', err.message));
   // His clock, and what's kept on it: the user's to-do list, reminders and timers.
   clock = createClock({ file: path.join(app.getPath('userData'), 'jobs.json'), log });
   tasks = createTasks({
@@ -2521,12 +2699,15 @@ async function start() {
     thinkAhead: async () => (await talking.savedOnes())[0]?.plan === 'paid',
     // Only with the mic open: typing to him with it closed, there's nobody to wait for.
     knowsYou: () => !!voiceprint && listening,
-    commands: {
-      knows: (text) => voiceRunner.knows(text),
-      risky: (text) => voiceRunner.risky(text),
-      scriptsAsk: (text) => voiceRunner.scriptsAsk(text),
-      run: (text, said, context) => voiceRunner.run(text, { talking: true, said, context })
-    },
+    // On a server, the Mac's (remote-hands.js): what it knows and does, over its link.
+    commands: SERVER
+      ? remoteHands.commands
+      : {
+          knows: (text) => voiceRunner.knows(text),
+          risky: (text) => voiceRunner.risky(text),
+          scriptsAsk: (text) => voiceRunner.scriptsAsk(text),
+          run: (text, said, context) => voiceRunner.run(text, { talking: true, said, context })
+        },
     // What he remembers and the user's notes, for each turn; "remember this"; notes made and opened.
     vaultMemory: {
       // Whether there's a vault to use. With none (not chosen, or macOS keeps him out), notes are made in the computer's own apps.
@@ -2569,7 +2750,14 @@ async function start() {
         ? briefingManager.respond(made.briefingId, 'interrupted', { token: made.readToken }) : undefined
     },
     // The rest of what's connected, read each turn, so what he says he can do is what's true now (abilities.js).
-    abilities: async () => ({
+    abilities: async () => SERVER ? {
+      // The Mac's, while it's connected; with none, there's no computer to work.
+      ...(remoteHands.abilities || { computer: false }),
+      web: webReady() || !!remoteHands.abilities?.web,
+      voice: !!voiceprint,
+      phone: !!phone?.ready,
+      mail: !!google?.signedIn
+    } : ({
       chrome: !!chromeLink?.linked,
       web: webReady(),
       pictures: await assistant.canSee(),
@@ -2581,7 +2769,7 @@ async function start() {
       mail: !!google?.signedIn,
       computer: process.platform === 'darwin' ? 'Mac' : 'computer'
     }),
-    assistant,
+    assistant: SERVER ? remoteHands.assistant : assistant,
     show: showConversation,
     log
   });
@@ -2670,7 +2858,8 @@ async function start() {
   phone = createPhone({ storage: storage.local, log, onChange: () => post(desktopState()) });
   await phone.start();
   // Their Gmail: signed in to with Google, to read only, and watched for what matters.
-  google = createGoogle({ storage: storage.local, open: (url) => shell.openExternal(url), log, onChange: () => post(desktopState()) });
+  // On a server, Google's page opens in the browser that asked, and the address it lands on is pasted back (signInReturned).
+  google = createGoogle({ storage: storage.local, open: (url) => (SERVER ? openInBrowser(url) : shell.openExternal(url)), log, onChange: () => post(desktopState()) });
   await google.start();
   mail = createMail({ google, storage: storage.local, request: talking, judged: () => settings?.mailJudge !== false, log });
   await mail.start();
@@ -2733,6 +2922,8 @@ async function start() {
   presence.start();
   // What came due while he wasn't running is told once he's had a moment to start, not as he does.
   setTimeout(() => {
+    // In the cloud, reminders, timers, mail and briefs are the server's: this clock would tell them twice.
+    if (cloudTarget) return log('cloud: the clock here is off; the server keeps time');
     clock.start();
     // Restarted with them still about, nothing says they've come back: what was held is told as if they just had.
     teller.moved(presence.where === 'away' ? 'away' : 'here');
@@ -2827,6 +3018,7 @@ async function start() {
     if (area === 'local' && changes.settings) refresh();
   });
 
+  if (cloudTarget) startCloudLink();
   if (SERVER) {
     // No camera, menu bar, permissions or shortcut on a server: his window is the website, already listening.
     await refresh();

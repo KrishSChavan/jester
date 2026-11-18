@@ -653,6 +653,30 @@ function renderChrome() {
       : `In Chrome, open Jester’s settings and click Link with Jester Desktop. It then has your bookmarks, tabs and pages for what you ask, and one camera and mic for both.${chrome.browsers?.length ? ` Ready for ${chrome.browsers.join(', ')}.` : ''}`;
 }
 
+/**
+ * Jester in the cloud: on a Mac, whether it's his server's hands (cloud-link.js) and the link to give it; on the
+ * server itself (his website), whether the Mac is connected.
+ */
+function renderCloud() {
+  const server = desktop?.server;
+  const cloud = desktop?.cloud || { on: false };
+  $('cloud-form').hidden = !!server || cloud.on;
+  $('cloud-off-card').hidden = !!server || !cloud.on;
+  if (server) {
+    $('cloud-title').textContent = 'Your Mac';
+    $('cloud-state').textContent = server.mac ? 'Connected' : 'Not connected';
+    $('cloud-hint').textContent = server.mac
+      ? 'This is Jester’s server. Your Mac is his hands: what you ask him to do on the computer is done there.'
+      : 'This is Jester’s server. Open Jester on your Mac and paste this server’s link into its Settings › Jester in the cloud: until then he can talk, remember and remind you, but can’t work your computer.';
+    return;
+  }
+  $('cloud-title').textContent = 'Use Jester in the cloud';
+  $('cloud-state').textContent = cloud.on ? (cloud.connected ? 'Connected' : 'Can’t reach it') : 'Off';
+  $('cloud-hint').textContent = cloud.on
+    ? `His conversation, memory, reminders, mail and briefs are on ${cloud.server}, the same Jester as his website. This Mac is his hands, eyes and ears: gestures, the cursor, Chrome and your apps stay here, and so do these settings.${cloud.connected ? '' : ' Is Tailscale on, on this Mac, and the server running?'}`
+    : 'Run his brain on a server of yours (see desktop/server/README.md), and talk to the same Jester here and on his website, from any of your devices.';
+}
+
 /** macOS keeps Jester out of the vault: since it was chosen, or since it was opened (its search says so). */
 const vaultDenied = (memory) => memory?.problem === 'denied' || (!!memory?.root && memory.search?.error === 'denied');
 
@@ -910,6 +934,7 @@ function render() {
   if (!settings) return;
   renderStatus();
   renderChrome();
+  renderCloud();
   renderPermissions();
   renderPictures();
   renderMemory();
@@ -963,6 +988,7 @@ function renderIndex() {
   const talker = inOrder(savedModels).find((connection) => connection.uses?.includes('talk'));
   aside('sum-models', talker ? talker.model : localUses().includes('talk') && ollama?.chosen ? ollama.chosen : savedModels.length ? `${savedModels.length} saved` : '');
   aside('sum-chrome', desktop?.chrome?.linked ? 'Linked' : 'Not linked');
+  aside('sum-cloud', desktop?.server ? (desktop.server.mac ? 'Mac connected' : 'No Mac') : desktop?.cloud?.on ? (desktop.cloud.connected ? 'On' : 'Can’t reach it') : 'Off', desktop?.cloud?.on && !desktop.cloud.connected ? 'warn' : '');
   aside('sum-gestures', settings.windowedBindingsEnabled ? 'Two sets' : '');
 }
 
@@ -974,6 +1000,19 @@ function gestureName(message) {
   const pose = GESTURES.find((item) => item.id === message.gesture);
   return pose ? `${pose.glyph} ${pose.label}` : message.gesture;
 }
+
+$('cloud-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  $('cloud-error').textContent = '';
+  $('cloud-use').disabled = true;
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-cloud', op: 'use', link: $('cloud-link').value });
+  $('cloud-use').disabled = false;
+  if (reply?.ok) {
+    $('cloud-link').value = '';
+    $('cloud-error').textContent = 'Restarting…';
+  } else $('cloud-error').textContent = reply?.error || 'Jester didn’t answer.';
+});
+$('cloud-off').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-cloud', op: 'off' }));
 
 chrome.runtime.onMessage.addListener((message) => {
   switch (message?.type) {

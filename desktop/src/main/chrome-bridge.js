@@ -23,12 +23,13 @@ const WORKER_URL = `${EXT_ROOT}src/background/service-worker.js`;
  * what Jester has learned (learned.js), which holds what was typed, the
  * key that proves a watch is yours (watch.js), the sign-in to the voice service an
  * earlier version used (`puterToken`: main.js removes it at launch), the
- * user's voiceprint (voiceprint.js), and their calendars' links, each of which
- * reads that calendar (calendars.js).
+ * user's voiceprint (voiceprint.js), their calendars' links, each of which
+ * reads that calendar (calendars.js), and the link to his server, which holds
+ * its key (cloud-link.js).
  * Pages never see them, through storage or its change events, and they're
  * sealed on disk.
  */
-export const PRIVATE_KEYS = Object.freeze(['modelConnections', 'modelConnection', 'desktopLearned', 'watchKey', 'puterToken', 'voiceprint', 'voiceLearned', 'calendarFeeds', 'phone', 'google', 'mail', 'briefingSnapshots']);
+export const PRIVATE_KEYS = Object.freeze(['cloudBrain', 'modelConnections', 'modelConnection', 'desktopLearned', 'watchKey', 'puterToken', 'voiceprint', 'voiceLearned', 'calendarFeeds', 'phone', 'google', 'mail', 'briefingSnapshots']);
 const isPrivate = (key) => PRIVATE_KEYS.includes(key);
 const withoutPrivate = (items) => Object.fromEntries(Object.entries(items || {}).filter(([key]) => !isPrivate(key)));
 

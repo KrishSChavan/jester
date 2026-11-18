@@ -3,7 +3,7 @@
  * (the orb, his chats and Settings, all in one), and the calibration screen.
  */
 
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, shell } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { postTo } from './chrome-bridge.js';
@@ -61,7 +61,7 @@ const showable = (screen) => (/^(main|chats|settings(\/[a-z-]+)?)$/.test(String(
  */
 function leaveDockIfAlone() {
   const open = (win) => win && !win.isDestroyed() && (win.isVisible() || win.isMinimized());
-  if (!open(home) && !open(calibration) && !open(controls)) app.dock?.hide();
+  if (!open(home) && !open(calibration) && !open(controls) && !open(cloud)) app.dock?.hide();
 }
 
 /**
@@ -74,6 +74,8 @@ function leaveDockIfAlone() {
  */
 export function showHome({ screen = 'main', quiet = false } = {}) {
   const goTo = showable(screen);
+  // Using him in the cloud, talking to him and his chats are the server's: its page, in a window of its own.
+  if (cloudPage && !goTo.startsWith('settings')) return showCloud({ quiet });
   if (home && !home.isDestroyed()) {
     const away = !home.isVisible() || home.isMinimized();
     if (home.isMinimized()) home.restore();
@@ -145,6 +147,7 @@ export function showTalk() {
  * opening; on another screen, nothing moves. With no window open, it opens on the orb.
  */
 export function reopenHome() {
+  if (cloudPage) return showCloud();
   const win = homeWindow();
   if (!win) return showHome();
   const away = !win.isVisible() || win.isMinimized();
@@ -155,6 +158,75 @@ export function reopenHome() {
   win.show();
   win.focus();
   return win;
+}
+
+// ---------------------------------------------------------------------------
+// Jester in the cloud (cloud-link.js): his window is his server's website
+// ---------------------------------------------------------------------------
+
+/** The server's page, with its key ("https://…/?key=…"), while the Mac uses him in the cloud; null otherwise. */
+let cloudPage = null;
+let cloud = null;
+let onCloudFocus = () => undefined;
+
+/** Using him in the cloud from here on, or not (null). `onFocus`: his window was clicked into, so it's the Mac he's talking to. */
+export function setCloudPage(page, { onFocus = () => undefined } = {}) {
+  cloudPage = page || null;
+  onCloudFocus = onFocus;
+  if (!cloudPage && cloud && !cloud.isDestroyed()) cloud.close();
+}
+
+/**
+ * His window, as his server's website. No preload: it's another site's page, and gets the `chrome` its own shim
+ * (web/shim.js) gives it, over its socket. Its mic is never its own: the Mac's voice page is his ears here, and
+ * Electron refuses the page any media (installMediaPermissions only allows jester:// pages).
+ */
+function showCloud({ quiet = false } = {}) {
+  if (cloud && !cloud.isDestroyed()) {
+    if (cloud.isMinimized()) cloud.restore();
+    if (quiet) cloud.showInactive();
+    else {
+      app.dock?.show();
+      cloud.show();
+      cloud.focus();
+    }
+    return cloud;
+  }
+  cloud = new BrowserWindow({
+    width: 600,
+    height: 760,
+    minWidth: 380,
+    minHeight: 560,
+    title: 'Jester',
+    show: false,
+    backgroundColor: HOME_GROUND,
+    acceptFirstMouse: true,
+    ...(ICON ? { icon: path.join(here, ICON) } : {}),
+    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false }
+  });
+  // Links in it open in the browser, never in a window of Jester's that has his session.
+  cloud.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  cloud.webContents.on('will-navigate', (event, url) => {
+    if (new URL(url).origin !== new URL(cloudPage).origin) event.preventDefault();
+  });
+  cloud.once('ready-to-show', () => {
+    if (quiet) cloud.showInactive();
+    else {
+      app.dock?.show();
+      cloud.show();
+      cloud.focus();
+    }
+  });
+  cloud.on('focus', () => onCloudFocus());
+  cloud.on('closed', () => {
+    cloud = null;
+    leaveDockIfAlone();
+  });
+  cloud.loadURL(cloudPage);
+  return cloud;
 }
 
 /** The window says what it shows as it changes (jester/home-screen). */

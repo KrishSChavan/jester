@@ -48,6 +48,8 @@ export function startSpeech({ log = () => undefined } = {}) {
   let current = null;
   /** Called with everything overheard, while the continuous assistant is on. */
   let listener = null;
+  /** Where the always-on mic's audio goes instead, while the Mac uses him in the cloud. */
+  let diverted = null;
   /** Called when his name starts something still being said. */
   let waker = null;
   /** Told what's been said so far at a pause that may be its end, and when they went on talking after all. */
@@ -199,6 +201,8 @@ export function startSpeech({ log = () => undefined } = {}) {
   // The always-on mic, unless a command has it. Only ever the voice page's.
   ipcMain.on('jester:listen-audio', (event, samples) => {
     if (!String(event.senderFrame?.url || event.sender.getURL()).startsWith(VOICE_PAGE)) return;
+    // Using him in the cloud: the server's recognizer hears it (cloud-link.js), not this one.
+    if (diverted) return void (samples?.length && diverted(samples));
     if (listener && !current && samples?.length) service?.postMessage({ type: 'audio', samples });
   });
 
@@ -208,6 +212,10 @@ export function startSpeech({ log = () => undefined } = {}) {
   });
 
   return {
+    /** The always-on mic's audio goes to `to` (a function) instead of this recognizer, or back to it (null). */
+    divert(to) {
+      diverted = typeof to === 'function' ? to : null;
+    },
     /**
      * The always-on mic's audio, from somewhere other than the voice page: a browser whose page is his window (the
      * web gateway), or the Mac using him in the cloud. 16 kHz mono, as the voice page sends it.

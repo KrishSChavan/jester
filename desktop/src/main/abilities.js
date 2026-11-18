@@ -47,10 +47,13 @@ export const ABILITIES = Object.freeze([
   { id: 'earlier', can: () => 'Remember the past week’s conversations, in brief: those that matter are listed below.' },
   {
     id: 'laptop',
+    // Off only on his server with no Mac connected (main.js JESTER_SERVER, remote-hands.js): there's no computer to work.
+    on: (state) => state.computer !== false,
+    off: 'Working their computer: their Mac isn’t connected to you right now (Jester on it, with “Use Jester in the cloud” on, connects it). Until it is, you can’t open, play, type or click anything, so asked to, say so plainly and do nothing with "do".',
     can: ({ computer = 'Mac' }) =>
       `Through "do", the laptop works any app or site the way a person would: it opens, quits and arranges apps and windows (left, right, full screen, onto another screen); opens sites and bookmarks; plays music on Spotify or YouTube; changes the volume and plays, pauses or skips; types, presses keys, clicks, scrolls, drags and uses menus; reads what's on the screen and tells it back, like what's due on a class site or whether an email came; starts a new note, email, message, reminder or calendar event in the ${computer}'s own apps; runs their Shortcuts; and searches the web, YouTube or Spotify. It can send a message, order food or book a flight, but asks the user first before it sends or posts anything, buys, deletes or changes system settings, and it never types a password, card number or other secret: the user enters those themselves.`
   },
-  { id: 'learn', can: () => 'Learn the user’s own commands ("when I say focus mode, open Notes and put it on the left"; "forget focus mode"), and do a task that worked again, faster, the next time it’s asked for.' },
+  { id: 'learn', on: (state) => state.computer !== false, can: () => 'Learn the user’s own commands ("when I say focus mode, open Notes and put it on the left"; "forget focus mode"), and do a task that worked again, faster, the next time it’s asked for.' },
   {
     id: 'web', on: (state) => !!state.web,
     // On only when something can read pages: the Scrapling helper set up, or Chrome linked (main.js webReady).

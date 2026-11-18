@@ -178,3 +178,25 @@ test('keys sealed on a server open again only with its own key file', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a pasted sign-in address goes only to the port that sign-in opened, with its own state', async () => {
+  const { landingAddress } = await import('../desktop/src/main/web-gateway.js');
+  const page = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=x&redirect_uri=http%3A%2F%2F127.0.0.1%3A51234&state=s123&code_challenge=c';
+  assert.equal(landingAddress('http://127.0.0.1:51234/?state=s123&code=4%2Fabc&scope=x', page), 'http://127.0.0.1:51234/?state=s123&code=4%2Fabc&scope=x');
+  assert.equal(landingAddress('  http://127.0.0.1:51234/?state=s123&error=access_denied  ', page), 'http://127.0.0.1:51234/?state=s123&error=access_denied');
+  // Only the answer's own parameters are taken along.
+  assert.equal(landingAddress('http://127.0.0.1:51234/?state=s123&code=c&evil=1', page), 'http://127.0.0.1:51234/?state=s123&code=c');
+  for (const bad of [
+    'http://127.0.0.1:11434/?state=s123&code=c', // another port: Ollama, say
+    'http://127.0.0.1:51234/api/tags?state=s123&code=c', // another path
+    'http://127.0.0.1:51234/?state=other&code=c', // another sign-in's
+    'http://localhost:51234/?state=s123&code=c',
+    'http://10.0.0.5:51234/?state=s123&code=c',
+    'https://127.0.0.1:51234/?state=s123&code=c',
+    'not a url',
+    ''
+  ]) {
+    assert.equal(landingAddress(bad, page), null, bad);
+  }
+  assert.equal(landingAddress('http://127.0.0.1:51234/?state=s123&code=c', null), null, 'no sign-in going on');
+});

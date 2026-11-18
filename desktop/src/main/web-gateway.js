@@ -100,6 +100,32 @@ export function withShim(html) {
 }
 
 /**
+ * A sign-in his server started sends the browser back to http://127.0.0.1:<port>/?state=…&code=…: on a phone, nothing.
+ * The address is pasted instead, and this says where on the server it goes: only to the port that sign-in opened, its
+ * root, with that sign-in's own state, and only the answer's own parameters. Anything else is null, so a page can't
+ * use a pasted address to reach any other service on the server.
+ * @param {string} pasted  what the user pasted
+ * @param {string|null} page  the sign-in page that was opened (its redirect_uri and state)
+ */
+export function landingAddress(pasted, page) {
+  let landed;
+  let asked;
+  let state;
+  try {
+    landed = new URL(String(pasted || '').trim());
+    const opened = new URL(page);
+    asked = new URL(opened.searchParams.get('redirect_uri'));
+    state = opened.searchParams.get('state');
+  } catch {
+    return null;
+  }
+  if (!state || asked.hostname !== '127.0.0.1' || !asked.port) return null;
+  if (landed.protocol !== 'http:' || landed.hostname !== '127.0.0.1' || landed.port !== asked.port || landed.pathname !== '/' || landed.searchParams.get('state') !== state) return null;
+  const kept = [...landed.searchParams].filter(([name]) => ['state', 'code', 'scope', 'error'].includes(name));
+  return `http://127.0.0.1:${asked.port}/?${new URLSearchParams(kept)}`;
+}
+
+/**
  * @param {object} options
  * @param {string} options.key
  * @param {number} [options.port]
