@@ -209,6 +209,9 @@ words alone (below, Memory and Obsidian).
 - `npm run icons` — redraws his icon (`scripts/make-icons.mjs`: the art is
   code) into `icons/`: `jester.svg`, `jester.png`, `Jester.icns` for macOS and
   `Jester.ico` for Windows' window and taskbar.
+- `npm run location` — builds his Location Services module
+  (`native/jester-location`, with the Xcode command line tools' clang) if its
+  source changed; `npm run app` and the launcher build it too.
 
 **Jester.app.** On a Mac, all three run him in `app.noindex/Jester.app`, made
 by `scripts/jester-app.mjs` (`npm run app` makes it on its own): npm's
@@ -1876,14 +1879,19 @@ choose it there, so macOS's location question only ever comes when they've asked
 for it.
 
 **Where.** Location is Off, This Mac's location, or A place you name. This Mac's
-location is Location Services, read by Chromium's Core Location provider (Electron
-44 has it: `CoreLocationProvider`, `SystemGeolocationSourceApple`) from a hidden
-page of Jester's, `jester://app/where/where.html`, the only page given the
-`geolocation` permission, and only while Settings says so (`locating` in main.js).
+location is Location Services, which Jester asks himself: `native/jester-location`
+is a small Objective-C Node-API module (built by `npm run location`, and by
+`npm run app` and everything that makes Jester.app) loaded into his main process
+(`src/main/mac-location.js`), so macOS's question names "Jester" (Jester.app's
+Info.plist carries the location usage string) and the position comes straight from
+Core Location. Not Chromium's location: Electron 44's Core Location provider
+waits for macOS's permission but nothing in Electron asks for it (Chrome asks from
+its own layer), so the hidden page that used to ask only ever timed out, and no
+question came. That page, `jester://app/where/where.html`, the only page given the
+`geolocation` permission and only while Settings says so (`locating` in main.js),
+is now for Windows, and for a Mac whose module couldn't be built.
 Wi-Fi positioning, to tens of metres. Chosen in Settings, a position is asked for
-at once and waited on for 90 s, since macOS asks first (for "Jester": Jester.app's
-Info.plist carries a location usage string, which npm's Electron.app lacked; the
-prompt itself is unchecked: see below); after that, when he's talked to and the last
+at once and waited on for 90 s, since macOS asks first; after that, when he's talked to and the last
 is over 15 minutes old (the turn uses the last one meanwhile), and when the
 computer wakes or unlocks, never on a timer. "Where am I?", "near me" and the like
 wait up to 3 s for a fresh one. One that can't be had isn't tried again for two
@@ -2327,7 +2335,21 @@ models decode in under 35 ms.
     name, ⌘-Tab, Activity Monitor and the prompts should all say Jester with
     the raised hand. The old "Electron" rows in System Settings can then go.
 
+19. **This Mac's location** (the module was built and loaded inside Jester.app,
+    and read "not determined" for him; it has never asked, or had a
+    position): with Settings › Weather and calendars on This Mac's location,
+    quit Jester and open him again. macOS should ask whether "Jester" may use
+    your location within a second or two of his starting: Allow. Settings
+    should then show your town and the weather, and "Jester, where am I?" should
+    name your street. If it says no position came, the log has `location:
+    none:` and why.
+
 ## Things learned the hard way
+
+- Electron's `navigator.geolocation` on a Mac waits for Location Services to
+  allow it and never asks: Chrome asks from its own layer, which Electron
+  doesn't have. The page timed out, and macOS never showed its question. Jester
+  asks Core Location himself (`native/jester-location`).
 
 - VS Code sets `ELECTRON_RUN_AS_NODE=1` for its terminals, and `open` passes it
   on: Electron then starts as plain Node. `scripts/start.mjs` and

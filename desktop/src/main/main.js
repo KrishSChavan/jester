@@ -65,6 +65,7 @@ import { fillsDisplay, wakeHint } from './os-actions.js';
 import { createOverlays } from './overlay.js';
 import { createPointer } from './pointer.js';
 import { createGoogle } from './google.js';
+import { createMacLocate, loadMacLocation } from './mac-location.js';
 import { CHECK_MS, createMail, mailCard, mailLine } from './mail.js';
 import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
@@ -313,7 +314,7 @@ function mediaAllowed(type) {
   return status.camera === 'granted' || status.microphone === 'granted';
 }
 
-/** The page that asks where this computer is (locateHere), and only while Settings says to use its location. */
+/** The page that asks where this computer is (locateByPage), and only while Settings says to use its location. */
 const LOCATE_PAGE = 'jester://app/where/where.html';
 const locating = (url) => String(url || '').startsWith(LOCATE_PAGE) && settings?.locationSource === 'here';
 
@@ -335,13 +336,13 @@ function installMediaPermissions() {
 }
 
 /**
- * Where this computer is, by a hidden page of Jester's asking Chromium, which asks Location Services on a Mac (its
- * Core Location provider): precise to tens of metres on Wi-Fi. The first time, macOS asks whether "Jester" may know;
- * a position waits for that answer, so it's first asked from Settings (`timeoutMs` 90 s).
+ * Where this computer is, by a hidden page of Jester's asking Chromium: Windows' location. Not on a Mac, where
+ * Electron's Chromium waits for macOS to allow it but never asks, so it only ever timed out: a Mac asks Location
+ * Services itself (mac-location.js), and this is only for a Mac whose module isn't built.
  * The page goes once it has answered.
  * @returns {Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, code?:number, message?:string}>}
  */
-async function locateHere({ timeoutMs }) {
+async function locateByPage({ timeoutMs }) {
   const page = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, sandbox: true, backgroundThrottling: false } });
   let timer;
   try {
@@ -2144,8 +2145,11 @@ async function start() {
   // Where the user is, the weather and their calendars: nothing until they're connected in Settings.
   const showDay = () => post(desktopState());
   weather = createWeather({ log });
+  // A Mac asks Location Services itself, as Jester: the first time, macOS asks whether "Jester" may know, and a
+  // position waits for that answer, so it's first asked from Settings (90 s).
+  const macLocation = loadMacLocation({ log });
   whereabouts = createWhereabouts({
-    locate: locateHere,
+    locate: macLocation ? createMacLocate({ native: macLocation }) : locateByPage,
     setting: () => ({ source: settings?.locationSource, place: settings?.locationPlace }),
     log,
     onChange: showDay

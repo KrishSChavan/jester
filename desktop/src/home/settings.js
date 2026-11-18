@@ -721,7 +721,7 @@ function locationProblem(problem) {
   const mac = platform() === 'darwin';
   if (problem === 'denied') {
     return mac
-      ? 'macOS hasn’t let Jester know where this Mac is. Click Open Privacy Settings, turn on Location Services and Electron (Jester while it’s in development), then Locate again.'
+      ? 'macOS hasn’t let Jester know where this Mac is. Click Open Privacy Settings, turn on Location Services, and Jester in its list, then Locate again.'
       : 'Windows hasn’t let Jester know where this computer is. Click Open Privacy Settings, let desktop apps use your location, then Locate again.';
   }
   if (problem === 'timeout') return `No position came in time. If ${mac ? 'macOS' : 'Windows'} asked whether Jester may use your location, answer it, then Locate again.`;

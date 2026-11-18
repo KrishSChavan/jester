@@ -29,6 +29,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildLocation } from './build-location.mjs';
 
 const here = fileURLToPath(import.meta.url);
 const desktop = path.resolve(path.dirname(here), '..');
@@ -150,13 +151,21 @@ export function build(target, { version, made, from = ELECTRON_APP, icon = ICON 
 }
 
 /**
- * Jester.app, made or remade if it's missing or out of date, and its path.
- * One that's running is left as it is (its files can't be swapped under it).
+ * Jester.app, made or remade if it's missing or out of date, and its path; and his Location Services module
+ * (build-location.mjs), built if it isn't. A Jester.app that's running is left as it is (its files can't be swapped
+ * under it).
  * @param {{log?: (line:string) => void}} [options]
  */
 export function jesterApp({ log = (line) => console.log(line) } = {}) {
   if (process.platform !== 'darwin') throw new Error('Jester.app is for macOS.');
   if (!fs.existsSync(ELECTRON_APP)) throw new Error('Electron is not downloaded yet; in desktop/, run: node node_modules/electron/install.js');
+  // His way of asking Location Services (Electron's own location never asks macOS): built here, so whatever starts
+  // Jester.app finds it ready.
+  try {
+    buildLocation({ log });
+  } catch (err) {
+    log(`${err.message}\nUntil it's built, Jester can't use this Mac's location.`);
+  }
   const wanted = recipe();
   const have = fs.existsSync(JESTER_APP) ? madeFrom(JESTER_APP) : null;
   if (have === wanted.made) return JESTER_APP;

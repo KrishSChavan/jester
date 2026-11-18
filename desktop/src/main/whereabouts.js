@@ -1,7 +1,8 @@
 /**
  * Where the user is. Either this computer's own location: on a Mac, Location
- * Services (Wi-Fi positioning, to tens of metres), which Chromium's Core Location
- * provider reads for a page of Jester's (main.js locateHere); or a place they
+ * Services (Wi-Fi positioning, to tens of metres), which Jester asks himself
+ * (mac-location.js), elsewhere Chromium's, for a page of his (main.js
+ * locateByPage); or a place they
  * named in Settings, for a computer that can't tell or a user who'd rather not;
  * or nowhere, which is how it starts, so macOS's question comes only when they
  * choose it.
@@ -76,7 +77,7 @@ const PROBLEMS = { 1: 'denied', 2: 'unavailable', 3: 'timeout' };
 /**
  * @param {object} deps
  * @param {(options:{timeoutMs:number}) => Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, at?:number, code?:number, message?:string}>} deps.locate
- *   this computer's position (main.js locateHere)
+ *   this computer's position (mac-location.js, or main.js locateByPage)
  * @param {() => {source:'off'|'here'|'place', place?:object|null}} deps.setting  what Settings says
  * @param {typeof fetch} [deps.fetchImpl]
  * @param {(...parts:any[]) => void} [deps.log]
