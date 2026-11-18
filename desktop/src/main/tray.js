@@ -15,7 +15,22 @@ function trayIcon() {
 }
 
 /**
- * @param {(id:string, checked?:boolean) => void} onAction  a menu item was chosen
+ * Electron's menu template from tray-menu.js's items: submenus as submenus, and what an item carries for its click
+ * (a script's step, a scene) kept out of the template and handed back with it.
+ * @param {object[]} items
+ * @param {(id:string, checked?:boolean, item?:object) => void} onAction
+ */
+export function menuTemplate(items, onAction) {
+  return items.map((item) => {
+    if (item.type === 'separator') return { type: 'separator' };
+    const { step, scene, submenu, ...rest } = item;
+    if (submenu) return { ...rest, submenu: menuTemplate(submenu, onAction) };
+    return { ...rest, click: (menuItem) => onAction(item.id, menuItem.checked, item) };
+  });
+}
+
+/**
+ * @param {(id:string, checked?:boolean, item?:object) => void} onAction  a menu item was chosen
  */
 export function createTray(onAction) {
   const tray = new Tray(trayIcon());
@@ -28,15 +43,7 @@ export function createTray(onAction) {
       current = key;
       tray.setToolTip(model.tooltip);
       if (process.platform === 'darwin') tray.setTitle(model.title);
-      tray.setContextMenu(
-        Menu.buildFromTemplate(
-          model.items.map((item) =>
-            item.type === 'separator'
-              ? { type: 'separator' }
-              : { ...item, click: (menuItem) => onAction(item.id, menuItem.checked) }
-          )
-        )
-      );
+      tray.setContextMenu(Menu.buildFromTemplate(menuTemplate(model.items, onAction)));
     },
     destroy() {
       tray.destroy();

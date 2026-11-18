@@ -45,6 +45,10 @@
  *   research background searches show progress in his window, source cards open only on a click, more than three
  *            collapse, and progress moves to the pill only while his window is hidden or minimized. The worker
  *            serves this script's fixtures: no page is fetched and no browser is opened.
+ *   scripts  a folder of pretend lamps added in Controls through + and its review; its block's state read, a button,
+ *            a chip, a slider dragged and a colour run from the page; "turn off the desk lamp" run with no model; a
+ *            model's "run" said back as how it went; a run kept with a task and done when it's due; and a scene, made
+ *            in Controls and run by its name. The lamps are a script in the scratch folder: no real device is touched.
  */
 
 import { spawn } from 'node:child_process';
@@ -265,6 +269,87 @@ send();
     } catch {
       return [];
     }
+  };
+
+  /** A picture of any of his windows, as `shot` takes his own. */
+  async function shotOf(win, name) {
+    if (!SHOTS) return;
+    fs.mkdirSync(SHOTS, { recursive: true });
+    win.setOpacity(1);
+    await pause(700);
+    fs.writeFileSync(path.join(SHOTS, `${name}.png`), (await win.webContents.capturePage()).toPNG());
+    win.setOpacity(0.02);
+  }
+
+  /** Pretend lamps, served as the real lights script is (its serve mode, status --json, ✓ lines), keeping a log. */
+  const FAKE_LAMPS = `
+const fs = require('node:fs');
+const path = require('node:path');
+const LOG = path.join(__dirname, 'commands.log');
+const STATE = path.join(__dirname, 'state.json');
+const ROOMS = { 'Lamp A': 'Bedside', 'Lamp B': 'Desk' };
+const load = () => { try { return JSON.parse(fs.readFileSync(STATE, 'utf8')); } catch { return { 'Lamp A': { level: 50, white: 20, color: null }, 'Lamp B': { level: 50, white: 20, color: null } }; } };
+const sum = (names, state) => {
+  const on = names.filter((name) => state[name].level > 0);
+  if (!on.length) return { summary: names.length > 1 ? 'Both off' : 'Off', say: 'They are off.', values: { power: false } };
+  const level = Math.round(on.reduce((total, name) => total + state[name].level, 0) / on.length);
+  const color = on.every((name) => state[name].color) ? state[on[0]].color : null;
+  const values = { power: true, brightness: level, ...(color ? { color } : { temp: state[on[0]].white }) };
+  return { summary: [on.length === names.length ? (names.length > 1 ? 'Both on' : 'On') : on.length + ' of ' + names.length + ' on', level + '%', color || 'warm white'].join(' · '), say: on.length + ' on at ' + level + '%.', values };
+};
+const report = (state) => ({ where: 'Scratch', ...sum(Object.keys(ROOMS), state), by: Object.fromEntries([...Object.entries(ROOMS).map(([name, room]) => [room, sum([name], state)]), ...Object.keys(ROOMS).map((name) => [name, sum([name], state)])]) });
+function run(args) {
+  fs.appendFileSync(LOG, args.join(' ') + '\\n');
+  const state = load();
+  const words = args.filter((arg) => arg !== '--quick');
+  const [command, ...rest] = words;
+  if (command === 'status') return { code: 0, out: JSON.stringify(report(state)), err: '' };
+  const named = rest.length && isNaN(Number(rest.at(-1))) && command !== 'color' || (command === 'color' && rest.length > 1) ? rest.at(-1) : '';
+  const targets = Object.keys(ROOMS).filter((name) => !named || ROOMS[name] === named || name === named);
+  if (!targets.length) return { code: 1, out: '', err: 'lamps: No lamp called "' + named + '". See them with: lamps list' };
+  for (const name of targets) {
+    if (command === 'on') state[name].level ||= 50;
+    else if (command === 'off') state[name].level = 0;
+    else if (command === 'brightness') state[name].level = Number(rest[0]);
+    else if (command === 'temp') Object.assign(state[name], { white: Number(rest[0]), color: null });
+    else if (command === 'color') state[name].color = rest[0];
+    else return { code: 2, out: '', err: 'lamps: unknown command ' + command };
+  }
+  fs.writeFileSync(STATE, JSON.stringify(state));
+  const quick = args.includes('--quick');
+  return { code: 0, out: targets.map((name) => (quick ? '→ ' : '✓ ') + name + ': ' + (state[name].level ? 'on, ' + state[name].level + '%' : 'off')).join('\\n'), err: '', state: report(state) };
+}
+if (process.argv[2] === 'serve') {
+  console.log(JSON.stringify({ serve: 1 }));
+  require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+    const { id, args } = JSON.parse(line);
+    console.log(JSON.stringify({ id, ...run(args) }));
+  });
+  setTimeout(() => process.exit(0), 60000);
+} else {
+  const result = run(process.argv.slice(2));
+  process.stdout.write(result.out + '\\n');
+  process.stderr.write(result.err);
+  process.exit(result.code);
+}
+`;
+  const LAMPS = {
+    jester: 1,
+    name: 'Lamps',
+    icon: 'bulb',
+    about: 'Two pretend lamps for the live check.',
+    run: 'lamps.cjs',
+    serve: ['serve'],
+    status: ['status', '--json'],
+    aim: { label: 'Which lamps', all: 'lamps', choices: [{ label: 'All', value: '' }, { label: 'Bedside', value: 'Bedside', said: 'Bedside lamp' }, { label: 'Desk', value: 'Desk', said: 'Desk lamp' }] },
+    controls: [
+      { id: 'on', kind: 'button', label: 'On', args: ['on', '{aim}'], lit: { power: true }, done: '{aim} on.', words: ['turn on the {aim?} lamps', 'turn on the {aim} lamp'] },
+      { id: 'off', kind: 'button', label: 'Off', args: ['off', '{aim}'], lit: { power: false }, done: '{aim} off.', words: ['turn off the {aim?} lamps', 'turn off the {aim} lamp'] },
+      { id: 'brightness', kind: 'slider', label: 'Brightness', min: 1, max: 100, unit: '%', low: 'Dim', high: 'Bright', track: 'brightness', args: ['brightness', '{value}', '{aim}'], drag: ['--quick'], done: '{aim} at {value}%.', words: ['dim the {aim?} lamps to {value}'] },
+      { id: 'temp', kind: 'slider', label: 'White', min: 0, max: 100, low: 'Warm', high: 'Cool', track: 'warmth', args: ['temp', '{value}', '{aim}'], drag: ['--quick'], names: [{ at: 0, name: 'warm white' }, { at: 34, name: 'neutral white' }, { at: 67, name: 'cool white' }], done: '{aim} set to {name}.' },
+      { id: 'color', kind: 'choices', label: 'Color', choices: [{ label: 'Red', value: 'red', color: '#ff453a' }, { label: 'Blue', value: 'blue', color: '#2f6bff' }, { label: 'Pink', value: 'pink', color: '#ff5fa2' }], args: ['color', '{value}', '{aim}'], done: '{aim} set to {value}.' },
+      { id: 'status', kind: 'ask', label: 'What’s on', args: ['status', '--json'], words: ['are the {aim?} lamps on'] }
+    ]
   };
 
   const SCENARIOS = {
@@ -1024,6 +1109,113 @@ send();
       // A model being added is ticked for Talking only while nothing talks yet (a new user's first key): here two do.
       const box = await inPage(`const provider = document.getElementById('connection-provider'); provider.value = 'groq'; provider.dispatchEvent(new Event('change')); return document.getElementById('connection-talk').checked;`);
       check('with models that talk already, another being added isn’t ticked for Talking unasked', box === false, String(box));
+    },
+
+    /** The user's own scripts: Controls, their words, the model's "run", a task's, and a scene. */
+    async scripts({ paid, free }) {
+      // Both model servers answer alike: a scenario before this one (models) may have left the paid one resting.
+      const answer = (reply) => (paid.answer = free.answer = () => reply);
+      const asked = () => paid.requests.length + free.requests.length;
+      const answered = (before) => (free.requests.length > before.free ? free : paid);
+      const folder = path.join(scratch, 'pretend lamps');
+      fs.mkdirSync(folder, { recursive: true });
+      fs.writeFileSync(path.join(folder, 'lamps.cjs'), FAKE_LAMPS);
+      fs.writeFileSync(path.join(folder, 'jester.json'), JSON.stringify(LAMPS, null, 2));
+      const commands = () => {
+        try {
+          return fs.readFileSync(path.join(folder, 'commands.log'), 'utf8').trim().split('\n');
+        } catch {
+          return [];
+        }
+      };
+      await inPage(`await chrome.runtime.sendMessage({ type: 'jester/scripts', op: 'open' });`);
+      const controls = await until('the Controls window', () => BrowserWindow.getAllWindows().find((win) => /\/controls\/controls\.html/.test(win.webContents.getURL()) && !win.webContents.isLoading()));
+      const inControls = (code) => controls.webContents.executeJavaScript(`(async () => { ${code} })()`, true);
+      await until('its page', () => inControls(`return !!document.getElementById('welcome') && typeof chrome?.runtime?.sendMessage === 'function';`).catch(() => false));
+      await until('its list, read', () => inControls(`return !document.getElementById('welcome').hidden;`));
+      check('with nothing added, Controls says how to add a folder', true);
+      await shotOf(controls, 'controls-empty');
+
+      // + : the folder chosen (the dialog answered here), read, and shown for review.
+      const realDialog = dialog.showOpenDialog;
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [folder] });
+      await inControls(`document.getElementById('add').click();`);
+      const review = await until('the review screen', () => inControls(`const s = document.getElementById('review'); return s.classList.contains('shown') ? { title: document.getElementById('review-title').textContent, rows: document.querySelectorAll('#review-controls .control-row').length, code: document.querySelector('#review-controls code')?.textContent, preview: !!document.querySelector('#review-preview .block') } : null;`));
+      dialog.showOpenDialog = realDialog;
+      check('+ reads the folder and shows its block for review, each control with the command it runs', review.title === 'Add Lamps' && review.rows === 6 && review.code === 'lamps.cjs on {aim}' && review.preview, JSON.stringify(review));
+      await shotOf(controls, 'controls-review');
+      const also = await inControls(`return [...document.querySelectorAll('#review-also > div')].map((row) => row.textContent);`);
+      check('the review shows what runs without a button: the status check, the served program, a drag’s extra, every aim', also.length === 5 && /^Which lamps.*Bedside, Desk/.test(also[0]) && /whenever Controls opens.*lamps\.cjs status --json/.test(also[1]) && /Stays running.*lamps\.cjs serve/.test(also[2]) && /Brightness is dragged.*--quick/.test(also[3]) && /White is dragged.*--quick/.test(also[4]), JSON.stringify(also));
+      await inControls(`document.querySelector('#review .scroll').scrollTop = 1e6;`);
+      await shotOf(controls, 'controls-review-end');
+      await inControls(`document.getElementById('review-save').click();`);
+      const card = await until('its card', () => inControls(`const c = document.querySelector('.block[data-id="lamps"]'); return c && document.getElementById('main').classList.contains('shown') ? { chips: [...c.querySelectorAll('.aim .chip')].map((b) => b.textContent), buttons: [...c.querySelectorAll('.act')].map((b) => b.textContent), sliders: c.querySelectorAll('input[type=range]').length, swatches: c.querySelectorAll('.swatch').length } : null;`));
+      check('added, its card has the chips, buttons, sliders and swatches, and no “What’s on” button', JSON.stringify(card) === JSON.stringify({ chips: ['All', 'Bedside', 'Desk'], buttons: ['On', 'Off'], sliders: 2, swatches: 3 }), JSON.stringify(card));
+      const stored = JSON.parse(fs.readFileSync(storageFile, 'utf8'));
+      check('it’s kept by folder, and its jester.json is written back', stored.scripts?.[0]?.folder === folder && JSON.parse(fs.readFileSync(path.join(folder, 'jester.json'), 'utf8')).name === 'Lamps', JSON.stringify(stored.scripts));
+
+      // ⋯ › Check what's on: the served program's status.
+      await inControls(`document.querySelector('.block[data-id="lamps"] .block-head .icon').click(); document.querySelector('#menu [data-op="refresh"]').click();`);
+      const summary = await until('what’s on, shown', () => inControls(`const t = document.querySelector('.block[data-id="lamps"] .block-title small').textContent; return /Both on/.test(t) ? t : null;`));
+      check('what’s on is read and shown, with where', summary === 'Both on · 50% · warm white · Scratch', summary);
+      const lit = await inControls(`return [...document.querySelectorAll('.block[data-id="lamps"] .act')].map((b) => b.getAttribute('aria-pressed'));`);
+      check('On is lit while they’re on', JSON.stringify(lit) === '["true","false"]', JSON.stringify(lit));
+
+      // A button, a chip and its button, a slider dragged and let go, a colour.
+      await inControls(`[...document.querySelectorAll('.block[data-id="lamps"] .act')].find((b) => b.textContent === 'Off').click();`);
+      const offLine = await until('the result line', () => inControls(`const r = document.querySelector('.block[data-id="lamps"] .result'); return /off/.test(r.textContent) ? r.textContent : null;`));
+      check('Off runs and says how it went under the card', offLine.trim() === 'Lamps off.' && commands().at(-1) === 'off', `${offLine} | ${commands().join(', ')}`);
+      await inControls(`const c = document.querySelector('.block[data-id="lamps"]'); [...c.querySelectorAll('.aim .chip')].find((b) => b.textContent === 'Bedside').click(); [...c.querySelectorAll('.act')].find((b) => b.textContent === 'On').click();`);
+      await until('Bedside on', () => commands().at(-1) === 'on Bedside');
+      check('a chip aims the buttons', commands().at(-1) === 'on Bedside');
+      await inControls(`const s = document.querySelector('.block[data-id="lamps"] input.brightness'); for (const v of [20, 35, 50]) { s.value = v; s.dispatchEvent(new Event('input')); await new Promise((r) => setTimeout(r, 60)); } s.value = 70; s.dispatchEvent(new Event('input')); s.dispatchEvent(new Event('change'));`);
+      await until('the slider’s last value', () => commands().at(-1) === 'brightness 70 Bedside');
+      const dragged = commands().filter((line) => line.startsWith('brightness'));
+      check('a slider dragged sends quick values on the way and its last when let go', dragged.some((line) => line.includes('--quick')) && dragged.at(-1) === 'brightness 70 Bedside' && dragged.length < 5, dragged.join(', '));
+      await inControls(`document.querySelector('.block[data-id="lamps"] .swatch[aria-label="Blue"]').click();`);
+      await until('blue', () => commands().at(-1) === 'color blue Bedside');
+      const swatch = await until('blue, picked', () => inControls(`return document.querySelector('.block[data-id="lamps"] .swatch[aria-label="Blue"]').getAttribute('aria-checked') === 'true';`));
+      check('a colour runs, and its swatch shows it’s the one on', swatch);
+      await inControls(`[...document.querySelectorAll('.block[data-id="lamps"] .aim .chip')].find((b) => b.textContent === 'All').click();`);
+      await shotOf(controls, 'controls-block');
+
+      // Their words, with no model.
+      const before = asked();
+      const fast = await type('turn off the desk lamp');
+      check('their words run it with no model, and he says how it went', fast === 'Desk lamp off.' && asked() === before && commands().at(-1) === 'off Desk', `${fast} | model asked ${asked() - before} | ${commands().at(-1)}`);
+
+      // The model's "run".
+      answer({ say: 'Okay', do: '', new: false, run: [{ id: 'lamps.brightness', value: '20' }] });
+      const counts = { free: free.requests.length };
+      const cozy = await type('make it cozy in here');
+      const server = answered(counts);
+      check('the model’s run is done, and he says how it went, not the model’s line', cozy === 'Lamps at 20%.' && commands().at(-1) === 'brightness 20', `${cozy} | ${commands().at(-1)}`);
+      check('his prompt has the scripts, an example from them, and what they said is on', /You run the user's own scripts yourself/.test(lastSystem(server)) && /- lamps\.brightness: Lamps, Brightness, value 1 to 100%/.test(lastSystem(server)) && /What the user's scripts said is on/.test(lastSaid(server)), lastSaid(server).slice(0, 300));
+
+      // Later: kept with a task, run when it's due.
+      answer({ say: 'Okay', do: '', new: false, task: { op: 'add', text: 'turn off the lamps', in: 0.1 }, run: [{ id: 'lamps.off' }] });
+      const ran = commands().length;
+      const later = await type('turn off the lamps in 5 seconds');
+      check('asked for later, it’s kept with a task and not run now', /^Okay, at .*: turn off the lamps\.$/.test(later) && commands().length === ran && taskFile().some((task) => task.run?.length && !task.done), `${later} | ${commands().slice(ran).join(', ')}`);
+      await until('the lamps, off at their time', () => commands().length > ran && commands().at(-1) === 'off', 20000);
+      const done = await until('the task, done', () => taskFile().find((task) => task.run?.length && task.done));
+      check('at its time it runs, and the task is done', !!done);
+
+      // A scene, made in Controls and run by its name.
+      const saved = await inControls(`return chrome.runtime.sendMessage({ type: 'jester/scripts', op: 'scene-save', scene: { name: 'Goodnight', steps: [{ script: 'lamps', control: 'brightness', value: 5 }, { script: 'lamps', control: 'off', aim: 'Desk' }] } });`);
+      await until('its pill', () => inControls(`return [...document.querySelectorAll('.scene')].some((b) => b.textContent === 'Goodnight');`));
+      check('a scene is saved and shown', saved.ok === true);
+      await shotOf(controls, 'controls-scene');
+      const night = await type('goodnight');
+      check('said by name, the scene runs its steps', night === 'Goodnight, done.' && commands().slice(-2).join(', ') === 'brightness 5, off Desk', `${night} | ${commands().slice(-2).join(', ')}`);
+
+      // Taken out: the folder and its jester.json stay.
+      await inControls(`document.querySelector('.block[data-id="lamps"] .block-head .icon').click(); document.querySelector('#menu [data-op="remove"]').click(); document.getElementById('confirm-yes').click();`);
+      await until('its card, gone', () => inControls(`return !document.querySelector('.block[data-id="lamps"]');`));
+      check('removed from Controls, its folder and jester.json are left', fs.existsSync(path.join(folder, 'jester.json')) && !JSON.parse(fs.readFileSync(storageFile, 'utf8')).scripts.length);
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+      free.answer = () => ({ say: 'Hello from free.', do: '', new: false });
+      controls.destroy();
     }
   };
 

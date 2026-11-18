@@ -4,7 +4,7 @@ import { ABILITIES, abilitiesPart } from '../desktop/src/main/abilities.js';
 import { createConversation, personaPrompt } from '../desktop/src/main/conversation.js';
 
 const DATE = new Date('2026-11-13T21:07:00');
-const ALL_ON = { notes: true, where: true, calendars: true, chrome: true, pictures: true, voice: true, gestures: true, watch: true, phone: true, mail: true };
+const ALL_ON = { notes: true, where: true, calendars: true, chrome: true, pictures: true, voice: true, gestures: true, watch: true, phone: true, mail: true, scripts: true };
 
 /** The not-connected part of a prompt, or '' when everything is. */
 const notConnected = (text) => /Not connected yet:\n([\s\S]*)/.exec(text)?.[1] ?? '';

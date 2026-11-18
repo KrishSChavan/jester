@@ -61,7 +61,7 @@ const showable = (screen) => (/^(main|chats|settings(\/[a-z-]+)?)$/.test(String(
  */
 function leaveDockIfAlone() {
   const open = (win) => win && !win.isDestroyed() && (win.isVisible() || win.isMinimized());
-  if (!open(home) && !open(calibration)) app.dock?.hide();
+  if (!open(home) && !open(calibration) && !open(controls)) app.dock?.hide();
 }
 
 /**
@@ -191,6 +191,62 @@ export function closeSafely(win) {
   const fallback = setTimeout(destroy, 3000);
   win.once('leave-full-screen', () => setTimeout(destroy, 100));
   win.setFullScreen(false);
+}
+
+let controls = null;
+const CONTROLS_PAGE = 'jester://app/controls/controls.html';
+
+/**
+ * Controls: a card for each of the user's scripts, and their scenes (src/controls/). A window of its own, unlike
+ * Chats and Settings (the user, 2026-11-18: "create a new window called controls"), small enough to sit beside
+ * what they're doing, like a remote. `onShown`: it's come to the front, so what's on is worth reading again.
+ * @param {{quiet?:boolean, onShown?:() => void}} [options]
+ */
+export function showControls({ quiet = false, onShown = () => undefined } = {}) {
+  if (controls && !controls.isDestroyed()) {
+    if (controls.isMinimized()) controls.restore();
+    if (quiet) controls.showInactive();
+    else {
+      app.dock?.show();
+      controls.show();
+      controls.focus();
+    }
+    return controls;
+  }
+  controls = new BrowserWindow({
+    width: 440,
+    height: 700,
+    minWidth: 360,
+    minHeight: 420,
+    title: 'Controls',
+    show: false,
+    backgroundColor: HOME_GROUND,
+    acceptFirstMouse: true,
+    titleBarStyle: 'hidden',
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 18, y: 18 } } : { titleBarOverlay: { color: HOME_GROUND, symbolColor: '#a79bbe', height: 52 } }),
+    ...(ICON ? { icon: path.join(here, ICON) } : {}),
+    webPreferences: pageDefaults
+  });
+  controls.once('ready-to-show', () => {
+    if (quiet) controls.showInactive();
+    else {
+      app.dock?.show();
+      controls.show();
+      controls.focus();
+    }
+  });
+  controls.on('focus', () => onShown());
+  controls.on('closed', () => {
+    controls = null;
+    leaveDockIfAlone();
+  });
+  controls.loadURL(CONTROLS_PAGE);
+  return controls;
+}
+
+/** The Controls window, if it's open. */
+export function controlsWindow() {
+  return controls && !controls.isDestroyed() ? controls : null;
 }
 
 let calibration = null;

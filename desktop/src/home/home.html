@@ -32,6 +32,7 @@
       <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" /></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5L2.5 20h19z" /><path d="M12 10v4.5M12 17.4v.1" /></symbol>
       <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-3 8-7 9.5-4-1.5-7-5.1-7-9.5V6z" /><path d="M9 12l2 2 4-4" /></symbol>
+      <symbol id="i-toggle" viewBox="0 0 24 24"><rect x="2.5" y="7" width="19" height="10" rx="5" /><circle cx="16.5" cy="12" r="2.6" /></symbol>
       <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></symbol>
       <symbol id="i-watch" viewBox="0 0 24 24"><rect x="7" y="6" width="10" height="12" rx="3" /><path d="M9 6l.5-3h5l.5 3M9 18l.5 3h5l.5-3M12 10v2.5l1.5 1" /></symbol>
       <symbol id="i-voice" viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" /></symbol>
@@ -56,9 +57,15 @@
             </button>
           </div>
           <button id="light" class="light" type="button"><i></i><span id="light-text" aria-live="polite" aria-atomic="true">Starting…</span></button>
-          <button id="to-settings" class="icon" type="button" data-go="settings" aria-label="Settings" title="Settings">
-            <svg class="icon-svg"><use href="#i-gear" /></svg>
-          </button>
+          <div class="rights">
+            <!-- Controls: the user's scripts, in a window of their own (src/controls/). -->
+            <button id="to-controls" class="icon" type="button" aria-label="Controls" title="Controls: your scripts">
+              <svg class="icon-svg"><use href="#i-sliders" /></svg>
+            </button>
+            <button id="to-settings" class="icon" type="button" data-go="settings" aria-label="Settings" title="Settings">
+              <svg class="icon-svg"><use href="#i-gear" /></svg>
+            </button>
+          </div>
         </header>
         <div id="banner" class="banner" role="alert" hidden>
           <svg class="icon-svg"><use href="#i-alert" /></svg>
@@ -172,7 +179,7 @@
           <nav class="cards index" aria-label="Settings">
             <button class="row go" type="button" data-go="setup"><span class="glyph"><svg class="icon-svg"><use href="#i-tasks" /></svg></span><span class="label">Getting started</span><span class="aside" id="sum-setup"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/permissions"><span class="glyph"><svg class="icon-svg"><use href="#i-shield" /></svg></span><span class="label">Permissions</span><span class="aside" id="sum-permissions"></span><svg class="chev"><use href="#i-forward" /></svg></button>
-            <button class="row go" type="button" data-go="settings/controls"><span class="glyph"><svg class="icon-svg"><use href="#i-sliders" /></svg></span><span class="label">Controls</span><span class="aside" id="sum-controls"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/general"><span class="glyph"><svg class="icon-svg"><use href="#i-toggle" /></svg></span><span class="label">General</span><span class="aside" id="sum-general"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/watch" id="go-watch"><span class="glyph"><svg class="icon-svg"><use href="#i-watch" /></svg></span><span class="label">Apple Watch</span><span class="aside" id="sum-watch"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/assistant"><span class="glyph"><svg class="icon-svg"><use href="#i-voice" /></svg></span><span class="label">Assistant and voice</span><span class="aside" id="sum-assistant"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/memory"><span class="glyph"><svg class="icon-svg"><use href="#i-book" /></svg></span><span class="label">Memory</span><span class="aside" id="sum-memory"></span><svg class="chev"><use href="#i-forward" /></svg></button>
@@ -198,10 +205,10 @@
         </div>
       </section>
 
-      <section id="page-controls" class="screen page" data-screen="settings/controls" aria-labelledby="controls-heading" inert>
+      <section id="page-general" class="screen page" data-screen="settings/general" aria-labelledby="general-heading" inert>
         <header class="top">
           <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
-          <h1 id="controls-heading">Controls</h1>
+          <h1 id="general-heading">General</h1>
         </header>
         <div class="scroll">
           <div class="cards">

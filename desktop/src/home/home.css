@@ -272,8 +272,10 @@ button:disabled {
   text-align: center;
 }
 
-.main-top #to-settings {
+.main-top .rights {
   justify-self: end;
+  display: flex;
+  gap: 2px;
   margin-right: calc(var(--inset-r) - 16px);
 }
 

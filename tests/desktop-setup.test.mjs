@@ -10,7 +10,7 @@ test('a new computer: what’s needed first, each with where it’s done, then w
   assert.deepEqual(steps.map((step) => [step.id, step.required, step.done, step.go]), [
     ['permissions', true, false, 'settings/permissions'],
     ['model', true, false, 'settings/models'],
-    ['hearing', true, false, 'settings/controls'],
+    ['hearing', true, false, 'settings/general'],
     ['listening', false, false, 'settings/assistant'],
     ['voiceprint', false, false, 'settings/assistant'],
     ['ownVoice', false, false, 'settings/assistant'],

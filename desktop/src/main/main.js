@@ -84,6 +84,8 @@ import { createSpeaker, systemVoice } from './speaker.js';
 import { startSpeech } from './speech.js';
 import { createStopButton } from './stop-button.js';
 import { createTasks } from './tasks.js';
+import { createScripts } from './scripts.js';
+import { draftManifest } from './script-draft.js';
 import { createTeller, SETTLE_MS } from './tell.js';
 import { createTray } from './tray.js';
 import { createWatch } from './watch.js';
@@ -100,7 +102,7 @@ import { VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
-import { closeSafely, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
+import { closeSafely, controlsWindow, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, showCalibration, showControls, showHome, showSettings, showTalk, talkWindow } from './windows.js';
 
 const env = process.env;
 /** Permissions change in System Settings, behind the app's back. */
@@ -121,6 +123,8 @@ const VIEWS = [PATHS.index, PATHS.routines, PATHS.readme];
 const ROUTINES_DELAY_MS = 1000;
 /** Teaching him a voice gives up after this long with nothing read. */
 const TEACHING_MS = 90000;
+/** Scripts set for a time and come due later than this (asleep, or not running) aren't run: they're told as not done. */
+const RUN_LATE_MS = 10 * 60 * 1000;
 
 registerScheme();
 if (env.JESTER_DATA_DIR) {
@@ -190,6 +194,8 @@ let stopButton = null;
 let ring = null;
 let speech = null;
 let voiceRunner = null;
+/** The user's own scripts, in Controls (scripts.js). */
+let scripts = null;
 let conversation = null;
 let recollections = null;
 /** The conversation going on, word for word (conversation-log.js), and what becomes of each once it's over (chat-keeper.js). */
@@ -495,7 +501,7 @@ async function refresh() {
 
 /** His menu, as things stand. */
 function updateTray() {
-  tray?.update(trayModel({ engine, settings, missing: missingFor(permissions, settings), voice: voiceState(), watch: watch?.state, ringing: ring?.ringing || null }));
+  tray?.update(trayModel({ engine, settings, missing: missingFor(permissions, settings), voice: voiceState(), watch: watch?.state, ringing: ring?.ringing || null, scripts: scripts?.menu() || null }));
 }
 
 /**
@@ -1217,6 +1223,74 @@ function onJester(op) {
   else if (op === 'calibrate') showCalibration(pointerDisplay());
   else if (op === 'settings') showSettings();
   else if (op === 'sleep') sleep(true);
+  else if (op === 'controls') showControlsWindow();
+}
+
+/**
+ * Controls, opened or brought forward: what's on is read again for each script that says so and wasn't read in
+ * the last half minute (the user chose "check when Controls opens"). A served script stays logged in a minute
+ * after, so the first press is quick.
+ */
+function showControlsWindow() {
+  return showControls({
+    onShown: () => {
+      scripts?.list().then(({ blocks }) => {
+        for (const block of blocks) if (block.hasStatus && (!block.state || Date.now() - block.state.at > 30000)) scripts.refresh(block.id).catch(() => undefined);
+      }, () => undefined);
+    }
+  });
+}
+
+/**
+ * What Controls (and his window's button for it) asks of the scripts. The page sends a script's id, a control's id,
+ * a value and an aim, never a command line: scripts.js makes that from the folder's jester.json.
+ */
+async function scriptsAsked(message) {
+  const id = String(message.script ?? '');
+  switch (message.op) {
+    case 'open':
+      showControlsWindow();
+      return { ok: true };
+    case 'list':
+      return { ok: true, ...(await scripts.list()) };
+    case 'run':
+      return scripts.run({ script: id, control: String(message.control ?? ''), value: message.value, aim: typeof message.aim === 'string' ? message.aim : '', drag: message.drag === true });
+    case 'refresh':
+      await scripts.refresh(id);
+      return { ok: true };
+    case 'choose': {
+      const win = controlsWindow();
+      const options = { title: 'Add a script folder', buttonLabel: 'Add', message: 'Choose the folder your script is in.', properties: ['openDirectory'] };
+      const { canceled, filePaths } = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+      return { ok: !canceled && !!filePaths?.[0], folder: canceled ? '' : filePaths?.[0] || '' };
+    }
+    case 'inspect':
+      return scripts.inspect(String(message.folder ?? ''));
+    case 'edit': {
+      const view = scripts.view(id);
+      if (!view) return { ok: false, why: 'That script isn’t in Controls any more.' };
+      return { ...(await scripts.inspect(view.folder)), script: id };
+    }
+    case 'save':
+      return scripts.save(String(message.folder ?? ''), message.manifest);
+    case 'remove':
+      return scripts.remove(id);
+    case 'menu':
+      return scripts.setMenu(id, message.on === true);
+    case 'reveal': {
+      const view = scripts.view(id);
+      if (view) shell.showItemInFolder(path.join(view.folder, 'jester.json'));
+      return { ok: !!view };
+    }
+    case 'scene-run':
+      return scripts.runScene(String(message.id ?? ''));
+    case 'scene-save':
+      return scripts.saveScene(message.scene || {});
+    case 'scene-remove':
+      return scripts.removeScene(String(message.id ?? ''));
+    default:
+      return { ok: false };
+  }
 }
 
 /** How to wake Jester, in a few words. */
@@ -1368,8 +1442,16 @@ function checkPermissions() {
   refresh();
 }
 
-async function onTrayAction(id, checked) {
+async function onTrayAction(id, checked, item) {
+  // A script's button or preset, or a scene, from the menu bar: done at once, and said on the screen.
+  if (item?.step || item?.scene) {
+    const outcome = item.scene ? await scripts.runScene(item.scene) : await scripts.run(item.step);
+    if (outcome.text) overlays.toast(outcome.text, outcome.ok ? {} : { detail: 'From the menu bar' });
+    return undefined;
+  }
   switch (id) {
+    case 'controls':
+      return showControlsWindow();
     case 'enabled':
       return saveSettings({ enabled: checked });
     case 'gestures':
@@ -1463,6 +1545,11 @@ function listenToPages() {
           return { ok: false };
         } catch (error) { return { ok: false, error: error.message || 'That briefing could not be opened.' }; }
       }
+      // Controls, and his window's button that opens it.
+      case 'jester/scripts':
+        if (!url.startsWith('jester://app/controls/') && !(url.startsWith('jester://app/home/') && message.op === 'open')) return { ok: false };
+        if (!scripts) return { ok: false, why: 'Jester is still starting.' };
+        return scriptsAsked(message);
       case 'jester/desktop-calibrate':
         showCalibration(pointerDisplay());
         return { ok: true };
@@ -1766,7 +1853,7 @@ function selfTest(capture) {
       fs.writeFileSync(capture, (await win.webContents.capturePage()).toPNG());
       log('selftest: captured', capture);
       // Some of its pages, and the orb's screen beside it.
-      for (const screen of ['settings/permissions', 'settings/controls', 'settings/models', 'settings/gestures', 'main']) {
+      for (const screen of ['settings/permissions', 'settings/general', 'settings/models', 'settings/gestures', 'main']) {
         await go(screen);
         await pause(400);
         const file = capture.replace(/\.png$/, `-${screen.replace('/', '-')}.png`);
@@ -1810,7 +1897,7 @@ function selfTest(capture) {
     // model, whose click the dry-run driver describes instead of doing.
     // What the assistant reads of the window is what's on screen: the page with Cursor control.
     if (env.JESTER_SELFTEST_AGENT) {
-      await go('settings/controls');
+      await go('settings/general');
       await pause(500);
       await selfTestAgent();
     }
@@ -2133,6 +2220,19 @@ async function start() {
   });
   // Taught phrases, learned tasks and shortcuts, kept with the app's settings, and listed in the vault's Routines note.
   learned = createLearned({ storage: storage.local, onChange: writeRoutinesNote });
+  // The user's own scripts: Controls' blocks, and his to run when asked. A folder with no jester.json is drafted by
+  // the talking model, made a moment below, as are words no phrase of theirs fits.
+  scripts = createScripts({
+    storage: storage.local,
+    draft: (folder) => draftManifest(folder, { request: (request) => talking(request), log }),
+    request: (request) => talking(request),
+    log,
+    onChange: (change) => {
+      post({ type: 'jester/scripts-changed', ...change });
+      updateTray();
+    }
+  });
+  scripts.ready().then(updateTray);
   voiceRunner = createVoiceRunner({
     driver: input,
     dispatch,
@@ -2150,6 +2250,7 @@ async function start() {
     toDipFrame: (frame) => toDipFrame(screen, frame),
     quietly: (task) => overlays.whileHidden(task),
     // What's the browser's (its bookmarks, tabs and pages) the linked extension does.
+    scripts,
     browser: {
       claims: (text) => chromeLink?.claims(text, { browserInFront: browserMode }) ?? false,
       run: (text, meant = '', options = {}) => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal, meant, ...options }))
@@ -2294,6 +2395,7 @@ async function start() {
     commands: {
       knows: (text) => voiceRunner.knows(text),
       risky: (text) => voiceRunner.risky(text),
+      scriptsAsk: (text) => voiceRunner.scriptsAsk(text),
       run: (text, said, context) => voiceRunner.run(text, { talking: true, said, context })
     },
     // What he remembers and the user's notes, for each turn; "remember this"; notes made and opened.
@@ -2309,6 +2411,8 @@ async function start() {
     situation,
     // Their to-do list, reminders and timers.
     tasks,
+    // Their own scripts: run by "run", or kept with a task to run later.
+    scripts,
     // The day's brief and its wrap-up, when they ask for one.
     briefs: {
       asked: briefingRequest,
@@ -2337,6 +2441,7 @@ async function start() {
       gestures: settings?.gesturesEnabled !== false,
       watch: !!watch?.state?.paired,
       phone: !!phone?.ready,
+      scripts: (scripts?.count || 0) > 0,
       mail: !!google?.signedIn,
       computer: process.platform === 'darwin' ? 'Mac' : 'computer'
     }),
@@ -2377,6 +2482,38 @@ async function start() {
   // A reminder's time, or a timer's end: told like any line, and only then counted as given.
   clock.on('task', async (job, info) => {
     const id = job.payload?.id;
+    // Scripts set for a time ("turn the lights off at 11"): run, here or not. How it went is said if they're here
+    // and it worked, and told like a reminder (held, or sent to their phone) if it didn't.
+    const timed = tasks.get(id);
+    if (timed?.run?.length && !timed.done) {
+      // Run once: a job held to tell them it failed comes back here, and only tells it.
+      if (!timed.failed) {
+        // Much later than it was for (the Mac asleep, or Jester not running), it isn't done: the heater on at 6 isn't
+        // wanted at 9. They're told it wasn't.
+        if (info.late > RUN_LATE_MS) {
+          const meant = new Date(info.meant).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+          log(`scripts: a timed run ${Math.round(info.late / 60000)} min late: not done`);
+          tasks.ran(id, false, `it was for ${meant}, when I couldn’t run it, so it wasn’t done`);
+        } else {
+          // Not waited for: the clock does one job at a time, and a device that doesn't answer takes half a minute a
+          // step, which a timer due meanwhile mustn't wait behind. A failure comes back on the clock, to be told.
+          const told = (outcome) => {
+            log(`scripts: a timed run ${outcome.ok ? 'worked' : 'failed'}`);
+            tasks.ran(id, outcome.ok, outcome.text);
+            if (outcome.ok) {
+              if (presence.where !== 'away') conversation.announce(outcome.text, { written: !listening });
+            } else clock.add({ id: `task-${id}`, kind: 'task', at: Date.now(), payload: { id } });
+          };
+          scripts.runAll(timed.run).then(told, (err) => told({ ok: false, text: String(err?.message || 'it didn’t work') }));
+          return undefined;
+        }
+      }
+      const failed = tasks.get(id);
+      if (!failed) return undefined;
+      const answer = await teller.say({ ...job, payload: { text: `${failed.text}: ${failed.failed}`, late: `${failed.text}: ${failed.failed}`, card: tasks.cardFor(id), title: 'Scripts', priority: 4 } }, info);
+      if (!answer) tasks.rang(id);
+      return answer;
+    }
     const text = tasks.ringLine(id);
     // Ticked off or removed meanwhile: there's nothing to say.
     if (!text) return undefined;
@@ -2590,5 +2727,6 @@ if (!app.requestSingleInstanceLock()) {
     presence?.stop();
     clock?.stop();
     spend?.flush().catch(() => undefined);
+    scripts?.close();
   });
 }

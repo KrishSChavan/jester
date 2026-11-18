@@ -227,9 +227,9 @@ function drawLight() {
   const { listening, knowsYou, problem, wanted } = desktop?.continuous || {};
   const asleep = settings.enabled && desktop?.engine?.state === ENGINE.SLEEPING;
   const [text, tone, go] = !settings.enabled
-    ? ['Jester is off', '', 'settings/controls']
+    ? ['Jester is off', '', 'settings/general']
     : asleep
-      ? ['Asleep', '', 'settings/controls']
+      ? ['Asleep', '', 'settings/general']
       : matched
         ? ['Your voice', 'on', 'settings/assistant']
         : listening
@@ -512,6 +512,8 @@ for (const form of document.querySelectorAll('.type')) {
   });
 }
 $('listen').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/talk-listen', on: !state().desktop?.continuous?.wanted }));
+// Controls is a window of its own: the user's scripts, beside whatever they're doing.
+$('to-controls').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/scripts', op: 'open' }));
 $('gestures').addEventListener('click', () => save({ gesturesEnabled: state().settings?.gesturesEnabled === false }));
 $('sleep').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-sleep', on: state().desktop?.engine?.state !== ENGINE.SLEEPING }));
 // The banner's button goes to Getting started (its data-go), where what's needed is listed.

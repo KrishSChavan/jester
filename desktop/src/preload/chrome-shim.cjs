@@ -84,6 +84,26 @@ contextBridge.executeInMainWorld({
 });
 
 // ---------------------------------------------------------------------------
+// A folder dropped on the Controls window: where it is
+// ---------------------------------------------------------------------------
+//
+// A sandboxed page's File has no path of its own; Electron's webUtils knows it.
+// Only for Controls, where a dropped script folder is added (src/controls/).
+
+if (location.href.startsWith('jester://app/controls/')) {
+  const { webUtils } = require('electron');
+  contextBridge.exposeInMainWorld('jesterFiles', {
+    pathOf: (file) => {
+      try {
+        return webUtils.getPathForFile(file) || '';
+      } catch {
+        return '';
+      }
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Speech, for the engine page only
 // ---------------------------------------------------------------------------
 //

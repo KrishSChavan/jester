@@ -32,6 +32,7 @@ import { ringStopAsked } from './ring.js';
 import { addressed, nameAt } from './wake.js';
 import { sourcesOf } from './research-sources.js';
 import { searchRequestIntent } from '../../../jester-extension/src/background/search-routing.js';
+import { timedWords } from './script-words.js';
 
 /** How long he waits for more: after just his name, and after answering, with no need to say it again. */
 const OPEN_MS = 8000;
@@ -132,13 +133,25 @@ const REPLY_SCHEMA = {
       properties: { op: { type: 'string', enum: ['add', 'timer', 'done', 'remove', 'move'] }, text: { type: 'string' }, at: { type: 'string' }, in: { type: 'number' } },
       required: ['op'],
       additionalProperties: false
+    },
+    run: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { id: { type: 'string' }, value: { type: 'string' }, aim: { type: 'string' } },
+        required: ['id'],
+        additionalProperties: false
+      }
     }
   },
   required: ['say', 'do', 'new'],
   additionalProperties: false
 };
-/** With no vault to keep notes in, there's no "note": they're the laptop's, as they were. And no "task" with no list of his. */
-const replySchema = ({ notes, tasks }) => (notes && tasks ? REPLY_SCHEMA : { ...REPLY_SCHEMA, properties: Object.fromEntries(Object.entries(REPLY_SCHEMA.properties).filter(([name]) => (name !== 'note' || notes) && (name !== 'task' || tasks))) });
+/**
+ * With no vault to keep notes in, there's no "note": they're the laptop's, as they were. No "task" with no list of
+ * his, and no "run" with no scripts of the user's (scripts.js).
+ */
+const replySchema = ({ notes, tasks, scripts = false }) => ({ ...REPLY_SCHEMA, properties: Object.fromEntries(Object.entries(REPLY_SCHEMA.properties).filter(([name]) => (name !== 'note' || notes) && (name !== 'task' || tasks) && (name !== 'run' || scripts))) });
 const TASK_OPS = new Set(REPLY_SCHEMA.properties.task.properties.op.enum);
 /** A model's "task", as far as it's one: its op, and what else it gave. */
 function taskIn(task) {
@@ -221,7 +234,7 @@ function earlierPart(earlier, date) {
  *   notes: there's a vault to keep the user's notes in; live: where they are (and so the weather) and their calendars
  *   are in the brackets; can: the rest of what's connected (Chrome, pictures, their voice, gestures, the watch)
  */
-export function personaPrompt(date, earlier = [], { notes = true, live = {}, can = {}, tasks = false } = {}) {
+export function personaPrompt(date, earlier = [], { notes = true, live = {}, can = {}, tasks = false, scripts = null } = {}) {
   const leftOut = (
     notes
       ? 'Leave out "note", "remember" and "forget" unless the user asks for a note, or to remember or forget something, as the lines below say.'
@@ -240,6 +253,11 @@ export function personaPrompt(date, earlier = [], { notes = true, live = {}, can
 {"op":"move","text":"which one"} with the new "at" or "in", to change when it's for or to snooze it.
 Said right after you've reminded them of one, "done" or "snooze ten minutes" is about that one. Asked what's on their list or what they have to do, answer from the brackets, the soonest first, in a sentence or two, and leave "task" out. Reminders are one-off: asked for one that repeats, say you can't yet and offer one for the next time. A shopping list or any other list is still a note, kept with "note".`
     : '';
+  // The user's own scripts (scripts.js), with a reply shaped like the task's: told only the shape of "task", qwen3.5:9b
+  // never set it (above). What's said is how it went, told for him, so "say" is just "Okay".
+  const scriptsLine = scripts?.catalog
+    ? `\nYou run the user's own scripts yourself, not the laptop: whenever they ask for something one of them does, set "run" to its steps, leave "do" empty, and make "say" just "Okay": how it went is told to them for you. Each step is {"id":"…"} from the list below, with "value" when it takes one, and "aim" for which of them, by one of the names listed; leave "aim" out for all of them. Several steps run in order. Asked about what they're doing ("are my lights on?"), run the one that says what's on, unless the brackets say it already. To run one later, at a time or in so many minutes, give "task" too, {"op":"add","text":"what it does","at":… or "in":…}: then it runs then, not now.${scripts.example ? ` For example, to "${scripts.example.said}" you reply ${scripts.example.reply}.` : ''}\nTheir scripts:\n${scripts.catalog}`
+    : '';
   const notesLine = notes ? `\nYou keep the user's notes yourself, in Obsidian: asked to make a note, add to a note or list, or open one, set "note" to {"title":"its name","add":"the words to add"} or {"title":"its name","open":true}, and leave "do" empty. ${tasks ? 'A shopping list or any other list of theirs is a note you keep, not an app\'s; their to-do list is the one "task" keeps.' : 'A to-do list, a shopping list or any list of theirs is a note you keep, not an app\'s.'} Asked what a note says, answer from the brackets and leave "note" out: open one only when they ask you to open it. Writing in an app they name is still "do".` : '';
   const knownLine = `Asked what you know or remember about them, pick the three or four things that matter most from the brackets and say them in two short sentences, the way a friend would, never all of it.${notes ? ' Then, in one more, say it\'s all in the About me note in their vault, theirs to read or change, and offer to open it.' : ''} Only when the brackets say you've learned nothing about them yet, say so instead, and that you pick things up as you talk.`;
   const knows = [live.where && 'where the user is and the weather there (and in a place they ask about)', live.calendars && 'their calendars, all of them combined'].filter(Boolean);
@@ -255,10 +273,10 @@ Said right after you've reminded them of one, "done" or "snooze ten minutes" is 
   return `Your name is Jester. You're the user's own AI and their friend, not just a program: you talk with them about anything, and you can take control of their laptop and search the internet for them.
 Your manner is JARVIS's, from Iron Man: calm, quick and quietly capable, with a dry, understated wit, and warm underneath it. You're on the user's side and you know them: notice how they seem, bring up what you remember about them when it fits, and offer the next step when it would help, without doing it unasked. Being a friend never means pretending: you weren't there when things happened, and you only know what they've told you or what's in your memory, so never invent a shared moment or a fact about them. Be yourself, not the film: never call them sir or Mr. Stark unless they ask you to.
 You talk with the user out loud, so talk the way a friend does: one to three short sentences, in plain words, with no lists, markdown or emoji, and never "as an AI" or a script's "How can I assist you?". Match their mood: easy when they're chatting, brisk when they're busy, gentle when something's wrong. When the brackets before their words say how they sound, go by it. In a hurry: the fewest words that will do, and nothing besides. Low: gentle and plain, a sentence or two, with no jokes, and no advice or plans unless they ask. Annoyed: own it in a word if it was your doing, put it right, and no jokes. Delighted: be glad with them and ask about it; what led up to it you only know if they've said, so nothing about the wait, the work or the odds. When they're just chatting, answer what they said, and now and then ask them something back. The user's latest words start with the date and time they said them, in brackets.
-Reply with JSON: {"say":"what you say out loud","do":"a command for the laptop, or empty","new":false}. ${leftOut}
+Reply with JSON: {"say":"what you say out loud","do":"a command for the laptop, or empty","new":false}. ${leftOut}${scripts?.catalog ? ' Leave out "run" unless they ask for something their scripts do.' : ''}
 Set "new" to true when what the user just said has nothing to do with the conversation so far, so a different subject has begun. Set it to false when it carries on from what you were talking about, or when there's nothing before it.
 Fill in "do" whenever the user wants something done on the laptop: an app, site or bookmark opened, something played or written, or something looked up on it and told back to them, like what's due on a class site or whether an email came. The laptop sees its own screen and does all of that, so never say you can't: hand it over. "do" is one plain command holding all of it, like "play Gunna on Spotify" or "open Notes and write down milk", in the user's own words, with every detail they gave: their times and dates as they said them, and a site or bookmark by the name they used, never a web address they didn't say. Then "say" is a few words like "On it", and never claims it's done: the laptop reports that itself. A question about what you can do isn't a request: answer it. When you can't tell who or what they mean (which person, which "it" or "that"), ask one short question and leave "do" empty, rather than guess. A request that's only loose ("play some music") isn't unclear: hand it over as it is. Never ask whether to do a thing and do it in the same reply.
-To search the internet, set "do" to "search the web for" and the words. ${can.web ? 'That researches in the background and returns the results with sources.' : 'That opens the results in the browser for the user to read.'} ${liveLine}${notesLine}${tasksLine}
+To search the internet, set "do" to "search the web for" and the words. ${can.web ? 'That researches in the background and returns the results with sources.' : 'That opens the results in the browser for the user to read.'} ${liveLine}${notesLine}${tasksLine}${scriptsLine}
 Asked to remember something ("remember this", "remember that…", "don't forget…"), copy the words to keep into "remember", word for word but never the asking itself: for just "remember this" or "remember that", the user's own words before it. Leave "do" empty, and say you'll remember it.
 Asked to forget something, or not to keep something they said, set "forget" to what, in a few of their words, leave "do" empty, and say only that you will: what was forgotten is told to them for you. "Don't forget…" asks you to remember, and "forget it" after a request only calls it off.
 ${knownLine}
@@ -507,7 +525,7 @@ export function firstSaid(raw) {
  * @returns {Promise<{say:string, do:string, new:boolean, remember:string, note:{title:string, add:string, open:boolean}|null}>}
  *   remember: words to keep, word for word, or ''
  */
-export async function askModel({ request, text, history, earlier = [], context = '', situation = '', live = {}, can = {}, notes = true, tasks = false, mood = '', signal, date = new Date(), onFirst = null }) {
+export async function askModel({ request, text, history, earlier = [], context = '', situation = '', live = {}, can = {}, notes = true, tasks = false, scripts = null, mood = '', signal, date = new Date(), onFirst = null }) {
   const recalled = quoted(situation, context, moodLine(mood));
   let told = false;
   const { json } = await request({
@@ -524,10 +542,10 @@ export async function askModel({ request, text, history, earlier = [], context =
           }
         }
       : {}),
-    system: personaPrompt(date, earlier, { notes, live, can, tasks }),
+    system: personaPrompt(date, earlier, { notes, live, can, tasks, scripts }),
     prompt: recalled ? `${recalled}\n${stamped(text, date)}` : stamped(text, date),
     history: history.map((entry) => ({ role: entry.who === 'you' ? 'user' : 'assistant', content: entry.text })),
-    schema: replySchema({ notes, tasks }),
+    schema: replySchema({ notes, tasks, scripts: !!scripts?.catalog }),
     maxOutputTokens: REPLY_TOKENS,
     signal
   });
@@ -550,8 +568,17 @@ export async function askModel({ request, text, history, earlier = [], context =
     remember: typeof json?.remember === 'string' ? json.remember.trim() : '',
     forget: typeof json?.forget === 'string' ? json.forget.trim() : '',
     note: noteIn(json?.note),
-    ...(task ? { task } : {})
+    ...(task ? { task } : {}),
+    ...(scripts?.catalog && Array.isArray(json?.run) && json.run.length ? { run: runIn(json.run) } : {})
   };
+}
+
+/** A model's "run", as far as it's steps: [{id, value?, aim?}], every value a string (scripts.js checks them). */
+function runIn(list) {
+  return list
+    .filter((step) => step && typeof step === 'object' && typeof step.id === 'string' && step.id.trim())
+    .slice(0, 12)
+    .map(({ id, value, aim }) => ({ id: id.trim().slice(0, 80), ...(value !== undefined && value !== null && String(value).trim() !== '' ? { value: String(value).trim().slice(0, 60) } : {}), ...(typeof aim === 'string' && aim.trim() ? { aim: aim.trim().slice(0, 60) } : {}) }));
 }
 
 /** A finished conversation, in the sentence recollections.js keeps, by the model he talks through. */
@@ -611,7 +638,7 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, ring = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, ring = null, scripts = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
@@ -1046,6 +1073,13 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         // Refused the way it was answered: typed, it's written.
         if (!allowed) return void (await say('Okay, I won’t.', { written: typing }));
       }
+      // One of the user's scripts with "Ask first" on (scripts.js): said aloud, anyone in the room may have said it.
+      const asks = !typed && commands.scriptsAsk ? await commands.scriptsAsk(text) : null;
+      if (asks && !stale()) {
+        const allowed = await assistant.confirm(`Run ${scripts?.label?.(asks) || `“${text.replace(/[.!?]+$/, '')}”`}`);
+        if (stale()) return;
+        if (!allowed) return void (await say('Okay, I won’t.', { written: typing }));
+      }
       if (stale()) return;
       const { outcome } = await commands.run(text, said, context);
       await before;
@@ -1098,14 +1132,18 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // Said as it's written, when what he says is the model's to choose: asked for a note or to remember, it's how
       // that went, which isn't known yet. Typed to, he writes.
       // Nor when it may be about their list, a reminder or a timer: what's said then is what was really set.
-      const ahead = !typed && !NOTE_ASKED.test(text) && !noteAsked(text) && !askedToRemember(text, text) && !mayAskToForget(text) && !tasks?.wanted(text, hisLast);
+      // Nor when it may be for their scripts: what's said then is how the run went, once it has.
+      const ahead = !typed && !NOTE_ASKED.test(text) && !noteAsked(text) && !askedToRemember(text, text) && !mayAskToForget(text) && !tasks?.wanted(text, hisLast) && !scripts?.mentions(text);
       const onFirst = (sentence) => {
         if (thought.first) return;
         thought.at.first = now();
         thought.first = sentence;
         thought.onFirst?.(sentence);
       };
-      const reply = await chat({ text, history, earlier: recollections.relevant(text), context, situation: around.block, live, can, notes, tasks: !!tasks, mood: moodOf(text, history, now()), signal: ongoing.signal, ...(ahead ? { onFirst } : {}) });
+      // What the user's scripts said is on, when one did lately, goes with where they are and their calendars.
+      const scripted = scripts?.prompt?.() || null;
+      const known = [around.block, scripted ? scripts.stateLines?.() : ''].filter(Boolean).join('\n');
+      const reply = await chat({ text, history, earlier: recollections.relevant(text), context, situation: known, live, can, notes, tasks: !!tasks, scripts: scripted, mood: moodOf(text, history, now()), signal: ongoing.signal, ...(ahead ? { onFirst } : {}) });
       thought.at.reply = now();
       return { reply, theirs, around, notes, lines };
     })();
@@ -1358,6 +1396,42 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         why = await forgetIt(text, askedToForget(text) === 'bare' ? 'bare' : 'named', lines);
         if (stale()) return;
       } else if (reply.forget) log('not asked to forget anything: nothing was forgotten');
+      // The user's own scripts (scripts.js), which he runs, not the laptop. With a task for later that's about them,
+      // they're kept with it and run then (tasks.js); a task about something else ("…and remind me to call Mom at 5")
+      // is its own, and they run now. Asked for at a time, with no task for them, they aren't run now: he asks when.
+      // Run now, what he says is how it went, in a word or two, not the model's line, written before anything ran.
+      // "Ask first", said aloud, is asked when it's set for later too: the clock won't ask.
+      const run = reply.run?.length && scripts ? scripts.fromModel(reply.run) : null;
+      if (run?.problems.length) log('scripts: steps that can’t run were left out:', run.problems.join('; ').slice(0, 200));
+      const timedTask = !!reply.task && ['add', 'timer'].includes(reply.task.op) && !!tasks;
+      const later = !!run?.steps.length && timedTask && (!reply.task.text || scripts.mentions(reply.task.text));
+      let ran = '';
+      if (run?.steps.length) {
+        // The same thing handed to the laptop as well isn't wanted twice.
+        if (reply.do && scripts.match?.(reply.do)) reply.do = '';
+        let allowed = true;
+        if (!typed && scripts.asksFirst(run.steps) && (later || !timedWords(text) || timedTask)) {
+          allowed = await assistant.confirm(later ? `Set ${scripts.label(run.steps)} for later` : `Run ${scripts.label(run.steps)}`);
+          if (stale()) return;
+        }
+        if (!allowed) {
+          why = 'Okay, I won’t.';
+          if (later) reply.task = null;
+        } else if (later) {
+          tasks.touched?.({ fresh: true });
+          why = (await tasks.apply({ ...reply.task, op: 'add', text: reply.task.text || scripts.label(run.steps), run: run.steps }, { said: text, last: history.at(-1)?.who === 'jester' ? history.at(-1).text : '' })) || why;
+          if (stale()) return;
+          if (!noted) card = tasks.touched?.() || card;
+          reply.task = null;
+        } else if (timedWords(text) && !timedTask) {
+          log('scripts: asked for at a time, with no task given: not run now');
+          why = 'When should I do that? Tell me the time again and I’ll set it.';
+        } else {
+          const outcome = await scripts.runAll(run.steps);
+          if (stale()) return;
+          why = ran = outcome.text;
+        }
+      } else if (run) why = why || `That didn’t match any of your scripts: ${run.problems[0] || 'nothing to run'}.`;
       // A task, reminder or timer is his to keep, and how that went is what he says, from what was really kept: the
       // time he says is the one on the clock. One is made only when the user's words ask for it; ticking off,
       // removing and moving are checked against their words by the list itself (tasks.js bears).
@@ -1366,7 +1440,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       if (reply.task && tasks && (!['add', 'timer'].includes(reply.task.op) || tasks.asked(text, lastHis, reply.task.op, reply.task.text))) {
         tasks.touched?.({ fresh: true });
         const applied = await tasks.apply(reply.task, { said: text, last: lastHis });
-        why = applied || why;
+        // Scripts run now as well ("turn off the lights and remind me…"): both are said, the run first.
+        why = applied ? [ran, applied].filter(Boolean).join(' ') : why;
         if (stale()) return;
         // A change to the list that wasn't made, which he was about to agree to ("Okay", "I'll set it for 1:30"):
         // he says how it stands instead.
@@ -1380,7 +1455,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       } else if (reply.task) {
         log('a task nobody asked for wasn’t made');
         // Told to say just "Okay" with a task, he mustn't be heard to agree to one that wasn't made: he offers it.
-        if (!reply.do && (TASK_CLAIM.test(reply.say) || BARE_ACK.test(reply.say))) why = 'That isn’t on your list yet: want me to add it?';
+        if (!reply.do && (TASK_CLAIM.test(reply.say) || BARE_ACK.test(reply.say))) why = [ran, 'That isn’t on your list yet: want me to add it?'].filter(Boolean).join(' ');
       }
       // He says one's done and set nothing (qwen3.5:9b, to "I called the dentist": "Okay, that call's done"): their own
       // words name it, so it's they who said so, and it's ticked.

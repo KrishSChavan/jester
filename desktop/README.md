@@ -72,6 +72,8 @@ front window fills its display.
 | `scripts/task-check.mjs` | `npm run task-check`: real tasks on this computer, typed to the real app one after another, with the real driver, the saved models and the linked Chrome. Acts for real. |
 | `scripts/hear-check.mjs` | `npm run hear-check`: his own speech service on audio from files: a made-up voice learned from use, or (`kept`) what he wasn't sure of, scored against the real voiceprint. |
 | `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
+| `src/main/scripts.js`, `script-manifest.js`, `script-runner.js`, `script-words.js`, `script-draft.js` | The user's own scripts: folders added in Controls, each with a `jester.json` saying what its block holds; run one command at a time, plainly or served; matched from their words with no model; a folder without one drafted by the talking model. |
+| `src/controls/` | The Controls window: a card for each script (buttons, sliders, colours, chips that aim them), scenes, and adding a folder (+, or dropped on the window) with a review before it's added. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
 | `scripts/speed-check.mjs` | `npm run speed-check`: how soon his voice starts after he hears you, with the real model and his real voice, against how it was. |
 | `scripts/voice-check.mjs` | `npm run voice-check`: his real voice making the kinds of line he says: how soon the first sound is ready, and each read back by his own recognizer. `-- --play` to hear it, `-- --voice lewis` for another. |
@@ -2253,6 +2255,79 @@ Parakeet 110M 39/44, WER 7.1%; Kroko streaming 39/44, WER 7.3% (licence
 CC-BY-SA, marketed for hobby use); Moonshine tiny 35/44, WER 14.8%. The small
 models decode in under 35 ms.
 
+## Your own scripts: Controls
+
+Built 2026-11-18, from the user's request: "attach a folder for scripts for him to execute … control my bluetooth
+lights … a new window called controls … a block for lights … turn them off and control their brightness and white
+level". Their choices are in the memory note `script-controls`.
+
+**Controls** is a window of its own (not a screen of his window: the user asked for one), opened from the menu-bar
+menu (Controls…), the sliders button beside the gear in his window, or by saying "open controls". Each script
+folder added is a card: what's on (when the script can say), chips that aim it at part of it (a room), buttons
+(lit by what's on: On while they're on), sliders and colour swatches, and a line saying what the last press did.
+Scenes sit above the cards: a name and steps ("Goodnight": all off), run by a click or by saying the name.
+
+**Adding one**: + (or drop the folder on the window). A folder with a `jester.json` is shown for review as it is;
+one without is drafted: its file names, README, the start of each script and, only for a script whose source shows
+an argument parser, its `--help` go to the talking model, which writes a `jester.json`; it's checked like any other
+and shown for review. Review shows a live preview, each control's name (editable), the command it runs, its first
+spoken phrase, and an **Ask first** switch. Saved, it's written to the folder as `jester.json`, so it goes with the
+folder (a friend can be handed one) and can be edited by hand; Jester reads it again whenever it changes. Hidden
+files, `.env`, keys and lines that look like they set a password or token are never shown to the model.
+
+**`jester.json`** (the whole format is at the top of `src/main/script-manifest.js`):
+
+```json
+{
+  "jester": 1, "name": "Lights", "icon": "bulb", "about": "One sentence: what it controls.",
+  "run": "lights",                      // the program, inside the folder
+  "serve": ["serve"], "status": ["status", "--json"],          // both optional
+  "aim": { "label": "Which lights", "all": "lights",
+           "choices": [{ "label": "Bedside", "value": "Bedside", "said": "Bedside lights" }] },
+  "controls": [
+    { "id": "off", "kind": "button", "label": "Off", "args": ["off", "{aim}"], "lit": { "power": false },
+      "done": "{aim} off.", "words": ["turn off the {aim?} lights", "lights out"] },
+    { "id": "brightness", "kind": "slider", "label": "Brightness", "min": 1, "max": 100, "unit": "%",
+      "track": "brightness", "args": ["brightness", "{value}", "{aim}"], "drag": ["--quick"],
+      "done": "{aim} at {value}%.", "words": ["dim the {aim?} lights to {value}"] }
+  ]
+}
+```
+
+Kinds: `button`, `slider` (`min`, `max`, `unit`, `low`/`high`, `track` brightness|warmth, `names` for spoken steps,
+`drag` arguments added while it's dragged), `choices` (`choices` with `color` for swatches), `ask` (prints what's
+on; his to answer questions with, not shown as a button). `{aim}` with All picked is left out, so `lights off`
+acts on everything. A choice with `"chip": false` is a name he takes by voice but not a chip.
+
+**Safe by construction**: the window, a model, a scene or a task only ever names a control, a value and an aim.
+The arguments are the manifest's, with the value checked against the slider's range or the choices, and the aim
+against the aim's values; the program must be inside the folder; it's started with `execFile` (never a shell),
+in its folder, with Homebrew's folders on its PATH and none of Electron's variables. One command at a time per
+script; a slider being dragged sends only its newest value, then the one let go at.
+
+**Served**: a script whose manifest has `serve` is started once and kept, taking `{"id","args"}` lines and
+answering `{"id","code","out","err","state"}`, with `{"event":"state"}` lines when something changes unasked. One
+that doesn't print `{"serve":1}` within 8 s is run plainly for ten minutes; one that leaves when idle is started
+again on the next command. The lights' `lights serve` keeps the Bluetooth login: 0.3–1 s a command, not 2–3 s
+(measured on the user's bulbs 2026-11-18: all three to a brightness 0.98 s, one bulb off 0.30 s, all off 0.50 s,
+what's on 0 ms once connected; first connect about 2.5–3 s).
+
+**By voice**: whole sentences matching a control's `words` run with no model, after his name ("turn off the
+bedside light", "dim the lights to thirty percent", "are the brown lights on?"; one or many alike). Otherwise his
+prompt lists every control as `script.control` with what it takes, and he replies with
+`"run":[{"id":"lights.brightness","value":"30","aim":"Bedside"}]`: he runs it and says how it went in a word or
+two ("Bedside lights at 30%.", "…, but Black didn't answer."), never the model's own line. With a `task` as well,
+it's kept with the task and run when it's due ("turn the lights off at 11"); asked for at a time with no task, it
+isn't run now: he asks when. A control or scene with **Ask first** is asked about when it's said aloud (typed, or
+a click, never asks). What a script said is on, read in the last ten minutes, goes in the brackets before their
+words. A taught phrase ("when I say movie time, dim the lights to 20 and make them warm") is resolved against the
+scripts by the talking model the first time it's said, and remembered.
+
+**Menu bar**: each script shown there (⋯ › Show in the menu bar, on by default) is a submenu of what's on, its
+buttons, and its sliders' and choices' presets, acting on all of it; and a Scenes submenu.
+
+Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice commands) is now **General**.
+
 ## Checks that need you at the Mac
 
 1. **Input**: `npm run dev:mac -- spikes/input-in-electron.mjs`. Allow
@@ -2429,6 +2504,18 @@ models decode in under 35 ms.
     About me and delete what's wrong or what you'd rather he didn't say aloud:
     it won't come back. Then ask "what do you know about me?". The log has
     `learning: done: … chat(s) read, … fact(s) into About me`.
+
+22. **Your scripts in Controls** (built 2026-11-18; the lights were run through the real app on a scratch profile
+    with your real `~/bluetooth lights`, never with your own Jester or its settings): restart Jester (menu bar ›
+    Restart Jester), then menu bar › Controls…, or the sliders button beside the gear. Press + and choose
+    `~/bluetooth lights`: it has its `jester.json`, so the review shows the Lights block; press Add to Controls.
+    The first time Jester itself uses Bluetooth, macOS may ask whether "Jester" may: allow it (the Watch's helper
+    asked the same). The card should say "All 3 on · …% · The Brexx" within a few seconds. Try the chips, On/Off,
+    dragging Brightness and White, and a colour. Then say "Jester, turn off the black light", "dim the lights to
+    30", "are the brown lights on?", "turn the lights off in two minutes", and make a scene. Still unverified:
+    a folder **without** a `jester.json` drafted by your real talking model (try a copy of a script folder), the
+    menu bar's Lights submenu, and the Ask first question by voice. The log's `scripts:` and `voice: scripts`
+    lines say what ran.
 
 ## Things learned the hard way
 

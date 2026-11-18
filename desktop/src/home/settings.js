@@ -933,7 +933,7 @@ function renderIndex() {
   if (!settings) return;
   const missing = stillMissing();
   aside('sum-permissions', missing.length ? `${missing.length} needed` : desktop?.permissions?.length ? 'All set' : '', missing.length ? 'warn' : '');
-  aside('sum-controls', !settings.enabled ? 'Off' : [settings.gesturesEnabled === false ? 'Gestures off' : 'Gestures on', settings.pointerEnabled ? 'cursor on' : ''].filter(Boolean).join(', '));
+  aside('sum-general', !settings.enabled ? 'Off' : [settings.gesturesEnabled === false ? 'Gestures off' : 'Gestures on', settings.pointerEnabled ? 'cursor on' : ''].filter(Boolean).join(', '));
   const watch = desktop?.watch || {};
   aside('sum-watch', settings.watchEnabled && watch.paired ? 'Steering' : watch.paired ? 'Paired' : '');
   const continuous = desktop?.continuous || {};

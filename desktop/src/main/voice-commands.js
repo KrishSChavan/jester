@@ -21,7 +21,7 @@
  *                                       app null: the window in front
  *   { kind: 'teach', phrase, then }     "when I say <phrase>, <then>": the user's own command
  *   { kind: 'forget', phrase }          a taught phrase (or a learned task) forgotten
- *   { kind: 'jester', op }              Jester's own: calibrate, settings, sleep
+ *   { kind: 'jester', op }              Jester's own: calibrate, settings, sleep, controls
  *   { kind: 'cancel' } · { kind: 'unknown', text }
  */
 
@@ -154,6 +154,8 @@ const TO = '(?:(?:go|switch|move) to )?(?:the )?';
 const PHRASES = [
   [/^(?:cancel|never ?mind|nothing|forget it)$/, () => ({ kind: 'cancel' })],
   [/^(?:open |show )?(?:the )?jester(?:'s)? settings$/, () => ({ kind: 'jester', op: 'settings' })],
+  // His Controls window: the user's scripts (scripts.js). "Open control center" is the Mac's, not this.
+  [/^(?:open|show|bring up|pull up)(?: me)? (?:my |the |jester(?:['’]s)? )?controls(?: window)?$/, () => ({ kind: 'jester', op: 'controls' })],
   // Jester's own sleep, before "go to" takes it for an app. The computer's isn't this.
   [/^(?:go (?:back )?to sleep|sleep(?: now)?|go to bed|take a nap|put (?:jester|yourself) to sleep|pause (?:jester|yourself))$/, () => ({ kind: 'jester', op: 'sleep' })],
   // Volume

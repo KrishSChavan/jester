@@ -58,7 +58,7 @@ export function setupSteps(state = {}) {
       why: state.hearing ? 'It’s here: what you say is recognized on this computer.' : 'In the desktop folder, run: npm run models. About 500 MB, once.',
       done: !!state.hearing,
       required: true,
-      go: 'settings/controls'
+      go: 'settings/general'
     },
     {
       id: 'listening',

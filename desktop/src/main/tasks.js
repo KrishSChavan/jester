@@ -466,7 +466,11 @@ const capital = (text) => (text ? text.charAt(0).toUpperCase() + text.slice(1) :
  * @param {() => void} [deps.onChange]  the list changed: his window's panel is told
  */
 export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = () => undefined, onChange = () => undefined }) {
-  /** @type {{id:string, text:string, made:number, due?:number, allDay?:boolean, timer?:number, told?:number, done?:number}[]} */
+  /**
+   * run: steps of the user's scripts (scripts.js), run when it's due rather than told: "turn the lights off at 11".
+   * failed: why its run didn't work, once it hasn't.
+   * @type {{id:string, text:string, made:number, due?:number, allDay?:boolean, timer?:number, told?:number, done?:number, run?:object[], failed?:string}[]}
+   */
   let tasks = [];
   let serial = 0;
   /** The reminder told last, and when: what's said next may be about it. */
@@ -518,10 +522,10 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
   const open = () => tasks.filter((task) => !task.done);
   const byDue = (a, b) => (a.due ?? Infinity) - (b.due ?? Infinity) || a.made - b.made;
 
-  function add({ text, due, allDay = false, timer = 0 }) {
+  function add({ text, due, allDay = false, timer = 0, run = null }) {
     const line = tidy(text);
     if (!line || open().length >= MOST_TASKS) return null;
-    const task = { id: `${now().toString(36)}${(serial++).toString(36)}`, text: line, made: now(), ...(Number.isFinite(due) ? { due, ...(allDay ? { allDay: true } : {}) } : {}), ...(timer ? { timer } : {}) };
+    const task = { id: `${now().toString(36)}${(serial++).toString(36)}`, text: line, made: now(), ...(Number.isFinite(due) ? { due, ...(allDay ? { allDay: true } : {}) } : {}), ...(timer ? { timer } : {}), ...(Array.isArray(run) && run.length ? { run: run.slice(0, 12) } : {}) };
     tasks.push(task);
     // A clock with no room for it can't ring: then it isn't kept as if it would.
     if (!schedule(task)) {
@@ -624,6 +628,8 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
     if (allDay) task.allDay = true;
     else delete task.allDay;
     delete task.told;
+    // Scripts that didn't run, moved: they're tried again at the new time, not told again as failed.
+    delete task.failed;
     touch(task);
     schedule(task);
     changed();
@@ -717,6 +723,9 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
         op = 'move';
         which = '';
       }
+      // Scripts to run later are a task with a time, whatever the model called them: "in twenty minutes" isn't a timer.
+      const run = Array.isArray(request?.run) && request.run.length ? request.run : null;
+      if (run && op === 'timer') op = 'add';
       if (op === 'timer') {
         const ms = Math.round(Number(request?.in) * MIN);
         if (!Number.isFinite(ms) || ms < 1000 || ms > LONGEST_TIMER_MS) return 'How long should the timer be?';
@@ -725,6 +734,15 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
       if (op === 'add') {
         if (!which) return 'What should I put on your list?';
         const when = whenAsked(request, said, last, at, which);
+        if (run) {
+          // A run is for a time: with none, it's asked for, not kept as a to-do that never runs.
+          if (when === 'past') return 'That time has already gone by, so I haven’t set it. When should it be?';
+          if (!when || when === 'unclear' || when.allDay) return 'When should I do that? Tell me a time.';
+          const task = add({ text: capital(which), ...when, run });
+          if (!task) return 'Your list is full, so I couldn’t set that.';
+          log('tasks: scripts set to run at a time');
+          return `Okay, ${dueWords(task, at)}: ${task.text.replace(/^\w/, (letter) => letter.toLowerCase())}.`;
+        }
         if (when === 'past') return 'That time has already gone by, so I haven’t set it. When should it be?';
         // They gave a time and it didn't come through: asked for, not left off.
         if (when === 'unclear') return 'When should it be for? I didn’t catch the time.';
@@ -831,6 +849,21 @@ export function createTasks({ file, clock, fs = nodeFs, now = Date.now, log = ()
       if (!Number.isFinite(meant)) return task.timer ? `Your ${what} is up.` : `Reminder: ${what}.`;
       const when = dueWords({ due: meant }, now());
       return task.timer ? `Your ${what} went off ${when}.` : `Reminder, from ${when.replace(/^at /, '')}: ${what}.`;
+    },
+    /**
+     * Its scripts ran (tasks with "run"): done, and so off the list, if they worked. If they didn't, why is kept with
+     * it, so it isn't run again when its job comes back to be told (held while they're away), and it stays on the
+     * list until it's told, for them to see what didn't happen.
+     */
+    ran(id, ok, why = '') {
+      const task = tasks.find((item) => item.id === id);
+      if (!task) return;
+      if (ok) {
+        clock.remove(jobId(id));
+        task.done = now();
+      } else task.failed = String(why || 'It didn’t work.').slice(0, 200);
+      touch(task);
+      changed();
     },
     /** Its time came and they were told: a timer's over with, a reminder stays until they say it's done. */
     rang(id) {

@@ -25,10 +25,12 @@ export const STATUS_TEXT = {
  * @param {string} [state.voice]  the speech model: 'ready' | 'off' | 'missing' (speech.js)
  * @param {{label:string}|null} [state.ringing]  a timer that's ringing (ring.js)
  * @param {{paired?:boolean}} [state.watch]  the Apple Watch (watch.js)
+ * @param {{scripts:{id:string, name:string, summary:string, items:object[]}[], scenes:{id:string, name:string}[]}|null} [state.scripts]
+ *   the user's scripts shown in the menu bar, and their scenes (scripts.js menu)
  * @param {string} [state.platform]
  * @returns {{tooltip:string, title:string, items:object[]}} title: beside the icon, on a Mac
  */
-export function trayModel({ engine, settings, missing = [], voice = 'missing', watch = null, ringing = null, platform = process.platform }) {
+export function trayModel({ engine, settings, missing = [], voice = 'missing', watch = null, ringing = null, scripts = null, platform = process.platform }) {
   const on = !!settings?.enabled;
   // Off, the camera's closed and voice, the watch and talking to him carry on.
   const gestures = settings?.gesturesEnabled !== false;
@@ -61,7 +63,24 @@ export function trayModel({ engine, settings, missing = [], voice = 'missing', w
   }
   items.push({ type: 'separator' });
   if (missing.length) items.push({ id: 'permissions', label: `Allow ${missing.map((item) => item.label).join(' and ')}…` });
-  items.push({ id: 'talk', label: 'Talk to Jester…' }, { id: 'settings', label: 'Settings…' }, { type: 'separator' }, { id: 'restart', label: 'Restart Jester' }, { id: 'quit', label: 'Quit Jester' });
+  // The user's scripts, each a submenu of its buttons and a slider's or choice's presets, acting on all of it; their
+  // scenes; and Controls, where the rest is.
+  for (const script of scripts?.scripts || []) {
+    items.push({
+      id: `script:${script.id}`,
+      label: script.name,
+      submenu: [
+        ...(script.summary ? [{ id: `script:${script.id}:state`, label: script.summary, enabled: false }, { type: 'separator' }] : []),
+        ...script.items.map((item, i) =>
+          item.items
+            ? { id: `script:${script.id}:${i}`, label: item.label, submenu: item.items.map((option, j) => ({ id: `run:${script.id}:${i}:${j}`, label: option.label, step: option.step })) }
+            : { id: `run:${script.id}:${i}`, label: item.label, step: item.step }
+        )
+      ]
+    });
+  }
+  if (scripts?.scenes?.length) items.push({ id: 'scenes', label: 'Scenes', submenu: scripts.scenes.map((scene) => ({ id: `scene:${scene.id}`, label: scene.name, scene: scene.id })) });
+  items.push({ id: 'controls', label: 'Controls…' }, { id: 'talk', label: 'Talk to Jester…' }, { id: 'settings', label: 'Settings…' }, { type: 'separator' }, { id: 'restart', label: 'Restart Jester' }, { id: 'quit', label: 'Quit Jester' });
   const tooltip = missing.length ? `Jester — needs ${missing.map((item) => item.label).join(' and ')}` : `Jester — ${on ? status : 'off'}`;
   // The extension's badge says the same: asleep looks just like awake otherwise.
   return { tooltip, title: asleep ? 'Zz' : '', items };

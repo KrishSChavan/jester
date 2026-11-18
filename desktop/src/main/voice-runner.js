@@ -17,6 +17,7 @@ import { aliasable, asksToBeTold, gist } from './learned.js';
 import { describePlan } from './os-actions.js';
 import { secretIn } from './vault-memory.js';
 import { asksFirst, matchApp, parseSequence } from './voice-commands.js';
+import { timedWords } from './script-words.js';
 import { sourcesOf } from './research-sources.js';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -72,7 +73,7 @@ const SIZE_SLACK = 24;
 /** Where a placed window ends up, in words. */
 const PLACED = { left: 'left half', right: 'right half', full: 'full size', center: 'centered' };
 const SCREEN_NAMES = { laptop: 'laptop screen', monitor: 'monitor', other: 'other screen' };
-const JESTER_SAID = { calibrate: 'Calibrating', settings: 'Opening Settings', sleep: 'Going to sleep' };
+const JESTER_SAID = { calibrate: 'Calibrating', settings: 'Opening Settings', sleep: 'Going to sleep', controls: 'Opening Controls' };
 
 /**
  * Where a window goes in a display's usable area (Electron's workArea,
@@ -193,6 +194,12 @@ export function dictation(text) {
  * @param {(task:Function) => Promise} [deps.quietly]  accessibility reads with Jester's overlays hidden
  * @param {{claims:(text:string) => Promise<boolean>, run:(text:string) => Promise<{ok:boolean, text:string}|null>}} [deps.browser]
  *   the linked Chrome extension (chrome-link.js): whether a command is the browser's, and doing it there
+ * @param {{match:(text:string) => {steps:object[]}|null, mentions:(text:string) => boolean,
+ *   resolve:(text:string) => Promise<{steps:object[]}|null>, runAll:(steps:object[]) => Promise<{ok:boolean, text:string}>,
+ *   asksFirst:(steps:object[]) => boolean}} [deps.scripts]
+ *   the user's own scripts (scripts.js): their words run them before anything else is tried, with no model; words no
+ *   phrase fits but that name their things ("dim the lights to 20 and make them warm", a taught phrase's) are the
+ *   talking model's to resolve before they'd go to the laptop
  */
 export function createVoiceRunner({
   driver,
@@ -210,7 +217,8 @@ export function createVoiceRunner({
   toOsFrame = (frame) => frame,
   toDipFrame = (frame) => frame,
   quietly = (task) => task(),
-  browser = null
+  browser = null,
+  scripts = null
 }) {
   const mac = platform === 'darwin';
   const primary = mac ? 'cmd' : 'ctrl';
@@ -597,6 +605,12 @@ export function createVoiceRunner({
       log('voice: taught', JSON.stringify(text), '→', JSON.stringify(taught.say));
       return runSentence(taught.say, depth + 1, { ...context, runGeneration });
     }
+    // The user's own scripts, by their words: "lights off" is theirs, whatever the matcher would make of it.
+    const scripted = !researched ? scripts?.match(text) : null;
+    if (scripted) {
+      log('voice: scripts', JSON.stringify(text), '→', JSON.stringify(scripted.steps));
+      return { steps: [{ kind: 'scripts', steps: scripted.steps }], outcome: await scripts.runAll(scripted.steps) };
+    }
     const apps = catalog && Date.now() - catalog.at < CATALOG_MS ? await catalog.apps : await readCatalog();
     if (superseded()) return cancelled();
     catalog = null;
@@ -632,6 +646,17 @@ export function createVoiceRunner({
       // One that didn't work is no shortcut: the next time, the conversation works the words out afresh.
       if (outcome) (outcome.ok ? learned.used(alias.key, 'alias') : learned.unalias(text)).catch(() => undefined);
       return { steps, outcome };
+    }
+    if (unknown && !researched && scripts?.mentions(text)) {
+      const resolved = await scripts.resolve(text).catch((err) => (log('voice: scripts couldn’t resolve:', err.message), null));
+      if (superseded()) return cancelled();
+      if (resolved) {
+        log('voice: scripts (resolved)', JSON.stringify(text), '→', JSON.stringify(resolved.steps));
+        // At a time ("turn off the lights in 10 minutes", handed over as a command): not now. Kept for later, it's
+        // the conversation's "run" with a task (conversation.js); here it's said so rather than done early.
+        if (timedWords(text)) return { steps: [{ kind: 'scripts', steps: resolved.steps }], outcome: bad('I haven’t done that yet: ask me again with the time, like “turn off the lights at 11”, and I’ll set it for then.') };
+        return { steps: [{ kind: 'scripts', steps: resolved.steps }], outcome: await scripts.runAll(resolved.steps) };
+      }
     }
     const chromes = async () => !!browser && ((await browser.claims(text)) || (!!said && (await browser.claims(said))));
     // Something to play on YouTube is the linked Chrome's to find and start, though every word of it is a command
@@ -745,6 +770,7 @@ export function createVoiceRunner({
       // "Keep going", with a task just failed to go on with: its own, not the talking model's to make something of.
       if (failed && AGAIN.test(text) && Date.now() - failed.at < AGAIN_MS) return true;
       if (learned && (await learned.phrase(text).catch(() => null))) return true;
+      if (scripts?.match(text)) return true;
       const apps = (await freshApps()).flatMap((app) => app.names);
       if (!parseSequence(text, { apps, platform, talking: true }).some((step) => step.kind === 'unknown')) return true;
       if (!learned) return false;
@@ -767,6 +793,20 @@ export function createVoiceRunner({
       if (alias) steps = parseSequence(alias.does, { apps: names, platform, talking: true });
       if (unknown(steps)) return false;
       return steps.some((step) => asksFirst(step, { platform, listed: (app) => !!matchApp(app, names) }));
+    },
+    /**
+     * The steps of the user's scripts a sentence runs, when one of them has "Ask first" on: said aloud, it's asked
+     * before it's done, whoever said it (scripts.js). A taught phrase asks for what it stands for.
+     * @returns {Promise<object[]|null>} the steps, or null when nothing needs asking
+     */
+    async scriptsAsk(text) {
+      if (!scripts) return null;
+      const taught = learned ? await learned.phrase(text).catch(() => null) : null;
+      const words = taught?.say ?? text;
+      // Words no phrase fits are worked out as running them will (resolve remembers it, so it's asked once): what
+      // only the model could tell was "unlock the front door" asks first all the same.
+      const found = scripts.match(words) || (scripts.mentions(words) ? await scripts.resolve(words).catch(() => null) : null);
+      return found && scripts.asksFirst(found.steps) ? found.steps : null;
     },
     /** Moves a window, as the assistant's place asks: {app?, pid?, name?, where, screen}. */
     async place(request) {

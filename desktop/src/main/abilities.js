@@ -37,6 +37,7 @@
  * @property {boolean} [tasks]  he keeps their to-do list, reminders and timers (tasks.js)
  * @property {boolean} [mail]  their Gmail is connected, to read (google.js, mail.js)
  * @property {boolean} [phone]  their phone is set up for what he tells them when they're away (phone.js)
+ * @property {boolean} [scripts]  at least one of the user's script folders is in Controls (scripts.js)
  * @property {string} [computer]  'Mac', or 'computer' elsewhere
  */
 
@@ -70,6 +71,13 @@ export const ABILITIES = Object.freeze([
     id: 'tasks',
     on: (state) => !!state.tasks,
     can: () => 'Keep their to-do list, remind them of something at a time or on a day, and run timers. A reminder is said aloud when it’s due, or as soon as they’re back at the computer. It stays on the list until they say it’s done: only they tick things off. Reminders are one-off: none repeats yet.'
+  },
+  {
+    id: 'scripts',
+    on: (state) => !!state.scripts,
+    // scripts.js: run from their words at once, by "run", or later with a task (tasks.js); scenes; Controls' blocks.
+    can: () => 'Run the user’s own scripts, listed above with what each does, and their scenes, which run several at once: when they ask, or later at a time they give. They added them in the Controls window, where each has its buttons and sliders.',
+    off: 'Their own scripts, like smart lights or anything else they’ve scripted: none added yet (the Controls window, from Jester’s menu-bar menu or by saying “open controls”: +).'
   },
   {
     id: 'mail',
