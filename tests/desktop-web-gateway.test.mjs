@@ -200,3 +200,11 @@ test('a pasted sign-in address goes only to the port that sign-in opened, with i
   }
   assert.equal(landingAddress('http://127.0.0.1:51234/?state=s123&code=c', null), null, 'no sign-in going on');
 });
+
+test('behind tailscale serve, the browser\'s own host may come forwarded', async (t) => {
+  const { g } = gateway();
+  t.after(() => g.close());
+  const port = await g.ready;
+  await connect(port, { Cookie: `jester_key=${KEY}`, Origin: 'https://jester.tail1234.ts.net', 'X-Forwarded-Host': 'jester.tail1234.ts.net' }).opened;
+  await assert.rejects(connect(port, { Cookie: `jester_key=${KEY}`, Origin: 'https://evil.example', 'X-Forwarded-Host': 'jester.tail1234.ts.net' }).opened);
+});

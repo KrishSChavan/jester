@@ -201,8 +201,15 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
   server.on('upgrade', (request, socket, head) => {
     const url = new URL(request.url, 'http://jester');
     // A page on another site can't use a browser's cookie to reach him: its Origin isn't this one.
+    // Behind `tailscale serve`, the host the browser asked for may come as X-Forwarded-Host.
     const origin = request.headers.origin;
-    const sameSite = !origin || new URL(origin).host === request.headers.host;
+    let originHost = '';
+    try {
+      originHost = origin ? new URL(origin).host : '';
+    } catch {
+      originHost = 'unreadable';
+    }
+    const sameSite = !origin || [request.headers.host, request.headers['x-forwarded-host']].includes(originHost);
     if (url.pathname !== '/socket' || !sameSite || !sameKey(keyOf(request), key)) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
       socket.destroy();

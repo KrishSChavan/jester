@@ -2599,10 +2599,15 @@ async function start() {
   // The vault's opened before the conversation log is: one left from the last run ends as the log loads, and is
   // summed up knowing what About me holds, kept in the vault, and kept at all only if Remember conversations is on.
   settings = await loadSettings();
-  // A server's vault is the one it was started with, synced from the Mac.
-  if (SERVER && env.JESTER_VAULT && !settings.memoryVault) {
-    await saveSettings({ memoryVault: path.resolve(env.JESTER_VAULT) });
-    settings = await loadSettings();
+  // A server's vault is always the one it was started with, synced from the Mac: settings brought from a Mac name
+  // the Mac's folder, which isn't here.
+  if (SERVER && env.JESTER_VAULT) {
+    const vaultHere = path.resolve(env.JESTER_VAULT);
+    const root = fs.existsSync(vaultHere) ? vaultRootIn(vaultHere) || vaultHere : vaultHere;
+    if (settings.memoryVault !== root) {
+      await saveSettings({ memoryVault: root });
+      settings = await loadSettings();
+    }
   }
   openVault();
   // Where the user is, the weather and their calendars: nothing until they're connected in Settings.
