@@ -1498,11 +1498,12 @@ export function createConversation({ chat, speaker, memory, recollections, comma
 
   /**
    * Something heard and let pass, for the log: why, and its shape, never its words. When someone says he didn't
-   * answer to his name, this is what tells a name that wasn't heard as one from a state he was in.
+   * answer to his name, this is what tells a name that wasn't heard as one from a state he was in. No colon after
+   * "pass": dev.log's filter reads "pass:" as a password's label and would hide the whole line (2026-11-18).
    */
   function passed(text, why) {
     const { words, at } = nameAt(text);
-    log(`heard and let pass: ${why} (${words} word${words === 1 ? '' : 's'}${at ? `, his name ${at === 1 ? 'first' : `word ${at}`}` : ', no name in it'})`);
+    log(`heard and let pass — ${why} (${words} word${words === 1 ? '' : 's'}${at ? `, his name ${at === 1 ? 'first' : `word ${at}`}` : ', no name in it'})`);
     return null;
   }
 

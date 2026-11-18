@@ -31,6 +31,7 @@ test('his name, and what the recognizer really writes for it', () => {
     ['Just to minimize this.', 'minimize this.'],
     ['Just tell me a joke.', 'tell me a joke.'],
     ['Just open notes.', 'open notes.'],
+    ['Just say VS Code.', 'say VS Code.'],
     ['Chester, what time is it?', 'what time is it?'],
     // Last, as you'd call someone.
     ['What time is it, Jester?', 'What time is it'],
@@ -62,7 +63,7 @@ test('nameAt: where his name sits in what was heard, for the log', () => {
 });
 
 test('ordinary speech is not for him', () => {
-  for (const heard of ['Just kidding.', 'Just what I needed.', 'Yes please.', 'Yesterday was fun.', 'The rest of it is fine.', 'Gesture control is cool.', 'Jessica is here.', 'Chester is a town in England.', 'Jess is late.', 'Jess and I went out.', 'Jay walked home.', 'I told Jester.', 'Best of luck.', 'Guess what.', 'Test this.', '', '   ',
+  for (const heard of ['Just kidding.', 'Just what I needed.', 'Just say it.', 'Just say no.', 'Just say what you mean.', 'Yes please.', 'Yesterday was fun.', 'The rest of it is fine.', 'Gesture control is cool.', 'Jessica is here.', 'Chester is a town in England.', 'Jess is late.', 'Jess and I went out.', 'Jay walked home.', 'I told Jester.', 'Best of luck.', 'Guess what.', 'Test this.', '', '   ',
     // About him, not to him: his name further in with nothing that sets it off, or nothing asked after it.
     'I told Jester to play some music.', 'So I asked Jester what time it was.', 'Trisha, this is Jester.', 'Yesterday Jester set a timer for me.', 'I think Jester is listening.', 'We use Jester, mostly.', 'Is that Jester? Jester is great.', 'The gesture, Jessica, is rude.',
     // The words people turn to him with are just talk before a name that's also someone's, or before "just".
@@ -1729,7 +1730,7 @@ test('talked over in the user’s voice he gives way without his name; uncertain
   await a.conversation.heard('what time is it?', { unsure: true });
   await a.conversation.heard('Jester, what time is it?', { unsure: true });
   assert.deepEqual(theirs(a), []);
-  assert.deepEqual(logs.splice(0), ['heard and let pass: he was talking (4 words, no name in it)', 'heard and let pass: he was talking (5 words, his name first)']);
+  assert.deepEqual(logs.splice(0), ['heard and let pass — he was talking (4 words, no name in it)', 'heard and let pass — he was talking (5 words, his name first)']);
   // Their own voice is enough: he stops and answers without his name.
   await a.conversation.heard('what time is it?');
   assert.deepEqual(theirs(a), ['what time is it?']);
@@ -1746,8 +1747,14 @@ test('talked over in the user’s voice he gives way without his name; uncertain
   const d = jester({ knowsYou: true, log: (...parts) => logs.push(parts.join(' ')) });
   await d.conversation.heard('I was telling Trisha about Jester yesterday');
   await d.conversation.heard('the bread is nearly done');
-  assert.deepEqual(logs, ['heard and let pass: not said to him (7 words, his name word 6)', 'heard and let pass: not said to him (5 words, no name in it)']);
+  assert.deepEqual(logs, ['heard and let pass — not said to him (7 words, his name word 6)', 'heard and let pass — not said to him (5 words, no name in it)']);
   await d.conversation.heard('The bread is in the oven. Jester, set a timer for forty minutes.');
   assert.deepEqual(theirs(d), ['set a timer for forty minutes.']);
   assert.ok(!logs.join('\n').includes('bread'), 'never the words');
+});
+
+test('the line saying why something heard was let pass is never taken for a password by dev.log’s filter (2026-11-18: "pass:" hid every one)', async () => {
+  const { secretIn } = await import('../desktop/src/main/vault-memory.js');
+  for (const why of ['not said to him', 'he was talking', 'he’d just stopped talking', 'he was waiting on a yes or a no', 'playback echo'])
+    assert.equal(secretIn(`heard and let pass — ${why} (4 words, his name first)`), '', why);
 });

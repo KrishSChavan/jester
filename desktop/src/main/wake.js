@@ -6,7 +6,8 @@
  * twelve synthetic voices (see README): American voices get "Jester", but
  * British, Indian and Australian ones mostly get "Just a…" or "Just to…". So
  * "just" counts, though only with a request after it, which "Just kidding" and
- * "Just what I needed" don't have. Names people really have (Jess, Jay) need
+ * "Just what I needed" don't have. "Just say" too, with what to say after it
+ * (2026-11-18: "Jester, say VS Code" went unheard), but not "just say it", "just say no". Names people really have (Jess, Jay) need
  * the same, or a "hey" before them, or a comma after: "Jess and I went out" is
  * not for Jester, and no text can tell "Jess, pass the salt" from him.
  */
@@ -32,7 +33,7 @@ const FIRST_WORD = /^([a-z]+(?:'[a-z]+)?)(?=$|[^a-z'])/i;
 /** A request's first words. Long enough to be something said to a computer, not a person. */
 const REQUEST = /^(?:please\s+)?(?:(?:can|could|would|will|should|do)\s+(?:you|i|we)\b|what|what's|whats|when|where|who|why|how|open|close|quit|play|pause|stop|resume|mute|unmute|skip|next|previous|turn|set|start|show|hide|tell|say|read|write|type|search|google|look|find|go|take|make|create|put|move|send|reply|call|text|email|remind|lock|volume|louder|quieter|thanks|thank)\b/i;
 /** After "just": people say "just take it", "just what I needed" and "just go" to each other. */
-const JUST_REQUEST = /^(?:(?:a|to|the)\s+)?(?:please\s+)?(?:(?:open|close|quit|play|pause|stop|resume|mute|unmute|skip|turn|set|start|tell|write|type|search|google|remind|lock|volume|read|minimize|scroll|click|press)\b|(?:new|next)\s+(?:tab|window|song|track)\b|what\s+(?:time|is|are|do|does|did|was)\b|what's\b|how\s+(?:are|is|do|does)\b|how's\b|(?:can|could|would|will)\s+you\b|show\s+me\b)/i;
+const JUST_REQUEST = /^(?:(?:a|to|the)\s+)?(?:please\s+)?(?:say\s+(?!(?:it|that|this|so|no|yes|what|something|anything|sorry|hi|hello|thanks|you|i|he|she|we|they)\b)\S|(?:open|close|quit|play|pause|stop|resume|mute|unmute|skip|turn|set|start|tell|write|type|search|google|remind|lock|volume|read|minimize|scroll|click|press)\b|(?:new|next)\s+(?:tab|window|song|track)\b|what\s+(?:time|is|are|do|does|did|was)\b|what's\b|how\s+(?:are|is|do|does)\b|how's\b|(?:can|could|would|will)\s+you\b|show\s+me\b)/i;
 const MEANT = /^(?:(?:a|to|the)\s+)(?=\S)/i;
 
 const tidy = (text) => text.replace(/^[\s,.:;!?-]+/, '').trim();
