@@ -1,0 +1,43 @@
+/*
+ * His window as a website (main/web-gateway.js adds this after home.css). The app's window is a fixed size with
+ * room left for the traffic lights; a browser is any size, a phone's included, and has no camera to sleep or
+ * gestures to switch: those are the Mac's.
+ */
+:root,
+:root[data-platform] {
+  --inset-l: 16px;
+  --inset-r: 16px;
+}
+
+.top {
+  -webkit-app-region: no-drag;
+}
+
+#gestures,
+#sleep,
+#to-controls {
+  display: none;
+}
+
+@media (max-width: 520px) {
+  .main-top {
+    grid-template-columns: auto 1fr auto;
+    gap: 6px;
+    padding: 0 8px;
+  }
+  .main-top .lefts {
+    margin-left: 0;
+    gap: 4px;
+  }
+  .main-top .rights {
+    margin-right: 0;
+  }
+  /* The chips keep their icons; their words go. */
+  .main-top .chip span {
+    display: none;
+  }
+  .light {
+    min-width: 0;
+    justify-self: center;
+  }
+}

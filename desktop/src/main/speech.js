@@ -208,6 +208,13 @@ export function startSpeech({ log = () => undefined } = {}) {
   });
 
   return {
+    /**
+     * The always-on mic's audio, from somewhere other than the voice page: a browser whose page is his window (the
+     * web gateway), or the Mac using him in the cloud. 16 kHz mono, as the voice page sends it.
+     */
+    feed(samples) {
+      if (listener && !current && samples?.length) service?.postMessage({ type: 'audio', samples });
+    },
     /** 'ready' | 'off' (voice commands switched off) | 'missing' (no model downloaded) */
     get state() {
       if (!model) return 'missing';

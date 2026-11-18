@@ -26,7 +26,8 @@
   },
   "dependencies": {
     "ical.js": "2.2.1",
-    "sherpa-onnx-node": "1.13.8"
+    "sherpa-onnx-node": "1.13.8",
+    "ws": "8.22.1"
   },
   "devDependencies": {
     "electron": "44.7.0"

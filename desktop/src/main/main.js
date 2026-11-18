@@ -25,6 +25,11 @@
  *   JESTER_THEME=light|dark   override the system's appearance
  *   JESTER_LINK_SOCKET=path   listen for the Chrome extension here (with DATA_DIR, the only way it listens)
  *   JESTER_NO_LINK=1          no link to the Chrome extension
+ *   JESTER_SERVER=1           his brain on a server (server/README.md): no camera, cursor, overlays, menu bar or
+ *                             driver; his window is a website (web-gateway.js), and the browser being talked to is his
+ *                             ears and mouth. Keys are sealed with a key file, not a keychain.
+ *   JESTER_WEB_PORT=n         with SERVER: the website's port on 127.0.0.1 (8770)
+ *   JESTER_WEB_KEY=key        with SERVER: the key the website asks for (made and kept in the data folder otherwise)
  */
 
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, utilityProcess } from 'electron';
@@ -40,7 +45,9 @@ import { createAssistant } from './assistant.js';
 import { createWebScraper } from './web-scraper.js';
 import { createResearchPresentation } from './research-presentation.js';
 import { sourceAddress, sourcesOf } from './research-sources.js';
-import { installBridge, onMessage, onStorageChanged, post, postTo, storage } from './chrome-bridge.js';
+import { addRemotePage, fromRemote, installBridge, onMessage, onStorageChanged, post, postRemote, postTo, remoteStorage, storage } from './chrome-bridge.js';
+import { createFileSealer } from './file-sealer.js';
+import { createRemoteVoicePage, createWebGateway, makeKey } from './web-gateway.js';
 import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS } from './briefs.js';
 import { callOffer, createOfferRunner, createOffers, draftOffer, openerLine, personal } from './offers.js';
 import { briefingRequest, createBriefingManager } from './briefing-manager.js';
@@ -106,6 +113,8 @@ import { createWindowShot } from './window-shot.js';
 import { closeSafely, controlsWindow, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, showCalibration, showControls, showHome, showSettings, showTalk, talkWindow } from './windows.js';
 
 const env = process.env;
+/** His brain on a server, his window a website: see JESTER_SERVER above. */
+const SERVER = !!env.JESTER_SERVER;
 /** Permissions change in System Settings, behind the app's back. */
 const PERMISSION_POLL_MS = 2000;
 /** How often the front window is checked: it decides which binding set is live. */
@@ -128,6 +137,8 @@ const TEACHING_MS = 90000;
 const RUN_LATE_MS = 10 * 60 * 1000;
 
 registerScheme();
+// A server has no display worth drawing on (it runs under a virtual one, xvfb) and no GPU.
+if (SERVER) app.disableHardwareAcceleration();
 if (env.JESTER_DATA_DIR) {
   app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
   // A test Jester's log is its own, not the user's dev.log.
@@ -321,7 +332,8 @@ function cpuReport() {
 
 /** Only media macOS (or Windows) has actually granted, so no prompt ever comes from the hidden window. */
 function mediaAllowed(type) {
-  if (env.JESTER_FAKE_MEDIA) return true;
+  // On a server, the mic is a browser's, and the browser asks for it itself.
+  if (env.JESTER_FAKE_MEDIA || SERVER) return true;
   const status = readStatuses();
   if (type === 'video') return status.camera === 'granted';
   if (type === 'audio') return status.microphone === 'granted';
@@ -607,6 +619,7 @@ function showConversation(voice) {
   const talk = talkWindow();
   if (!talk || voice.active === false || voice.done) return post(message);
   postTo(talk.webContents, message);
+  postRemote(message);
   if (!assistant.running) for (const win of overlays.windows()) postTo(win.webContents, TASK_OVER);
 }
 
@@ -625,16 +638,21 @@ let chatForgotten = false;
 function showChat() {
   clearTimeout(chatTimer);
   chatTimer = setTimeout(() => {
-    const win = homeWindow();
-    if (win && conversationLog) postTo(win.webContents, { type: 'jester/chat', chat: currentChat(), forgotten: chatForgotten });
+    if (conversationLog) toHome({ type: 'jester/chat', chat: currentChat(), forgotten: chatForgotten });
     chatForgotten = false;
   }, 0);
 }
 
 /** The Chats panel lists them again. */
 function chatsChanged() {
+  toHome({ type: 'jester/chats-changed' });
+}
+
+/** To his window only: the app's, and wherever it's open as a website. */
+function toHome(message) {
   const win = homeWindow();
-  if (win) postTo(win.webContents, { type: 'jester/chats-changed' });
+  if (win) postTo(win.webContents, message);
+  postRemote(message);
 }
 
 /**
@@ -1843,7 +1861,7 @@ function listenToPages() {
         }
       // Settings' Apple Watch section: pairing is only ever started from here.
       case 'jester/desktop-watch':
-        if (['pair', 'confirm', 'cancel', 'forget'].includes(message.op)) await watch[message.op]();
+        if (watch && ['pair', 'confirm', 'cancel', 'forget'].includes(message.op)) await watch[message.op]();
         return desktopState();
       // Settings' camera view: the engine draws one while someone asks, and
       // only takes asking from Jester's own (worker's) messages.
@@ -2160,6 +2178,56 @@ async function selfTestAgent() {
   log('selftest: assistant —', JSON.stringify(result), '· driver:', calls.join(', '));
 }
 
+/** On a server: the last time anything was done in a browser with his window open (presence's idle seconds). */
+let webActiveAt = Date.now();
+let webGateway = null;
+
+/** The key his website asks for: JESTER_WEB_KEY, or one made on first run and kept in the data folder. */
+function webKey() {
+  if (env.JESTER_WEB_KEY) return env.JESTER_WEB_KEY;
+  const file = path.join(app.getPath('userData'), 'web-key');
+  try {
+    return fs.readFileSync(file, 'utf8').trim();
+  } catch {
+    const key = makeKey();
+    fs.writeFileSync(file, key, { mode: 0o600 });
+    return key;
+  }
+}
+
+/**
+ * JESTER_SERVER: his window as a website (web-gateway.js). Its pages are his own window's, their messages answered
+ * as that window's are, and the browser last clicked in is his ears and mouth.
+ */
+function startWebGateway() {
+  const key = webKey();
+  webGateway = createWebGateway({
+    key,
+    port: Number(env.JESTER_WEB_PORT) || 8770,
+    log,
+    onConnect: (client) => {
+      webActiveAt = Date.now();
+      client.leave = addRemotePage(client);
+    },
+    onClose: (client) => client.leave?.(),
+    onMessage: (client, message) => {
+      webActiveAt = Date.now();
+      return fromRemote(client, message);
+    },
+    onStorage: (area, op, arg) => remoteStorage(area, op, arg),
+    onAudio: (samples) => speech?.feed(samples),
+    onVoiceStatus: (report) => voicePage?.status?.(report),
+    onVoiceClient: () => {
+      webActiveAt = Date.now();
+      presence?.seen('typed');
+    }
+  });
+  webGateway.ready.then(
+    (port) => console.log(`Jester's window: open http://127.0.0.1:${port}/?key=${key} (through Tailscale, https://<this server>.<tailnet>.ts.net/?key=${key})`),
+    (err) => console.error('Jester’s window couldn’t start:', err.message)
+  );
+}
+
 async function start() {
   if (!env.JESTER_KEEP_DOCK) app.dock?.hide();
   if (['light', 'dark'].includes(env.JESTER_THEME)) nativeTheme.themeSource = env.JESTER_THEME;
@@ -2167,25 +2235,34 @@ async function start() {
   // API keys are sealed on disk with the OS's keychain (macOS) or DPAPI (Windows),
   // which is first touched when a key is saved. Without either, saving fails:
   // a key is never written in the clear.
-  const sealer = {
-    seal: (text) => safeStorage.encryptString(text).toString('base64'),
-    unseal: (sealed) => safeStorage.decryptString(Buffer.from(sealed, 'base64'))
-  };
+  // A server has neither: its own key file seals them (file-sealer.js).
+  const sealer = SERVER
+    ? createFileSealer(path.join(app.getPath('userData'), 'sealing.key'))
+    : {
+        seal: (text) => safeStorage.encryptString(text).toString('base64'),
+        unseal: (sealed) => safeStorage.decryptString(Buffer.from(sealed, 'base64'))
+      };
   installBridge({ onClose: closeSafely, sealer });
   await seedSettings();
   installMediaPermissions();
-  permissions = readPermissions();
+  // A server asks no OS for a camera or a mic: browsers ask for their own.
+  permissions = SERVER ? [] : readPermissions();
+  if (SERVER) startWebGateway();
 
   // JESTER_NO_OVERLAY (tests): no windows over the displays, toasts dropped.
-  overlays = env.JESTER_NO_OVERLAY
+  overlays = env.JESTER_NO_OVERLAY || SERVER
     ? { track() {}, toast() {}, cursor() {}, ripple() {}, whileHidden: (task) => task(), toScreen: () => null, windows: () => [], activeWindow: () => null, destroy() {} }
     : createOverlays();
-  startInput();
-  startChromeLink();
-  // Whether they're at the computer: asked of the system's own count of quiet seconds, never of the camera.
+  // A server's hands are the Mac's, when it's connected (none yet): no driver of its own, and no Chrome to link to.
+  if (!SERVER) {
+    startInput();
+    startChromeLink();
+  }
+  // Whether they're at the computer: asked of the system's own count of quiet seconds, never of the camera. On a
+  // server, nobody sits at it: it's how long since anything was done in a browser that has his window open.
   presence = createPresence({
-    idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    keptAwake: process.platform === 'darwin' ? () => macScreenKeptAwake(runFile) : undefined,
+    idleSeconds: () => (SERVER ? (Date.now() - webActiveAt) / 1000 : powerMonitor.getSystemIdleTime()),
+    keptAwake: process.platform === 'darwin' && !SERVER ? () => macScreenKeptAwake(runFile) : undefined,
     file: path.join(app.getPath('userData'), 'presence.json'),
     tickMs: Number(env.JESTER_TICK_MS) || undefined,
     log,
@@ -2208,7 +2285,8 @@ async function start() {
     // A click on a page in the linked Chrome lands on the link the extension finds nearest.
     aimInBrowser: (request) => (browserMode && chromeLink?.linked ? chromeLink.aim(request) : null)
   });
-  watch = createWatch({
+  // The Apple Watch talks to the Mac on its own network: a server never sees it.
+  if (!SERVER) watch = createWatch({
     loadKey: async () => (await storage.local.get('watchKey')).watchKey,
     saveKey: (watchKey) => storage.local.set({ watchKey }),
     forgetKey: () => storage.local.remove('watchKey'),
@@ -2300,7 +2378,8 @@ async function start() {
       run: (text, meant = '', options = {}) => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal, meant, ...options }))
     }
   });
-  voicePage = createVoicePage({ log });
+  // On a server, the browser being talked to is the voice page (web-gateway.js).
+  voicePage = SERVER ? createRemoteVoicePage(webGateway, { log }) : createVoicePage({ log });
   kokoro = startKokoro({
     fork: (file) => utilityProcess.fork(file, [], { serviceName: 'Jester voice', stdio: 'pipe' }),
     voice: () => settings?.jesterVoice,
@@ -2748,6 +2827,11 @@ async function start() {
     if (area === 'local' && changes.settings) refresh();
   });
 
+  if (SERVER) {
+    // No camera, menu bar, permissions or shortcut on a server: his window is the website, already listening.
+    await refresh();
+    return;
+  }
   engineWindow = createEngineWindow(log);
   tray = createTray(onTrayAction);
   await refresh();

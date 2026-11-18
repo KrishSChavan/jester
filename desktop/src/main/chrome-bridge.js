@@ -35,6 +35,11 @@ const withoutPrivate = (items) => Object.fromEntries(Object.entries(items || {})
 const handlers = new Set();
 const storageListeners = new Set();
 let areas = null;
+/**
+ * Pages in a browser elsewhere (web-gateway.js): Jester's window, served as a website. Each is
+ * `{ url, message(message, sender), storageChanged(changes, area) }`, and counts as one of his own pages.
+ */
+const remotes = new Set();
 
 /**
  * Listen as the worker. A handler returns the reply, or a promise of one;
@@ -58,7 +63,47 @@ function pages(except) {
 export function post(message) {
   const sender = { id: RUNTIME_ID, url: WORKER_URL };
   for (const contents of pages()) contents.send('jester:message', message, sender);
+  for (const remote of remotes) remote.message(message, sender);
 }
+
+/** A message from the worker to the pages in browsers elsewhere only: his window, where it's a website. */
+export function postRemote(message) {
+  const sender = { id: RUNTIME_ID, url: WORKER_URL };
+  for (const remote of remotes) remote.message(message, sender);
+}
+
+/** A page in a browser elsewhere joins the pages messages reach. Returns what takes it away again. */
+export function addRemotePage(remote) {
+  remotes.add(remote);
+  return () => remotes.delete(remote);
+}
+
+/** What a page sent, wherever it is: to every other page, then to the worker's handlers, the first reply answering it. */
+async function deliver(message, sender, { exceptContents = null, exceptRemote = null } = {}) {
+  for (const contents of pages(exceptContents)) contents.send('jester:message', message, { id: RUNTIME_ID, url: sender.url });
+  for (const remote of remotes) if (remote !== exceptRemote) remote.message(message, { id: RUNTIME_ID, url: sender.url });
+  for (const handler of handlers) {
+    const reply = await handler(message, sender);
+    if (reply !== undefined) return reply;
+  }
+  return undefined;
+}
+
+/** A message from a page in a browser elsewhere, as one from his own window. */
+export function fromRemote(remote, message) {
+  return deliver(message, { id: RUNTIME_ID, url: remote.url, remote }, { exceptRemote: remote });
+}
+
+/** Storage, as a page sees it: never the private keys. */
+async function pageStorage(area, op, arg) {
+  if (!Object.hasOwn(areas, area) || !['get', 'set', 'remove'].includes(op)) return undefined;
+  if (op === 'get') return withoutPrivate(await areas[area].get(arg));
+  if (op === 'set') return areas[area].set(withoutPrivate(arg));
+  return areas[area].remove([arg].flat().filter((key) => !isPrivate(key)));
+}
+
+/** Storage asked for by a page in a browser elsewhere: the same rules as his own window's. */
+export const remoteStorage = pageStorage;
 
 /** Send to one page only, as `chrome.tabs.sendMessage` would. */
 export function postTo(contents, message) {
@@ -76,7 +121,10 @@ export const storage = {
 
 function storageChanged(area, changes) {
   const visible = withoutPrivate(changes);
-  if (Object.keys(visible).length) for (const contents of pages()) contents.send('jester:storage-changed', visible, area);
+  if (Object.keys(visible).length) {
+    for (const contents of pages()) contents.send('jester:storage-changed', visible, area);
+    for (const remote of remotes) remote.storageChanged(visible, area);
+  }
   for (const listener of storageListeners) listener(changes, area);
 }
 
@@ -126,13 +174,7 @@ export function installBridge({ dataDir = app.getPath('userData'), onClose = nul
   ipcMain.handle('jester:message', async (event, message) => {
     const url = event.senderFrame?.url || event.sender.getURL();
     if (!OWN_PAGES.test(url)) return undefined;
-    const sender = { id: RUNTIME_ID, url, contents: event.sender };
-    for (const contents of pages(event.sender)) contents.send('jester:message', message, { id: RUNTIME_ID, url });
-    for (const handler of handlers) {
-      const reply = await handler(message, sender);
-      if (reply !== undefined) return reply;
-    }
-    return undefined;
+    return deliver(message, { id: RUNTIME_ID, url, contents: event.sender }, { exceptContents: event.sender });
   });
 
   // A page's window.close() (see the preload): close its window, safely.
@@ -143,9 +185,7 @@ export function installBridge({ dataDir = app.getPath('userData'), onClose = nul
 
   ipcMain.handle('jester:storage', async (event, area, op, arg) => {
     const url = event.senderFrame?.url || event.sender.getURL();
-    if (!OWN_PAGES.test(url) || !Object.hasOwn(areas, area) || !['get', 'set', 'remove'].includes(op)) return undefined;
-    if (op === 'get') return withoutPrivate(await areas[area].get(arg));
-    if (op === 'set') return areas[area].set(withoutPrivate(arg));
-    return areas[area].remove([arg].flat().filter((key) => !isPrivate(key)));
+    if (!OWN_PAGES.test(url)) return undefined;
+    return pageStorage(area, op, arg);
   });
 }

@@ -1,0 +1,199 @@
+/**
+ * Jester's window in a browser (main/web-gateway.js): the `chrome` it has in the app (src/preload/chrome-shim.cjs),
+ * over one WebSocket to his server. Runs before the page's own scripts.
+ *
+ *   chrome.runtime.sendMessage / onMessage    messages, as in the app
+ *   chrome.storage.local / session / onChanged    his settings, private keys never sent
+ *
+ * The same socket is his ears and mouth in this browser, like the app's hidden voice page (src/voice/voice.js): the
+ * mic is opened when the server says so, and only on the browser being talked to, which is whichever was last
+ * clicked in (`voice-claim`). His voice plays here too. A click is also what lets a browser play sound at all.
+ */
+(() => {
+  const RUNTIME_ID = 'jester-desktop';
+  const MIC = { channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: false };
+  const RETRY_MS = [500, 1000, 2000, 5000];
+  const messageListeners = new Set();
+  const storageListeners = new Set();
+  const waiting = new Map();
+  let socket = null;
+  let open = false;
+  let queue = [];
+  let nextId = 0;
+  let tries = 0;
+  let claimed = false;
+
+  function connect() {
+    socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/socket`);
+    socket.binaryType = 'arraybuffer';
+    socket.onopen = () => {
+      open = true;
+      tries = 0;
+      socket.send(JSON.stringify({ t: 'hello', role: 'page' }));
+      if (claimed) socket.send(JSON.stringify({ t: 'voice-claim' }));
+      for (const frame of queue) socket.send(frame);
+      queue = [];
+      document.documentElement.dataset.server = 'on';
+    };
+    socket.onmessage = ({ data }) => {
+      let frame;
+      try {
+        frame = JSON.parse(data);
+      } catch {
+        return;
+      }
+      if (frame.t === 'reply') {
+        waiting.get(frame.id)?.(frame.reply ?? undefined);
+        waiting.delete(frame.id);
+      } else if (frame.t === 'msg') {
+        for (const listener of messageListeners) {
+          try {
+            listener(frame.message, frame.sender, () => undefined);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+      } else if (frame.t === 'storage-changed') {
+        for (const listener of storageListeners) {
+          try {
+            listener(frame.changes, frame.area);
+          } catch (err) {
+            console.error(err);
+          }
+        }
+      } else if (frame.t === 'voice') {
+        if (frame.op === 'open') openMic();
+        else closeMic();
+      } else if (frame.t === 'play') play(frame);
+    };
+    socket.onclose = () => {
+      open = false;
+      closeMic();
+      stopPlaying();
+      document.documentElement.dataset.server = 'off';
+      // Asked and never answered: nothing will answer now.
+      for (const resolve of waiting.values()) resolve(undefined);
+      waiting.clear();
+      setTimeout(connect, RETRY_MS[Math.min(tries++, RETRY_MS.length - 1)]);
+    };
+  }
+
+  function send(frame) {
+    const text = JSON.stringify(frame);
+    if (open) socket.send(text);
+    else queue.push(text);
+  }
+
+  function ask(frame) {
+    const id = ++nextId;
+    return new Promise((resolve) => {
+      waiting.set(id, resolve);
+      send({ ...frame, id });
+    });
+  }
+
+  const event = (listeners) => ({
+    addListener: (fn) => void listeners.add(fn),
+    removeListener: (fn) => void listeners.delete(fn),
+    hasListener: (fn) => listeners.has(fn)
+  });
+
+  const area = (name) => ({
+    get: (keys) => ask({ t: 'storage', area: name, op: 'get', arg: keys ?? null }).then((items) => items || {}),
+    set: (items) => ask({ t: 'storage', area: name, op: 'set', arg: items }),
+    remove: (keys) => ask({ t: 'storage', area: name, op: 'remove', arg: keys })
+  });
+
+  if (typeof globalThis.chrome !== 'object' || globalThis.chrome === null) globalThis.chrome = {};
+  globalThis.chrome.runtime = {
+    id: RUNTIME_ID,
+    getURL: (file = '') => `/app/ext/${String(file).replace(/^\/+/, '')}`,
+    sendMessage: (message) => ask({ t: 'msg', message }),
+    onMessage: event(messageListeners)
+  };
+  globalThis.chrome.storage = { local: area('local'), session: area('session'), onChanged: event(storageListeners) };
+  // His window can't close a browser's tab.
+  globalThis.close = () => undefined;
+  // For pages that do something else in a browser (nothing yet).
+  globalThis.jesterWeb = { claim: () => claim() };
+
+  // ---------------------------------------------------------------------------
+  // His ears and mouth, here
+  // ---------------------------------------------------------------------------
+
+  let stream = null;
+  let context = null;
+  let player = null;
+  let micWanted = false;
+
+  function status(report) {
+    if (open) socket.send(JSON.stringify({ t: 'voice-status', report }));
+  }
+
+  /** This browser is the one being talked to: its mic opens if he's listening, and his voice plays here. */
+  function claim() {
+    claimed = true;
+    if (open) socket.send(JSON.stringify({ t: 'voice-claim' }));
+  }
+
+  function closeMic() {
+    micWanted = false;
+    stream?.getTracks().forEach((track) => track.stop());
+    stream = null;
+    Promise.resolve(context?.close()).catch(() => undefined);
+    context = null;
+  }
+
+  async function openMic() {
+    if (micWanted && stream) return;
+    micWanted = true;
+    try {
+      const got = await navigator.mediaDevices.getUserMedia({ audio: MIC, video: false });
+      if (!micWanted) return got.getTracks().forEach((track) => track.stop());
+      stream = got;
+      // The recognizer wants 16 kHz mono; the audio context resamples to it.
+      context = new AudioContext({ sampleRate: 16000 });
+      await context.audioWorklet.addModule('/app/worklets/speech-capture.js');
+      const tap = new AudioWorkletNode(context, 'jester-speech-capture');
+      tap.port.onmessage = ({ data }) => open && socket.send(data.buffer);
+      context.createMediaStreamSource(stream).connect(tap);
+      tap.connect(context.destination);
+      await context.resume();
+      status({ mic: stream.getAudioTracks()[0]?.label || 'open' });
+    } catch (error) {
+      const why = error?.message || String(error);
+      closeMic();
+      status({ mic: `not open: ${why}` });
+    }
+  }
+
+  function stopPlaying() {
+    player?.pause();
+    player = null;
+  }
+
+  function play({ id, bytes, type, stop }) {
+    stopPlaying();
+    if (stop) return;
+    const raw = atob(bytes);
+    const data = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) data[i] = raw.charCodeAt(i);
+    const url = URL.createObjectURL(new Blob([data], { type }));
+    const sound = new Audio(url);
+    player = sound;
+    const over = () => {
+      URL.revokeObjectURL(url);
+      if (player === sound) player = null;
+      status({ ended: id });
+    };
+    sound.onended = over;
+    sound.onpause = over;
+    sound.onerror = over;
+    sound.play().catch(over);
+  }
+
+  // A click or a key here makes this the browser he's talking to.
+  addEventListener('pointerdown', claim, { capture: true });
+  addEventListener('keydown', claim, { capture: true });
+  connect();
+})();
