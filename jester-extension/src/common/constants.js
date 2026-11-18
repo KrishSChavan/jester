@@ -296,6 +296,11 @@ export const SETTINGS_VERSION = 6;
 export const DEFAULT_SETTINGS = {
   settingsVersion: SETTINGS_VERSION,
   enabled: false,
+  // Off: Chrome's camera stays closed and nothing here watches for gestures.
+  // Voice still works, and so does a linked Jester Desktop: its camera, its
+  // gestures, done in Chrome. The same key as the app's own switch, which the
+  // shared engine already obeys; the link never sends it across. @see desktop-link.js
+  gesturesEnabled: true,
 
   // --- camera ---
   cameraDeviceId: '',

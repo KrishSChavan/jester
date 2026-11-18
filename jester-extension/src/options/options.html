@@ -32,6 +32,9 @@
 
       <section class="card" id="cameraSection">
         <h2>Camera</h2>
+        <label class="row check"><input type="checkbox" data-setting="gesturesEnabled" />
+          <span>Watch for gestures</span></label>
+        <p class="small muted">Turn this off and Chrome’s camera stays closed: no gestures, eyes/head cursor or calibration here until it’s back on. Voice still works (Alt+Shift+J, or Start voice in the toolbar popup), and so does Jester Desktop: linked, it watches with its own camera and does your gestures in Chrome.</p>
         <div class="row between camera-status">
           <div class="row"><i class="dot" id="camDot"></i><span id="camText">Checking…</span></div>
           <button class="primary" id="grantBtn">Allow camera access</button>
@@ -346,8 +349,8 @@
           Leave this off — the default — and Jester keeps watching on every tab, so gestures
           and the pointer still work while you browse. Turn it on to stop inference whenever
           there's no video to act on, which is easier on the battery. The camera stream stays
-          open either way so it can resume instantly; use the toggle at the top of this page
-          to release the camera entirely.
+          open either way so it can resume instantly; turn off <strong>Watch for gestures</strong>
+          under Camera to release it entirely and keep voice.
         </p>
       </section>
 

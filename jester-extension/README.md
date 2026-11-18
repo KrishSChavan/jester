@@ -10,7 +10,12 @@ Allow camera access and enable Jester. A closed fist pauses video, thumbs change
 volume, swipes seek or adjust volume, and the ILoveYou pose toggles fullscreen.
 All gesture bindings remain editable, with optional separate fullscreen and
 windowed bindings. **Sleep / wake Jester** keeps the camera watching only for
-its resume gesture and stops the microphone and pointer.
+its resume gesture and stops the microphone and pointer. **Watch for gestures**
+(the popup, and Settings › Camera) off closes the camera: no gestures, eyes/head
+cursor or calibration in Chrome, while voice (Alt+Shift+J or the popup's Start
+voice) and a linked Jester Desktop keep working. It's the setting
+`gesturesEnabled`, which the shared engine also takes from the desktop's own
+switch; the link never carries it between the two.
 
 For voice, allow microphone access and click **Set up on-device speech**.
 Chrome may download a language pack; recognition itself is local. If the local
@@ -166,7 +171,11 @@ gestures and hands their actions here; a command it hears that's about the brows
 (a tab, a bookmark, a site, or Chrome in front) is carried out here, with this
 extension's model, its steps and questions on the app's pill; and a click of the
 app's cursor in Chrome asks the page for the link nearest the aim. While the app
-isn't running, the extension tries again every half minute (`alarms`).
+isn't running, the extension tries again every half minute (`alarms`). With
+**Watch for gestures** off here, Chrome's camera stays closed while the app is away
+too, and the app's gestures still act in Chrome once it links: that switch covers
+this camera only. Jester's master switch off, by contrast, turns the app's
+Chrome commands away ("Jester is off in Chrome").
 
 ## Audit of the fetched implementation
 

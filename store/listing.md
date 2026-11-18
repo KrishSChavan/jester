@@ -21,7 +21,7 @@ asks for, in the order it asks. Text in the boxes is ready to paste.
 
 ## Package
 
-**Current upload:** `dist/jester-extension-0.2.7.zip`.
+**Current upload:** `dist/jester-extension-0.2.8.zip`.
 
 For an existing listing, choose **Package → Upload new package**. For a new
 listing, choose **Items → New item** and upload the same ZIP.
@@ -235,6 +235,11 @@ use your existing Chrome session without exporting cookies or changing tabs.
 The extension works with Jester Desktop closed; an updated linked desktop app
 adds local Scrapling extraction and isolated JavaScript rendering. Cancellation
 also prevents an older research request from resuming after a newer one.
+
+**What's new in 0.2.8**: A **Watch for gestures** switch, in the toolbar popup
+and under Camera in Settings. Turn it off and Chrome's camera stays closed while
+voice commands keep working. A linked Jester Desktop still does your gestures in
+Chrome with its own camera.
 
 **What's new in 0.2.7**: Only real searches go to background research
 ("search for…", "look up…", Canvas or pages you have open); searching YouTube

@@ -191,3 +191,28 @@ test('Chrome running with no window open: one opens, and the bookmark opens in i
   assert.equal(done.ok, true, done.say);
   assert.equal(tabs.some((tab) => tab.url === 'https://psu.instructure.com/'), true);
 });
+
+test('with Watch for gestures off in Chrome, the app’s gestures and commands still act here', async (t) => {
+  t.mock.method(console, 'info', () => {});
+  // Chrome in front: the app is going by the extension's gestures.
+  t.mock.method(chrome.windows, 'getLastFocused', async () => ({ ...windows[0], focused: true, state: 'normal', type: 'normal' }));
+  const change = (patch) => {
+    const oldValue = local.settings;
+    local.settings = { ...oldValue, ...patch };
+    chrome.storage.onChanged.fire({ settings: { oldValue, newValue: local.settings } }, 'local');
+  };
+  change({ gesturesEnabled: false });
+  t.after(() => change({ gesturesEnabled: true }));
+  // Its bindings went across only if they changed; the switch itself never does.
+  assert.equal(posted.some((message) => message.type === 'settings' && 'gesturesEnabled' in (message.settings || {})), false);
+
+  portMessages.fire({ type: 'request', id: 'gesture-1', op: 'act', action: 'TAB_NEXT', source: 'pose', gesture: 'Thumb_Up' });
+  await until(() => posted.some((message) => message.type === 'reply' && message.id === 'gesture-1'), 'the gesture’s reply');
+  const reply = posted.find((message) => message.type === 'reply' && message.id === 'gesture-1');
+  assert.equal(reply.result?.ok, true, reply.result?.detail);
+  assert.equal(tabs.find((tab) => tab.id === 8).active, true);
+
+  const done = await fromDesktop('open my PSU Canvas bookmark');
+  assert.equal(done.ok, true, done.say);
+  assert.deepEqual(created.map((props) => props.url), ['https://psu.instructure.com/']);
+});

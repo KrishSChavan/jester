@@ -354,7 +354,7 @@ function preflightText(signal, ready) {
     if (refusal || notice) return refusal || notice;
     // The lease lapses on purpose while this page is in the background.
     if (!document.hasFocus()) return 'Paused while this window is in the background — click on it to carry on.';
-    return "Jester isn't sending camera frames. Check it's switched on and the camera is allowed.";
+    return "Jester isn't sending camera frames. Check it's switched on, Watch for gestures is on, and the camera is allowed.";
   }
   if (notice) return notice;
   if (live.tracker === 'failed') {

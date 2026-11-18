@@ -10,7 +10,9 @@ const ui = {
   pointerCard: el('pointerCard'),
   pointerEnabled: el('pointerEnabled'),
   pointerInput: el('pointerInput'),
+  gesturesEnabled: el('gesturesEnabled'),
   voiceEnabled: el('voiceEnabled'),
+  voiceHint: el('voiceHint'),
   notice: el('notice'),
   statusDot: el('statusDot'),
   statusText: el('statusText'),
@@ -53,6 +55,8 @@ const DOT_CLASS = {
 let previewSeenAt = 0;
 let cameraGranted = true;
 let lastEngine = {};
+/** Jester on with its Gestures switch off: the camera is closed on purpose, and needs no permission. */
+let gesturesOff = false;
 let env = { ok: true, error: '', cursor: true, aiOk: true, aiMessage: '' };
 /** Set from telemetry, and only when the microphone is in a state worth saying. */
 let micProblem = '';
@@ -104,16 +108,38 @@ function renderEngine(engine = {}) {
   lastEngine = engine;
   if (engine.mic) { micProblem = ['error','no-permission'].includes(engine.mic.state) ? engine.mic.detail || 'Check Voice setup in Settings.' : ''; renderNotice(); }
   const state = engine.state || ENGINE.OFF;
-  const blocked = !cameraGranted;
+  const blocked = !cameraGranted && !gesturesOff;
+  const closed = gesturesOff && state === ENGINE.OFF;
 
-  ui.statusText.textContent = blocked && state !== ENGINE.ERROR
-    ? STATUS_TEXT[ENGINE.NO_PERMISSION]
-    : STATUS_TEXT[state] || state;
+  ui.statusText.textContent = closed
+    ? 'Gestures off'
+    : blocked && state !== ENGINE.ERROR
+      ? STATUS_TEXT[ENGINE.NO_PERMISSION]
+      : STATUS_TEXT[state] || state;
   ui.statusDot.className = `dot ${blocked ? 'error' : DOT_CLASS[state] || ''}`;
-  ui.statusDetail.textContent =
-    engine.detail ||
-    (blocked ? 'Jester needs camera access before it can start.' : '');
+  ui.statusDetail.textContent = closed
+    ? 'Chrome’s camera is closed. Voice still works, and so does Jester Desktop once linked.'
+    : engine.detail || (blocked ? 'Jester needs camera access before it can start.' : '');
   ui.grantBtn.hidden = !blocked && state !== ENGINE.NO_PERMISSION;
+}
+
+/** The switches, from saved settings: the popup's first paint and every change after. */
+function renderSettings(settings) {
+  gesturesOff = !!settings.enabled && settings.gesturesEnabled === false;
+  ui.enabled.checked = !!settings.enabled;
+  // Left usable with Jester off: switched off first, turning Jester on never opens the camera.
+  ui.gesturesEnabled.checked = settings.gesturesEnabled !== false;
+  ui.voiceEnabled.checked = !!settings.voiceEnabled;
+  ui.voiceHint.textContent = settings.gesturesEnabled === false
+    ? 'Start with Alt+Shift+J (⌥⇧J on a Mac) or Start voice below.'
+    : 'Start with your bound gesture (☝️ by default).';
+  ui.pointerEnabled.checked = !!settings.pointerEnabled;
+  ui.pointerInput.value = settings.pointerInput;
+  ui.pointerCard.hidden = !settings.pointerEnabled;
+  if (!settings.enabled) ui.previewPlaceholder.textContent = 'Turn Jester on to start the camera.';
+  else if (gesturesOff) ui.previewPlaceholder.textContent = 'Gestures are off, so the camera is closed.';
+  else ui.previewPlaceholder.textContent = 'Camera preview appears here';
+  renderEngine(lastEngine);
 }
 
 function renderTelemetry(t) {
@@ -219,6 +245,7 @@ ui.pointerEnabled.addEventListener('change', async () => {
   }
 });
 
+ui.gesturesEnabled.addEventListener('change', () => saveSettings({gesturesEnabled:ui.gesturesEnabled.checked}));
 ui.voiceEnabled.addEventListener('change', () => saveSettings({voiceEnabled:ui.voiceEnabled.checked}));
 ui.pointerInput.addEventListener('change', () => saveSettings({pointerInput:ui.pointerInput.value}));
 el('listenBtn').addEventListener('click', () => chrome.runtime.sendMessage({type:'jester/voice-control',action:'start'}));
@@ -299,7 +326,7 @@ setInterval(() => {
   if (previewSeenAt && Date.now() - previewSeenAt > 1500) {
     ui.preview.classList.remove('live');
     ui.previewPlaceholder.hidden = false;
-    ui.previewPlaceholder.textContent = 'Waiting for camera frames…';
+    ui.previewPlaceholder.textContent = gesturesOff ? 'Gestures are off, so the camera is closed.' : 'Waiting for camera frames…';
   }
 }, 800);
 
@@ -313,11 +340,7 @@ setInterval(() => {
 
   const state = await chrome.runtime.sendMessage({ type: MSG.GET_STATE });
   if (!state) return;
-  ui.enabled.checked = !!state.settings.enabled;
-  ui.pointerEnabled.checked = !!state.settings.pointerEnabled;
-  ui.voiceEnabled.checked = !!state.settings.voiceEnabled;
-  ui.pointerInput.value = state.settings.pointerInput;
-  ui.pointerCard.hidden = !state.settings.pointerEnabled;
+  renderSettings(state.settings);
   renderApproval(state.approval);
   el('resumeBtn').hidden = !state.resumeAvailable;
   // The pill may already be up and blocked before this popup was even opened.
@@ -330,17 +353,9 @@ setInterval(() => {
   // you want to check when a pose does something you didn't expect.
   const context = state.context === 'windowed' ? 'windowed' : 'fullscreen';
   ui.targetState.textContent = `${context} · ${state.hasTarget ? 'video tab found' : 'no video tab'}`;
-  if (!state.settings.enabled) {
-    ui.previewPlaceholder.textContent = 'Turn Jester on to start the camera.';
-  }
 })();
 
 chrome.storage.onChanged.addListener((changes,area) => {
   if (area !== 'local' || !changes.settings?.newValue) return;
-  const settings = changes.settings.newValue;
-  ui.enabled.checked = !!settings.enabled;
-  ui.voiceEnabled.checked = !!settings.voiceEnabled;
-  ui.pointerEnabled.checked = !!settings.pointerEnabled;
-  ui.pointerInput.value = settings.pointerInput;
-  ui.pointerCard.hidden = !settings.pointerEnabled;
+  renderSettings(changes.settings.newValue);
 });

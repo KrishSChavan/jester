@@ -24,8 +24,10 @@ or raw HTML. See the [privacy policy](PRIVACY.md).
 5. Bind another pose or swipe to **Start / stop voice commands** if preferred.
    Use the pill’s × or the popup’s Cancel button to stop capture or an active task.
 
-The popup and Settings have separate **Voice commands** and **Cursor control**
-switches. Cursor input can be **Voice**, **Eyes / head**, or **Both**. Head-only
+The popup and Settings have separate **Watch for gestures**, **Voice commands**
+and **Cursor control** switches. Watch for gestures off closes Chrome's camera;
+voice still works, and a linked Jester Desktop still does its gestures in Chrome
+with its own camera. Cursor input can be **Voice**, **Eyes / head**, or **Both**. Head-only
 pointing needs no calibration. Eye modes have a calibration screen. Raise an
 open palm to point and close it into a fist to click; in Both mode, “click” uses
 the current eye/head target too. The old finger-steering implementation remains

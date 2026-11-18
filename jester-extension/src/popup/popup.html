@@ -42,8 +42,10 @@
     </div>
 
     <div class="card" id="inputCard">
+      <label class="row between"><span>Watch for gestures</span><input type="checkbox" id="gesturesEnabled" /></label>
+      <p class="small muted">Off closes Chrome’s camera. Voice still works, and so does Jester Desktop once linked.</p>
       <label class="row between"><span>Voice commands</span><input type="checkbox" id="voiceEnabled" /></label>
-      <p class="small muted">Start with your bound gesture (☝️ by default).</p>
+      <p class="small muted" id="voiceHint">Start with your bound gesture (☝️ by default).</p>
       <label class="row between"><span>Cursor control</span><input type="checkbox" id="pointerEnabled" /></label>
       <div id="pointerCard"><label for="pointerInput">Control with</label>
         <select id="pointerInput"><option value="voice">Voice</option><option value="eyes-head">Eyes / head</option><option value="both">Both</option></select></div>
