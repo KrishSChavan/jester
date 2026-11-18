@@ -1147,6 +1147,35 @@ note asked for goes to the computer's own apps, as before.
 | `Jester/Index.md` | A map of the vault, folder by folder. Rewritten as it changes. |
 | `Jester/How Jester uses this vault.md` | All this, for the user. |
 | `Notes/Grocery list.md` | Notes they asked for ("add eggs to my grocery list"), added to a line at a time. A note the model suggests unasked isn't made: qwen3.5:9b made "Personal Info" of "I'm a junior at Penn State". |
+| `Claude/2026/2026-03-14 Planning the trip.md` | A chat imported from Claude's export (Settings › Memory › Import…), word for word; ChatGPT's go in `ChatGPT/`. See below. |
+
+**Chats from Claude and ChatGPT** (`chat-import.js`, `zip-read.js`). Settings ›
+Memory › Import… takes what each lets the user download: Claude's
+`conversations-000.zip` (Claude now emails a manifest of links, one per part,
+each working once within a day; the manifest itself is recognised and the user
+told to open the conversations link), ChatGPT's export zip, the
+`conversations.json` in either, or a folder one was unzipped into (Safari unzips).
+Each chat becomes a note in `Claude/<year>/` or `ChatGPT/<year>/`, named by its
+first day and title, `type: chat`, `source`, `chat_id`, a `chat/claude` or
+`chat/chatgpt` tag, and a link back to it. A note is the branch last shown (Claude:
+back from the newest message along `parent_message_uuid`; ChatGPT: back from
+`current_node`), `## You · 10:05 AM` / `## Claude · 10:06 AM` per message, the
+messages' own headings pushed to `####` and below so each stays one section in
+search, a code block left open closed. Artifacts and files Claude made, and pasted
+text, are folded callouts (cut at 20,000 characters); tools are one line ("Claude
+used: searched “…” ×2 · read boston.gov"); thinking, tool results and hidden
+messages are left out, as are ChatGPT's citation marks. A line `secretIn` flags is
+replaced by a line saying one was left out: on the user's own 298 chats (2026-11-17)
+that was 194 lines, mostly real keys and passwords. Importing again rewrites only a
+chat whose `updated` is later than its note's, at the same path, and never over a
+note that isn't that chat's (a user's note of the same name gets `… 2.md` beside it).
+These two folders are written only by an import: `vault.writable` (Jester's own
+writes) is still `Jester/` and `Notes/`. Recall labels them for the model: "Your
+chat with Claude “…”, March 14 (8 months ago) › Claude said: …", so Claude's
+answer is never taken for something the user said. Measured on that export: 286
+notes (12 chats with nothing shown skipped), 6.6 MB, in 0.5 s; again in 0.13 s.
+Not yet seen: a real ChatGPT export (built from its documented shape: `mapping`,
+`current_node`, `content.parts`), and Claude's projects or memories parts.
 
 Each of Jester's notes says what it is in its properties (`type`: profile,
 conversations, remembered; a `jester/…` tag; its day), the same way every time, and
@@ -2343,6 +2372,16 @@ models decode in under 35 ms.
     should then show your town and the weather, and "Jester, where am I?" should
     name your street. If it says no position came, the log has `location:
     none:` and why.
+
+20. **Your chats from Claude and ChatGPT** (built 2026-11-17; your Claude export
+    was imported into a scratch vault only, and ChatGPT's format is untested on
+    a real export): Settings › Memory › Import…, choose
+    `~/Downloads/conversations-000.zip`. It should say about 286 Claude chats
+    were added and 194 lines left out, and your vault should have
+    `Claude/2023`, `Claude/2025` and `Claude/2026`. Then ask him something only
+    one of those chats would know: the model should be told "Your chat with
+    Claude …". For ChatGPT: Settings › Data controls › Export data, wait for
+    the email, and import its zip the same way; the log has `import: ChatGPT …`.
 
 ## Things learned the hard way
 

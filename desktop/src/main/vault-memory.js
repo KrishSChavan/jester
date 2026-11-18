@@ -17,7 +17,7 @@
  * from it when the user keeps one there themselves.
  */
 
-import { PATHS, SECTIONS } from './vault.js';
+import { IMPORTED_IN, PATHS, SECTIONS } from './vault.js';
 
 /** The most of the vault the model is given with what's said; of that, the most About me may take whole. */
 export const RECALL_CHARS = 1800;
@@ -568,6 +568,14 @@ function itemParts(hit, date) {
   }
   const title = plain(hit.title) || nameOf(rel);
   const heading = plain(hit.heading).split(' › ').filter((part) => part && part !== title).join(' › ');
+  // A chat they imported from Claude or ChatGPT (chat-import.js): who said it, so the model never takes the other's
+  // answer for something the user said, and when.
+  const imported = hit.type === 'chat' && IMPORTED_IN.find((folder) => rel.startsWith(`${folder}/`));
+  if (imported) {
+    const who = /^You\b/.test(heading) ? ' › you said' : new RegExp(`^${imported}\\b`).test(heading) ? ` › ${imported} said` : '';
+    const day = dayOf(rel, date, false);
+    return { label: `- Your chat with ${imported} “${title}”${day ? `, ${day}` : ''}${who}`, says: flat(hit.text), theirs: true };
+  }
   // Its folder, which may be all that tells School/PHYS 212/Syllabus from School/STAT 318/Syllabus.
   const folder = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
   return { label: `- Note “${title}”${folder ? ` (${folder})` : ''}${heading ? ` › ${heading}` : ''}`, says: flat(hit.text), theirs: true };

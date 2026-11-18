@@ -409,6 +409,23 @@ test('recall: kept to its size, and About me whole only while it’s short', asy
   assert.deepEqual(recalled.used, [{ rel: 'Jester/About me.md', heading: 'About me › People' }]);
 });
 
+test('recall: a chat imported from Claude or ChatGPT says whose words they were, and when', async () => {
+  const index = fakeIndex([
+    { rel: 'Claude/2026/2026-03-14 Planning the trip.md', title: 'Planning the trip', type: 'chat', heading: 'Planning the trip › You · 10:05 AM', text: 'Plan a trip to Boston for my sister’s graduation', score: 0.03, why: 'both' },
+    { rel: 'ChatGPT/2026/2026-11-09 Recipe ideas.md', title: 'Recipe ideas', type: 'chat', heading: 'Recipe ideas › ChatGPT · 2:01 PM', text: 'Try a frittata or shakshuka.', score: 0.029, why: 'meaning' },
+    // A note of the user's own in a folder called Claude is theirs, as any other.
+    { rel: 'Claude/Prompts I like.md', title: 'Prompts I like', type: '', heading: 'Prompts I like', text: 'Explain it like a tutor.', score: 0.028, why: 'words' }
+  ]);
+  const { memory } = memoryWith({ index });
+  const { block } = await memory.recall('what did I plan for boston and what should I cook');
+  assert.equal(block, [
+    '[From your memory and the user’s Obsidian notes, in case it helps:',
+    '- Your chat with Claude “Planning the trip”, March 14 (8 months ago) › you said: Plan a trip to Boston for my sister’s graduation',
+    '- Your chat with ChatGPT “Recipe ideas”, November 9 (yesterday) › ChatGPT said: Try a frittata or shakshuka.',
+    '- Note “Prompts I like” (Claude): Explain it like a tutor.]'
+  ].join('\n'));
+});
+
 test('recall: a short follow-up is searched with the user’s line before it; anything longer as it was said', async () => {
   const index = fakeIndex([]);
   const { memory } = memoryWith({ index });

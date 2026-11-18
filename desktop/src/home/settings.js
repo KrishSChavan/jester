@@ -666,7 +666,7 @@ function renderMemory() {
   const detected = (memory.detected || []).find((item) => item.path !== memory.chosen && item.path !== memory.root);
   $('memoryConversations').checked = settings.memoryConversations !== false;
   $('vault-hint').textContent = memory.root
-    ? `${memory.name}: ${memory.root}. Jester reads all of it, and writes only in its Jester and Notes folders. Stop using, and Jester does neither (nothing in the vault is deleted).`
+    ? `${memory.name}: ${memory.root}. Jester reads all of it, and writes only in its Jester and Notes folders (and Claude and ChatGPT, when you import your chats). Stop using, and Jester does neither (nothing in the vault is deleted).`
     : 'Jester keeps what it learns about you in an Obsidian vault, reads your notes there to answer, and adds to them when you ask.';
   // What leaves the computer: the talking model is told what bears on what's said (vault-memory.js recall).
   if (memory.root) $('vault-hint').textContent += ' What you say goes to the model ticked for Talking with About me and the parts of your notes that look related, never a line that looks like a password.';
@@ -694,11 +694,56 @@ function renderMemory() {
   if (knownShown && memory.root) {
     $('known-hint').textContent = `${knownShown.facts ? `${things(knownShown.facts, 'thing', 'things')} learned from talking with you` : 'Nothing learned yet: he picks things up as you talk'}${knownShown.kept ? `, and ${things(knownShown.kept, 'thing', 'things')} you asked him to remember` : ''}. Ask him “what do you know about me?”, or say “forget that…” and what: he takes it out, and a note you’d asked him to keep goes to the Trash.`;
   }
+  $('chats-import').hidden = !memory.root;
+  $('chats-hint').textContent = memory.root
+    ? 'Bring in the chats you’ve downloaded: from Claude (Settings › Privacy › Export data, then conversations-000.zip from the links it gives) or ChatGPT (Settings › Data controls › Export data). ' +
+      'Each chat becomes a note in your vault’s Claude or ChatGPT folder, word for word but for lines that look like a password or key, and Jester answers from them like your other notes. ' +
+      'Importing again updates only the chats carried on since, replacing those notes.'
+    : 'Once there’s a vault: your chats from Claude and ChatGPT, imported a note each.';
   $('vault-search').textContent = !memory.root
     ? 'Once there’s a vault: by meaning, with nomic-embed-text in Ollama, or by words without it.'
     : memory.reading || !search
       ? 'Reading the vault…'
       : `${search.notes} note${search.notes === 1 ? '' : 's'} read · ${search.mode === 'meaning' ? `by meaning (${search.model})` : search.mode === 'words' ? 'by words' : 'off'}${search.error && search.error !== 'denied' ? ` · ${search.error}` : ''}`;
+}
+
+/** What an import of chats did, in a sentence or two; `error` when nothing came of it. */
+function importedText(result) {
+  if (result.error) return { text: `Couldn’t import them: ${result.error}`, error: true };
+  const things = (count, one, many) => `${count.toLocaleString()} ${count === 1 ? one : many}`;
+  const lines = Object.entries(result.sources || {}).map(([name, tally]) => {
+    const done = [
+      tally.added && `${things(tally.added, 'chat', 'chats')} added to your ${tally.folder} folder`,
+      tally.updated && `${things(tally.updated, 'chat', 'chats')} carried on since, updated`,
+      tally.same && `${things(tally.same, 'chat', 'chats')} already there`,
+      tally.empty && `${things(tally.empty, 'empty chat', 'empty chats')} skipped`
+    ].filter(Boolean);
+    return `${name}: ${done.join(', ') || 'no chats'}.`;
+  });
+  if (result.leftOut) lines.push(`${things(result.leftOut, 'line', 'lines')} left out, as ${result.leftOut === 1 ? 'it' : 'they'} looked like a password, key or card number.`);
+  if (result.failed) lines.push(`${things(result.failed, 'chat', 'chats')} couldn’t be written: Jester’s log says why.`);
+  for (const problem of result.problems || []) lines.push(`${problem.file}: ${problem.why}`);
+  const none = !Object.keys(result.sources || {}).length;
+  if (none && !lines.length) lines.push('There were no chats in that.');
+  return { text: lines.join(' '), error: none };
+}
+
+/** Settings › Memory's Import…: macOS's dialog, then what came of it under the button, till the next one. */
+async function importChats() {
+  const button = $('chats-import');
+  button.disabled = true;
+  try {
+    const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-memory', op: 'import' });
+    if (reply) desktop = reply;
+    if (reply?.imported) {
+      const { text, error } = importedText(reply.imported);
+      $('chats-result').textContent = text;
+      $('chats-result').classList.toggle('error', error);
+    }
+  } finally {
+    button.disabled = false;
+    render();
+  }
 }
 
 /** Asks the app to do something with the vault: it answers with how things are now. */
@@ -967,6 +1012,7 @@ for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], 
   $(id).addEventListener('click', () => vaultOp(op));
 }
 $('vault-use').addEventListener('click', (event) => vaultOp('use', event.currentTarget.dataset.path));
+$('chats-import').addEventListener('click', () => importChats().catch(() => undefined));
 $('locationSource').addEventListener('change', (event) => {
   // The place is asked for before it's chosen: until one's set, there's nothing to tell the weather of.
   namingPlace = event.target.value === 'place' && !desktop?.day?.place;

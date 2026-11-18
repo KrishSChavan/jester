@@ -5,7 +5,8 @@
  * to remember, word for word; and the notes the user asks it to make or add to.
  *
  * It reads the whole vault and writes only in Jester/, any time, and Notes/,
- * when asked. Everything else is the user's. Every write is checked against
+ * when asked; and in Claude/ and ChatGPT/, the chats the user imports there
+ * (chat-import.js), when they import them. Everything else is the user's. Every write is checked against
  * that, and lands whole: written beside the note and renamed into place, so
  * neither Obsidian nor a sync ever sees half a note. Notes are changed by
  * adding and removing lines, never rewritten, so what the user typed into them
@@ -38,6 +39,8 @@ export const PATHS = Object.freeze({
 
 /** The only folders Jester writes in. */
 const WRITES_IN = ['Jester', 'Notes'];
+/** …and where the chats imported from Claude and ChatGPT go, written only by an import the user starts (chat-import.js). */
+export const IMPORTED_IN = Object.freeze(['Claude', 'ChatGPT']);
 /** How deep a vault is walked: far past any real one, short of a loop. */
 const MAX_DEPTH = 24;
 
@@ -46,8 +49,8 @@ const ABOUT_ME_INTRO = 'What Jester has learned about you from your conversation
 const README = [
   '# How Jester uses this vault',
   '',
-  'Jester reads every note in this vault, so it can answer from what you’ve written. It writes in only two folders, Jester and Notes. ' +
-    'Everything else is yours, and Jester leaves it as it is.',
+  'Jester reads every note in this vault, so it can answer from what you’ve written. On its own, it writes in only two folders, Jester and Notes, ' +
+    'and in Claude and ChatGPT only when you import your chats there. Everything else is yours, and Jester leaves it as it is.',
   '',
   '## What’s where',
   '- [[Jester/About me|About me]]: what Jester has learned about you, by section. Correct anything that’s wrong.',
@@ -56,6 +59,8 @@ const README = [
   '- [[Jester/Routines|Routines]]: what Jester does straight away, with no AI model, because you taught it or it learned it.',
   '- [[Jester/Index|Index]]: a map of this vault, folder by folder.',
   '- Notes: notes you asked Jester to make or add to (“add eggs to my grocery list”). Jester changes these only when you ask.',
+  '- Claude and ChatGPT: the chats you imported from their exports (Jester’s Settings › Memory), a note each by year, word for word but for ' +
+    'lines that look like a password or key. Importing again rewrites only the chats carried on since.',
   '',
   '## What Jester keeps',
   '- In this vault, conversations are kept as summaries and facts, not word for word: your exact words are kept here only when you ask Jester to remember something. ' +
@@ -142,10 +147,10 @@ function relPath(rel) {
   return rel.split('/').every((part) => part && part !== '.' && part !== '..') ? rel : null;
 }
 
-/** Whether Jester may write there: a file inside Jester/ or Notes/, plainly named (no "..", nothing hidden). */
-function writablePath(rel) {
+/** Whether Jester may write there: a file inside Jester/ or Notes/ (or `folders`), plainly named (no "..", nothing hidden). */
+function writablePath(rel, folders = WRITES_IN) {
   const parts = relPath(rel)?.split('/');
-  return !!parts && parts.length > 1 && WRITES_IN.includes(parts[0]) && parts.every((part) => !part.startsWith('.'));
+  return !!parts && parts.length > 1 && folders.includes(parts[0]) && parts.every((part) => !part.startsWith('.'));
 }
 
 const inNotes = (rel) => writablePath(rel) && rel.startsWith(`${PATHS.notes}/`);
@@ -714,13 +719,13 @@ export function createVault({ root, fs = nodeFs, now = Date.now, trash = null })
       folders = fs.readdirSync(base, { withFileTypes: true }).filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => entry.name);
     } catch {
       // Not there, or not readable yet: as Jester spells them, until it is.
-      return new Map(WRITES_IN.map((folder) => [folder, folder]));
+      return new Map([...WRITES_IN, ...IMPORTED_IN].map((folder) => [folder, folder]));
     }
     const onDisk = (folder) => (folders.includes(folder) ? folder : folders.find((entry) => entry.toLowerCase() === folder.toLowerCase()) || folder);
-    spelled = new Map(WRITES_IN.map((folder) => [folder, onDisk(folder)]));
+    spelled = new Map([...WRITES_IN, ...IMPORTED_IN].map((folder) => [folder, onDisk(folder)]));
     return spelled;
   }
-  /** A note's path from the vault's root as the disk has it: its parts, Jester/ or Notes/ spelled the disk's way. */
+  /** A note's path from the vault's root as the disk has it: its parts, Jester/, Notes/ (or Claude/, ChatGPT/) spelled the disk's way. */
   const diskParts = (rel) => {
     const [top, ...rest] = rel.split('/');
     return [spelling().get(top) ?? top, ...rest];
@@ -749,11 +754,11 @@ export function createVault({ root, fs = nodeFs, now = Date.now, trash = null })
   }
 
   /**
-   * Writes a note whole, only in Jester/ or Notes/: beside it first, then renamed into place. A note that's a link
-   * isn't written: renamed over, it would be a copy, and the file it links to would never change again.
+   * Writes a note whole, only in Jester/ or Notes/ (`folders`: an import's): beside it first, then renamed into place.
+   * A note that's a link isn't written: renamed over, it would be a copy, and the file it links to would never change again.
    */
-  function put(rel, text) {
-    if (!writablePath(rel)) throw Object.assign(new Error(`Jester writes only in its Jester and Notes folders, not “${rel}”.`), { code: 'not_writable' });
+  function put(rel, text, folders = WRITES_IN) {
+    if (!writablePath(rel, folders)) throw Object.assign(new Error(`Jester writes only in its ${folders.join(' and ')} folders, not “${rel}”.`), { code: 'not_writable' });
     present();
     const file = abs(rel);
     if (fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) {
@@ -1127,6 +1132,49 @@ export function createVault({ root, fs = nodeFs, now = Date.now, trash = null })
       const heading = `# ${headingText(asked)}\n`;
       put(rel, writeFrontmatter({ type: 'note', tags: ['note'], created: time, updated: time }, addition ? appendTo(heading, addition) : heading));
       return { rel, created: true };
+    },
+
+    /**
+     * The chats imported into `folder` (Claude or ChatGPT), by their own ids: the note each is in, and when the chat
+     * last changed, as the note says. A note the user moved out of the folder isn't one of them.
+     * @returns {Map<string, {rel:string, updated:number}>}
+     */
+    importedChats(folder) {
+      const found = new Map();
+      if (!IMPORTED_IN.includes(folder)) return found;
+      for (const note of listNotes()) {
+        if (!note.rel.startsWith(`${folder}/`)) continue;
+        try {
+          const { data } = read(note.rel);
+          const id = typeof data.chat_id === 'string' || typeof data.chat_id === 'number' ? String(data.chat_id) : '';
+          if (data.type === 'chat' && id && !found.has(id)) found.set(id, { rel: note.rel, updated: Date.parse(data.updated) || 0 });
+        } catch {
+          /* unreadable: imported again as new */
+        }
+      }
+      return found;
+    },
+
+    /**
+     * An imported chat's note, written in Claude/ or ChatGPT/ only. `rel`, the note it was imported to before, is
+     * rewritten while it's still that chat's (`id`); otherwise a new note is made, called `name` (or "`name` 2"…),
+     * so nothing else is ever written over.
+     * @param {{rel?:string, name:string, text:string, id?:string}} note
+     * @returns {string} the note written
+     */
+    writeImported({ rel, name, text, id } = {}) {
+      if (rel && writablePath(rel, IMPORTED_IN)) {
+        const old = textOf(rel);
+        const data = old === null ? null : parseFrontmatter(old).data;
+        if (data?.type === 'chat' && id && String(data.chat_id) === String(id)) {
+          put(rel, text, IMPORTED_IN);
+          return rel;
+        }
+      }
+      if (!writablePath(`${name}.md`, IMPORTED_IN)) throw Object.assign(new Error(`Imported chats go only in the ${IMPORTED_IN.join(' and ')} folders, not “${name}”.`), { code: 'not_writable' });
+      const next = unique(name);
+      put(next, text, IMPORTED_IN);
+      return next;
     },
 
     /** The link that opens a note in Obsidian, by its path as the disk spells it. */

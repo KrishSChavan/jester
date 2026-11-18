@@ -114,8 +114,8 @@ const ABOUT_A_DAY = new Set(
 /** "earlier today", "all day yesterday", "did anything happen on Friday". */
 const DAY_FILLER = new Set(['day', 'earlier', 'later', 'past', 'anything', 'something', 'everything', 'else'].map(stem));
 const LABEL_KEYS = /(?:^|; )(?:type|folder|tags|topics|people|aliases): /g;
-/** Properties that file a note or say when it was written: labelsOf has the filing, and nobody asks the rest. */
-const UNSAID = new Set(['type', 'tags', 'aliases', 'cssclasses', 'cssclass', 'title', 'created', 'updated', 'position']);
+/** Properties that file a note or say when it was written: labelsOf has the filing, and nobody asks the rest (nor an imported chat's id). */
+const UNSAID = new Set(['type', 'tags', 'aliases', 'cssclasses', 'cssclass', 'title', 'created', 'updated', 'position', 'chat_id']);
 /** A day's topics and people are its conversations', each in its own section, and its date is in its name. */
 const UNSAID_OF_A_DAY = new Set(['date', 'topics', 'people']);
 /** Jester's own views of the vault, told by where they are: a note of the user's may well say `type: index`. */

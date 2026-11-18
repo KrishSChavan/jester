@@ -91,6 +91,7 @@ import { createWeather, unitsFor, weatherLines } from './weather.js';
 import { createWhereabouts } from './whereabouts.js';
 import { trayModel } from './tray-menu.js';
 import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault.js';
+import { importChats } from './chat-import.js';
 import { createVaultIndex } from './vault-index.js';
 import { createVaultMemory, secretIn } from './vault-memory.js';
 import { createVoicePage } from './voice-page.js';
@@ -858,6 +859,34 @@ function memoryState() {
   };
 }
 
+/**
+ * Settings › Memory's Import: the export the user chooses from Claude or ChatGPT, each chat made a note in the vault's
+ * Claude or ChatGPT folder (chat-import.js), then the vault read again so he can answer from them. What came of it,
+ * for Settings to say; nothing when they cancelled.
+ */
+async function importChatsChosen() {
+  const picked = await dialog.showOpenDialog({
+    title: 'Import your chats from Claude or ChatGPT',
+    message: 'Choose the zip Claude or ChatGPT sent you (Claude’s is conversations-000.zip), the conversations.json in it, or the folder it was unzipped into.',
+    buttonLabel: 'Import',
+    // A Mac's dialog takes files and folders at once: Safari unzips what it downloads.
+    properties: process.platform === 'darwin' ? ['openFile', 'openDirectory', 'multiSelections'] : ['openFile', 'multiSelections'],
+    filters: [{ name: 'Chat exports', extensions: ['zip', 'json'] }],
+    defaultPath: app.getPath('downloads')
+  });
+  if (picked.canceled || !picked.filePaths.length || !vault) return null;
+  try {
+    const result = await importChats({ vault, files: picked.filePaths, log });
+    const counts = Object.entries(result.sources).map(([name, tally]) => `${name} ${tally.added} new, ${tally.updated} updated, ${tally.same} unchanged, ${tally.empty} empty`);
+    log(`import: ${counts.join('; ') || 'no chats'}; ${result.leftOut} line(s) left out as secrets${result.failed ? `; ${result.failed} not written` : ''}${result.problems.length ? `; ${result.problems.length} file(s) not read` : ''}`);
+    if (Object.values(result.sources).some((tally) => tally.added || tally.updated)) refreshVault();
+    return result;
+  } catch (err) {
+    log('import: failed:', err.message);
+    return { error: err.message };
+  }
+}
+
 /** How many things he's learned about the user, and how many they asked him to keep: for Settings › Memory. */
 function knownCounts() {
   if (!vault) return null;
@@ -1574,8 +1603,10 @@ function listenToPages() {
         return { ok: true, where: presence.where, jobs: clock.list().map(({ id, kind, due, held, payload }) => ({ id, kind, due: Number.isFinite(due) ? due : null, held: !!held, text: String(payload?.text ?? '') })) };
       }
       // Settings' Memory section: the vault is only ever chosen, and so first read, from here.
-      case 'jester/desktop-memory':
-        if (message.op === 'choose') {
+      case 'jester/desktop-memory': {
+        let imported;
+        if (message.op === 'import' && vault) imported = await importChatsChosen();
+        else if (message.op === 'choose') {
           const picked = await dialog.showOpenDialog({
             title: 'Choose your Obsidian vault',
             properties: ['openDirectory'],
@@ -1594,7 +1625,8 @@ function listenToPages() {
         else if (message.op === 'reindex') refreshVault({ retry: true });
         await refresh();
         // How much he knows, counted only when Settings asks: it walks the vault.
-        return { ...desktopState(), memory: { ...memoryState(), known: knownCounts() } };
+        return { ...desktopState(), memory: { ...memoryState(), known: knownCounts() }, ...(imported ? { imported } : {}) };
+      }
       // Settings' Weather and calendars. A calendar's link goes in and never comes back out.
       case 'jester/desktop-day':
         try {

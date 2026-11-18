@@ -747,6 +747,62 @@ send();
       paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
     },
 
+    /** Chats imported from Claude's export in Settings › Memory: a note each in the vault's Claude folder, and found when asked about. */
+    async chats({ paid }) {
+      await until('the vault opened', () => fs.existsSync(inVault('Jester/About me.md')), 20000);
+      const started = new Date(Date.now() - 3 * 24 * 3600000);
+      started.setHours(15, 0, 0, 0);
+      const at = (minutes) => new Date(started.getTime() + minutes * 60000).toISOString();
+      const exportFile = path.join(scratch, 'conversations.json');
+      fs.writeFileSync(exportFile, JSON.stringify([
+        {
+          uuid: 'live-chat-1',
+          name: 'Saturn’s rings',
+          created_at: at(0),
+          updated_at: at(1),
+          chat_messages: [
+            { uuid: 'q', sender: 'human', created_at: at(0), content: [{ type: 'text', text: 'How old are the rings of Saturn?' }], parent_message_uuid: '00000000-0000-4000-8000-000000000000' },
+            { uuid: 'a', sender: 'assistant', created_at: at(1), content: [{ type: 'thinking', thinking: 'Not to be kept.' }, { type: 'text', text: 'Saturn’s rings are thought to be young, perhaps 100 to 400 million years old.' }], parent_message_uuid: 'q' }
+          ]
+        }
+      ]));
+      const asked = [];
+      const realDialog = dialog.showOpenDialog;
+      dialog.showOpenDialog = async (options) => {
+        asked.push(options);
+        return { canceled: false, filePaths: [exportFile] };
+      };
+      try {
+        const notesRead = async () => (await inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-memory', op: 'state' });`))?.memory?.search?.notes ?? 0;
+        const before = await notesRead();
+        await inPage(`window.jesterHome.go('settings/memory', { instant: true });`);
+        await until('the Import button', () => inPage(`return !document.getElementById('chats-import').hidden;`));
+        await inPage(`document.getElementById('chats-import').click();`);
+        const result = await until('what the import did', () => inPage(`return document.getElementById('chats-result').textContent;`)).catch((err) => err.message);
+        check('Settings › Memory’s Import… says what it did', result === 'Claude: 1 chat added to your Claude folder.', result);
+        check('its dialog takes zips, JSON and folders, several at once', ['openFile', 'openDirectory', 'multiSelections'].every((what) => asked[0]?.properties?.includes(what)) && asked[0]?.filters?.[0]?.extensions?.join() === 'zip,json', JSON.stringify(asked[0]));
+        const pad = (n) => String(n).padStart(2, '0');
+        const rel = `Claude/${started.getFullYear()}/${started.getFullYear()}-${pad(started.getMonth() + 1)}-${pad(started.getDate())} Saturn’s rings.md`;
+        const note = fs.existsSync(inVault(rel)) ? fs.readFileSync(inVault(rel), 'utf8') : '';
+        check('the chat is a note in the vault’s Claude folder, by year, its thinking left out', /\n## You · 3:00 PM\n\nHow old are the rings of Saturn\?\n\n## Claude · 3:01 PM\n\nSaturn’s rings are thought to be young/.test(note) && !/Not to be kept/.test(note), note.slice(0, 400) || `no ${rel}`);
+        check('the log says how many, never what', /import: Claude 1 new, 0 updated, 0 unchanged, 0 empty; 0 line\(s\) left out/.test(logLines()) && !/Saturn/.test(logLines()));
+        await shot('chats-imported');
+        await inPage(`document.getElementById('chats-import').click();`);
+        const again = await until('the second import', () => inPage(`const text = document.getElementById('chats-result').textContent; return /already there/.test(text) ? text : '';`)).catch((err) => err.message);
+        check('imported again, nothing changes', again === 'Claude: 1 chat already there.', again);
+
+        await until('the chat read into search', async () => (await notesRead()) > before, 30000).catch(() => undefined);
+        paid.answer = () => ({ say: 'Claude said they’re young: maybe 100 to 400 million years.', do: '', new: false });
+        await type('what did Claude tell me about how old Saturn’s rings are?');
+        const given = lastSaid(paid);
+        check('asked about it, the model is told it was Claude who said so, and when', /- Your chat with Claude “Saturn’s rings”, \w+ \d+ \(3 days ago\) › Claude said: Saturn’s rings are thought to be young/.test(given), given.slice(0, 600));
+      } finally {
+        dialog.showOpenDialog = realDialog;
+        paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
+        await inPage(`window.jesterHome.go('main', { instant: true });`);
+      }
+    },
+
     /** What was summed up yesterday is yesterday's when he's told it (2026-11-13: "a class starting in about an hour"). */
     async stale({ paid }) {
       await type('what’s up?');
