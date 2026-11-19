@@ -134,3 +134,11 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* On a phone's Home Screen the app runs to the bottom edge, where the home indicator sits: the box to type in, and
+   every screen's bar along the foot, sit higher there (the user, 2026-11-18: "a little too low"). */
+@media (display-mode: standalone) and (pointer: coarse) {
+  .bottom {
+    padding-bottom: max(34px, env(safe-area-inset-bottom, 0px));
+  }
+}

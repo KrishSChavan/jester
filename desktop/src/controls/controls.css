@@ -1383,3 +1383,10 @@ input[type='checkbox']:checked::after {
     font-size: 16px;
   }
 }
+
+/* His website on a phone's Home Screen: the bars along the foot clear the home indicator (web.css does the same). */
+@media (display-mode: standalone) and (pointer: coarse) {
+  .bottom {
+    padding-bottom: max(34px, env(safe-area-inset-bottom, 0px));
+  }
+}
