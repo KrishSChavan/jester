@@ -155,6 +155,27 @@ export function createDevicesPage({ onChange = () => undefined } = {}) {
     note = reply?.ok ? 'Sent. It shows when Jester isn’t in front, so close him or lock the screen to see it.' : reply?.error || 'It didn’t go.';
     draw();
   });
+  // The password that signs a new device in (main/web-login.js): set here, on a device that's signed in.
+  let login = { set: false };
+  const drawLogin = (note = '') => {
+    if (!$('login-hint')) return;
+    $('login-hint').textContent = login.set
+      ? 'A password is set: a new device signs in with it, and the key link still works. Changing it needs the current one.'
+      : 'None yet: only your key link signs a device in. Set one to sign in from any browser. At least 10 characters; a few words together is easy to type and hard to guess.';
+    $('login-current').hidden = !login.set;
+    $('login-save').textContent = login.set ? 'Change password' : 'Set password';
+    $('login-note').textContent = note;
+  };
+  ask({ type: 'jester/web-login', op: 'state' }).then((reply) => {
+    if (reply) login = reply;
+    drawLogin();
+  });
+  $('login-save')?.addEventListener('click', async () => {
+    const reply = await ask({ type: 'jester/web-login', op: 'set', current: $('login-current').value, password: $('login-new').value });
+    if (reply) login = reply;
+    if (reply?.ok) $('login-current').value = $('login-new').value = '';
+    drawLogin(reply?.ok ? 'Saved. A new device can sign in with it now.' : reply?.error || 'That didn’t save.');
+  });
   $('device-name')?.addEventListener('change', async () => {
     const name = $('device-name').value.trim();
     if (name && here) await ask({ type: 'jester/devices', op: 'rename', id: here, name });

@@ -194,7 +194,7 @@ export function landingAddress(pasted, page) {
  * @param {(client:object, message:object) => void} [options.onOther]   anything else a client sends (the Mac's hands)
  * @param {(client:object) => void} [options.onVoiceClient]   the client being talked to changed
  */
-export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessage, onStorage, onConnect = () => undefined, onClose = () => undefined, onAudio = () => undefined, onVoiceStatus = () => undefined, onOther = () => undefined, onVoiceClient = () => undefined, onSeen = () => undefined, log = () => undefined }) {
+export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessage, onStorage, onConnect = () => undefined, onClose = () => undefined, onAudio = () => undefined, onVoiceStatus = () => undefined, onOther = () => undefined, onVoiceClient = () => undefined, onSeen = () => undefined, login = null, log = () => undefined }) {
   if (!key || key.length < 16) throw new Error('The web gateway needs a key of at least 16 characters');
   const clients = new Set();
   /** The client being talked to: the mic is theirs, and so is his voice. */
@@ -232,7 +232,7 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
       return refuse(response, 404, 'Not found');
     }
     const type = TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
-    const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
+    const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow' };
     if (type.startsWith('text/html')) {
       if (shim) body = Buffer.from(withShim(body.toString('utf8'), { install: installToken() }));
       headers['Content-Security-Policy'] = CSP;
@@ -247,9 +247,58 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     return response.end();
   };
 
+  /** Where a request comes from, as `tailscale serve` says it (he only listens to this machine): for counting wrong tries. */
+  const sourceOf = (request) => String(request.headers['x-forwarded-for'] || '').split(',')[0].trim().slice(0, 64) || String(request.socket.remoteAddress || 'unknown');
+
+  const json = (response, status, body, headers = {}) => {
+    response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
+    response.end(JSON.stringify(body));
+  };
+
+  /**
+   * Signing in with the password (web-login.js): posted by his sign-in page, from this site only. Right, the browser
+   * is given the cookie his key link gives; wrong, why, and how long before another try.
+   */
+  async function passwordSignIn(request, response) {
+    const origin = request.headers.origin;
+    let from = '';
+    try {
+      from = origin ? new URL(origin).host : '';
+    } catch {
+      from = 'unreadable';
+    }
+    if (origin && ![request.headers.host, request.headers['x-forwarded-host']].includes(from)) return json(response, 403, { ok: false, error: 'Sign in from Jester’s own page.' });
+    if (!login) return json(response, 404, { ok: false, error: 'This Jester has no password sign-in.' });
+    let body = '';
+    for await (const chunk of request) {
+      body += chunk;
+      if (body.length > 2048) return json(response, 413, { ok: false, error: 'That’s too long to be a password.' });
+    }
+    let password = '';
+    try {
+      password = String(JSON.parse(body)?.password ?? '');
+    } catch {
+      return json(response, 400, { ok: false, error: 'That wasn’t a sign-in.' });
+    }
+    const result = await login.check(password, sourceOf(request));
+    if (!result.ok) return json(response, result.wait ? 429 : 401, { ok: false, error: result.error, wait: Math.ceil(result.wait / 1000) }, result.wait ? { 'Retry-After': String(Math.ceil(result.wait / 1000)) } : {});
+    log('web: signed in with the password');
+    return json(response, 200, { ok: true }, { 'Set-Cookie': `${COOKIE}=${encodeURIComponent(key)}; Path=/; Max-Age=${YEAR_S}; HttpOnly; Secure; SameSite=Strict` });
+  }
+
   async function serve(request, response) {
     const url = new URL(request.url, 'http://jester');
+    if (request.method === 'POST' && url.pathname === '/sign-in') return passwordSignIn(request, response);
     if (request.method !== 'GET' && request.method !== 'HEAD') return refuse(response, 405, 'Not allowed');
+    // Reachable from anywhere, he's nobody's to list: search engines are asked to stay out.
+    if (url.pathname === '/robots.txt') return refuse(response, 200, 'User-agent: *\nDisallow: /\n');
+    // For his sign-in page: whether there's a password to ask for.
+    if (url.pathname === '/sign-in.json') return json(response, 200, { password: !!login?.state().set });
+    // This browser, signed out: its cookie's taken back.
+    if (url.pathname === '/sign-out') {
+      response.writeHead(303, { 'Set-Cookie': `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`, Location: '/', 'Cache-Control': 'no-store' });
+      return response.end();
+    }
     // His website as an app: what's needed before signing in, for anyone.
     if (PUBLIC.has(url.pathname)) return send200(request, response, path.join(WEB_ROOT, PUBLIC.get(url.pathname)));
     if (url.pathname === '/manifest.webmanifest') {
@@ -286,6 +335,9 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
       if (!response.headersSent) refuse(response, 500, 'Something went wrong');
     });
   });
+  // Reachable from anywhere, a request that dawdles is dropped: nothing he's asked takes long to send.
+  server.headersTimeout = 15_000;
+  server.requestTimeout = 30_000;
   const sockets = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME });
 
   server.on('upgrade', (request, socket, head) => {

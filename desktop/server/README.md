@@ -126,6 +126,14 @@ link, once, and the server starts again with them. Keys are sealed on the server
 the one that counts: a Mac linking again moves nothing. What's the Mac's alone stays there (its scripts and scenes,
 the watch's key, the pointer's calibration).
 
+### 6a. A password, and signing out
+
+Settings › Devices on the website has **Password**: set one (10 characters or more) from a device that's signed
+in, and a new device signs in with it on his sign-in page, with no link. Only a salted hash is kept, sealed. Wrong
+tries lock an address out for a minute, then longer, up to an hour; thirty wrong tries from anywhere in a quarter
+hour close password sign-in for that long (signed-in devices and the key link go on working). Changing it needs the
+current one. **Sign out here** takes this browser's sign-in back.
+
 ### 6b. Every device, linked
 
 - **Devices** (Settings › Devices on the website): every phone, browser and computer he's been opened on, whether

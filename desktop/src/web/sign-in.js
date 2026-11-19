@@ -39,6 +39,40 @@ if (globalThis.document) {
     location.href = address;
   });
 
+  // With a password set, that's what's asked for: the link is the other way in.
+  const showLink = (on) => {
+    $('password-form').hidden = on;
+    $('form').hidden = !on;
+    $('link-intro').hidden = !on;
+  };
+  fetch('/sign-in.json')
+    .then((response) => response.json())
+    .then((state) => {
+      // Sent here by a link that didn't work: the link's box stays, with why.
+      if (state?.password && !$('error').textContent) {
+        showLink(false);
+        $('password').focus();
+      }
+    })
+    .catch(() => undefined);
+  $('use-link').addEventListener('click', () => showLink(true));
+  $('password-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('password-form').querySelector('button[type="submit"]');
+    button.disabled = true;
+    $('password-error').textContent = '';
+    try {
+      const response = await fetch('/sign-in', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('password').value }) });
+      const reply = await response.json().catch(() => ({}));
+      if (reply.ok) return void (location.href = '/');
+      $('password-error').textContent = reply.error || 'That didn’t work.';
+      $('password').select();
+    } catch {
+      $('password-error').textContent = 'Jester couldn’t be reached. Try again.';
+    }
+    button.disabled = false;
+  });
+
   if (navigator.clipboard?.readText) {
     $('paste').hidden = false;
     $('paste').addEventListener('click', async () => {

@@ -109,6 +109,7 @@ import { createWhereabouts } from './whereabouts.js';
 import { createDeviceLocate } from './device-location.js';
 import { createDevices } from './devices.js';
 import { createPush } from './push.js';
+import { createWebLogin } from './web-login.js';
 import { apply as applyMove, collect as collectMove } from './move-in.js';
 import { createSessions, following, sessionFile, sessionKeyOf } from './sessions.js';
 import { trayModel } from './tray-menu.js';
@@ -228,6 +229,8 @@ let conversation = null;
 let sessions = null;
 /** On a server: where he's open (devices.js). */
 let devices = null;
+/** On a server: signing in to his website with a password (web-login.js). */
+let webLogin = null;
 /** On a server: notifications to his app on the user's devices (push.js), in place of ntfy. */
 let push = null;
 let recollections = null;
@@ -1677,6 +1680,16 @@ function listenToPages() {
     if (message?.type === MSG.GET_STATE && url.startsWith('jester://ext/src/calibration/')) return { settings: await loadSettings(), engine };
     if (!url.startsWith('jester://app/')) return undefined;
     switch (message?.type) {
+      // His website's Settings › Devices: the password that signs a new device in (web-login.js). Set or changed
+      // only from a device that's signed in, and with the current one when there is one.
+      case 'jester/web-login': {
+        if (!SERVER || !webLogin || !sender?.remote) return { ok: false };
+        const source = sender.remote.from || `page-${sender.remote.id}`;
+        let done = { ok: true, error: '' };
+        if (message.op === 'set') done = await webLogin.set(String(message.password ?? ''), { current: String(message.current ?? ''), source });
+        else if (message.op === 'remove') done = await webLogin.remove({ current: String(message.current ?? ''), source });
+        return { ...done, ...webLogin.state() };
+      }
       // His website's Settings › Devices: notifications to this device, from his own app (push.js).
       case 'jester/push': {
         if (!SERVER || !push || !sender?.remote) return { ok: false };
@@ -2463,6 +2476,8 @@ function startWebGateway() {
   const key = webKey();
   devices = createDevices({ storage: storage.local, computers: () => remoteHands?.list() || [], voiceClient: () => webGateway?.voiceClient || null, onChange: devicesChanged, log });
   devices.start().catch((err) => log('devices: couldn’t be read:', err.message));
+  webLogin = createWebLogin({ storage: storage.local, log });
+  webLogin.start().catch((err) => log('sign-in: the password couldn’t be read:', err.message));
   remoteHands = createRemoteHands({
     // A computer's task has a question: asked in the chat that started it, aloud or written, and answered there.
     onAsk: (label, chat) => sessions?.get(chat && chat !== 'local' ? chat : sessions.frontKey).conversation.ask(label),
@@ -2480,6 +2495,7 @@ function startWebGateway() {
   });
   webGateway = createWebGateway({
     key,
+    login: webLogin,
     port: Number(env.JESTER_WEB_PORT) || 8770,
     log,
     onConnect: (client) => {

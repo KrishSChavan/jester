@@ -96,6 +96,18 @@
       code {
         white-space: nowrap;
       }
+      #use-link-row {
+        text-align: center;
+      }
+      button.plain {
+        flex: none;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: #b69cf5;
+        font-weight: 400;
+        text-decoration: underline;
+      }
       .note {
         margin-top: 18px;
         font-size: 13px;
@@ -110,7 +122,17 @@
     <main>
       <img src="/web/icons/apple-touch-icon.png" alt="" width="72" height="72" />
       <h1>Sign in to Jester</h1>
-      <p>Paste the link his server gave you. It ends in <code>?key=</code> and a long code, and each device needs it just once.</p>
+      <!-- With a password set (Settings › Devices): that, and the link only if asked for. -->
+      <form id="password-form" hidden>
+        <label for="password" hidden>Password</label>
+        <input id="password" type="password" autocomplete="current-password" placeholder="Password" />
+        <div class="buttons">
+          <button type="submit">Sign in</button>
+        </div>
+        <p id="password-error" class="error" role="alert"></p>
+        <p class="note" id="use-link-row"><button id="use-link" class="plain" type="button">Use your Jester link instead</button></p>
+      </form>
+      <p id="link-intro">Paste the link his server gave you. It ends in <code>?key=</code> and a long code, and each device needs it just once.</p>
       <form id="form">
         <label for="link" hidden>Your Jester link</label>
         <input id="link" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/?key=…" />

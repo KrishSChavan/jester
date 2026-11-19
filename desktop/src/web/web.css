@@ -159,3 +159,30 @@
     padding-bottom: max(34px, env(safe-area-inset-bottom, 0px));
   }
 }
+
+/* Settings › Devices: the password's boxes under its words, and Sign out as a button. */
+#login-row {
+  flex-wrap: wrap;
+}
+
+#login-row .buttons {
+  flex: 1 0 100%;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+#login-row input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+a.button {
+  flex: none;
+  padding: 7px 14px;
+  border: 1px solid var(--edge-hi);
+  border-radius: 9px;
+  color: var(--text);
+  text-decoration: none;
+}

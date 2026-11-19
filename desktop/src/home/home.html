@@ -635,6 +635,24 @@
               </span>
             </div>
           </div>
+          <div class="cards">
+            <div class="row" id="login-row">
+              <span>
+                <strong>Password</strong>
+                <small id="login-hint"></small>
+                <small id="login-note" class="error" role="status"></small>
+              </span>
+              <span class="buttons">
+                <input id="login-current" type="password" autocomplete="current-password" placeholder="Current password" hidden />
+                <input id="login-new" type="password" autocomplete="new-password" placeholder="New password" />
+                <button id="login-save" type="button" class="primary">Set password</button>
+              </span>
+            </div>
+            <div class="row">
+              <span><strong>Sign out here</strong><small>This device forgets Jester until it’s signed in again. Other devices stay signed in.</small></span>
+              <a id="sign-out" class="button" href="/sign-out">Sign out</a>
+            </div>
+          </div>
           <h2 class="group">Where Jester is</h2>
           <div id="devices-list" class="cards"></div>
           <p id="devices-none" class="note" hidden>No device has opened him yet.</p>
