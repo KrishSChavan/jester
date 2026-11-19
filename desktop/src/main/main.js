@@ -54,7 +54,7 @@ import { addRemotePage, fromRemote, installBridge, onMessage, onStorageChanged, 
 import { createFileSealer } from './file-sealer.js';
 import { createRemoteVoicePage, createWebGateway, landingAddress, makeKey } from './web-gateway.js';
 import { createRemoteHands } from './remote-hands.js';
-import { createCloudLink, parseCloudLink } from './cloud-link.js';
+import { cloudKeyFor, createCloudLink, parseCloudLink, serverOrigin } from './cloud-link.js';
 import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS } from './briefs.js';
 import { callOffer, createOfferRunner, createOffers, draftOffer, openerLine, personal } from './offers.js';
 import { briefingRequest, createBriefingManager } from './briefing-manager.js';
@@ -503,7 +503,8 @@ function desktopState() {
     fakeMedia: !!env.JESTER_FAKE_MEDIA,
     // On a server: whether the Mac's connected. On a Mac: whether it uses him in the cloud, and where.
     server: SERVER ? { mac: !!remoteHands?.connected } : null,
-    cloud: cloudTarget ? { on: true, server: cloudTarget.origin, connected: !!cloudLink?.connected } : { on: false }
+    // `refused`: the server no longer takes this Mac's key (it was replaced): signing in again mends it.
+    cloud: cloudTarget ? { on: true, server: cloudTarget.origin, connected: !!cloudLink?.connected, refused: !!cloudLink?.refused } : { on: false }
   };
 }
 
@@ -2025,6 +2026,22 @@ function listenToPages() {
           setTimeout(restart, 300);
           return { ok: true };
         }
+        // With the server's address and the password set on his website (the user, 2026-11-19: "I need a better easier
+        // way to signin"): the server answers with the key, which is kept as the link was. No link to find or paste.
+        if (message.op === 'sign-in') {
+          try {
+            const key = await cloudKeyFor(message.server || cloudTarget?.origin, String(message.password ?? ''));
+            const origin = serverOrigin(message.server || cloudTarget?.origin);
+            if (cloudTarget && cloudTarget.origin === origin) await adoptCloudKey(key);
+            else {
+              await storage.local.set({ cloudBrain: { link: `${origin}/?key=${encodeURIComponent(key)}` } });
+              setTimeout(restart, 300);
+            }
+            return { ok: true };
+          } catch (err) {
+            return { ok: false, error: err.message };
+          }
+        }
         const target = parseCloudLink(message.link);
         if (!target) return { ok: false, error: 'That isn’t the link his server printed: it starts with https:// and ends with ?key=…' };
         const reached = await fetch(target.page, { redirect: 'manual', signal: AbortSignal.timeout(8000) }).then((response) => response.status, (err) => err.message);
@@ -2548,6 +2565,45 @@ async function moveIn() {
   if (cloudLink.send({ t: 'move-in', move })) log('cloud: sending this Mac’s Jester to the server, the first time it links');
 }
 
+/**
+ * A new key for the server this Mac is linked to (signed in again, here or in his window): kept, and used at once,
+ * with no restart.
+ */
+async function adoptCloudKey(key) {
+  if (!cloudTarget || !key || key === cloudTarget.key) return false;
+  const link = `${cloudTarget.origin}/?key=${encodeURIComponent(key)}`;
+  const next = parseCloudLink(link);
+  if (!next) return false;
+  await storage.local.set({ cloudBrain: { link } });
+  cloudTarget = next;
+  setCloudPage(next.page, { onFocus: () => cloudLink?.claim() });
+  cloudLink?.use(next);
+  log('cloud: signed in again: this Mac’s key is the new one');
+  post(desktopState());
+  return true;
+}
+
+/**
+ * His window here is his server's website, and signing in there (with the password) gives that window the key as a
+ * cookie: this Mac's own line to the server takes the same key, so signing in once mends both.
+ */
+function watchCloudSignIn() {
+  const mine = (cookie) => cookie?.name === 'jester_key' && cloudTarget && String(cookie.domain || '').replace(/^\./, '') === new URL(cloudTarget.origin).hostname;
+  session.defaultSession.cookies.on('changed', (_event, cookie, _cause, removed) => {
+    if (!removed && mine(cookie)) adoptCloudKey(decodeURIComponent(cookie.value)).catch(() => undefined);
+  });
+}
+
+/** The server turned this Mac's key away: the key his window signed in with, if it has one; else his window, to sign in. */
+async function cloudRefused() {
+  post(desktopState());
+  const cookies = await session.defaultSession.cookies.get({ url: cloudTarget.origin, name: 'jester_key' }).catch(() => []);
+  const key = cookies[0] ? decodeURIComponent(cookies[0].value) : '';
+  if (key && key !== cloudTarget.key && (await adoptCloudKey(key))) return;
+  overlays.toast('Jester needs you to sign in again', { detail: 'Type your password in his window', tone: 'warn' });
+  showHome({ screen: 'main' });
+}
+
 let thisDevice = null;
 /** This computer, as his server knows it: an id made once and kept, and the name the user gave the computer. */
 async function deviceIdentity() {
@@ -2599,6 +2655,7 @@ function startCloudLink() {
     },
     onHands: handsAsked,
     // What its hands are doing, and its own switches: his website shows them, and throws them (the phone as a remote).
+    onRefused: () => cloudRefused().catch((err) => log('cloud: couldn’t ask to sign in again:', err.message)),
     // The server's answer to this Mac's Jester moving in: taken, or it has one already. Either way, not sent again.
     onFrame: (frame) => {
       if (frame?.t !== 'moved-in') return;
@@ -3378,6 +3435,7 @@ async function start() {
 
   if (cloudTarget) {
     thisDevice = await deviceIdentity();
+    watchCloudSignIn();
     startCloudLink();
   }
   if (SERVER) {

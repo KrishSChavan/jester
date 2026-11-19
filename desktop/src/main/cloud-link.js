@@ -36,6 +36,39 @@ export function parseCloudLink(link) {
   return { origin: url.origin, socket: `${url.protocol === 'https:' ? 'wss' : 'ws'}://${url.host}/socket`, key, page: `${url.origin}/?key=${encodeURIComponent(key)}` };
 }
 
+/** A server's address as typed ("jester.tail1234.ts.net", with or without https://), as its origin. Throws in words. */
+export function serverOrigin(input) {
+  const text = String(input ?? '').trim();
+  if (!text) throw new Error('Type his server’s address, like jester.your-tailnet.ts.net.');
+  let url;
+  try {
+    url = new URL(/^[a-z]+:\/\//i.test(text) ? text : `https://${text}`);
+  } catch {
+    throw new Error('That isn’t a server’s address. It looks like jester.your-tailnet.ts.net.');
+  }
+  const local = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(local && url.protocol === 'http:')) throw new Error('His server’s address starts with https://.');
+  return url.origin;
+}
+
+/** Signs in to his server with the password, as his sign-in page does: the key it answers with, or why not, in words. */
+export async function cloudKeyFor(server, password, { fetchImpl = globalThis.fetch } = {}) {
+  const origin = serverOrigin(server);
+  if (!password) throw new Error('Type the password you set for Jester (his website’s Settings › Devices).');
+  let response;
+  try {
+    response = await fetchImpl(`${origin}/sign-in`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }), redirect: 'error', signal: AbortSignal.timeout(15000) });
+  } catch {
+    throw new Error('His server couldn’t be reached at that address. Check it, and that this Mac is online.');
+  }
+  const reply = await response.json().catch(() => ({}));
+  if (!response.ok || !reply.ok) throw new Error(reply.error || (response.status === 404 ? 'That server has no password set. Set one on his website (Settings › Devices), or paste his link.' : `His server answered ${response.status}.`));
+  const cookie = (response.headers.getSetCookie?.() || []).map((line) => /^jester_key=([^;]+)/.exec(line)?.[1]).find(Boolean);
+  const key = cookie ? decodeURIComponent(cookie) : '';
+  if (key.length < 16) throw new Error('His server signed in, but gave no key. Is it up to date?');
+  return key;
+}
+
 /**
  * @param {object} deps
  * @param {{socket:string, key:string, origin:string}} deps.link   parseCloudLink's
@@ -46,9 +79,14 @@ export function parseCloudLink(link) {
  * @param {() => number} deps.idleSeconds
  * @param {{id:string, name:string}} [deps.device]   which of the user's computers this is (devices.js)
  * @param {(frame:object) => void} [deps.onFrame]   anything else the server says (a move's answer)
+ * @param {() => void} [deps.onRefused]   the server turned its key away: the user has to sign in again
  * @param {(connected:boolean) => void} [deps.onChange]
  */
-export function createCloudLink({ link, device = null, onVoice, onPlay, onHands, handsState, idleSeconds, onChange = () => undefined, onFrame = () => undefined, log = () => undefined, WebSocketImpl = WebSocket }) {
+export function createCloudLink({ link: given, device = null, onVoice, onPlay, onHands, handsState, idleSeconds, onChange = () => undefined, onFrame = () => undefined, onRefused = () => undefined, log = () => undefined, WebSocketImpl = WebSocket }) {
+  /** Where it connects, and with what key: changed when the user signs in again (`use`). */
+  let link = given;
+  /** The server said the key isn't its own (it was replaced): told once, and tried again more slowly. */
+  let refused = false;
   let socket = null;
   let connected = false;
   let closed = false;
@@ -63,9 +101,13 @@ export function createCloudLink({ link, device = null, onVoice, onPlay, onHands,
 
   function connect() {
     if (closed) return;
-    socket = new WebSocketImpl(link.socket, { headers: { Authorization: `Bearer ${link.key}` }, handshakeTimeout: 10000 });
+    // One line at a time: a try already on its way, or open, is the one.
+    if (socket && (socket.readyState === 0 || socket.readyState === 1)) return;
+    const mine = new WebSocketImpl(link.socket, { headers: { Authorization: `Bearer ${link.key}` }, handshakeTimeout: 10000 });
+    socket = mine;
     socket.on('open', () => {
       connected = true;
+      refused = false;
       tries = 0;
       lastState = '';
       log('cloud: connected to', link.origin);
@@ -95,6 +137,8 @@ export function createCloudLink({ link, device = null, onVoice, onPlay, onHands,
       } else onFrame(frame);
     });
     socket.on('close', () => {
+      // A line given up for a newer one (signed in again): its end is nothing.
+      if (socket !== mine) return;
       const was = connected;
       connected = false;
       // The mic was the server's to open: with no server, it's closed.
@@ -103,9 +147,19 @@ export function createCloudLink({ link, device = null, onVoice, onPlay, onHands,
         log('cloud: disconnected');
         onChange(false);
       }
-      if (!closed) retry = setTimeout(connect, RETRY_MS[Math.min(tries++, RETRY_MS.length - 1)]);
+      // Turned away, it's tried again only now and then: signing in again connects at once (use).
+      if (!closed) retry = setTimeout(connect, refused ? RETRY_MS.at(-1) : RETRY_MS[Math.min(tries++, RETRY_MS.length - 1)]);
     });
     socket.on('error', (err) => {
+      // Reached, and turned away: its key was replaced, or the user signed this Mac out. Signing in again mends it.
+      if (/\b401\b/.test(String(err?.message))) {
+        if (!refused) {
+          refused = true;
+          log('cloud: the server no longer takes this Mac’s key: sign in again');
+          onRefused();
+        }
+        return;
+      }
       if (tries < 2 || tries % 10 === 0) log('cloud: can’t reach the server:', err.message);
     });
   }
@@ -132,6 +186,30 @@ export function createCloudLink({ link, device = null, onVoice, onPlay, onHands,
   return {
     get connected() {
       return connected;
+    },
+    /** The server turned this Mac's key away, and nothing's mended it yet. */
+    get refused() {
+      return refused;
+    },
+    /** Signed in again: the new key, used at once. */
+    use(next) {
+      link = next;
+      refused = false;
+      tries = 0;
+      clearTimeout(retry);
+      const old = socket;
+      socket = null;
+      if (connected) {
+        connected = false;
+        onVoice('close');
+        onChange(false);
+      }
+      try {
+        old?.terminate();
+      } catch {
+        /* not open */
+      }
+      connect();
     },
     /** The Mac is the one being talked to: its mic opens if he's listening, and his voice plays here. */
     claim() {

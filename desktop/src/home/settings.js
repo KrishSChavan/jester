@@ -660,7 +660,10 @@ function renderChrome() {
 function renderCloud() {
   const server = desktop?.server;
   const cloud = desktop?.cloud || { on: false };
-  $('cloud-form').hidden = !!server || cloud.on;
+  // Signing in: when it isn't linked, and again when the server no longer takes this Mac's key (only the password then).
+  $('cloud-signin').hidden = !!server || (cloud.on && !cloud.refused);
+  $('cloud-server-row').hidden = !!cloud.on;
+  $('cloud-link-way').hidden = !!server || cloud.on;
   $('cloud-off-card').hidden = !!server || !cloud.on;
   if (server) {
     $('cloud-title').textContent = 'Your Mac';
@@ -671,8 +674,10 @@ function renderCloud() {
     return;
   }
   $('cloud-title').textContent = 'Use Jester in the cloud';
-  $('cloud-state').textContent = cloud.on ? (cloud.connected ? 'Connected' : 'Can’t reach it') : 'Off';
-  $('cloud-hint').textContent = cloud.on
+  $('cloud-state').textContent = cloud.on ? (cloud.connected ? 'Connected' : cloud.refused ? 'Sign in again' : 'Can’t reach it') : 'Off';
+  $('cloud-hint').textContent = cloud.on && cloud.refused
+    ? `His server at ${cloud.server} no longer takes this Mac’s key (it was replaced, or this Mac was signed out). Type your password below, or in his window, and this Mac is linked again.`
+    : cloud.on
     ? `His conversation, memory, reminders, mail and briefs are on ${cloud.server}, the same Jester as his website. This Mac is his hands, eyes and ears: gestures, the cursor, Chrome and your apps stay here, and so do these settings.${cloud.connected ? '' : ' Is Tailscale on, on this Mac, and the server running?'}`
     : 'Run his brain on a server of yours (see desktop/server/README.md), and talk to the same Jester here and on his website, from any of your devices.';
 }
@@ -1027,6 +1032,15 @@ $('cloud-form').addEventListener('submit', async (event) => {
     $('cloud-link').value = '';
     $('cloud-error').textContent = 'Restarting…';
   } else $('cloud-error').textContent = reply?.error || 'Jester didn’t answer.';
+});
+$('cloud-signin').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  $('cloud-signin-error').textContent = '';
+  $('cloud-signin-go').disabled = true;
+  const reply = await chrome.runtime.sendMessage({ type: 'jester/desktop-cloud', op: 'sign-in', server: $('cloud-server').value, password: $('cloud-password').value });
+  $('cloud-signin-go').disabled = false;
+  $('cloud-password').value = '';
+  if (!reply?.ok) $('cloud-signin-error').textContent = reply?.error || 'That didn’t work.';
 });
 $('cloud-off').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-cloud', op: 'off' }));
 

@@ -2162,3 +2162,15 @@ code {
 .row.web-only {
   display: none;
 }
+
+/* Settings › Jester in the cloud: the link, as the other way in. */
+#cloud-link-way {
+  margin: 4px 4px 16px;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+#cloud-link-way summary {
+  cursor: pointer;
+  margin-bottom: 10px;
+}

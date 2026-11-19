@@ -122,3 +122,46 @@ test('signed out, a browser’s cookie is taken back; search engines are asked t
   assert.equal((await ask(port, 'POST', '/sign-in', { body: { password: 'x' } })).status, 404, 'no password sign-in without one configured');
   assert.match((await ask(port, 'GET', '/app/home/home.html', { headers: { Cookie: `jester_key=${KEY}` } })).headers['x-robots-tag'], /noindex/);
 });
+
+test('a Mac signs in with the password, no link: turned away with an old key, it takes the new one and connects', async (t) => {
+  const { cloudKeyFor, createCloudLink, parseCloudLink, serverOrigin } = await import('../desktop/src/main/cloud-link.js');
+  assert.equal(serverOrigin('jester.tail1234.ts.net'), 'https://jester.tail1234.ts.net');
+  assert.equal(serverOrigin(' https://jester.tail1234.ts.net/app/home '), 'https://jester.tail1234.ts.net');
+  assert.throws(() => serverOrigin('http://jester.tail1234.ts.net'), /starts with https/);
+  assert.throws(() => serverOrigin(''), /Type his server’s address/);
+
+  const { login: l } = login();
+  await l.set('correct horse battery');
+  const joined = [];
+  const gateway = createWebGateway({ key: KEY, port: 0, login: l, onMessage: async () => null, onStorage: async () => null, onConnect: (client) => joined.push(client.role) });
+  t.after(() => gateway.close());
+  const port = await gateway.ready;
+  const origin = `http://127.0.0.1:${port}`;
+  await assert.rejects(cloudKeyFor(origin, 'not it'), /That’s not the password/);
+  await assert.rejects(cloudKeyFor(origin, ''), /Type the password/);
+  await assert.rejects(cloudKeyFor('http://127.0.0.1:9', 'x'), /couldn’t be reached/);
+  const key = await cloudKeyFor(origin, 'correct horse battery');
+  assert.equal(key, KEY);
+
+  // Linked with a key the server no longer takes: told so once, and mended by the new key, with no restart.
+  let refusals = 0;
+  const states = [];
+  const link = createCloudLink({
+    link: parseCloudLink(`${origin}/?key=${'old'.repeat(8)}`),
+    device: { id: 'mac-device-00001', name: 'Test Mac' },
+    onVoice: () => undefined, onPlay: () => undefined, onHands: async () => null,
+    handsState: () => ({ running: false, asking: false, abilities: {} }), idleSeconds: () => 0,
+    onRefused: () => (refusals += 1),
+    onChange: (connected) => states.push(connected)
+  });
+  t.after(() => link.close());
+  const until = async (check) => { const end = Date.now() + 5000; while (!check()) { if (Date.now() > end) throw new Error('timed out'); await new Promise((r) => setTimeout(r, 20)); } };
+  await until(() => refusals === 1);
+  assert.equal(link.refused, true);
+  assert.equal(link.connected, false);
+  link.use(parseCloudLink(`${origin}/?key=${key}`));
+  await until(() => link.connected);
+  assert.equal(link.refused, false);
+  assert.deepEqual(joined, ['mac']);
+  assert.equal(refusals, 1);
+});

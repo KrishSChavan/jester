@@ -48,11 +48,11 @@ if (globalThis.document) {
   fetch('/sign-in.json')
     .then((response) => response.json())
     .then((state) => {
-      // Sent here by a link that didn't work: the link's box stays, with why.
-      if (state?.password && !$('error').textContent) {
-        showLink(false);
-        $('password').focus();
-      }
+      if (!state?.password) return;
+      // With a password set, that's the way in, a link that didn't work included: said there, with what to do.
+      if ($('error').textContent) $('password-error').textContent = `${$('error').textContent.replace(/ Paste.*$/, '')} Sign in with your password.`;
+      showLink(false);
+      $('password').focus();
     })
     .catch(() => undefined);
   $('use-link').addEventListener('click', () => showLink(true));

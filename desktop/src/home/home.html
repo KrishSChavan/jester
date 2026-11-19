@@ -672,16 +672,34 @@
               <span id="cloud-state" class="value"></span>
             </div>
           </div>
-          <form id="cloud-form" class="cards">
+          <!-- Signing this Mac in with the password set on his website: nothing to find or paste. -->
+          <form id="cloud-signin" class="cards">
+            <label class="row" id="cloud-server-row">
+              <span><strong>His server’s address</strong><small>Where his website is, like jester.your-tailnet.ts.net.</small></span>
+              <input id="cloud-server" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="jester.your-tailnet.ts.net" />
+            </label>
             <label class="row">
-              <span><strong>Server link</strong><small>The link his server printed when it started, ending in ?key=…: it’s kept encrypted on this computer. Jester restarts to use it.</small></span>
-              <input id="cloud-link" type="password" spellcheck="false" autocomplete="off" placeholder="https://jester.your-tailnet.ts.net/?key=…" />
+              <span><strong>Password</strong><small id="cloud-password-hint">The one you set on his website (Settings › Devices). It isn’t kept: his server answers with this Mac’s key, which is kept encrypted here.</small></span>
+              <input id="cloud-password" type="password" autocomplete="off" placeholder="Password" />
             </label>
             <div class="row">
-              <span id="cloud-error" class="error" role="alert"></span>
-              <button id="cloud-use" type="submit" class="primary">Use it</button>
+              <span id="cloud-signin-error" class="error" role="alert"></span>
+              <button id="cloud-signin-go" type="submit" class="primary">Sign in</button>
             </div>
           </form>
+          <details id="cloud-link-way">
+            <summary>Use his link instead</summary>
+            <form id="cloud-form" class="cards">
+              <label class="row">
+                <span><strong>Server link</strong><small>The link his server printed when it started, ending in ?key=…: it’s kept encrypted on this computer. Jester restarts to use it.</small></span>
+                <input id="cloud-link" type="password" spellcheck="false" autocomplete="off" placeholder="https://jester.your-tailnet.ts.net/?key=…" />
+              </label>
+              <div class="row">
+                <span id="cloud-error" class="error" role="alert"></span>
+                <button id="cloud-use" type="submit" class="primary">Use it</button>
+              </div>
+            </form>
+          </details>
           <div class="cards" id="cloud-off-card">
             <div class="row">
               <span><strong>Stop using it</strong><small>Back to Jester on this Mac alone: his own conversation, memory and reminders here. The server keeps its own.</small></span>
