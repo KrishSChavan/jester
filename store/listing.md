@@ -21,7 +21,7 @@ asks for, in the order it asks. Text in the boxes is ready to paste.
 
 ## Package
 
-**Current upload:** `dist/jester-extension-0.2.8.zip`.
+**Current upload:** `dist/jester-extension-0.2.9.zip`.
 
 For an existing listing, choose **Package → Upload new package**. For a new
 listing, choose **Items → New item** and upload the same ZIP.
@@ -235,6 +235,9 @@ use your existing Chrome session without exporting cookies or changing tabs.
 The extension works with Jester Desktop closed; an updated linked desktop app
 adds local Scrapling extraction and isolated JavaScript rendering. Cancellation
 also prevents an older research request from resuming after a newer one.
+
+**What's new in 0.2.9**: A new icon: a lilac jester's head on black, in the
+toolbar, on the extensions page and in the store. Nothing else changed.
 
 **What's new in 0.2.8**: A **Watch for gestures** switch, in the toolbar popup
 and under Camera in Settings. Turn it off and Chrome's camera stays closed while
