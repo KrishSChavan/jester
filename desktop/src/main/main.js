@@ -1574,6 +1574,10 @@ function listenToPages() {
     if (message?.type === MSG.GET_STATE && url.startsWith('jester://ext/src/calibration/')) return { settings: await loadSettings(), engine };
     if (!url.startsWith('jester://app/')) return undefined;
     switch (message?.type) {
+      // His website's Settings: a sign-in link for another device, or his website on a Home Screen that asks. A code
+      // that works for a day (web-gateway.js INSTALL_MS), never the key itself.
+      case 'jester/web-link':
+        return SERVER && webGateway ? { ok: true, code: webGateway.installToken() } : { ok: false };
       // On a server: a browser saying where it is, asked by device-location.js (web/shim.js answers).
       case 'jester/where-told':
         return { ok: !!sender?.remote && !!deviceLocate?.told(sender.remote, message) };

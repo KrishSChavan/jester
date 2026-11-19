@@ -183,6 +183,18 @@
               <p id="status" class="status" role="status"><span class="dot"></span><span id="status-text">Starting…</span></p>
             </div>
           </div>
+          <!-- His website only (home/install.js): putting him on a Home Screen, and a sign-in link for another device. -->
+          <div id="install-card" class="install-card" hidden>
+            <img src="/web/icons/apple-touch-icon.png" alt="" width="44" height="44" />
+            <div class="install-text">
+              <strong id="install-title">Put Jester on your Home Screen</strong>
+              <small id="install-steps"></small>
+            </div>
+            <div class="install-buttons">
+              <button id="install-now" class="chip strong" type="button" hidden>Install</button>
+              <button id="install-link" class="chip" type="button">Copy a sign-in link</button>
+            </div>
+          </div>
           <nav class="cards index" aria-label="Settings">
             <button class="row go" type="button" data-go="setup"><span class="glyph"><svg class="icon-svg"><use href="#i-tasks" /></svg></span><span class="label">Getting started</span><span class="aside" id="sum-setup"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/permissions"><span class="glyph"><svg class="icon-svg"><use href="#i-shield" /></svg></span><span class="label">Permissions</span><span class="aside" id="sum-permissions"></span><svg class="chev"><use href="#i-forward" /></svg></button>

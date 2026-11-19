@@ -82,7 +82,14 @@ Don't use iCloud for the vault here: it can't sync to a Linux server.
 ### 5. His website
 
 On each device, open his link once (the one ending in `?key=…`). It's remembered after that, so bookmark
-`https://<server>.<tailnet>.ts.net/`. On a phone, **Share › Add to Home Screen** makes it an app.
+`https://<server>.<tailnet>.ts.net/`. A device that isn't signed in gets a page to paste the link into.
+
+**As an app:** his website installs like one, with his icon, full screen, from the Home Screen. On an iPhone, in
+Safari: **Share › Add to Home Screen** (his Settings has a card saying so for the browser you're in; Chrome on
+Android or a computer gets an **Install** button there). An iPhone's Home Screen app keeps its own sign-in, apart
+from Safari's: added from his signed-in site, it signs itself in the first time it opens, within a day; after that,
+or on another device, **Settings › Copy a sign-in link** makes a link that works for a day (never the key itself).
+With Tailscale off, the app says it can't reach him instead of showing an error.
 
 Then, in his Settings on the website:
 
@@ -90,8 +97,8 @@ Then, in his Settings on the website:
   sealed in its keychain, so the server needs its own.
 - **Assistant and voice:** his voice, your phone (ntfy), and your voice (teach it again on the website, with your
   laptop's or phone's mic).
-- **Weather and calendars:** pick **a place**, since the server can't know where you are. Add your calendars'
-  links again.
+- **Weather and calendars:** **Where your device is** (the phone or computer you're using says where it is, after
+  its browser asks you once), or **a place**. Add your calendars' links again.
 - **Memory:** it reads `~/vault`. **Choose** uses that folder; there's no folder picker on a server.
 
 To talk out loud on the website: click anywhere on his page (that browser becomes the one he hears and speaks

@@ -32,6 +32,7 @@ const MAX_FRAME = 8 * 1024 * 1024;
 /** The extension's page policy, with the socket allowed: `'self'` covers wss:// to the same host. */
 const CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; worker-src 'self'; connect-src 'self'; frame-ancestors 'none'";
 const TYPES = {
+  '.webmanifest': 'application/manifest+json',
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
@@ -52,6 +53,48 @@ const TYPES = {
  */
 const SERVED_DIRS = [path.join(ROOTS.app, 'home'), path.join(ROOTS.app, 'controls'), path.join(ROOTS.app, 'vendor'), path.join(ROOTS.app, 'worklets'), path.join(ROOTS.ext, 'src', 'common'), path.join(ROOTS.ext, 'icons'), WEB_ROOT];
 const SERVED_FILES = [path.join(ROOTS.app, 'main', 'os-actions.js'), path.join(ROOTS.app, 'main', 'watch-status.js')];
+
+/**
+ * What anyone who reaches the server may have, signed in or not, for his website as an app on a Home Screen (the
+ * user, 2026-11-18: "make the website so that I can download it as a PWA especially on my phone"): its worker, its
+ * icons, and the pages for signing in and for being offline. Nothing of his is in them. The manifest is made below.
+ */
+const PUBLIC = new Map([
+  ['/sw.js', 'sw.js'],
+  ['/web/offline.html', 'offline.html'],
+  ['/web/sign-in.js', 'sign-in.js'],
+  ['/web/icons/apple-touch-icon.png', 'icons/apple-touch-icon.png'],
+  ['/web/icons/icon-192.png', 'icons/icon-192.png'],
+  ['/web/icons/icon-512.png', 'icons/icon-512.png'],
+  ['/web/icons/maskable-512.png', 'icons/maskable-512.png']
+]);
+/**
+ * A sign-in code (`?install=`) works this long: in the manifest his signed-in page links, so his website added to a
+ * phone's Home Screen (which keeps its own cookies, apart from the browser's) signs itself in when first opened; and
+ * copied from Settings, for another device. Never the key itself, which stays in its HttpOnly cookie.
+ */
+export const INSTALL_MS = 24 * 60 * 60 * 1000;
+const INSTALL_KEPT = 64;
+
+/** His website's app manifest: opened at `start`, the address that signs it in when there's a code to. */
+export function manifestFor(install = '') {
+  return {
+    id: '/',
+    name: 'Jester',
+    short_name: 'Jester',
+    description: 'Your own AI: talk or type to him, from your phone or any computer of yours.',
+    start_url: install ? `/?install=${encodeURIComponent(install)}` : '/',
+    scope: '/',
+    display: 'standalone',
+    background_color: '#08060c',
+    theme_color: '#08060c',
+    icons: [
+      { src: '/web/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/web/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: '/web/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+    ]
+  };
+}
 
 /** A key the gateway can be opened with: printed by the server's setup, kept in its data folder. */
 export function makeKey() {
@@ -91,11 +134,23 @@ export function servedFile(pathname) {
   return SERVED_FILES.includes(file) || SERVED_DIRS.some((dir) => file.startsWith(dir + path.sep)) ? file : null;
 }
 
-/** An HTML page, with the shim run before any of its own scripts. */
-export function withShim(html) {
+/**
+ * An HTML page, with the shim run before any of its own scripts; and what makes it an app on a Home Screen: its
+ * manifest (with a sign-in code, for one added from this signed-in page), its icon, and its look there.
+ */
+export function withShim(html, { install = '' } = {}) {
   const tag = '<script src="/web/shim.js"></script>';
+  const app = [
+    `<link rel="manifest" href="/manifest.webmanifest${install ? `?install=${encodeURIComponent(install)}` : ''}" />`,
+    '<meta name="theme-color" content="#08060c" />',
+    '<meta name="mobile-web-app-capable" content="yes" />',
+    '<meta name="apple-mobile-web-app-capable" content="yes" />',
+    '<meta name="apple-mobile-web-app-status-bar-style" content="black" />',
+    '<meta name="apple-mobile-web-app-title" content="Jester" />',
+    '<link rel="apple-touch-icon" href="/web/icons/apple-touch-icon.png" />'
+  ].join('\n    ');
   // The website's own styles, after the page's, so they win.
-  const styled = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, '    <link rel="stylesheet" href="/web/web.css" />\n  </head>') : html;
+  const styled = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `    <link rel="stylesheet" href="/web/web.css" />\n    ${app}\n  </head>`) : html;
   return /<head[^>]*>/i.test(styled) ? styled.replace(/<head[^>]*>/i, (head) => `${head}\n    ${tag}`) : `${tag}\n${styled}`;
 }
 
@@ -153,27 +208,23 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     response.end(text);
   }
 
-  async function serve(request, response) {
-    const url = new URL(request.url, 'http://jester');
-    if (request.method !== 'GET' && request.method !== 'HEAD') return refuse(response, 405, 'Not allowed');
-    // Opened with the key: kept, and the address shown without it.
-    const given = url.searchParams.get('key');
-    if (given !== null) {
-      if (!sameKey(given, key)) return refuse(response, 401, 'That key isn’t this Jester’s.');
-      response.writeHead(303, {
-        'Set-Cookie': `${COOKIE}=${encodeURIComponent(key)}; Path=/; Max-Age=${YEAR_S}; HttpOnly; Secure; SameSite=Strict`,
-        Location: url.pathname === '/' ? HOME_PATH : url.pathname,
-        'Cache-Control': 'no-store'
-      });
-      return response.end();
-    }
-    if (!sameKey(keyOf(request), key)) return refuse(response, 401, 'Open Jester with the link his server printed (it ends in ?key=…), once on each device.');
-    if (url.pathname === '/' || url.pathname === '/app' || url.pathname === '/app/') {
-      response.writeHead(302, { Location: HOME_PATH });
-      return response.end();
-    }
-    const file = servedFile(url.pathname);
-    if (!file) return refuse(response, 404, 'Not found');
+  /** Sign-in codes (INSTALL_MS), and when each runs out: kept in memory, so a restart ends them. */
+  const installs = new Map();
+  function installToken() {
+    const at = Date.now();
+    for (const [code, until] of installs) if (until <= at) installs.delete(code);
+    while (installs.size >= INSTALL_KEPT) installs.delete(installs.keys().next().value);
+    const code = crypto.randomBytes(18).toString('base64url');
+    installs.set(code, at + INSTALL_MS);
+    return code;
+  }
+  const installed = (code) => (installs.get(String(code ?? '')) || 0) > Date.now();
+
+  /** A page opened, not a script or a message: shown the sign-in, not a plain refusal. */
+  const opening = (request) => request.headers['sec-fetch-mode'] === 'navigate' || (!request.headers['sec-fetch-mode'] && /text\/html/.test(String(request.headers.accept || '')));
+
+  /** A file of his website, as it's served: HTML with its policy (and, for a page of his, the shim). */
+  async function send200(request, response, file, { status = 200, shim = false } = {}) {
     let body;
     try {
       body = await fs.promises.readFile(file);
@@ -183,11 +234,50 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     const type = TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream';
     const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' };
     if (type.startsWith('text/html')) {
-      body = Buffer.from(withShim(body.toString('utf8')));
+      if (shim) body = Buffer.from(withShim(body.toString('utf8'), { install: installToken() }));
       headers['Content-Security-Policy'] = CSP;
     }
-    response.writeHead(200, headers);
+    response.writeHead(status, headers);
     response.end(request.method === 'HEAD' ? undefined : body);
+  }
+
+  const signIn = (request, response) => send200(request, response, path.join(WEB_ROOT, 'sign-in.html'), { status: 401 });
+  const keep = (response, location) => {
+    response.writeHead(303, { 'Set-Cookie': `${COOKIE}=${encodeURIComponent(key)}; Path=/; Max-Age=${YEAR_S}; HttpOnly; Secure; SameSite=Strict`, Location: location, 'Cache-Control': 'no-store' });
+    return response.end();
+  };
+
+  async function serve(request, response) {
+    const url = new URL(request.url, 'http://jester');
+    if (request.method !== 'GET' && request.method !== 'HEAD') return refuse(response, 405, 'Not allowed');
+    // His website as an app: what's needed before signing in, for anyone.
+    if (PUBLIC.has(url.pathname)) return send200(request, response, path.join(WEB_ROOT, PUBLIC.get(url.pathname)));
+    if (url.pathname === '/manifest.webmanifest') {
+      const code = url.searchParams.get('install');
+      response.writeHead(200, { 'Content-Type': TYPES['.webmanifest'], 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+      return response.end(request.method === 'HEAD' ? undefined : JSON.stringify(manifestFor(installed(code) ? code : '')));
+    }
+    const signedIn = sameKey(keyOf(request), key);
+    // Opened with the key: kept, and the address shown without it.
+    const given = url.searchParams.get('key');
+    if (given !== null) {
+      if (!sameKey(given, key)) return opening(request) ? signIn(request, response) : refuse(response, 401, 'That key isn’t this Jester’s.');
+      return keep(response, url.pathname === '/' ? HOME_PATH : url.pathname);
+    }
+    // Opened with a sign-in code (his website on a Home Screen, or a link copied from Settings): kept the same way.
+    const code = url.searchParams.get('install');
+    if (code !== null && url.pathname === '/') {
+      if (installed(code)) return keep(response, HOME_PATH);
+      if (!signedIn) return signIn(request, response);
+    }
+    if (!signedIn) return opening(request) ? signIn(request, response) : refuse(response, 401, 'Open Jester with the link his server printed (it ends in ?key=…), once on each device.');
+    if (url.pathname === '/' || url.pathname === '/app' || url.pathname === '/app/') {
+      response.writeHead(302, { Location: HOME_PATH });
+      return response.end();
+    }
+    const file = servedFile(url.pathname);
+    if (!file) return refuse(response, 404, 'Not found');
+    return send200(request, response, file, { shim: true });
   }
 
   const server = http.createServer((request, response) => {
@@ -320,6 +410,8 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     get clients() {
       return [...clients];
     },
+    /** A sign-in code for another device, for a signed-in page to copy (Settings): never the key itself. */
+    installToken,
     get voiceClient() {
       return voiceClient;
     },

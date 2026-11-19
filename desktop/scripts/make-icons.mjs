@@ -6,6 +6,12 @@
  *   Jester.icns   macOS: the app in the Dock, Finder, permission prompts
  *   Jester.ico    Windows: the window and taskbar
  *
+ * and, to src/web/icons, his website's as an app on a phone's Home Screen (`npm run icons -- --web` writes only those):
+ *
+ *   apple-touch-icon.png   180 px, the square filled: an iPhone rounds its corners itself
+ *   icon-192.png, icon-512.png   Windows' look (the rounded square on clear), for an install prompt and a desktop
+ *   maskable-512.png       the square filled, the art inside Android's safe circle, for its launcher's own shape
+ *
  * The art is code: the extension's raised hand, in front of a globe of dots
  * like his orb's, on the extension's purple-to-green. On a Mac it sits in the
  * system's rounded square with a 100 px margin around it (Apple's grid, which
@@ -115,9 +121,10 @@ function hand() {
  * @param {boolean} options.small  the hand alone, for 16-32 px
  * @param {boolean} options.lifted  the square's own shadow (macOS's grid has room for it)
  */
-export function art({ inset = 100, small = false, lifted = true } = {}) {
+export function art({ inset = 100, small = false, lifted = true, bleed = false } = {}) {
   const size = 1024 - 2 * inset;
-  const shape = squircle(inset, size);
+  // Filled to the edges, for a Home Screen that cuts its own shape: the art keeps its inset, the ground doesn't.
+  const shape = bleed ? 'M0 0H1024V1024H0Z' : squircle(inset, size);
   // Everything inside is drawn for a 824 square at 100 and scaled to this one.
   const scale = size / 824;
   const inside = `translate(${inset} ${inset}) scale(${scale.toFixed(5)}) translate(-100 -100)`;
@@ -198,6 +205,14 @@ const MAC_SIZES = [
   ['icon_512x512', 512], ['icon_512x512@2x', 1024]
 ];
 const WINDOWS_SIZES = [16, 24, 32, 48, 64, 128, 256];
+/** His website's, as an app: [file, look, px]. Android's safe zone is the middle 80% of a maskable icon. */
+const WEB = path.resolve(path.dirname(here), '../src/web/icons');
+const WEB_ICONS = [
+  ['apple-touch-icon.png', { inset: 0, lifted: false, bleed: true }, 180],
+  ['icon-192.png', WINDOWS, 192],
+  ['icon-512.png', WINDOWS, 512],
+  ['maskable-512.png', { inset: 112, lifted: false, bleed: true }, 512]
+];
 const SMALL = 32;
 
 async function draw() {
@@ -220,6 +235,10 @@ async function draw() {
     return Buffer.from(base64, 'base64');
   };
   const svg = (look, size) => art({ ...look, small: size <= SMALL });
+
+  fs.mkdirSync(WEB, { recursive: true });
+  for (const [file, look, size] of WEB_ICONS) fs.writeFileSync(path.join(WEB, file), await render(svg(look, size), size));
+  if (process.argv.includes('--web')) return console.log(`Wrote ${WEB_ICONS.map(([file]) => file).join(', ')} to ${WEB}`);
 
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, 'jester.svg'), art(MAC));
@@ -255,6 +274,6 @@ if (process.versions.electron) {
   const { default: electron } = await import('electron');
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(electron, [here], { stdio: 'inherit', env });
+  const child = spawn(electron, [here, ...process.argv.slice(2)], { stdio: 'inherit', env });
   child.on('exit', (code) => process.exit(code ?? 1));
 }

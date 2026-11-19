@@ -117,8 +117,29 @@
   globalThis.chrome.storage = { local: area('local'), session: area('session'), onChanged: event(storageListeners) };
   // His window can't close a browser's tab.
   globalThis.close = () => undefined;
-  // For pages that do something else in a browser (nothing yet).
-  globalThis.jesterWeb = { claim: () => claim() };
+  // For pages that do something else in a browser: Settings' card for putting him on a Home Screen (home/install.js).
+  globalThis.jesterWeb = { claim: () => claim(), installPrompt: null };
+
+  // ---------------------------------------------------------------------------
+  // His website as an app (a phone's Home Screen)
+  // ---------------------------------------------------------------------------
+  //
+  // The worker shows a page of his own when the server can't be reached (sw.js). Not in the Mac's own window, which
+  // is an app already. A browser that can install him says so before his page's scripts run: its prompt is kept
+  // for Settings' Install button.
+  const inMacWindow = /\bElectron\//.test(navigator.userAgent);
+  if (!inMacWindow && 'serviceWorker' in navigator) {
+    addEventListener('load', () => navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => undefined));
+  }
+  addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    globalThis.jesterWeb.installPrompt = event;
+    dispatchEvent(new Event('jester-installable'));
+  });
+  addEventListener('appinstalled', () => {
+    globalThis.jesterWeb.installPrompt = null;
+    dispatchEvent(new Event('jester-installable'));
+  });
 
   // ---------------------------------------------------------------------------
   // His ears and mouth, here

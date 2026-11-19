@@ -17,6 +17,7 @@ import { onRender, save, showing, startSettings, state } from './settings.js';
 import { renderResearchState } from './research.js';
 import { fitBox, putInBox, typingBox } from './typing.js';
 import { mountControls } from '../controls/controls.js';
+import { startInstall } from './install.js';
 
 const $ = (id) => document.getElementById(id);
 document.documentElement.dataset.platform = /^Win/i.test(navigator.platform) ? 'win' : 'mac';
@@ -491,6 +492,8 @@ const controls = mountControls($('controls-host'), {
   onMac: !website || /\bElectron\//.test(navigator.userAgent),
   canDrop: !!globalThis.jesterFiles
 });
+// His website only: Settings' card for putting him on a Home Screen.
+startInstall();
 // Asked for from elsewhere (the Mac's menu bar, "open controls", for his website in the Mac's window): a screen's
 // name put in the address, which always holds the one showing.
 addEventListener('hashchange', () => {

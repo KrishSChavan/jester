@@ -99,3 +99,38 @@
 [data-go='settings/chrome'] {
   display: none !important;
 }
+
+/* Settings' card for his website as an app on a Home Screen (home/install.js): here only. */
+.install-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px 14px;
+  align-items: center;
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--edge);
+  border-radius: 16px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--ring) 18%, var(--raised)), var(--raised));
+}
+
+.install-card img {
+  border-radius: 22%;
+}
+
+.install-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.install-text small {
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+
+.install-buttons {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
