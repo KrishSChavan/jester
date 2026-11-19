@@ -1,6 +1,10 @@
 # Jester: gestures, local voice, and a compact browser agent
 
-Load this folder unpacked in Chrome. Settings opens from the toolbar popup.
+This is how the extension works, in full. To just use it, install it from the
+[Chrome Web Store](https://chromewebstore.google.com/detail/jbfmeaijggbkkakdiinamgjjmcfblpab);
+the short guide is [docs/chrome-extension.md](../docs/chrome-extension.md).
+
+To work on it, load this folder unpacked in Chrome. Settings opens from the toolbar popup.
 Camera frames and microphone audio stay on-device. AI reasoning uses the
 provider and exact model you configure in Settings.
 

@@ -1,116 +1,120 @@
 # Jester
 
-A Chrome extension for streaming sites: control playback with gestures, point
-with your eyes or head, and give multi-step voice commands such as “Play season
-3 episode 1 of Rick and Morty.”
+Work your computer with your voice, your hands and your eyes.
 
-Camera tracking and speech recognition run on-device. Your chosen AI provider
-receives command text and compact semantic page context, and a screenshot of the
-tab only when a task needs one and Settings allow it; never audio, camera frames
-or raw HTML. See the [privacy policy](PRIVACY.md).
+![Jester](store/promo-marquee-1400x560.png)
 
-## Run locally
+Jester comes in two parts that work alone or together:
 
-1. In `chrome://extensions`, enable Developer mode and load the
-   [`jester-extension/`](jester-extension/) folder unpacked.
-2. Open Jester Settings. Allow camera and microphone access. Use **Set up
-   on-device speech** to install the chosen language pack if Chrome needs it.
-3. Under **AI assistant**, choose OpenAI, Anthropic, Gemini, Groq, or a custom
-   OpenAI-compatible endpoint. Enter its model ID and API key, then **Add model**.
-   Repeat for additional models; use **Move up/down** to set the fallback order.
-4. Enable Jester and open a supported streaming site. Hold ☝️ once, lower your
-   hand, and speak a full command. The bottom-center black pill shows live voice
-   bars. Pause after speaking to execute; repeat the gesture to finish sooner.
-5. Bind another pose or swipe to **Start / stop voice commands** if preferred.
-   Use the pill’s × or the popup’s Cancel button to stop capture or an active task.
+| | What it is | Get it |
+|---|---|---|
+| **Jester Desktop** | A voice assistant that lives in your menu bar. Say his name and talk to him: he answers aloud, works any app for you, keeps your reminders and timers, and can tell you about your day. Hand gestures and an eye or head pointer are there when you want them. | [Mac (Apple silicon)](https://github.com/KrishSChavan/jester/releases/latest/download/Jester-mac-arm64.dmg) · [Windows (preview)](https://github.com/KrishSChavan/jester/releases/latest/download/Jester-windows-x64-setup.exe) |
+| **Jester for Chrome** | An extension that controls video and web pages with gestures, an eye or head cursor, and spoken commands such as “play season 3 episode 1 of Rick and Morty”. | [Chrome Web Store](https://chromewebstore.google.com/detail/jbfmeaijggbkkakdiinamgjjmcfblpab) |
 
-The popup and Settings have separate **Watch for gestures**, **Voice commands**
-and **Cursor control** switches. Watch for gestures off closes Chrome's camera;
-voice still works, and a linked Jester Desktop still does its gestures in Chrome
-with its own camera. Cursor input can be **Voice**, **Eyes / head**, or **Both**. Head-only
-pointing needs no calibration. Eye modes have a calibration screen. Raise an
-open palm to point and close it into a fist to click; in Both mode, “click” uses
-the current eye/head target too. The old finger-steering implementation remains
-in the source but is not loaded or shown in Settings.
+Speech is recognized on your own computer, and so is everything the camera
+sees. What you say reaches a model only as text, and only the model you chose.
 
-Choose the permission boundary in Settings: review every action, allow normal
-entertainment browsing while reviewing sensitive actions, or allow supported
-actions on the task’s original site. Reviews appear in the toolbar popup.
+## Start here
 
-A browser without local speech support cannot use voice; there is no cloud
-speech fallback. Gesture and cursor controls continue to work. AI providers
-require compatible text-generating models and may charge API usage fees.
+**I want the desktop app**
 
-The agent now handles exact show/season/episode flows locally when controls are
-clear, and groups existing controls in AI responses to reduce round trips.
-Groq GPT-OSS uses low reasoning effort. A rate-limited model moves to the end of
-your saved queue and Jester tries the next ready model. If all are limited, a
-small top-right countdown shows the closest next retry and hides at expiry.
-Voice tasks now work the way Claude in Chrome does: Chrome's real mouse and keyboard
-through `chrome.debugger` (Chrome shows a debugging bar during a task), requests paced
-per saved model so free tiers aren't tripped (set each model's **Plan** in Settings),
-the last few commands as context for follow-ups, and a numbered screenshot only when
-the page text isn't enough. See the full guide's "Claude in Chrome-style control".
-Say **keep going** to resume; Jester never resumes automatically. A paused task is
-forgotten a minute after its last step (or after the cooldown), and a finished one at
-once, so the next command always starts fresh. Reload the extension and
-refresh the streaming tab after updating. See the full guide’s latency section
-for timing logs and limits.
+1. Download it: [Mac](https://github.com/KrishSChavan/jester/releases/latest/download/Jester-mac-arm64.dmg) or [Windows](https://github.com/KrishSChavan/jester/releases/latest/download/Jester-windows-x64-setup.exe).
+2. Install and open it. The first time, your computer will warn that it can't
+   verify the app; the install guide shows the two clicks that get past that:
+   [Mac](docs/install-mac.md) · [Windows](docs/install-windows.md).
+3. Follow **Getting started** in his window. It takes about five minutes:
+   [what each step is](docs/first-run.md).
 
-Settings also suggests Google's free-tier `gemini-3.5-flash-lite` and links to
-API-key setup and your project's active quotas. Select **Google (Gemini)**,
-enter the model ID and your Google AI Studio key, then **Add model**. Free-tier
-availability and limits depend on the provider and project; changing provider
-does not replace the local shortcuts that reduce request usage.
+**I want the Chrome extension**
 
-## Background web research
+1. Add it from the [Chrome Web Store](https://chromewebstore.google.com/detail/jbfmeaijggbkkakdiinamgjjmcfblpab).
+2. Open its Settings, allow the camera and microphone, and add a model.
+   [The extension guide](docs/chrome-extension.md) has the details.
 
-If you say “search something” without a topic, Jester asks what to search for.
-Your next reply supplies the topic. The model scores whether background reading
-can complete the request from 0 to 100. At 70 or above it can try scraping;
-below 70, or when interaction is needed, it asks before using computer controls.
-The pending question clears after two minutes, cancellation, or a new task.
+**I want both, working together**
 
-Ask Jester to search, look something up, or research your Canvas assignments or
-open pages. It reads in the background first and returns sources and retrieval
-times. If reading cannot finish, it asks before using browser or desktop
-controls. Explicit commands such as opening a site or playing music still work
-as before. Full research answers and clickable sources appear in the
-extension popup's **Research results** card.
+Install both, then in the extension's Settings press **Link with Jester
+Desktop**. They share one camera and microphone, and he can work your tabs
+and pages. (Mac only for now.)
 
-The extension works with the desktop app closed. In Jester Settings, allow
-**Also run on every other site** for public searches and the sites you want it
-to read, or grant those sites individually through Chrome. Keep Canvas open
-and signed in for coursework research. Jester can read its current page and
-follow same-origin document links using that session, without exporting
-cookies or changing your tabs. A snapshot of an open page reflects what that
-page has loaded; it is not an automatic page refresh.
+## What you need
 
-For Scrapling's public-page parsing and isolated JavaScript rendering, install
-the local helper and run the desktop app:
+- **Mac:** Apple silicon (M1 or later), macOS 13 or later.
+- **Windows:** Windows 10 or 11, 64-bit. The Windows build is a preview: see
+  [what that means](docs/install-windows.md#what-preview-means).
+- **Something for him to think with**, either of:
+  - an API key for Claude, Gemini, Groq, OpenAI or a compatible service
+    (Groq and Gemini have free plans), or
+  - [Ollama](https://ollama.com) running a model on your own computer, which
+    costs nothing and sends nothing anywhere.
+- About 1 GB of free disk space. The first time he opens he downloads what he
+  hears and speaks with (about 500 MB), by himself.
+
+## What he asks permission for
+
+Nothing up front. Jester asks for each permission at the moment something
+first needs it, and if you ask him for something he isn't allowed to do, he
+says so and tells you where to allow it.
+
+| Permission | Asked for when | What it's for |
+|---|---|---|
+| Microphone | You turn on listening, or start a voice command | Hearing you. Audio never leaves your computer. |
+| Accessibility (Mac) | He first has to click, type or read a window | Working apps for you. |
+| Camera | You turn on Gestures or the eye/head pointer | Seeing your hand and face. Frames never leave your computer. |
+| Location | You set Location to this computer | The weather, and what's near you. |
+| Screen Recording (Mac) | A model that reads pictures first needs one | A picture of the window he's working in. Optional. |
+| Bluetooth (Mac) | You turn on the Apple Watch | Steering the pointer with your watch. |
+
+More in [Permissions](docs/permissions.md).
+
+## Documentation
+
+| | |
+|---|---|
+| [Install on a Mac](docs/install-mac.md) | Download, the "can't verify" warning, moving him to Applications, updating |
+| [Install on Windows](docs/install-windows.md) | Download, SmartScreen, what the preview does and doesn't do yet |
+| [Getting started](docs/first-run.md) | The first five minutes: a model, listening, and what you can add |
+| [Permissions](docs/permissions.md) | Each permission, when it's asked for, and where to change it |
+| [The Chrome extension](docs/chrome-extension.md) | Installing it, linking it to the desktop app |
+| [Troubleshooting](docs/troubleshooting.md) | What to try when he doesn't hear, answer, click or link, and where his log is |
+| [What leaves your computer](docs/privacy-desktop.md) | For the desktop app. The extension's policy is [PRIVACY.md](PRIVACY.md) |
+| [Building from source](docs/building.md) | Running from a checkout, the tests, packaging, making a release |
+| [Roadmap](docs/roadmap.md) | What's done and what's next |
+
+Going deeper:
+
+- [How the desktop app works](desktop/README.md): its design, file by file,
+  and what was learned building it. Long.
+- [How the extension works](jester-extension/README.md): gestures, the agent,
+  token limits.
+- [Jester on a server](desktop/server/README.md): his brain on a small cloud
+  machine, reachable from your phone, with your Mac as his hands.
+
+## What's in this repository
+
+| Folder | What it holds |
+|---|---|
+| [`desktop/`](desktop/) | Jester Desktop: the Electron app (`src/`), its native helpers (`native/`: Rust, Swift, Objective-C), its scripts and packaging |
+| [`jester-extension/`](jester-extension/) | Jester for Chrome. The desktop app runs the same gesture engine from this folder |
+| [`tests/`](tests/) | Tests for both (`npm test`): about 1,600, none needing a camera, a microphone or a paid model |
+| [`docs/`](docs/) | The guides listed above |
+| [`store/`](store/) | The Chrome Web Store listing: text, screenshots, promo tiles |
+| [`.github/workflows/`](.github/workflows/) | Builds the Mac and Windows downloads and publishes a release when a version is tagged |
+
+## Building from source
 
 ```sh
-npm --prefix desktop run scraping:setup -- --browser
+git clone https://github.com/KrishSChavan/jester.git
+cd jester/desktop
+npm install
+npm run driver      # the helper that clicks and types; needs Rust
+npm start           # he fetches his speech models himself on first run
 ```
 
-This needs Python 3.10 or newer and installs
-[Scrapling 0.5.1](https://github.com/D4Vinci/Scrapling/releases/tag/v0.5.1)
-and its browser under `desktop/.scrapling/`. Link the extension to Jester
-Desktop to share it. Without the helper, the extension uses background web
-requests and its existing signed-in pages; pages that need fresh JavaScript
-rendering or a login step may require the interaction approval. No paid
-scraping service is needed. Your configured AI model still plans research and
-reads the extracted text; its normal usage charges apply.
+Tests run from the repository root with `npm test`. Everything else, including
+how the downloads are built, is in [Building from source](docs/building.md).
 
-## Development
+## License
 
-Run `npm test` from this repository root. Tests use mocked browser/model APIs;
-no microphone, account credentials, paid inference, or live streaming account
-is required.
-
-`npm run zip` checks the extension and writes the Chrome Web Store upload,
-`dist/jester-extension-<version>.zip`, on any platform. On Windows,
-`build-zip.cmd -Flat` builds the same zip. [store/listing.md](store/listing.md)
-has the listing text, the Privacy practices answers and the submission steps.
-
-[Full setup, architecture, token limits and before/after example](jester-extension/README.md).
+[MIT](LICENSE). The speech models Jester downloads, and the libraries he's
+built on, have their own licenses: see [Building from source](docs/building.md#what-jester-is-built-on).

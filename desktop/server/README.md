@@ -53,7 +53,7 @@ needs HTTPS: browsers only use the microphone on a secure page.
 
 ```sh
 ssh ubuntu@<the server's public IP>
-curl -fsSL https://raw.githubusercontent.com/KrishSChavan/jester/desktop-app/desktop/server/setup.sh | bash
+curl -fsSL https://raw.githubusercontent.com/KrishSChavan/jester/main/desktop/server/setup.sh | bash
 ```
 
 It takes 10–15 minutes. It installs everything, signs the server in to Tailscale (open the link it prints), and

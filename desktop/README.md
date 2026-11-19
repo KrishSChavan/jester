@@ -4,6 +4,29 @@ The Electron app that takes Jester beyond Chrome: the real cursor, the
 keyboard, media keys and other apps, driven by the same gestures, eye/head
 pointing and voice. The extension stays, and links to the app.
 
+**This file is the developer's account of how he works**: his design, file by
+file, what was measured, and what was learned the hard way. It's long. To
+install and use him, start at the [repository's front page](../README.md) and
+the guides in [`docs/`](../docs/); to run or package him from a checkout, see
+[Building from source](../docs/building.md).
+
+Where things are in here:
+
+| If you want | Go to |
+|---|---|
+| Which file does what | [Layout](#layout) |
+| Running him from a checkout | [Setup](#setup), [Running](#running) |
+| The app people download, and how it's checked | [Installed, not run from a checkout](#installed-not-run-from-a-checkout) |
+| Permissions, asked for as they're needed | [Permissions, asked for as they're needed](#permissions-asked-for-as-theyre-needed) |
+| Voice commands and the recognizer | [Voice](#voice) |
+| The assistant: talking, models, tasks | [The assistant](#the-assistant) |
+| Memory | [Memory and Obsidian](#memory-and-obsidian) |
+| Reminders, timers, briefs, phone, email | [Their to-do list…](#their-to-do-list-reminders-and-timers), [briefs](#the-morning-brief-the-evening-wrap-up-and-a-word-before-class), [phone](#their-phone), [email](#their-email) |
+| Weather, location, calendars | [Weather, location and calendars](#weather-location-and-calendars) |
+| The Apple Watch, Chrome, scripts | [The Apple Watch](#the-apple-watch), [Chrome: the link](#chrome-the-link), [Controls](#your-own-scripts-controls) |
+| What hasn't been tried on a real computer | [Checks that need you at the Mac](#checks-that-need-you-at-the-mac) |
+| Traps | [Things learned the hard way](#things-learned-the-hard-way) |
+
 **Status: phase 6 (the assistant), being tried out.** Jester runs from the
 menu bar; gestures press the OS's own keys, an overlay shows what they did,
 and with Cursor control on, an open palm raises the real cursor: your eyes or
@@ -30,9 +53,12 @@ front window fills its display.
 
 | Path | What it is |
 |---|---|
+| `src/main/boot.js` | Loaded before anything else: where his models and helpers are, installed or from a checkout. |
 | `src/main/main.js` | App entry: one instance, menu-bar only, engine in a hidden window, permissions polled. |
 | `src/main/tray.js`, `tray-menu.js` | The menu-bar menu (`tray-menu.js` decides what it says). |
-| `src/main/permissions.js`, `permission-list.js` | Reading and asking for Camera, Accessibility, Microphone, Screen Recording. |
+| `src/main/permissions.js`, `permission-list.js` | Reading and asking for each permission; where each is allowed, and what he says when one's missing (`refusal`). |
+| `src/main/speech/model-fetch.js` | Fetching what he hears and speaks with: resumable downloads, unpacking, progress for his window. |
+| `scripts/pack.mjs`, `electron-builder.yml`, `scripts/dist-check.mjs` | `npm run dist`: the app people download. `npm run dist-check`: that app, started for real on a scratch profile. |
 | `src/main/windows.js`, `src/home/` | The engine's hidden window, and Jester's own: the orb and talking to him, his chats and Settings, in one window (`home.js`, `screens.js`, `chats.js`, `settings.js`, `orb.js`). |
 | `src/main/os-actions.js`, `dispatch.js` | What each action does on each OS, and doing it through the driver. |
 | `src/main/overlay.js`, `src/overlay/` | Click-through windows over every display: hold progress, toasts, the cursor ring, the voice pill. |
@@ -167,8 +193,9 @@ answers. The helper keeps no page cache or research log.
 
 ## Setup
 
-Setting him up on another Mac, for someone who isn't going to read the rest of
-this: [SETUP.md](SETUP.md).
+Someone who only wants to use him downloads the app: [install on a
+Mac](../docs/install-mac.md), [on Windows](../docs/install-windows.md), then
+[Getting started](../docs/first-run.md). What follows is for a checkout.
 
 
 ```sh
@@ -180,7 +207,9 @@ npm run models                           # hearing and voice models, ~510 MB, in
 ```
 
 `npm run models` downloads what's too big for git, skipping anything already
-there. Run it on every new checkout, and again after pulling a new model:
+there. It's optional now: he fetches the same set himself the first time he's
+started, with progress in his window (below, [Installed, not run from a
+checkout](#installed-not-run-from-a-checkout)). The models:
 
 | Model | Size | What it's for |
 |---|---|---|
@@ -252,6 +281,140 @@ and the overlay's toast). `JESTER_SELFTEST_VOICE=1` with
 `JESTER_FAKE_AUDIO=command.wav` speaks one command into the synthetic mic and
 logs what was heard and done; make one with
 `say -o command.wav --data-format=LEI16@16000 "[[slnc 200]] Open Spotify. [[slnc 3000]]"`.
+
+## Installed, not run from a checkout
+
+Until 2026-11-19 he only ran from a checkout. The app people download
+(`npm run dist`, which is `scripts/pack.mjs` and `electron-builder.yml`) is the
+same code with its things in other places, and `src/main/boot.js`, which
+main.js imports first, is where that's settled:
+
+| | From a checkout | Installed |
+|---|---|---|
+| His code | `desktop/src` | `Resources/app/src`, as plain files (no asar) |
+| The extension's folder | `../jester-extension` | `Resources/jester-extension`, so the same `../../../jester-extension` imports resolve; `Resources/package.json` says `"type": "module"` for it, as the repository's root one does |
+| `jester-driver`, the watch's bridge, the Location module | each in its own build folder under `native/` | `Resources/bin` (`BIN`) |
+| Speech and voice models | `desktop/models` | `<userData>/models` (`JESTER_MODELS_DIR`, which the speech and voice services inherit) |
+| His log | `dev.log`, kept by the launcher | `jester.log` in the logs folder, kept by himself, with the run before as `jester.previous.log` |
+
+Plain files rather than an asar because the helpers are spawned, Python reads
+`worker.py`, and sherpa-onnx's native module loads the libraries beside it.
+`app.isPackaged` is what tells the two apart; the Jester.app made from a
+checkout keeps Electron's executable name so that it stays false there.
+
+**He fetches his own models** (`speech/model-fetch.js`). Started with any of
+the first set missing (the voice-activity detector, Parakeet 110M, the
+voiceprint model, Kokoro), he downloads them one at a time in the order
+they're useful, so he can hear after the first 110 MB. A download that stops
+is carried on from its `.part` file with a Range request; an archive is
+unpacked into a staging folder and moved in whole, so a folder that's there is
+a model that's all there. Windows' own `tar.exe` is called by its full path,
+since one from Git earlier on the PATH reads `C:\…` as a host. Progress is its
+own message to his window (`jester/desktop-models`), so a line is redrawn and
+not every page; a model's arrival is a `refresh()`. Getting started, the
+banner over the orb and Settings › General › Downloads say how far it's got,
+with Download, Try again and Stop. A test's Jester (`JESTER_DATA_DIR`) fetches
+nothing unless `JESTER_FETCH_MODELS` is set; `JESTER_MODELS_URL` points him at
+another server, which is how the check below serves pretend ones.
+
+**On a Mac he's signed ad hoc** (`identity: "-"`), which Apple silicon needs
+to run him at all. Gatekeeper still makes whoever downloads him approve him
+once (docs/install-mac.md), and since an ad hoc signature is different for
+every build, macOS takes each version for a new app: permissions are asked
+again, and the keychain item that seals model keys asks for the login
+password. A Developer ID would end both. Opened from the disk image or
+Downloads, he offers to move himself to Applications
+(`app.moveToApplicationsFolder`).
+
+**`npm run dist-check`** starts the packaged app on a scratch profile, with
+faint unfocused windows (`JESTER_QUIET`), a pretend camera and microphone and
+a driver that only describes input, and reads his log for: started as
+installed, the driver's `hello`, the engine page's status, each model fetched
+and on disk, and with real models (`--models <dir>`, or `--real-models` to
+fetch them) the recognizer loaded and listening. `--fresh` gives him no
+settings at all and expects gestures off. The GitHub workflow
+(`.github/workflows/release.yml`) runs it with the real models on a Mac and a
+Windows machine for every tag, before publishing either. That run, on
+2026-11-19, was the first time the Windows build had been started anywhere:
+it compiled and linked `win.rs`, built the installer, started, unpacked the
+real archives with Windows' tar, loaded the recognizer and the gesture engine,
+and the driver answered. Nothing more of Windows than that has been tried.
+
+## Permissions, asked for as they're needed
+
+The user, 2026-11-19: "Have him ask for all the permissions he needs as people
+need it and if he is asked to do something that needs permissions he does not
+have have him say so and point the person to where in settings."
+
+Before, one place asked at the moment of need (the voice shortcut, for the
+microphone); everything else waited for a button on Settings › Permissions,
+and the model was never told a permission was missing, so asked to click
+without Accessibility he'd try, fail to read the screen, and say that.
+
+Now (`main.js`, "Permissions, asked for as they're needed"):
+
+- **`need(id)`** is asked wherever something needs a permission. It's null
+  when he has it. Otherwise it does what can be done and gives the words to
+  say (`permission-list.js` `refusal`: `say` for him, `note` for a toast or a
+  line in Settings, `where` the pane). Never answered, macOS's own question is
+  put up (camera, microphone, location: it asks once only). For Accessibility
+  and the screen, which are a switch in System Settings and not a question,
+  macOS is asked (which is what lists him there) and the pane is opened, once
+  since he started, when it was asked for by a word or a click.
+- **What's switched on is asked for as it's switched on** (`askForWhatsOn`, at
+  every `refresh()`): the camera with Gestures or Cursor control, the
+  microphone with listening, Accessibility with Cursor control. Starting up
+  with one on, macOS's question if it's never been answered and no more;
+  thrown just now and refused before, a toast says where it's allowed and the
+  pane opens.
+- **Asked to click, type or do a task by hand without Accessibility**, the
+  command runner refuses before anything starts (`voice-runner.js` `noInput`),
+  with: "I can't click, type or read what's on the screen: macOS hasn't
+  allowed it. Switch Jester on in System Settings › Privacy & Security ›
+  Accessibility, then ask me again." A gesture or the watch says the same on
+  its toast, without throwing System Settings open for what may have been a
+  hand at rest.
+- **A picture of the window** is asked for once ever, as a task begins with a
+  model that reads pictures (`askForPictures`).
+- **His model is told** (`abilities.js` `blocked`, from `blockedNow()`): what
+  needs a missing permission isn't claimed, and a "Not allowed by macOS yet"
+  list says each with where it's switched on. With nothing in the way the
+  prompt is what it was, to the letter (a test keeps it so). The Mac's list
+  goes to his server with its other abilities.
+- **Spoken, a path through Settings is said as one** (`speaker.js` `forEar`):
+  "System Settings, then Privacy and Security, then Accessibility".
+- **A new Jester starts with his voice alone**: `gesturesEnabled` is false in
+  the settings a first launch stores, so the camera isn't asked for until
+  Gestures is turned on. Settings that exist are left as they are.
+- Location, Bluetooth and a vault's folder join Settings › Permissions once
+  they're in use (`whenKnown`), each with where it's allowed; Accessibility's
+  card says what mends a switch that's on and does nothing after an update.
+
+**Location never asked** (the user, 2026-11-19: set to this device, "it
+doesn't trigger location access ask so I have had to go in and toggle it off
+and then back", in the Mac app, the Mac linked to the cloud, and the website
+on another device). The one thing the three had in common was where the
+question was asked from: the background (at launch, or when he was spoken
+to), never a click with his window in front. On a Mac, `createMacLocate` now
+brings him forward first (`comeForward`: his window, and the app activated),
+puts macOS's question again every three seconds until it's answered, and
+reports an unanswered question as `asking` rather than a failure, so the next
+turn asks again at once (`whereabouts.js`). On his website, `shim.js` reads
+the browser's permission state: granted, it locates; refused, it says so;
+still to ask, it shows a bar with an **Allow location** button, since a
+browser may only put its question after a tap, and asks at once as well for
+one that doesn't need the tap. "Not now" stands until the page is opened
+again, unless it's asked for on purpose from Settings (`sure`). Why there's
+no position is told with the turn (`situation.js` `nowhereLine`), with where
+it's allowed, so asked for the weather he says what's in the way.
+
+That macOS shows Location's question only to an app in front is what the
+user's account points to, not something measured here: no prompt can be
+raised on this Mac without them. Check 24 below is the test.
+
+`JESTER_PRETEND_REFUSED=accessibility` has a permission read as refused, and
+macOS's question and System Settings logged rather than opened: `npm run
+live-check -- permissions` uses it (6 of 6).
 
 ## Voice
 
@@ -2568,7 +2731,7 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
 
 16. **A first launch** (the checks run on a scratch profile that already has a
     model; no new Mac has run it): on a Mac that's never had Jester, or a
-    second user account on this one, follow SETUP.md from `git clone` to the
+    second user account on this one, install the download (docs/install-mac.md) and go from first launch to the
     Getting started screen, and note every place it's wrong or unclear. The
     banner should count down as each needed thing is done, and go when the last
     is; a key pasted in Settings › Models should come with Talking ticked; and
@@ -2648,6 +2811,30 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     a real Canvas assignment link opening, a reply really drafted by your extension, your talking model's own
     ideas (how often they're worth it, and whether one ever reads as made up), and how "yes" scores with your
     voice from across the room. The log's `offers:` lines say what was offered and what came of it.
+
+24. **Permissions asked as they're needed, and Location's question** (built 2026-11-19; the refusals were run in the
+    real app with Accessibility pretended refused, and no real macOS question has been raised by any of it). To see
+    them all, they have to be un-granted first: quit Jester, then in Terminal
+    `tccutil reset All com.jester.desktop`, and in System Settings › Privacy & Security › Location Services switch
+    Jester off (or remove him). Then start him and: press the microphone under the orb (macOS should ask for the
+    microphone at once); say or type "type hello world" (he should say he can't click or type, macOS's Accessibility
+    dialog should come up, and System Settings should open at Accessibility); turn Gestures on (the camera is asked
+    for); set Location to This Mac's location and ask "what's the weather?" (his window should come forward and
+    macOS ask about location, with nothing switched off and on). The log's `permission:` lines say what he asked for
+    and what he opened. In the cloud-linked window and on your phone's browser: ask for the weather with Location
+    set to your device; the phone should show a bar with Allow location.
+25. **The download, on your Mac** (built 2026-11-19; started here and on GitHub's Mac and Windows machines by
+    `npm run dist-check`, never opened by a person from a real download). Download `Jester-mac-arm64.dmg` from the
+    Releases page in a browser, drag him to Applications and open him: macOS should refuse once, and System
+    Settings › Privacy & Security › Open Anyway should let him in. He has the same bundle ID as the Jester you run
+    from this checkout, so quit that one first; macOS will treat him as a different app and ask for permissions
+    again, and may ask for your login password for "Jester Safe Storage". A cleaner test is a second user account
+    or a friend's Mac: nothing set up, his window should open on the orb with the download's progress across the
+    top, and Getting started should need only a model.
+26. **The Windows preview** (built and started by GitHub's Windows machine on 2026-11-19, which is all the running
+    it has had). On your PC: run `Jester-windows-x64-setup.exe` (More info › Run anyway), and see that he opens,
+    downloads his models, hears "Jester", answers, and that "open Notepad and type hello" does it. What his log
+    says is in `%APPDATA%\Jester\logs\jester.log`. Linking with Chrome isn't built for Windows.
 
 ## Things learned the hard way
 

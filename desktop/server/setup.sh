@@ -2,14 +2,14 @@
 # Jester's brain on a server: Ubuntu 24.04 on an Oracle Cloud Always Free Ampere A1 (arm64), or any Ubuntu 24.04.
 # Run as the normal user (ubuntu), not root: it asks for sudo when it needs it. Safe to run again.
 #
-#   curl -fsSL https://raw.githubusercontent.com/KrishSChavan/jester/desktop-app/desktop/server/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/KrishSChavan/jester/main/desktop/server/setup.sh | bash
 #
 # What it does: installs Node, what Electron needs to run with no screen (xvfb), Ollama with the two small models
 # the server uses, Tailscale and Syncthing; clones Jester; downloads his speech and voice models; and runs him as a
 # service that starts with the server. It opens no port to the internet: Tailscale is the only way in.
 set -euo pipefail
 
-BRANCH="${JESTER_BRANCH:-desktop-app}"
+BRANCH="${JESTER_BRANCH:-main}"
 HOME_DIR="$HOME"
 REPO="$HOME_DIR/jester"
 VAULT="${JESTER_VAULT:-$HOME_DIR/vault}"
