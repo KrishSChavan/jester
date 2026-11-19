@@ -22,12 +22,31 @@
  * @property {boolean} [phone]  their phone is set up and on
  * @property {boolean} [mail]  their Gmail is signed in to
  * @property {boolean} [chrome]  his Chrome extension is linked
+ * @property {{fetching?:{id:string}|null, waiting?:string[], error?:string, words?:string, firstMb?:number}|null} [fetch]
+ *   how the download of what he hears and speaks with stands (main.js modelsState)
  */
+
+/** What he hears with, and his own voice, as speech/model-fetch.js names them. */
+const HEARING = ['vad', 'parakeet-110m', 'parakeet-0.6b'];
+const OWN_VOICE = ['kokoro'];
+
+/**
+ * A step that waits on a download: how it stands, and the button that starts it when nothing has. He starts it
+ * himself the first time he's opened, so the button is for one that was stopped, or failed.
+ */
+function downloading(fetch, ids, idle) {
+  const now = ids.includes(fetch?.fetching?.id);
+  if (now) return { why: fetch.words || 'Downloading…' };
+  if (fetch?.waiting?.some((id) => ids.includes(id))) return { why: fetch.error ? fetch.words : 'Waiting its turn to download.' , ...(fetch.error ? { act: 'fetch-models', button: 'Try again' } : {}) };
+  if (fetch?.error) return { why: fetch.words, act: 'fetch-models', button: 'Try again' };
+  return { why: idle, act: 'fetch-models', button: 'Download' };
+}
 
 /**
  * @param {SetupState} state
- * @returns {{id:string, title:string, why:string, done:boolean, required:boolean, go:string}[]}  what's needed
- *   first, then what's optional; `go` is the screen of his window where it's done
+ * @returns {{id:string, title:string, why:string, done:boolean, required:boolean, go:string, act?:string, button?:string}[]}  what's needed
+ *   first, then what's optional; `go` is the screen of his window where it's done; `act`, when the step's own button
+ *   does it there and then ('fetch-models': the download), with what the `button` says
  */
 export function setupSteps(state = {}) {
   const missing = Array.isArray(state.missing) ? state.missing : [];
@@ -55,7 +74,9 @@ export function setupSteps(state = {}) {
     {
       id: 'hearing',
       title: 'Download what he hears with',
-      why: state.hearing ? 'It’s here: what you say is recognized on this computer.' : 'In the desktop folder, run: npm run models. About 500 MB, once.',
+      ...(state.hearing
+        ? { why: 'It’s here: what you say is recognized on this computer.' }
+        : downloading(state.fetch, HEARING, `Not downloaded yet${state.fetch?.firstMb ? `: about ${state.fetch.firstMb} MB, once` : ''}. You can type to him meanwhile.`)),
       done: !!state.hearing,
       required: true,
       go: 'settings/general'
@@ -79,7 +100,7 @@ export function setupSteps(state = {}) {
     {
       id: 'ownVoice',
       title: 'Give him his own voice',
-      why: state.ownVoice ? 'He has it, made on this computer.' : 'Until it’s downloaded (npm run models, in the desktop folder) he speaks with the computer’s voice.',
+      ...(state.ownVoice ? { why: 'He has it, made on this computer.' } : downloading(state.fetch, OWN_VOICE, 'Until it’s downloaded he speaks with the computer’s voice.')),
       done: !!state.ownVoice,
       required: false,
       go: 'settings/assistant'

@@ -13,6 +13,8 @@
     "watch": "node scripts/build-watch.mjs",
     "launcher": "node scripts/make-launcher.mjs",
     "app": "node scripts/jester-app.mjs",
+    "dist": "node scripts/pack.mjs",
+    "dist-check": "node scripts/dist-check.mjs",
     "icons": "node scripts/make-icons.mjs",
     "location": "node scripts/build-location.mjs",
     "models": "node scripts/fetch-models.mjs vad voice parakeet-110m kokoro",
@@ -30,6 +32,14 @@
     "ws": "8.22.1"
   },
   "devDependencies": {
-    "electron": "44.7.0"
+    "electron": "44.7.0",
+    "electron-builder": "26.18.0"
+  },
+  "author": "Krish Chavan",
+  "license": "MIT",
+  "homepage": "https://github.com/KrishSChavan/jester",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KrishSChavan/jester.git"
   }
 }

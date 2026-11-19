@@ -5,7 +5,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const desktop = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const SETUP = 'Install local scraping with npm --prefix desktop run scraping:setup.';
+/**
+ * Where the helper's Python and its browser are: .scrapling beside src/ in a checkout (npm run scraping:setup);
+ * for an installed Jester, a folder with his settings (boot.js), since his own folder can't be written to.
+ */
+const scraplingHome = (env = process.env, root = desktop) => (env.JESTER_SCRAPLING_DIR ? path.resolve(env.JESTER_SCRAPLING_DIR) : path.join(root, '.scrapling'));
+const SETUP = process.env.JESTER_SCRAPLING_DIR
+  ? 'The local page reader isn’t set up on this computer. Link Jester’s Chrome extension (Settings › Chrome) and pages are read through it.'
+  : 'Install local scraping with npm --prefix desktop run scraping:setup.';
 const failure = (code, detail) => ({ ok: false, code, detail });
 
 function killWorker(child) {
@@ -24,7 +31,7 @@ function killWorker(child) {
 }
 
 export function scrapingPython({ env = process.env, platform = process.platform, root = desktop } = {}) {
-  return env.JESTER_SCRAPLING_PYTHON || path.join(root, '.scrapling', platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  return env.JESTER_SCRAPLING_PYTHON || path.join(scraplingHome(env, root), platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 }
 
 export function createWebScraper({ python = scrapingPython(), worker = path.join(desktop, 'scraping/worker.py'), spawn = nodeSpawn,
@@ -44,7 +51,7 @@ export function createWebScraper({ python = scrapingPython(), worker = path.join
     return new Promise((resolve) => {
       let child;
       try { child = spawn(python, ['-u', worker], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, detached: process.platform !== 'win32',
-        env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(desktop, '.scrapling/browsers') } }); }
+        env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(scraplingHome(), 'browsers') } }); }
       catch { resolve(failure('setup_required', SETUP)); return; }
       let bytes = 0;
       const chunks = [];

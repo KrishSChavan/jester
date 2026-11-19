@@ -11,3 +11,6 @@ native/jester-watch/build/
 xcuserdata/
 # What spikes/input-in-electron.mjs saw on this machine.
 spikes/*-report.json
+# The packaged app and its installers (npm run dist), and the helpers collected for it.
+dist/
+build/bin/

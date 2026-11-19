@@ -230,10 +230,41 @@ function renderVoice() {
   $('voiceEnabled').disabled = !settings.enabled || missing;
   $('voice-row').classList.toggle('disabled', missing);
   $('voice-hint').textContent = missing
-    ? 'Needs its speech model, which isn’t installed. In desktop/, run: npm run models'
+    ? desktop?.models?.words || 'Needs what he hears with, which isn’t downloaded yet: Download, above.'
     : `${voiceStarters()} starts a command: say “open Spotify”, “volume 30”, “type hello”. Speech is recognized on this computer.`;
+  renderModels();
   renderSpeechModel(missing);
   renderContinuous();
+}
+
+/**
+ * What he hears and speaks with, when it isn't all here: how the download's going, and the buttons that start and
+ * stop it. He starts it himself the first time he's opened; the row goes once there's nothing left to fetch.
+ */
+function renderModels() {
+  const models = desktop?.models;
+  const row = $('models-row');
+  if (!models) return void (row.hidden = true);
+  const first = models.first || [];
+  const extra = models.extra?.[0];
+  row.hidden = !models.fetching && !models.error && !first.length && !extra;
+  $('models-words').textContent =
+    models.words ||
+    (first.length
+      ? `What he hears and speaks with isn’t all here yet: ${models.firstMb} MB to download, once. Nothing you say is sent anywhere to be recognized.`
+      : extra
+        ? `${extra.label}, the other recognizer, is a ${extra.mb} MB download.`
+        : '');
+  const fetch = $('models-fetch');
+  fetch.hidden = !!models.fetching || (!first.length && !models.error);
+  fetch.textContent = models.error ? 'Try again' : `Download (${models.firstMb} MB)`;
+  const more = $('models-extra');
+  more.hidden = !!models.fetching || !!models.error || !extra;
+  if (extra) {
+    more.textContent = `Download ${extra.label} (${extra.mb} MB)`;
+    more.dataset.id = extra.id;
+  }
+  $('models-stop').hidden = !models.fetching;
 }
 
 /** Pictures of the window for the model: on unless turned off here, and on a Mac only with Screen Recording too. */
@@ -275,7 +306,7 @@ function renderContinuous() {
   select.hidden = !there;
   $('jester-voice-hear').hidden = !there;
   $('jester-voice-hint').textContent = !there
-    ? 'This computer’s voice, for now. His own is a 334 MB download: in desktop/ run: npm run models -- kokoro'
+    ? `This computer’s voice, for now. ${desktop?.models?.fetching?.id === 'kokoro' ? desktop.models.words : 'His own is a 334 MB download: Settings › General › Downloads.'}`
     : voice.state === 'resting'
       ? 'His own voice isn’t starting, so this computer’s speaks for now. It’s tried again in a few minutes.'
       : 'His own voice, made on this computer: nothing he says is sent anywhere, and there’s no account or allowance.';
@@ -342,7 +373,7 @@ function renderSpeechModel(missing) {
   select.disabled = !settings.enabled || !settings.voiceEnabled;
   const chosen = choices.find((choice) => choice.id === desktop?.speechModel);
   const absent = choices.find((choice) => !choice.installed);
-  $('speech-model-hint').textContent = [chosen?.hint, absent && `To add ${absent.label}, in desktop/ run: npm run models -- ${absent.id}`].filter(Boolean).join(' ');
+  $('speech-model-hint').textContent = [chosen?.hint, absent && `${absent.label} isn’t downloaded: Downloads, above, has it.`].filter(Boolean).join(' ');
 }
 
 /** Whether the eyes are calibrated, and how well, from the extension's own grading. */
@@ -1051,6 +1082,12 @@ chrome.runtime.onMessage.addListener((message) => {
       drawMail(message.mail);
       render();
       break;
+    // A download's progress (main.js modelsChanged): the lines that say it, and nothing else redrawn.
+    case 'jester/desktop-models':
+      if (!desktop) break;
+      desktop.models = message.models;
+      renderVoice();
+      break;
     case 'jester/telemetry': {
       const t = message.telemetry || {};
       $('camera-stats').textContent = t.stalled ? 'No picture' : `${t.fps} fps · ${t.delegate || '—'} · ${t.handPresent ? 'hand in view' : 'no hand in view'}`;
@@ -1119,6 +1156,10 @@ for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], 
 $('vault-use').addEventListener('click', (event) => vaultOp('use', event.currentTarget.dataset.path));
 $('chats-import').addEventListener('click', () => importChats().catch(() => undefined));
 $('chats-learn').addEventListener('click', () => vaultOp(desktop?.memory?.learning?.running ? 'learn-stop' : 'learn').catch(() => undefined));
+const modelsOp = (message) => chrome.runtime.sendMessage({ type: 'jester/desktop-models', ...message }).catch(() => undefined);
+$('models-fetch').addEventListener('click', () => modelsOp({ op: 'fetch' }));
+$('models-extra').addEventListener('click', (event) => modelsOp({ op: 'fetch', ids: [event.currentTarget.dataset.id] }));
+$('models-stop').addEventListener('click', () => modelsOp({ op: 'stop' }));
 $('locationSource').addEventListener('change', (event) => {
   // The place is asked for before it's chosen: until one's set, there's nothing to tell the weather of.
   namingPlace = event.target.value === 'place' && !desktop?.day?.place;

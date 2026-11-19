@@ -11,7 +11,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const MODELS_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../models');
+/**
+ * Where the models are kept: models/ in a checkout; for an installed Jester, a folder with his settings (boot.js
+ * names it here, and the speech and voice services inherit it), since he fetches them himself (model-fetch.js).
+ */
+export const MODELS_DIR = process.env.JESTER_MODELS_DIR
+  ? path.resolve(process.env.JESTER_MODELS_DIR)
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../models');
 
 const SAMPLE_RATE = 16000;
 const threads = 2;
@@ -118,11 +124,11 @@ export function pickModel(wanted, installed = isInstalled) {
   return SPEECH_CHOICES.find((choice) => installed(choice.id))?.id || null;
 }
 
-/** The model's folder, or an error naming the command that downloads it. */
+/** The model's folder, or an error saying it isn't there. */
 export function modelDir(name) {
   const model = SPEECH_MODELS[name];
   if (!model) throw new Error(`Unknown speech model "${name}"`);
   const dir = path.join(MODELS_DIR, model.folder);
-  if (!fs.existsSync(dir)) throw new Error(`Speech model "${name}" is missing; run: node scripts/fetch-models.mjs ${name}`);
+  if (!fs.existsSync(dir)) throw new Error(`Speech model "${name}" isn’t downloaded yet`);
   return dir;
 }

@@ -46,7 +46,7 @@ export function createDispatcher({ driver, getSettings, canPost, onJester, toast
       onJester(plan.op);
       return done(true, '', false);
     }
-    if (!driver) return done(false, 'Jester’s input helper isn’t built (npm run driver)');
+    if (!driver) return done(false, 'Jester’s input helper is missing. Install Jester again (from a checkout: npm run driver)');
     if (!canPost()) return done(false, 'Allow Accessibility in Jester’s Settings first');
     try {
       if (plan.kind === 'key') await driver.call('key', { key: plan.key, modifiers: plan.modifiers });

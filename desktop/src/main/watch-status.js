@@ -12,7 +12,7 @@ const BLUETOOTH_TROUBLE = {
 
 /** The line under the switch. */
 export function watchStatus(watch, settings) {
-  if (!watch?.built) return 'Needs its Bluetooth helper. In desktop/, run: npm run watch';
+  if (!watch?.built) return 'Needs its Bluetooth helper, which this copy of Jester came without (from a checkout: npm run watch, in desktop/).';
   if (!settings?.enabled) return 'Jester is off.';
   if (!settings.watchEnabled) return 'Move the cursor with your wrist, using Jester on your watch.';
   if (watch.problem) return watch.problem;

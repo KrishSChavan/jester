@@ -285,6 +285,14 @@ function drawControls() {
 
 /** What's needed and not there yet (main.js `jester/setup`): as last told. */
 let setup = null;
+/** How the download of what he hears and speaks with stands (main.js modelsState): told as it goes. */
+let modelsNow = null;
+const models = () => modelsNow || state().desktop?.models || null;
+/** The step of Getting started a download is for, by what's being fetched. */
+const stepFetching = () => {
+  const id = models()?.fetching?.id;
+  return !id ? '' : id === 'kokoro' ? 'ownVoice' : id === 'voice' ? '' : 'hearing';
+};
 
 /**
  * What's still needed before he's any use, over the orb, a click from Getting started: a permission macOS hasn't
@@ -296,7 +304,11 @@ function drawBanner() {
   const missing = (desktop?.permissions || []).filter((item) => (desktop?.missing || []).includes(item.id));
   const left = setup?.left || 0;
   $('banner').hidden = !missing.length && !left;
-  if (missing.length && left <= 1) $('banner-text').textContent = `Jester needs ${missing.map((item) => item.label).join(' and ')} to work.`;
+  // All that's left is a download he's already at: how far it's got, rather than a thing for them to do.
+  const fetching = models()?.fetching;
+  const onlyHearing = left === 1 && !missing.length && setup?.steps?.some((step) => step.id === 'hearing' && !step.done);
+  if (onlyHearing && fetching && stepFetching() === 'hearing') $('banner-text').textContent = fetching.unpacking ? 'Jester’s unpacking what he hears with. You can type to him meanwhile.' : `Jester’s downloading what he hears with: ${fetching.percent}%. You can type to him meanwhile.`;
+  else if (missing.length && left <= 1) $('banner-text').textContent = `Jester needs ${missing.map((item) => item.label).join(' and ')} to work.`;
   else if (left) $('banner-text').textContent = `${left} thing${left === 1 ? '' : 's'} left to set up before Jester’s ready.`;
 }
 
@@ -329,14 +341,20 @@ function drawSetup() {
     title.textContent = step.title;
     const why = document.createElement('span');
     why.className = 'why';
-    why.textContent = step.why;
+    // A download under way says how far it's got, as it goes.
+    const live = !step.done && stepFetching() === step.id;
+    why.textContent = live ? models().words : step.why;
     words.append(title, why);
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'chip';
-    button.dataset.go = step.go;
-    button.textContent = step.done ? 'Change' : 'Set up';
-    button.setAttribute('aria-label', `${step.done ? 'Change' : 'Set up'}: ${step.title}`);
+    const does = !step.done && !live && step.act === 'fetch-models';
+    // The step's own button does it there and then (the download); any other goes to where it's done.
+    if (does) button.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-models', op: 'fetch' }).then(askSetup, () => undefined));
+    else button.dataset.go = step.go;
+    const says = step.done ? 'Change' : does ? step.button || 'Download' : live ? 'See' : 'Set up';
+    button.textContent = says;
+    button.setAttribute('aria-label', `${says}: ${step.title}`);
     item.append(mark, words, button);
     return item;
   };
@@ -595,6 +613,12 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'jester/chat':
       drawChat(message.chat, { forgotten: message.forgotten === true });
       break;
+    // A download's progress: the banner and Getting started say how far it's got.
+    case 'jester/desktop-models':
+      modelsNow = message.models;
+      drawBanner();
+      drawSetup();
+      break;
     // His website: where he's open changed, or what a computer's doing.
     case 'jester/devices-changed':
       devicesPage.load();
@@ -633,6 +657,8 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+// The whole state came again: it has the download's latest, and the one told in passing is done with.
+onRender(() => (modelsNow = null));
 onRender(drawMain);
 onRender(({ desktop }) => {
   if (desktop && Object.hasOwn(desktop, 'research')) drawResearch(desktop.research);

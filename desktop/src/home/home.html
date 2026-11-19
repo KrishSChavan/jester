@@ -266,6 +266,14 @@
               <span><strong>Camera</strong><small id="camera-hint">The camera Jester watches.</small></span>
               <select id="cameraDeviceId"></select>
             </label>
+            <div class="row" id="models-row" hidden>
+              <span><strong>Downloads</strong><small id="models-words"></small></span>
+              <span class="buttons">
+                <button id="models-fetch" type="button" hidden>Download</button>
+                <button id="models-extra" type="button" hidden></button>
+                <button id="models-stop" type="button" hidden>Stop</button>
+              </span>
+            </div>
             <label class="row" id="voice-row">
               <span><strong>Voice commands</strong><small id="voice-hint"></small></span>
               <input type="checkbox" id="voiceEnabled" />

@@ -34,6 +34,8 @@
  *   JESTER_GOOGLE_CLIENT=file with SERVER: Google's client file, for Gmail, in place of picking it in Settings
  */
 
+// First: it says where his models and helpers are, for the modules below that read it as they load.
+import { BIN, LOG_NAME, PACKAGED } from './boot.js';
 import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, nativeImage, nativeTheme, powerMonitor, safeStorage, screen, session, shell, utilityProcess } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -85,7 +87,6 @@ import { CHECK_MS, createMail, mailCard, mailLine } from './mail.js';
 import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
-import { remakeOnQuit } from '../../scripts/jester-app.mjs';
 import { missingFor } from './permission-list.js';
 import { createRing } from './ring.js';
 import { createRingPage } from './ring-page.js';
@@ -98,13 +99,15 @@ import { setupSteps, setupSummary } from './setup.js';
 import { createSituation } from './situation.js';
 import { createSpeaker, systemVoice } from './speaker.js';
 import { startSpeech } from './speech.js';
+import { createModelFetcher, fetchWords, FIRST_SET, MODEL_FILES, modelsAt } from './speech/model-fetch.js';
+import { MODELS_DIR, SPEECH_CHOICES } from './speech/models.js';
 import { createStopButton } from './stop-button.js';
 import { createTasks } from './tasks.js';
 import { createScripts } from './scripts.js';
 import { draftManifest } from './script-draft.js';
 import { createTeller, SETTLE_MS } from './tell.js';
 import { createTray } from './tray.js';
-import { createWatch } from './watch.js';
+import { bridgePath, createWatch } from './watch.js';
 import { createWeather, unitsFor, weatherLines } from './weather.js';
 import { createWhereabouts } from './whereabouts.js';
 import { createDeviceLocate } from './device-location.js';
@@ -156,10 +159,13 @@ const RUN_LATE_MS = 10 * 60 * 1000;
 registerScheme();
 // A server has no display worth drawing on (it runs under a virtual one, xvfb) and no GPU.
 if (SERVER) app.disableHardwareAcceleration();
-if (env.JESTER_DATA_DIR) {
-  app.setPath('userData', path.resolve(env.JESTER_DATA_DIR));
-  // A test Jester's log is its own, not the user's dev.log.
-  app.setAppLogsPath(path.join(path.resolve(env.JESTER_DATA_DIR), 'logs'));
+/**
+ * From a checkout on a Mac, Jester.app is made again as he quits when his icon or Electron changed
+ * (scripts/jester-app.mjs). An installed Jester has no scripts folder, and nothing to remake.
+ */
+let remakeOnQuit = null;
+if (!PACKAGED && process.platform === 'darwin') {
+  import('../../scripts/jester-app.mjs').then((made) => (remakeOnQuit = made.remakeOnQuit)).catch(() => undefined);
 }
 // Read by the speech service, which inherits this environment.
 if (env.JESTER_SAVE_SPEECH) env.JESTER_SAVE_SPEECH = path.resolve(env.JESTER_SAVE_SPEECH);
@@ -177,14 +183,25 @@ if (env.JESTER_FAKE_MEDIA) {
  * Where the log goes with JESTER_LOG: stdout, which the launcher sends to
  * dev.log. Restarted from the menu bar, Jester's stdout goes nowhere, so it
  * adds to dev.log itself. Null: stdout will do (the launcher's file, or a terminal).
+ *
+ * An installed Jester has no launcher and his stdout goes nowhere, so he always keeps the file himself (boot.js
+ * turns JESTER_LOG on): jester.log, started afresh each time he's opened, with the run before kept beside it as
+ * jester.previous.log, for when the last thing he did was stop.
  */
 function ownLogFile() {
-  if (!env.JESTER_LOG || process.stdout.isTTY) return null;
+  if (!env.JESTER_LOG) return null;
   try {
-    if (fs.fstatSync(1).isFile()) return null;
+    if (!PACKAGED && (process.stdout.isTTY || fs.fstatSync(1).isFile())) return null;
     // dev:mac's JESTER_DEV_LOG, when it was started with one.
-    const file = env.JESTER_DEV_LOG ? path.resolve(env.JESTER_DEV_LOG) : path.join(app.getPath('logs'), 'dev.log');
+    const file = env.JESTER_DEV_LOG ? path.resolve(env.JESTER_DEV_LOG) : path.join(app.getPath('logs'), LOG_NAME);
     fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (PACKAGED) {
+      try {
+        fs.renameSync(file, file.replace(/\.log$/, '.previous.log'));
+      } catch {
+        /* his first run */
+      }
+    }
     return fs.openSync(file, 'a');
   } catch {
     return null;
@@ -222,6 +239,8 @@ let stopButton = null;
 /** A timer's ringing (ring.js): until it's turned off by a word, a gesture or a click. */
 let ring = null;
 let speech = null;
+/** What he hears and speaks with, fetched when it isn't here (speech/model-fetch.js). */
+let modelFetcher = null;
 let voiceRunner = null;
 /** The user's own scripts, in Controls (scripts.js). */
 let scripts = null;
@@ -482,6 +501,7 @@ function desktopState() {
     mail: google ? google.state() : null,
     speechModel: speech?.model || null,
     speechChoices: speech?.choices || [],
+    models: modelsState(),
     research: researchPresentation.state(),
     watch: watch?.state || null,
     continuous: {
@@ -525,6 +545,44 @@ async function noteCamera() {
 
 /** The speech model: 'ready', 'off' or 'missing' (see speech.js). */
 const voiceState = () => speech?.state || 'missing';
+
+/** Megabytes, for a button: "Download (104 MB)". */
+const megs = (keys) => Math.round(keys.reduce((sum, key) => sum + (MODEL_FILES[key]?.size || 0), 0) / 1048576);
+
+/**
+ * What he hears and speaks with, for his window: how a download stands, in words; what a new Jester still lacks
+ * (`first`: what Download fetches, and how big it is); and the recognizers Settings offers that aren't here.
+ */
+function modelsState() {
+  if (!modelFetcher) return null;
+  const fetch = modelFetcher.state();
+  const busy = new Set([fetch.fetching?.id, ...fetch.waiting].filter(Boolean));
+  const first = FIRST_SET.filter((key) => !modelFetcher.has(key));
+  const extra = SPEECH_CHOICES.filter((choice) => !FIRST_SET.includes(choice.id) && !modelFetcher.has(choice.id) && !busy.has(choice.id)).map((choice) => ({ id: choice.id, label: choice.label, mb: megs([choice.id]) }));
+  return { ...fetch, words: fetchWords(fetch), first: first.filter((key) => !busy.has(key)), firstMb: megs(first.filter((key) => !busy.has(key))), extra };
+}
+
+/** Told as a download goes: its own message, so his window redraws a line and not every page. */
+function modelsChanged(arrived) {
+  // One's arrived: the recognizer or his voice may be usable now, and Getting started has one thing fewer.
+  if (arrived) return void refresh();
+  post({ type: 'jester/desktop-models', models: modelsState() });
+}
+
+/**
+ * What a new Jester needs and hasn't got, fetched without being asked: the first time an installed one's opened,
+ * that's all of it (the user, 2026-11-19: he fetches them himself, no terminal). A test's Jester (JESTER_DATA_DIR)
+ * fetches nothing unless told to.
+ */
+function fetchFirstModels() {
+  if (!modelFetcher || SERVER || env.JESTER_NO_MODEL_FETCH) return;
+  if (env.JESTER_DATA_DIR && !env.JESTER_FETCH_MODELS) return;
+  const missing = FIRST_SET.filter((key) => !modelFetcher.has(key));
+  if (missing.length) {
+    log('models: fetching', missing.join(', '), 'into', MODELS_DIR);
+    modelFetcher.want(missing);
+  }
+}
 
 async function refresh() {
   settings = await loadSettings();
@@ -1065,7 +1123,7 @@ function startChromeLink() {
   if (env.JESTER_NO_LINK || (testing && !env.JESTER_LINK_SOCKET)) return;
   if (!testing) {
     try {
-      linkHost = installLinkHost({ relaySource: driverPath() });
+      linkHost = installLinkHost({ relaySource: driverPath({ resourcesPath: BIN }) });
       log('chrome link:', linkHost.why || `relay for ${linkHost.browsers.join(', ') || 'no browser yet'}${linkHost.changed ? ' (updated)' : ''}`);
     } catch (err) {
       linkHost = { browsers: [], why: err.message };
@@ -1136,6 +1194,7 @@ function useBrowserBindings() {
 function startInput() {
   try {
     driver = startDriver({
+      binary: driverPath({ resourcesPath: BIN }),
       dryRun: !!env.JESTER_DRIVER_DRY,
       onExit: (code, signal) => {
         driver = null;
@@ -1144,6 +1203,12 @@ function startInput() {
         setTimeout(startInput, 1000);
       }
     });
+    // For the log: that the helper this copy came with runs here at all.
+    const started = driver;
+    started.call('hello').then(
+      (hello) => log(`driver: ${hello.version} on ${hello.platform}${hello.dryRun ? ', describing input rather than sending it' : ''}`),
+      (err) => started === driver && log('driver: no answer:', err.message)
+    );
   } catch (err) {
     driver = null;
     log(err.message);
@@ -1203,6 +1268,7 @@ async function setupState() {
     hearing: voiceState() !== 'missing',
     listening: !!settings?.continuousAssistant,
     ownVoice: (kokoro?.state || 'missing') !== 'missing',
+    fetch: modelsState(),
     voiceprint: !!voiceprint,
     vault: !!vault,
     day: !!whereabouts?.connected || !!calendars?.connected,
@@ -1503,7 +1569,7 @@ function voiceProblem({ mic = true } = {}) {
   if (!settings?.enabled) return 'Jester is off';
   if (!settings.voiceEnabled) return 'Voice commands are off in Jester’s Settings';
   if (engine.state === ENGINE.SLEEPING) return `Jester is asleep: ${wakeWords()}`;
-  if (voiceState() === 'missing') return 'The speech model isn’t installed (in desktop/: npm run models)';
+  if (voiceState() === 'missing') return modelsState()?.words || 'What he hears with isn’t downloaded yet (Settings › General)';
   if (mic && !mediaAllowed('audio')) return 'Allow the Microphone in Jester’s Settings first';
   return '';
 }
@@ -1865,6 +1931,18 @@ function listenToPages() {
       // Getting started: what's left to set up, for his window's banner and its Getting started screen.
       case 'jester/setup':
         return { ok: true, ...(await setupState()) };
+      // His window's Download and Stop, for what he hears and speaks with.
+      case 'jester/desktop-models': {
+        if (!modelFetcher) return desktopState();
+        if (message.op === 'stop') modelFetcher.stop();
+        else {
+          const asked = Array.isArray(message.ids) ? message.ids.map(String).filter((id) => Object.hasOwn(MODEL_FILES, id)) : [];
+          // A recognizer is no use without what tells speech from silence.
+          modelFetcher.want(asked.length ? ['vad', ...asked] : FIRST_SET);
+        }
+        post({ type: 'jester/desktop-models', models: modelsState() });
+        return desktopState();
+      }
       // Settings › Email: the file from Google's console (chosen here, read here, never shown), signing in and out,
       // and a card's Open, which opens that conversation in Gmail.
       case 'jester/mail': {
@@ -2742,6 +2820,7 @@ async function handsAsked(frame) {
 }
 
 async function start() {
+  log(`Jester ${app.getVersion()}, ${PACKAGED ? 'installed' : 'from a checkout'} · ${process.platform} ${process.arch} · Electron ${process.versions.electron} · models in ${MODELS_DIR}`);
   if (!env.JESTER_KEEP_DOCK) app.dock?.hide();
   if (['light', 'dark'].includes(env.JESTER_THEME)) nativeTheme.themeSource = env.JESTER_THEME;
   serveFiles();
@@ -2806,6 +2885,7 @@ async function start() {
   });
   // The Apple Watch talks to the Mac on its own network: a server never sees it.
   if (!SERVER) watch = createWatch({
+    binary: bridgePath({ resourcesPath: BIN }),
     loadKey: async () => (await storage.local.get('watchKey')).watchKey,
     saveKey: (watchKey) => storage.local.set({ watchKey }),
     forgetKey: () => storage.local.remove('watchKey'),
@@ -2825,6 +2905,7 @@ async function start() {
   dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
   // Switched on by refresh(), from the settings.
   speech = startSpeech({ log });
+  modelFetcher = createModelFetcher({ dir: MODELS_DIR, log, onChange: modelsChanged, ...(env.JESTER_MODELS_URL ? { models: modelsAt(env.JESTER_MODELS_URL) } : {}) });
   // A dry run describes `open`, `osascript` and `shortcuts` too, rather than running them.
   const runTool = env.JESTER_DRIVER_DRY ? async (file, args) => (log('dry run: would run', file, JSON.stringify(args)), '') : runFile;
   stopButton = createStopButton({ onStop: stopAutomation });
@@ -2985,7 +3066,7 @@ async function start() {
   weather = createWeather({ log });
   // A Mac asks Location Services itself, as Jester: the first time, macOS asks whether "Jester" may know, and a
   // position waits for that answer, so it's first asked from Settings (90 s).
-  const macLocation = loadMacLocation({ log });
+  const macLocation = loadMacLocation({ log, ...(BIN ? { file: path.join(BIN, 'jester-location.node') } : {}) });
   locateHere = macLocation ? createMacLocate({ native: macLocation }) : locateByPage;
   // On a server, "where you are" is where the device being used is: its browser's, or the Mac's (device-location.js).
   whereabouts = createWhereabouts({
@@ -3447,6 +3528,7 @@ async function start() {
   engineWindow = createEngineWindow(log);
   tray = createTray(onTrayAction);
   await refresh();
+  fetchFirstModels();
   setInterval(checkPermissions, PERMISSION_POLL_MS);
   watchFront();
   if (!globalShortcut.register(VOICE_SHORTCUT, () => onJester('voice'))) log(`${VOICE_SHORTCUT} is taken by another app`);
@@ -3490,7 +3572,7 @@ if (!app.requestSingleInstanceLock()) {
     scripts?.close();
     // Last: Jester.app made again if his icon or Electron changed, so the next start, however it's started, shows them.
     try {
-      const done = remakeOnQuit(process.execPath);
+      const done = remakeOnQuit?.(process.execPath);
       if (done) console.log(`[jester] ${done}`);
     } catch (err) {
       console.error(`[jester] Jester.app couldn't be remade: ${err.message}`);

@@ -1,0 +1,96 @@
+# How Jester is packaged into the app people download (npm run dist, which is scripts/pack.mjs).
+#
+# What goes where once installed is described at the top of src/main/boot.js. In short: this folder's code as
+# plain files (no asar: the helpers are spawned, Python reads worker.py, and sherpa-onnx's native module sits
+# beside the libraries it loads), the extension's folder next to it so the same ../../../jester-extension
+# imports work, and the helpers built for this platform in Resources/bin.
+#
+# Nothing here signs with a paid certificate. On a Mac the app is signed ad hoc ("-"), which Apple silicon
+# needs to run it at all; Gatekeeper still asks the person to approve it once (docs/install-mac.md). To sign
+# properly later: set CSC_LINK and CSC_KEY_PASSWORD (a Developer ID certificate) in the build's environment,
+# remove `identity` below, and add notarization.
+
+appId: com.jester.desktop
+productName: Jester
+copyright: Copyright © 2026 Krish Chavan
+asar: false
+npmRebuild: false
+publish: null
+
+directories:
+  output: dist
+  buildResources: build
+
+# An allowlist: this folder also holds 4 GB of models, build output and a Python environment.
+files:
+  - package.json
+  - src/**/*
+  - scraping/worker.py
+  - scraping/requirements.txt
+  - icons/Jester.ico
+  - icons/jester.png
+
+extraResources:
+  # The extension's pages and modules: the engine page, the shared constants, MediaPipe.
+  - from: ../jester-extension
+    to: jester-extension
+    filter:
+      - "**/*"
+      - "!.env*"
+      - "!env.txt"
+      - "!README.md"
+      - "!tests"
+      - "!**/.DS_Store"
+  # { "type": "module" }, as the repository's own package.json says for the extension's files.
+  - from: build/resources-package.json
+    to: package.json
+  # jester-driver and, on a Mac, the watch's bridge and the Location Services module (scripts/pack.mjs).
+  - from: build/bin/${os}
+    to: bin
+
+artifactName: Jester-${os}-${arch}.${ext}
+
+mac:
+  category: public.app-category.productivity
+  icon: icons/Jester.icns
+  identity: "-"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
+  # The same words scripts/jester-app.mjs gives the Jester.app run from a checkout.
+  extendInfo:
+    NSCameraUsageDescription: Jester watches for your hand gestures through the camera, and your eyes or head if you steer the pointer with them.
+    NSMicrophoneUsageDescription: Jester listens for his name and for what you ask him.
+    NSBluetoothAlwaysUsageDescription: Jester talks to your Apple Watch over Bluetooth, so you can move the pointer with it.
+    NSBluetoothPeripheralUsageDescription: Jester talks to your Apple Watch over Bluetooth, so you can move the pointer with it.
+    NSLocationUsageDescription: Jester uses where this Mac is for the weather and what’s near you, once you turn it on in Settings.
+    NSLocationWhenInUseUsageDescription: Jester uses where this Mac is for the weather and what’s near you, once you turn it on in Settings.
+    NSAppleEventsUsageDescription: Jester runs the scripts you add to Controls, which may work other apps.
+    NSAudioCaptureUsageDescription: Jester listens for his name and for what you ask him.
+
+dmg:
+  title: Jester
+  contents:
+    - x: 150
+      y: 190
+    - x: 390
+      y: 190
+      type: link
+      path: /Applications
+
+win:
+  icon: icons/Jester.ico
+  target:
+    - target: nsis
+      arch: x64
+
+nsis:
+  artifactName: Jester-windows-${arch}-setup.${ext}
+  oneClick: true
+  perMachine: false
+  shortcutName: Jester
+  uninstallDisplayName: Jester

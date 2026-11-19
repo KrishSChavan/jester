@@ -3,65 +3,43 @@
  *
  *   node scripts/fetch-models.mjs [name ...]   (no names: the default set)
  *
- * They come from sherpa-onnx's own release page and are too big for git. tar
- * unpacks the .tar.bz2 archives; macOS and Windows 10+ both ship one.
+ * The app fetches what it needs itself the first time it's opened; this does the same from a terminal, for a
+ * checkout or a server. Both use src/main/speech/model-fetch.js, which has the list.
  */
 
-import { execFileSync } from 'node:child_process';
-import fs from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { createModelFetcher, megabytes, MODEL_FILES, modelPath } from '../src/main/speech/model-fetch.js';
 
-const RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/';
-/** Their spelling. */
-const VOICE_RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/';
-const TTS_RELEASE = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/';
-
-export const MODELS = {
-  vad: { file: 'silero_vad.onnx' },
-  voice: { file: 'nemo_en_titanet_small.onnx', release: VOICE_RELEASE },
-  'moonshine-tiny': { archive: 'sherpa-onnx-moonshine-tiny-en-quantized-2026-02-27.tar.bz2' },
-  kroko: { archive: 'sherpa-onnx-streaming-zipformer-en-kroko-2025-08-06.tar.bz2' },
-  'parakeet-110m': { archive: 'sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2' },
-  'parakeet-0.6b': { archive: 'sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2' },
-  // Jester's own voice (Kokoro v1.0, Apache-2.0): 334 MB to fetch, 360 MB unpacked.
-  kokoro: { archive: 'kokoro-multi-lang-v1_0.tar.bz2', release: TTS_RELEASE }
-};
+export const MODELS = MODEL_FILES;
 const DEFAULT_SET = ['vad', 'voice', 'moonshine-tiny'];
 
-const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../models');
-
-async function download(name, target, release = RELEASE) {
-  const response = await fetch(release + name, { redirect: 'follow' });
-  if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
-  const temp = `${target}.part`;
-  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(temp));
-  fs.renameSync(temp, target);
-}
-
-async function fetchModel(key) {
-  const model = MODELS[key];
-  if (!model) throw new Error(`Unknown model "${key}". Known: ${Object.keys(MODELS).join(', ')}`);
-  fs.mkdirSync(dir, { recursive: true });
-  if (model.file) {
-    const target = path.join(dir, model.file);
-    if (!fs.existsSync(target)) await download(model.file, target, model.release);
-    return target;
-  }
-  const folder = path.join(dir, model.archive.replace(/\.tar\.bz2$/, ''));
-  if (fs.existsSync(folder)) return folder;
-  const archive = path.join(dir, model.archive);
-  await download(model.archive, archive, model.release);
-  execFileSync('tar', ['-xjf', archive, '-C', dir]);
-  fs.rmSync(archive);
-  return folder;
-}
+const dir = process.env.JESTER_MODELS_DIR ? path.resolve(process.env.JESTER_MODELS_DIR) : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../models');
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const keys = process.argv.slice(2);
-  for (const key of keys.length ? keys : DEFAULT_SET) {
-    console.log(`${key}: ${await fetchModel(key)}`);
+  const asked = process.argv.slice(2);
+  const keys = asked.length ? asked : DEFAULT_SET;
+  const live = process.stdout.isTTY;
+  let fetcher;
+  fetcher = createModelFetcher({
+    dir,
+    retryMs: [],
+    onChange: (done) => {
+      const { fetching } = fetcher.state();
+      if (done) console.log(`${live ? '\r\x1b[K' : ''}${done}: ${modelPath(done, dir)}`);
+      else if (live && fetching) process.stdout.write(`\r\x1b[K${fetching.id}: ${fetching.unpacking ? 'unpacking' : `${fetching.percent}% (${megabytes(fetching.got, fetching.total)})`}`);
+    }
+  });
+  try {
+    for (const key of keys) if (fetcher.has(key)) console.log(`${key}: ${modelPath(key, dir)}`);
+    await fetcher.want(keys).done;
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+  const { error } = fetcher.state();
+  if (error) {
+    console.error(`${live ? '\n' : ''}${error}`);
+    process.exit(1);
   }
 }
