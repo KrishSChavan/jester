@@ -97,8 +97,10 @@ button:disabled {
   transition: transform 0.32s var(--ease), opacity 0.22s ease, visibility 0s linear 0.32s;
 }
 
+/* Shown as its host is: `visible` here would show through his window's other screens, which hide Controls by
+   `visibility: hidden` on its screen (home.css), and a child's own `visible` outranks that. */
 .screen.shown {
-  visibility: visible;
+  visibility: inherit;
   transform: none;
   opacity: 1;
   transition: transform 0.32s var(--ease), opacity 0.22s ease, visibility 0s;
@@ -1311,7 +1313,7 @@ input[type='checkbox']:checked::after {
 }
 
 .menu button[aria-checked='true'] .check {
-  visibility: visible;
+  visibility: inherit;
 }
 
 .menu button.danger,

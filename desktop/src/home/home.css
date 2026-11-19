@@ -141,6 +141,12 @@ button:disabled {
   min-height: 0;
 }
 
+/* Not drawn at all off its screen: what's in a shadow root can say `visible` and show through a hidden screen (it
+   did, 2026-11-18: Controls stayed over the orb, and looked frozen, as the screen under it took the clicks). */
+.screen:not(.shown) > .controls-host {
+  content-visibility: hidden;
+}
+
 /* The bar along the top is the window's title bar: it drags the window. */
 .top {
   flex: none;

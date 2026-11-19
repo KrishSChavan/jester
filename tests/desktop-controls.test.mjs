@@ -205,3 +205,13 @@ test('his website’s Controls asks the Mac through the link, and hears when its
   await until(() => !hands.connected);
   assert.deepEqual(changes.at(-1), { mac: false }, 'the Mac went: Controls says why');
 });
+
+test('Controls never shows through his window’s other screens', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const css = await readFile(new URL('../desktop/src/controls/controls.css', import.meta.url), 'utf8');
+  // A child's own `visible` outranks the `visibility: hidden` his window hides a screen by (2026-11-18: Controls
+  // stayed over the orb, and the screen under it took the clicks). Shown things inherit instead.
+  assert.doesNotMatch(css, /visibility:\s*visible/);
+  const home = await readFile(new URL('../desktop/src/home/home.css', import.meta.url), 'utf8');
+  assert.match(home, /\.screen:not\(\.shown\) > \.controls-host \{\s*content-visibility: hidden;/);
+});
