@@ -8,6 +8,8 @@ saying how much is left to set up. Press **Set up** on it for **Getting
 started**: a list of everything, each item with a button that takes you to
 where it's done. This page explains each item.
 
+<img src="images/getting-started.png" alt="Jester's Getting started screen: what's needed, ticked as it's done, then what you can add" width="460">
+
 ## Needed
 
 ### 1. Give him a model to think with

@@ -48,7 +48,10 @@ export const USAGE = {
   NSBluetoothAlwaysUsageDescription: 'Jester talks to your Apple Watch over Bluetooth, so you can move the pointer with it.',
   NSBluetoothPeripheralUsageDescription: 'Jester talks to your Apple Watch over Bluetooth, so you can move the pointer with it.',
   NSLocationUsageDescription: 'Jester uses where this Mac is for the weather and what’s near you, once you turn it on in Settings.',
-  NSLocationWhenInUseUsageDescription: 'Jester uses where this Mac is for the weather and what’s near you, once you turn it on in Settings.'
+  NSLocationWhenInUseUsageDescription: 'Jester uses where this Mac is for the weather and what’s near you, once you turn it on in Settings.',
+  // For a script of the user's that tells another app what to do (Controls). As electron-builder.yml has it for the
+  // installed app. RECIPE isn't raised for it: it joins this copy the next time one's made.
+  NSAppleEventsUsageDescription: 'Jester runs the scripts you add to Controls, which may work other apps.'
 };
 
 /**
