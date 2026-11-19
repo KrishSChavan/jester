@@ -11,6 +11,7 @@
  *   apple-touch-icon.png   180 px, the square filled: an iPhone rounds its corners itself
  *   icon-192.png, icon-512.png   Windows' look (the rounded square on clear), for an install prompt and a desktop
  *   maskable-512.png       the square filled, the art inside Android's safe circle, for its launcher's own shape
+ *   favicon-32.png, favicon.ico   a browser's tab (the .ico holds 16, 32 and 48 px; a browser asks for it by name)
  *
  * and to the Chrome extension, in Windows' look:
  *
@@ -220,8 +221,12 @@ const WEB_ICONS = [
   ['apple-touch-icon.png', { inset: 0, lifted: false, bleed: true }, 180],
   ['icon-192.png', WINDOWS, 192],
   ['icon-512.png', WINDOWS, 512],
-  ['maskable-512.png', { inset: 112, lifted: false, bleed: true }, 512]
+  ['maskable-512.png', { inset: 112, lifted: false, bleed: true }, 512],
+  // A browser's tab: the head alone, as every small size is.
+  ['favicon-32.png', WINDOWS, 32]
 ];
+/** And favicon.ico, which a browser asks for by that name whatever the page says: the tab's sizes in one file. */
+const FAVICON_SIZES = [16, 32, 48];
 /** The Chrome extension's (its manifest's sizes), and the Web Store's copy of the largest. */
 const EXTENSION = path.resolve(path.dirname(here), '../../jester-extension/icons');
 const EXTENSION_SIZES = [16, 32, 48, 128];
@@ -251,7 +256,10 @@ async function draw() {
 
   fs.mkdirSync(WEB, { recursive: true });
   for (const [file, look, size] of WEB_ICONS) fs.writeFileSync(path.join(WEB, file), await render(svg(look, size), size));
-  if (process.argv.includes('--web')) return console.log(`Wrote ${WEB_ICONS.map(([file]) => file).join(', ')} to ${WEB}`);
+  const tab = [];
+  for (const size of FAVICON_SIZES) tab.push({ size, png: await render(svg(WINDOWS, size), size) });
+  fs.writeFileSync(path.join(WEB, 'favicon.ico'), icoFile(tab));
+  if (process.argv.includes('--web')) return console.log(`Wrote ${WEB_ICONS.map(([file]) => file).join(', ')} and favicon.ico to ${WEB}`);
 
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, 'jester.svg'), art(MAC));

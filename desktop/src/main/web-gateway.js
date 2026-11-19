@@ -66,8 +66,43 @@ const PUBLIC = new Map([
   ['/web/icons/apple-touch-icon.png', 'icons/apple-touch-icon.png'],
   ['/web/icons/icon-192.png', 'icons/icon-192.png'],
   ['/web/icons/icon-512.png', 'icons/icon-512.png'],
-  ['/web/icons/maskable-512.png', 'icons/maskable-512.png']
+  ['/web/icons/maskable-512.png', 'icons/maskable-512.png'],
+  // A browser's tab. It asks for /favicon.ico by that name whatever a page says, the sign-in page's tab included.
+  ['/web/icons/favicon-32.png', 'icons/favicon-32.png'],
+  ['/favicon.ico', 'icons/favicon.ico']
 ]);
+
+/**
+ * A few letters that change when the icons' art does, put on every icon's address a page or the manifest gives
+ * (`?v=`). A browser keeps a tab's icon, and a phone or a desktop its installed app's, by address: at the same
+ * address a new icon was never looked for (the user, 2026-11-19: "the website did not get the new icon for the pwa
+ * or favicon"). The files answer at their plain addresses too: the query is only what makes an address new.
+ */
+const ICON_FILES = ['apple-touch-icon.png', 'icon-192.png', 'icon-512.png', 'maskable-512.png', 'favicon-32.png', 'favicon.ico'];
+const ICONS_DIR = path.join(WEB_ROOT, 'icons');
+let iconStamp = null;
+export function iconVersion(dir = ICONS_DIR) {
+  if (dir === ICONS_DIR && iconStamp !== null) return iconStamp;
+  const hash = crypto.createHash('sha256');
+  for (const name of ICON_FILES) {
+    try {
+      hash.update(name).update(fs.readFileSync(path.join(dir, name)));
+    } catch {
+      /* one that isn't there is no part of it */
+    }
+  }
+  const stamp = hash.digest('hex').slice(0, 8);
+  if (dir === ICONS_DIR) iconStamp = stamp;
+  return stamp;
+}
+
+/**
+ * A page of the website's own (the sign-in), with its icons' addresses stamped: only in `<link>` tags, and only
+ * ones not stamped already. A picture on the page keeps its plain address, which the worker's offline copy has.
+ */
+export function withIconVersion(html, version = iconVersion()) {
+  return html.replace(/(<link\b[^>]*\bhref=")(\/favicon\.ico|\/web\/icons\/[\w.-]+)(")/g, `$1$2?v=${version}$3`);
+}
 /**
  * A sign-in code (`?install=`) works this long: in the manifest his signed-in page links, so his website added to a
  * phone's Home Screen (which keeps its own cookies, apart from the browser's) signs itself in when first opened; and
@@ -89,9 +124,9 @@ export function manifestFor(install = '') {
     background_color: '#08060c',
     theme_color: '#08060c',
     icons: [
-      { src: '/web/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-      { src: '/web/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-      { src: '/web/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+      { src: `/web/icons/icon-192.png?v=${iconVersion()}`, sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: `/web/icons/icon-512.png?v=${iconVersion()}`, sizes: '512x512', type: 'image/png', purpose: 'any' },
+      { src: `/web/icons/maskable-512.png?v=${iconVersion()}`, sizes: '512x512', type: 'image/png', purpose: 'maskable' }
     ]
   };
 }
@@ -150,7 +185,11 @@ export function withShim(html, { install = '' } = {}) {
     '<meta name="apple-mobile-web-app-capable" content="yes" />',
     '<meta name="apple-mobile-web-app-status-bar-style" content="black" />',
     '<meta name="apple-mobile-web-app-title" content="Jester" />',
-    '<link rel="apple-touch-icon" href="/web/icons/apple-touch-icon.png" />'
+    // The tab's icon, which a page of his had none of; and the Home Screen's.
+    `<link rel="icon" href="/favicon.ico?v=${iconVersion()}" sizes="48x48" />`,
+    `<link rel="icon" type="image/png" sizes="32x32" href="/web/icons/favicon-32.png?v=${iconVersion()}" />`,
+    `<link rel="icon" type="image/png" sizes="192x192" href="/web/icons/icon-192.png?v=${iconVersion()}" />`,
+    `<link rel="apple-touch-icon" href="/web/icons/apple-touch-icon.png?v=${iconVersion()}" />`
   ].join('\n    ');
   // The website's own styles, after the page's, so they win.
   const styled = /<\/head>/i.test(html) ? html.replace(/<\/head>/i, `    <link rel="stylesheet" href="/web/web.css" />\n    ${app}\n  </head>`) : html;
@@ -238,6 +277,8 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     const headers = { 'Content-Type': type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow' };
     if (type.startsWith('text/html')) {
       if (shim) body = Buffer.from(withShim(body.toString('utf8'), { install: installToken() }));
+      // The sign-in page's own icon links, stamped. Not the offline page, which the worker keeps as it is.
+      else if (path.basename(file) !== 'offline.html') body = Buffer.from(withIconVersion(body.toString('utf8')));
       headers['Content-Security-Policy'] = CSP;
     }
     response.writeHead(status, headers);

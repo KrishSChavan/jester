@@ -6,7 +6,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import vm from 'node:vm';
-import { createWebGateway, manifestFor, withShim } from '../desktop/src/main/web-gateway.js';
+import os from 'node:os';
+import path from 'node:path';
+import { createWebGateway, iconVersion, manifestFor, withIconVersion, withShim } from '../desktop/src/main/web-gateway.js';
 import { signInAddress } from '../desktop/src/web/sign-in.js';
 import { installWords } from '../desktop/src/home/install.js';
 
@@ -41,14 +43,26 @@ test('what an app needs before signing in is anyone’s; nothing else is', async
   const worker = await get(port, '/sw.js');
   assert.equal(worker.status, 200);
   assert.match(worker.headers.get('content-type'), /javascript/);
-  for (const icon of ['apple-touch-icon', 'icon-192', 'icon-512', 'maskable-512']) {
+  for (const icon of ['apple-touch-icon', 'icon-192', 'icon-512', 'maskable-512', 'favicon-32']) {
     const got = await get(port, `/web/icons/${icon}.png`);
     assert.equal(got.status, 200, icon);
     assert.equal(got.headers.get('content-type'), 'image/png');
     assert.deepEqual([...got.body.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], `${icon} is a PNG`);
   }
+  // A browser's tab: the icon it asks for by name, and the one a page links. The sign-in page's tab has it too.
+  const tab = await get(port, '/favicon.ico');
+  assert.equal(tab.status, 200);
+  assert.equal(tab.headers.get('content-type'), 'image/x-icon');
+  assert.deepEqual([...tab.body.subarray(0, 4)], [0, 0, 1, 0], 'an .ico');
+  assert.equal(tab.body.readUInt16LE(4), 3, 'holding 16, 32 and 48 px');
+  assert.equal((await get(port, '/web/icons/favicon-32.png')).status, 200);
+  // Stamped or not, an icon's address answers: the stamp is only what makes it new to whoever kept the old one.
+  assert.equal((await get(port, `/web/icons/icon-192.png?v=${iconVersion()}`)).status, 200);
+  assert.equal((await get(port, `/favicon.ico?v=${iconVersion()}`)).status, 200);
   const offline = await get(port, '/web/offline.html');
   assert.equal(offline.status, 200);
+  // The offline page is the worker's to keep as it is: its picture stays at the address the worker stored.
+  assert.match(offline.body, /src="\/web\/icons\/apple-touch-icon\.png"/);
   assert.match(offline.headers.get('content-security-policy'), /script-src 'self'/);
   assert.equal((await get(port, '/web/sign-in.js')).status, 200);
   // His page, its scripts and the rest of the website's files still need the key.
@@ -68,6 +82,32 @@ test('a page opened without the key is asked to sign in; a script is just refuse
   const script = await get(port, '/app/home/home.js', { 'Sec-Fetch-Mode': 'cors' });
   assert.equal(script.status, 401);
   assert.doesNotMatch(script.body, /Sign in to Jester/);
+  // The sign-in page has a tab icon too, at an address stamped with the icons' version.
+  const page = await get(port, '/', NAVIGATE);
+  const v = iconVersion();
+  assert.match(page.body, new RegExp(`<link rel="icon" href="/favicon\\.ico\\?v=${v}" sizes="48x48" />`));
+  assert.match(page.body, new RegExp(`<link rel="apple-touch-icon" href="/web/icons/apple-touch-icon\\.png\\?v=${v}" />`));
+});
+
+test('an icon’s address changes when its art does, so nothing keeps showing the old one', () => {
+  const v = iconVersion();
+  assert.match(v, /^[0-9a-f]{8}$/);
+  // The manifest's icons, the tab's and the Home Screen's all carry it.
+  for (const icon of manifestFor().icons) assert.ok(icon.src.endsWith(`?v=${v}`), icon.src);
+  const page = withShim('<html><head><title>x</title></head><body></body></html>');
+  for (const href of [`/favicon.ico?v=${v}`, `/web/icons/favicon-32.png?v=${v}`, `/web/icons/icon-192.png?v=${v}`, `/web/icons/apple-touch-icon.png?v=${v}`]) assert.ok(page.includes(`href="${href}"`), href);
+  assert.equal((page.match(/rel="icon"/g) || []).length, 3);
+  // Another drawing is another stamp; the same one, the same.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-icons-'));
+  fs.writeFileSync(path.join(dir, 'icon-192.png'), 'a hand');
+  const before = iconVersion(dir);
+  assert.equal(iconVersion(dir), before);
+  fs.writeFileSync(path.join(dir, 'icon-192.png'), 'a jester');
+  assert.notEqual(iconVersion(dir), before);
+  // A page's own links are stamped once: not twice, and not its pictures.
+  const stamped = withIconVersion('<link rel="icon" href="/favicon.ico" /><link rel="apple-touch-icon" href="/web/icons/apple-touch-icon.png" /><img src="/web/icons/apple-touch-icon.png" />', 'abc12345');
+  assert.equal(stamped, '<link rel="icon" href="/favicon.ico?v=abc12345" /><link rel="apple-touch-icon" href="/web/icons/apple-touch-icon.png?v=abc12345" /><img src="/web/icons/apple-touch-icon.png" />');
+  assert.equal(withIconVersion(stamped, 'zzz'), stamped);
 });
 
 test('his signed-in page links a manifest whose start signs the Home Screen app in, for a day', async (t) => {

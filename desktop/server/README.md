@@ -91,6 +91,14 @@ from Safari's: added from his signed-in site, it signs itself in the first time 
 or on another device, **Settings › Copy a sign-in link** makes a link that works for a day (never the key itself).
 With Tailscale off, the app says it can't reach him instead of showing an error.
 
+**If his icon changes** (or you still see an old one): update the server (the
+setup line above), then reload the page for the tab's icon. An app already on a
+Home Screen keeps the icon it was added with: on an iPhone, remove it from the
+Home Screen and add it again; Chrome on Android or a computer replaces it by
+itself within a day or so of the next time it's opened. Each icon's address
+carries a stamp that changes with the art (`iconVersion` in
+`src/main/web-gateway.js`), which is what makes a browser look again.
+
 Then, in his Settings on the website:
 
 - **Models:** add your Groq key and tick **Talking**; add your Claude key and tick **Actions**. Your Mac's keys stay
