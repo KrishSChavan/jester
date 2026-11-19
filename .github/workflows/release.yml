@@ -32,8 +32,8 @@ jobs:
       run:
         working-directory: desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -47,7 +47,7 @@ jobs:
         run: npm run dist
       - name: Start it, fetching the real models
         run: npm run dist-check -- --real-models --app dist/mac-arm64/Jester.app
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jester-mac
           path: |
@@ -64,8 +64,8 @@ jobs:
       run:
         working-directory: desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -76,7 +76,7 @@ jobs:
         run: npm run dist
       - name: Start it, fetching the real models
         run: npm run dist-check -- --real-models
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: jester-windows
           path: desktop/dist/Jester-windows-x64-setup.exe
@@ -91,8 +91,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: downloads
           merge-multiple: true
