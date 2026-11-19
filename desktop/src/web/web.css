@@ -42,6 +42,18 @@
   }
 }
 
+/*
+ * On a phone, Safari zooms the page in on any field whose words are under 16 px as it's tapped, and leaves it zoomed:
+ * at 16 px it stays put. The message boxes keep their one-line height (home.css: 20 px lines).
+ */
+@media (hover: none) and (pointer: coarse) {
+  input:not([type='checkbox'], [type='radio'], [type='range'], [type='color']),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
 /* Finishing a sign-in his server started (web/shim.js): the address it landed on, pasted. */
 .jester-landing {
   position: fixed;

@@ -15,6 +15,7 @@ import { createTasksPanel } from './tasks.js';
 import { cardElement, refreshBriefingCards, refreshCards, shelfOf, tookOffers, watchCards } from './cards.js';
 import { onRender, save, showing, startSettings, state } from './settings.js';
 import { renderResearchState } from './research.js';
+import { fitBox, putInBox, typingBox } from './typing.js';
 
 const $ = (id) => document.getElementById(id);
 document.documentElement.dataset.platform = /^Win/i.test(navigator.platform) ? 'win' : 'mac';
@@ -516,37 +517,19 @@ $('type').addEventListener('submit', (event) => {
   $('type').classList.remove('filled');
   chrome.runtime.sendMessage({ type: 'jester/talk-type', text });
 });
-/**
- * The box to type in: Return sends, Shift-Return starts a new line and makes it a taller box, for a passage and what
- * to do with it in one message. Pasted lines, or more than fits on one, make it taller too. Sent or emptied, it's one
- * line again.
- */
-function fitBox(form) {
-  const box = form.querySelector('textarea');
-  // The tasks box is an input, one line always.
-  if (!box) return;
-  if (!box.value) form.classList.remove('tall');
-  else if (!form.classList.contains('tall') && (box.value.includes('\n') || box.scrollHeight > box.clientHeight + 2)) form.classList.add('tall');
-  box.style.height = '';
-  if (form.classList.contains('tall')) box.style.height = `${box.scrollHeight}px`;
-}
-for (const form of document.querySelectorAll('.type')) {
-  const box = form.querySelector('textarea');
-  // The tasks box (#task-add) is a .type too, with an input: Return there adds the task, as it always has.
-  if (!box) continue;
-  box.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' || event.isComposing || event.altKey || event.metaKey || event.ctrlKey) return;
-    if (event.shiftKey) {
-      // The new line is the box's own to make; it's taller first, so it's seen going in.
-      form.classList.add('tall');
-      requestAnimationFrame(() => fitBox(form));
-      return;
-    }
-    event.preventDefault();
-    form.requestSubmit();
-  });
-  form.addEventListener('submit', () => requestAnimationFrame(() => fitBox(form)));
-}
+// His boxes (typing.js): Return sends; Shift-Return, pasted lines and "now this:" make a tall one. The tasks box
+// (#task-add) is a .type too, with an input: Return there adds the task, as it always has.
+for (const form of document.querySelectorAll('.type')) typingBox(form);
+// A box sized for words that no longer fit as they did: the window's narrower now.
+window.addEventListener('resize', () => document.querySelectorAll('.type').forEach(fitBox));
+// On his screen, pasting anywhere is pasting to him, as typing anywhere is (a passage copied from a document, say).
+document.addEventListener('paste', (event) => {
+  if (screens.current !== 'main' || event.target.closest?.('input, select, textarea, [contenteditable]')) return;
+  const text = event.clipboardData?.getData('text/plain');
+  if (!text) return;
+  event.preventDefault();
+  putInBox($('type'), text);
+});
 // Typing to him, here or to carry a chat on: his model loads meanwhile, rather than after Return.
 for (const form of document.querySelectorAll('.type')) {
   const box = form.querySelector('textarea, input');

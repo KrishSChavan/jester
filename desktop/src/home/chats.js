@@ -7,6 +7,7 @@
 
 import { cardElement } from './cards.js';
 import { sourceCardsElement } from './research.js';
+import { fitBox } from './typing.js';
 
 const $ = (id) => document.getElementById(id);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -133,6 +134,8 @@ export function createChats({ go, onPickedUp }) {
     $('chat-lines').replaceChildren(...chatElements(chat.lines));
     $('chat-text').value = '';
     $('chat-type').classList.remove('filled');
+    // One line again, whatever was left in it for the chat before.
+    fitBox($('chat-type'));
     go('chat');
     // Read from the end, as a chat is: what was said last is nearest the box to carry on in.
     $('chat-scroll').scrollTop = $('chat-scroll').scrollHeight;
@@ -150,6 +153,8 @@ export function createChats({ go, onPickedUp }) {
       if (text && !$('chat-text').value) {
         $('chat-text').value = text;
         $('chat-type').classList.add('filled');
+        // Given back as it was typed, lines and all: the box is the size for it again.
+        fitBox($('chat-type'));
       }
       $('chat-lines').querySelector('.divider.refused')?.remove();
       const why = dividerElement(reply?.error || 'Jester couldn’t pick that chat up.');

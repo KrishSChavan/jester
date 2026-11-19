@@ -643,7 +643,11 @@ body[data-state='listening'] .mic[aria-pressed='true'] {
   color: var(--faint);
 }
 
-/* Shift-Return, or pasted lines: a taller box, for a passage and what to do with it. Send stays at its foot. */
+/*
+ * Words past one line grow the box a line at a time (.grown); Shift-Return, pasted lines, or Return after "now this:"
+ * make it a tall box (.tall), for a passage and what to do with it (typing.js). Send stays at its foot.
+ */
+.type.grown,
 .type.tall {
   height: auto;
   align-items: flex-end;
@@ -651,16 +655,21 @@ body[data-state='listening'] .mic[aria-pressed='true'] {
   border-radius: 16px;
 }
 
-.bottom:has(.type.tall) {
+.bottom:has(.type.grown, .type.tall) {
   align-items: flex-end;
 }
 
+.type.grown textarea,
 .type.tall textarea {
-  align-self: stretch;
-  min-height: 120px;
   max-height: 40vh;
   margin-bottom: 7px;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge-hi) transparent;
+}
+
+.type.tall textarea {
+  min-height: 120px;
 }
 
 /* Send comes when there's something to send; till then it isn't there, for Tab either. */
