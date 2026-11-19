@@ -523,6 +523,8 @@ $('type').addEventListener('submit', (event) => {
  */
 function fitBox(form) {
   const box = form.querySelector('textarea');
+  // The tasks box is an input, one line always.
+  if (!box) return;
   if (!box.value) form.classList.remove('tall');
   else if (!form.classList.contains('tall') && (box.value.includes('\n') || box.scrollHeight > box.clientHeight + 2)) form.classList.add('tall');
   box.style.height = '';
@@ -530,6 +532,8 @@ function fitBox(form) {
 }
 for (const form of document.querySelectorAll('.type')) {
   const box = form.querySelector('textarea');
+  // The tasks box (#task-add) is a .type too, with an input: Return there adds the task, as it always has.
+  if (!box) continue;
   box.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || event.isComposing || event.altKey || event.metaKey || event.ctrlKey) return;
     if (event.shiftKey) {
@@ -545,9 +549,10 @@ for (const form of document.querySelectorAll('.type')) {
 }
 // Typing to him, here or to carry a chat on: his model loads meanwhile, rather than after Return.
 for (const form of document.querySelectorAll('.type')) {
+  const box = form.querySelector('textarea, input');
   form.addEventListener('input', () => {
     fitBox(form);
-    form.classList.toggle('filled', !!form.querySelector('textarea').value.trim());
+    form.classList.toggle('filled', !!box.value.trim());
     if (Date.now() - typedAt < TYPING_MS) return;
     typedAt = Date.now();
     chrome.runtime.sendMessage({ type: 'jester/talk-typing' });

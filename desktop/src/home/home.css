@@ -615,22 +615,30 @@ body[data-state='listening'] .mic[aria-pressed='true'] {
   border-color: var(--ring);
 }
 
+/* His boxes are textareas (Shift-Return, below); the tasks box is an input. */
+.type input,
 .type textarea {
   flex: 1;
   min-width: 0;
-  height: 20px;
-  padding: 0;
   border: 0;
   outline: none;
   background: transparent;
-  color: inherit;
-  font: inherit;
-  line-height: 20px;
-  resize: none;
-  overflow: hidden;
   user-select: text;
 }
 
+.type input {
+  height: 100%;
+}
+
+.type textarea {
+  height: 20px;
+  padding: 0;
+  line-height: 20px;
+  resize: none;
+  overflow: hidden;
+}
+
+.type input::placeholder,
 .type textarea::placeholder {
   color: var(--faint);
 }
