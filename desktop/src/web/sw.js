@@ -8,7 +8,8 @@
  * And what he sends this device while his app's closed (main/push.js): shown as a notification, which opens him.
  */
 
-const CACHE = 'jester-offline-1';
+// The number goes up when the cached page or icon changes (2: the jester icon), so a device drops its old copy.
+const CACHE = 'jester-offline-2';
 const OFFLINE = '/web/offline.html';
 
 self.addEventListener('install', (event) => {

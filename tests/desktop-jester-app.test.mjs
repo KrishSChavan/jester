@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { appChanges, build, BUNDLE_ID, helperChanges, helperName, USAGE } from '../desktop/scripts/jester-app.mjs';
-import { art, icoFile } from '../desktop/scripts/make-icons.mjs';
+import { art, COLOURS, icoFile } from '../desktop/scripts/make-icons.mjs';
 import { listedAsFor } from '../desktop/src/main/permission-list.js';
 
 test('Electron\'s helpers take Jester\'s name, kind and all; nothing else is a helper', () => {
@@ -45,19 +45,25 @@ test('System Settings names the bundle that runs him, when it isn\'t Jester', ()
 });
 
 test('the icon: macOS\'s grid with room for its shadow, Windows\' edge to edge, the small sizes without the dots', () => {
+  const dots = (svg) => (svg.match(/<circle [^>]*fill-opacity=/g) || []).length;
   const mac = art({ inset: 100, lifted: true });
   assert.match(mac, /^<svg [^>]*viewBox="0 0 1024 1024"/);
-  assert.match(mac, /^<path d="M[^"]*" fill="url\(#ground\)" filter="url\(#lift\)"\/>$/m);
+  assert.match(mac, new RegExp(`^<path d="M[^"]*" fill="${COLOURS.ground}" filter="url\\(#lift\\)"/>$`, 'm'));
   // The rounded square starts on its top edge, 100 in.
   assert.match(mac, /<clipPath id="shape"><path d="M\d+\.\d+ 100\.00L/);
-  assert.ok((mac.match(/<circle /g) || []).length > 300);
+  assert.ok(dots(mac) > 300);
+  // The head is lines, tipped 15° to the right, and the dots stop at its edge.
+  assert.match(mac, new RegExp(`<g fill="none" stroke="${COLOURS.line}" stroke-width="22"`));
+  assert.match(mac, /<g transform="translate\([\d ]+\) rotate\(15\) /);
+  assert.match(mac, /<g fill="[^"]+" mask="url\(#head\)">/);
   const windows = art({ inset: 24, lifted: false });
   assert.doesNotMatch(windows, /filter="url\(#lift\)"/);
   assert.match(windows, /<clipPath id="shape"><path d="M\d+\.\d+ 24\.00L/);
   const small = art({ small: true });
-  // Neither the dots nor the glow behind them.
-  assert.equal((small.match(/<circle /g) || []).length, 0);
-  assert.doesNotMatch(small, /handShadow\)"/);
+  // No dots, and a heavier line.
+  assert.equal(dots(small), 0);
+  assert.doesNotMatch(small, /id="head"/);
+  assert.match(small, new RegExp(`stroke="${COLOURS.line}" stroke-width="40"`));
 });
 
 test('a .ico is a directory of PNGs: 256 written as 0, offsets past the directory', () => {

@@ -210,8 +210,11 @@ words alone (below, Memory and Obsidian).
   camera and Accessibility on behalf of "Jester" rather than the terminal or
   VS Code. Output: `~/Library/Logs/Jester/dev.log`, echoed to the terminal.
 - `npm run icons` — redraws his icon (`scripts/make-icons.mjs`: the art is
-  code) into `icons/`: `jester.svg`, `jester.png`, `Jester.icns` for macOS and
-  `Jester.ico` for Windows' window and taskbar.
+  code, a lilac jester's head on black) into `icons/`: `jester.svg`,
+  `jester.png`, `Jester.icns` for macOS and `Jester.ico` for Windows' window
+  and taskbar; his website's into `src/web/icons/`; and the Chrome
+  extension's (`jester-extension/icons/`, also his menu-bar icon) and the Web
+  Store's (`store/icon-128.png`).
 - `npm run location` — builds his Location Services module
   (`native/jester-location`, with the Xcode command line tools' clang) if its
   source changed; `npm run app` and the launcher build it too.

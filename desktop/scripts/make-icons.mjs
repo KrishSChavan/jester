@@ -1,22 +1,30 @@
 /**
- * `npm run icons`: Jester's app icon, drawn here and written to desktop/icons:
+ * `npm run icons`: Jester's icon, drawn here and written to desktop/icons:
  *
  *   jester.svg    the art, at 1024 on macOS's grid
  *   jester.png    the same, 1024 px
  *   Jester.icns   macOS: the app in the Dock, Finder, permission prompts
  *   Jester.ico    Windows: the window and taskbar
  *
- * and, to src/web/icons, his website's as an app on a phone's Home Screen (`npm run icons -- --web` writes only those):
+ * to src/web/icons, his website's as an app on a phone's Home Screen (`npm run icons -- --web` writes only those):
  *
  *   apple-touch-icon.png   180 px, the square filled: an iPhone rounds its corners itself
  *   icon-192.png, icon-512.png   Windows' look (the rounded square on clear), for an install prompt and a desktop
  *   maskable-512.png       the square filled, the art inside Android's safe circle, for its launcher's own shape
  *
- * The art is code: the extension's raised hand, in front of a globe of dots
- * like his orb's, on the extension's purple-to-green. On a Mac it sits in the
- * system's rounded square with a 100 px margin around it (Apple's grid, which
- * the Dock expects); on Windows the square fills the canvas. Below 64 px the
- * dots and shadows would be mud, so the small sizes draw the hand alone, larger.
+ * and to the Chrome extension, in Windows' look:
+ *
+ *   jester-extension/icons/icon16.png … icon128.png   its toolbar button and its chrome://extensions card,
+ *                                                     and this app's menu-bar icon (src/main/tray.js)
+ *   store/icon-128.png                                the Web Store's
+ *
+ * The art is code: a jester's head in lilac line with nothing filled in, tipped
+ * 15° to the right, its eyes shut in a grin, in front of a faint globe of dots
+ * like his orb's, on black with a purple glow (the user's pick, 2026-11-19).
+ * On a Mac it sits in the system's rounded square with a 100 px margin around
+ * it (Apple's grid, which the Dock expects); on Windows the square fills the
+ * canvas. At 48 px and under the dots would be mud and the line too thin to
+ * see, so the small sizes draw the head alone, larger, in a heavier line.
  *
  * Electron draws the SVG at each size (Chromium, as his pages are drawn);
  * iconutil packs the macOS file, and the .ico is PNGs in Windows' wrapper.
@@ -65,8 +73,11 @@ function squircle(at, size, radius = size * 0.225) {
   ].join('');
 }
 
-/** The orb: dots on a tilted globe, the far ones smaller and fainter, drawn back to front. */
-function orbDots({ cx, cy, radius, count = 340 }) {
+/**
+ * The orb: dots on a tilted globe, the far ones smaller and fainter, drawn back to front.
+ * `strength` scales every dot's opacity, so the globe can sit faintly behind the head.
+ */
+function orbDots({ cx, cy, radius, count = 340, strength = 1 }) {
   const golden = Math.PI * (3 - Math.sqrt(5));
   const [tilt, turn] = [0.42, 0.5];
   const dots = [];
@@ -81,44 +92,60 @@ function orbDots({ cx, cy, radius, count = 340 }) {
     const x = x0 * Math.cos(turn) + z1 * Math.sin(turn);
     const z = -x0 * Math.sin(turn) + z1 * Math.cos(turn);
     const near = (z + 1) / 2;
-    dots.push({ x: cx + radius * x, y: cy + radius * y1, r: 2.6 + 4.2 * near, o: 0.1 + 0.62 * near ** 1.6, z });
+    dots.push({ x: cx + radius * x, y: cy + radius * y1, r: 2.6 + 4.2 * near, o: (0.1 + 0.62 * near ** 1.6) * strength, z });
   }
   dots.sort((a, b) => a.z - b.z);
   return dots.map((d) => `<circle cx="${d.x.toFixed(1)}" cy="${d.y.toFixed(1)}" r="${d.r.toFixed(2)}" fill-opacity="${d.o.toFixed(3)}"/>`).join('');
 }
 
+/** The icon's colours: the ground, the glow in it, the line, the dots. */
+export const COLOURS = { ground: '#0a0710', glow: '#5b21b6', line: '#c9b8ff', dots: '#d9c9ff' };
+
 /**
- * The raised hand as one outline (separate shapes leave hairline seams where
- * their edges meet), in a 1024 square with its middle at (0, 0). Four fingers
- * 72 wide with 14 between, a palm 330 by 275, and a thumb 78 wide at 45
- * degrees, its web with the first finger curved rather than a notch.
+ * The jester's head, upright, back to front: his face, the cap's three horns,
+ * its band, a bell at each tip. Plain shapes, on the 824 square at 100 with the
+ * head's middle at (512, 450); art() decides the line and what's hidden.
  */
-function hand() {
-  const r = 36;
-  const gap = 7;
-  // [left edge, top] of each finger: index, middle, ring, little.
-  const fingers = [[-165, -248], [-79, -292], [7, -260], [93, -190]];
-  const path = ['M-165 -45.2'];
-  fingers.forEach(([left, top], i) => {
-    const right = left + 2 * r;
-    path.push(`L${left} ${top + r}`, `A${r} ${r} 0 0 1 ${right} ${top + r}`);
-    // Down between this finger and the next, round at the bottom.
-    if (i < fingers.length - 1) path.push(`L${right} -67`, `A${gap} ${gap} 0 0 0 ${right + 2 * gap} -67`);
+const BAND = 'M312 556C352 420 672 420 712 556C700 574 690 580 676 578C620 500 404 500 348 578C334 580 324 574 312 556Z';
+const HEAD = [
+  '<circle cx="512" cy="590" r="178"/>',
+  '<path d="M330 560Q300 450 190 450C230 320 380 290 500 470Z"/>',
+  '<path d="M694 560Q724 450 834 450C794 320 644 290 524 470Z"/>',
+  '<path d="M420 485C415 340 470 210 590 180C555 250 600 360 612 485Z"/>',
+  `<path d="${BAND}"/>`,
+  '<circle cx="176" cy="482" r="38"/>',
+  '<circle cx="848" cy="482" r="38"/>',
+  '<circle cx="614" cy="172" r="38"/>'
+];
+/** His eyes, shut in a grin: two arcs. */
+const GRIN = [450, 574].map((x) => `<path d="M${x - 38} 658Q${x} 600 ${x + 38} 658"/>`).join('');
+/** Room enough, in the head's own space, for any mask over it. */
+const AREA = 'x="-400" y="-400" width="1824" height="1824"';
+
+/**
+ * The head as lines with nothing filled in. Each part's line is hidden where a
+ * part in front of it covers it (the cap's foot behind its band, the top of his
+ * face behind the cap), so no line crosses another.
+ */
+function lines(width) {
+  const masks = [];
+  const parts = HEAD.map((part, i) => {
+    const front = HEAD.slice(i + 1).join('');
+    if (!front) return part;
+    masks.push(`<mask id="front${i}" maskUnits="userSpaceOnUse" ${AREA}><rect ${AREA} fill="#fff"/><g fill="#000">${front}</g></mask>`);
+    return `<g mask="url(#front${i})">${part}</g>`;
   });
-  path.push(
-    // The palm's side and rounded foot.
-    'L165 111', 'A104 104 0 0 1 61 215', 'L-61 215', 'A104 104 0 0 1 -165 111', 'L-165 105.2',
-    // The thumb: out along its outer edge, round its tip, back along the inner edge, into the web.
-    'L-259.6 10.6', 'A39 39 0 0 1 -204.4 -44.6', 'L-193.3 -33.5', 'Q-165 -5.2 -165 -45.2', 'Z'
-  );
-  return `<path d="${path.join('')}"/>`;
+  return {
+    masks: masks.join('\n  '),
+    drawing: `<g fill="none" stroke="${COLOURS.line}" stroke-width="${width}" stroke-linejoin="round" stroke-linecap="round">${parts.join('')}${GRIN}</g>`
+  };
 }
 
 /**
  * The icon as SVG, 1024 square.
  * @param {object} options
  * @param {number} options.inset  the margin around the rounded square
- * @param {boolean} options.small  the hand alone, for 16-32 px
+ * @param {boolean} options.small  the head alone, larger and in a heavier line, for 48 px and under
  * @param {boolean} options.lifted  the square's own shadow (macOS's grid has room for it)
  */
 export function art({ inset = 100, small = false, lifted = true, bleed = false } = {}) {
@@ -128,47 +155,29 @@ export function art({ inset = 100, small = false, lifted = true, bleed = false }
   // Everything inside is drawn for a 824 square at 100 and scaled to this one.
   const scale = size / 824;
   const inside = `translate(${inset} ${inset}) scale(${scale.toFixed(5)}) translate(-100 -100)`;
-  const handAt = small ? 'translate(544 548) scale(1.14)' : 'translate(546 552)';
+  // Tipped 15° to the right and centred, clear of the square's edges.
+  const head = small ? { at: '520 496', scale: 0.98, width: 40 } : { at: '520 497', scale: 0.9, width: 22 };
+  const tipped = `translate(${head.at}) rotate(15) scale(${head.scale}) translate(-512 -450)`;
+  const { masks, drawing } = lines(head.width);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
 <defs>
-  <linearGradient id="ground" x1="0.08" y1="0" x2="0.92" y2="1">
-    <stop offset="0" stop-color="#7047e8"/>
-    <stop offset="0.42" stop-color="#4a5cc9"/>
-    <stop offset="0.72" stop-color="#2f8f9f"/>
-    <stop offset="1" stop-color="#23c26c"/>
-  </linearGradient>
-  <radialGradient id="sheen" cx="0.3" cy="0.08" r="0.75">
-    <stop offset="0" stop-color="#fff" stop-opacity="0.26"/>
-    <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+  <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="512" cy="512" r="635">
+    <stop offset="0" stop-color="${COLOURS.glow}" stop-opacity="0.5"/>
+    <stop offset="1" stop-color="${COLOURS.glow}" stop-opacity="0"/>
   </radialGradient>
-  <linearGradient id="depth" x1="0" y1="0" x2="0" y2="1">
-    <stop offset="0.55" stop-color="#0b0420" stop-opacity="0"/>
-    <stop offset="1" stop-color="#0b0420" stop-opacity="0.22"/>
-  </linearGradient>
-  <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
-    <stop offset="0" stop-color="#e4d9ff" stop-opacity="0.5"/>
-    <stop offset="0.55" stop-color="#c7b3ff" stop-opacity="0.2"/>
-    <stop offset="1" stop-color="#c7b3ff" stop-opacity="0"/>
-  </radialGradient>
-  <linearGradient id="skin" gradientUnits="userSpaceOnUse" x1="0" y1="-300" x2="0" y2="220">
-    <stop offset="0" stop-color="#ffffff"/>
-    <stop offset="1" stop-color="#ece6fb"/>
-  </linearGradient>
   <clipPath id="shape"><path d="${shape}"/></clipPath>
   <filter id="lift" x="-10%" y="-10%" width="120%" height="125%">
     <feDropShadow dx="0" dy="10" stdDeviation="11" flood-color="#000" flood-opacity="0.3"/>
-  </filter>
-  <filter id="handShadow" x="-30%" y="-30%" width="160%" height="160%">
-    <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#160a3a" flood-opacity="0.38"/>
-  </filter>
+  </filter>${small ? '' : `
+  <mask id="head" maskUnits="userSpaceOnUse" ${AREA}><rect ${AREA} fill="#fff"/><g transform="${tipped}" fill="#000" stroke="#000" stroke-width="${head.width + 34}" stroke-linejoin="round">${HEAD.join('')}</g></mask>`}
+  ${masks}
 </defs>
-<path d="${shape}" fill="url(#ground)"${lifted ? ' filter="url(#lift)"' : ''}/>
+<path d="${shape}" fill="${COLOURS.ground}"${lifted ? ' filter="url(#lift)"' : ''}/>
 <g clip-path="url(#shape)">
-  <path d="${shape}" fill="url(#sheen)"/>
-  <path d="${shape}" fill="url(#depth)"/>
   <g transform="${inside}">
-    ${small ? '' : `<circle cx="520" cy="470" r="330" fill="url(#glow)"/><g fill="#f4efff">${orbDots({ cx: 520, cy: 470, radius: 292 })}</g>`}
-    <g transform="${handAt}" fill="url(#skin)"${small ? '' : ' filter="url(#handShadow)"'}>${hand()}</g>
+    <rect ${AREA} fill="url(#glow)"/>
+    ${small ? '' : `<g fill="${COLOURS.dots}" mask="url(#head)">${orbDots({ cx: 512, cy: 512, radius: 330, strength: 0.675 })}</g>`}
+    <g transform="${tipped}">${drawing}</g>
   </g>
   <path d="${shape}" fill="none" stroke="#fff" stroke-opacity="0.22" stroke-width="${(5 * scale).toFixed(2)}"/>
 </g>
@@ -213,7 +222,11 @@ const WEB_ICONS = [
   ['icon-512.png', WINDOWS, 512],
   ['maskable-512.png', { inset: 112, lifted: false, bleed: true }, 512]
 ];
-const SMALL = 32;
+/** The Chrome extension's (its manifest's sizes), and the Web Store's copy of the largest. */
+const EXTENSION = path.resolve(path.dirname(here), '../../jester-extension/icons');
+const EXTENSION_SIZES = [16, 32, 48, 128];
+const STORE_ICON = path.resolve(path.dirname(here), '../../store/icon-128.png');
+const SMALL = 48;
 
 async function draw() {
   const { app, BrowserWindow } = await import('electron');
@@ -255,6 +268,10 @@ async function draw() {
   for (const size of WINDOWS_SIZES) images.push({ size, png: await render(svg(WINDOWS, size), size) });
   fs.writeFileSync(path.join(out, 'Jester.ico'), icoFile(images));
   console.log(`Wrote jester.svg, jester.png, Jester.icns and Jester.ico to ${out}`);
+
+  for (const size of EXTENSION_SIZES) fs.writeFileSync(path.join(EXTENSION, `icon${size}.png`), await render(svg(WINDOWS, size), size));
+  fs.copyFileSync(path.join(EXTENSION, 'icon128.png'), STORE_ICON);
+  console.log(`Wrote ${EXTENSION_SIZES.map((size) => `icon${size}.png`).join(', ')} to ${EXTENSION}, and ${STORE_ICON}`);
 }
 
 const direct = process.argv[1] && path.resolve(process.argv[1]) === here;
