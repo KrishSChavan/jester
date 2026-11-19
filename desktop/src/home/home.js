@@ -18,6 +18,8 @@ import { renderResearchState } from './research.js';
 import { fitBox, putInBox, typingBox } from './typing.js';
 import { mountControls } from '../controls/controls.js';
 import { startInstall } from './install.js';
+import { createOthers } from './others.js';
+import { createDevicesPage } from './devices-page.js';
 
 const $ = (id) => document.getElementById(id);
 document.documentElement.dataset.platform = /^Win/i.test(navigator.platform) ? 'win' : 'mac';
@@ -250,16 +252,20 @@ function drawLight() {
 function drawControls() {
   const { settings, desktop } = state();
   if (!settings) return;
-  const on = !!settings.enabled;
-  const engine = desktop?.engine?.state;
+  // On his website the hand and the moon are a computer's, thrown from here (the phone as a remote): there with one
+  // connected, and saying how it stands.
+  const remote = globalThis.jesterWeb ? devicesPage.computer() : null;
+  const on = remote ? remote.computer.switches?.enabled !== false : !!settings.enabled;
+  const engine = remote ? (remote.computer.engine === 'sleeping' ? ENGINE.SLEEPING : ENGINE.RUNNING) : desktop?.engine?.state;
+  $('gestures').hidden = $('sleep').hidden = !!globalThis.jesterWeb && !remote;
 
-  const gestures = on && settings.gesturesEnabled !== false;
+  const gestures = on && (remote ? remote.computer.switches?.gestures !== false : settings.gesturesEnabled !== false);
   const hand = $('gestures');
   hand.disabled = !on;
   // The name stays; whether it's on is aria-pressed's to say.
   hand.setAttribute('aria-pressed', String(gestures));
   hand.querySelector('use').setAttribute('href', gestures ? '#i-hand' : '#i-hand-off');
-  hand.title = !on ? 'Gestures: Jester is off' : gestures ? 'Gestures on: click to close the camera' : 'Gestures off: click to watch for them';
+  hand.title = remote ? `Gestures on ${remote.name}: ${gestures ? 'on' : 'off'}` : !on ? 'Gestures: Jester is off' : gestures ? 'Gestures on: click to close the camera' : 'Gestures off: click to watch for them';
 
   const asleep = on && engine === ENGINE.SLEEPING;
   const canSleep = on && (engine === ENGINE.RUNNING || asleep);
@@ -492,6 +498,11 @@ const controls = mountControls($('controls-host'), {
   onMac: !website || /\bElectron\//.test(navigator.userAgent),
   canDrop: !!globalThis.jesterFiles
 });
+// His website: Settings › Devices, and the computer whose switches the hand and the moon throw from here.
+const devicesPage = createDevicesPage({ onChange: () => drawControls() });
+if (website) devicesPage.load();
+// His website: the banner for a chat going on on another device.
+const others = createOthers({ onChat: (chat) => drawChat(chat) });
 // His website only: Settings' card for putting him on a Home Screen.
 startInstall();
 // Asked for from elsewhere (the Mac's menu bar, "open controls", for his website in the Mac's window): a screen's
@@ -563,8 +574,16 @@ for (const form of document.querySelectorAll('.type')) {
   });
 }
 $('listen').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/talk-listen', on: !state().desktop?.continuous?.wanted }));
-$('gestures').addEventListener('click', () => save({ gesturesEnabled: state().settings?.gesturesEnabled === false }));
-$('sleep').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-sleep', on: state().desktop?.engine?.state !== ENGINE.SLEEPING }));
+$('gestures').addEventListener('click', () => {
+  const remote = globalThis.jesterWeb ? devicesPage.computer() : null;
+  if (remote) return devicesPage.throwSwitch(remote.id, { gestures: remote.computer.switches?.gestures === false });
+  return save({ gesturesEnabled: state().settings?.gesturesEnabled === false });
+});
+$('sleep').addEventListener('click', () => {
+  const remote = globalThis.jesterWeb ? devicesPage.computer() : null;
+  if (remote) return devicesPage.throwSwitch(remote.id, { sleep: remote.computer.engine !== 'sleeping' });
+  return chrome.runtime.sendMessage({ type: 'jester/desktop-sleep', on: state().desktop?.engine?.state !== ENGINE.SLEEPING });
+});
 // The banner's button goes to Getting started (its data-go), where what's needed is listed.
 askSetup();
 
@@ -575,6 +594,14 @@ chrome.runtime.onMessage.addListener((message) => {
       break;
     case 'jester/chat':
       drawChat(message.chat, { forgotten: message.forgotten === true });
+      break;
+    // His website: where he's open changed, or what a computer's doing.
+    case 'jester/devices-changed':
+      devicesPage.load();
+      break;
+    // His website: the chats going on on other devices changed.
+    case 'jester/chats-live':
+      others.draw(message);
       break;
     case 'jester/research-state':
       drawResearch(message.research);
@@ -634,7 +661,10 @@ chrome.runtime
   })
   .catch(() => undefined);
 mood(document.body.dataset.state);
-chrome.runtime.sendMessage({ type: 'jester/chats', op: 'current' }).then((reply) => reply?.chat && drawChat(reply.chat));
+chrome.runtime.sendMessage({ type: 'jester/chats', op: 'current' }).then((reply) => {
+  if (reply?.chat) drawChat(reply.chat);
+  others.draw(reply || {});
+});
 chrome.runtime.sendMessage({ type: 'jester/briefings', op: 'list' }).then((reply) => reply?.ok && drawBriefings(reply.cards));
 chrome.runtime.sendMessage({ type: 'jester/offers', op: 'list' }).then((reply) => reply?.ok && drawOffers(reply.offers)).catch(() => undefined);
 document.addEventListener('jester/briefing-navigate', (event) => {

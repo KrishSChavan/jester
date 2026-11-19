@@ -25,14 +25,14 @@ const saidAnew = (entries) => entries.some((entry) => entry?.who === 'you' && !e
  */
 export function createChatKeeper({ chats, recollections, live = () => '', onChats = () => undefined, log = () => undefined }) {
   /** Into Chats now. @returns {string} its id, or '' when nothing was kept */
-  function keep(entries) {
+  function keep(entries, more = {}) {
     if (!entries?.length) return '';
     if (untouched(entries)) {
       // Left out of the list while it was going on: it's listed again where it was.
       onChats();
       return '';
     }
-    const id = chats.keep(entries);
+    const id = chats.keep(entries, more);
     onChats();
     return id;
   }
@@ -67,8 +67,8 @@ export function createChatKeeper({ chats, recollections, live = () => '', onChat
     keep,
     sumUp,
     /** Over by itself (quiet, or the hour): in Chats now, and summed up. */
-    over(entries) {
-      const id = keep(entries);
+    over(entries, more = {}) {
+      const id = keep(entries, more);
       return sumUp(entries, id || idOf(entries));
     },
     /** For a summary on its way to the vault: is this conversation still kept? */
@@ -92,8 +92,9 @@ export function createChatKeeper({ chats, recollections, live = () => '', onChat
     },
     /** For the Chats screen: all but the one going on. */
     list() {
-      const going = live();
-      return chats.list().filter((chat) => chat.id !== going);
+      // A chat per device (sessions.js): every one going on, on any of them.
+      const going = [live()].flat();
+      return chats.list().filter((chat) => !going.includes(chat.id));
     },
     get: (id) => chats.get(id)
   };

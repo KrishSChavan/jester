@@ -72,6 +72,11 @@
           <span id="banner-text"></span>
           <button id="banner-fix" type="button" data-go="setup">Set up</button>
         </div>
+        <!-- His website: the chat going on on another device, to look at from this one (others.js). -->
+        <div id="others" class="others" hidden>
+          <button id="others-see" class="others-see" type="button"><svg class="icon-svg"><use href="#i-chats" /></svg><span id="others-text"></span></button>
+          <button id="others-close" class="icon small" type="button" aria-label="Hide this" title="Hide this"><svg class="icon-svg"><use href="#i-close" /></svg></button>
+        </div>
         <!-- What's in play, as cards: timers running, reminders given or coming up (cards.js). -->
         <div id="shelf" class="shelf" aria-label="Timers and reminders in play" hidden></div>
         <div id="briefing-shelf" class="shelf" aria-label="Briefings ready for you" hidden></div>
@@ -206,6 +211,7 @@
             <button class="row go" type="button" data-go="settings/mail"><span class="glyph"><svg class="icon-svg"><use href="#i-mail" /></svg></span><span class="label">Email</span><span class="aside" id="sum-mail"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/models"><span class="glyph"><svg class="icon-svg"><use href="#i-chip" /></svg></span><span class="label">Models</span><span class="aside" id="sum-models"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/cloud"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Jester in the cloud</span><span class="aside" id="sum-cloud"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go web-only" type="button" data-go="settings/devices"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Devices</span><span class="aside" id="sum-devices"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/chrome"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Chrome</span><span class="aside" id="sum-chrome"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/gestures"><span class="glyph"><svg class="icon-svg"><use href="#i-hand" /></svg></span><span class="label">Gestures and shortcuts</span><span class="aside" id="sum-gestures"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/activity"><span class="glyph"><svg class="icon-svg"><use href="#i-pulse" /></svg></span><span class="label">Activity</span><span class="aside" id="sum-activity"></span><svg class="chev"><use href="#i-forward" /></svg></button>
@@ -349,7 +355,7 @@
               <span><strong>Offer to do things for you</strong><small>At the end of a brief, with new mail, and before a call, he offers what he could do about it: open what’s due, move something overdue, draft a reply in Gmail (never sent), open the call, or with a paid model, look something up or set a reminder. Say yes, “just the first”, “not now” or no, or use the buttons on its card. Nothing is sent, bought or deleted, and “no” means he won’t offer that again.</small></span>
               <input type="checkbox" id="offerWork" />
             </label>
-            <div class="row">
+            <div class="row" id="phone-row">
               <span>
                 <strong>Your phone</strong>
                 <small>When you’re away from this computer, what he has to tell you (a reminder, a timer, a word before class, the evening wrap-up) goes to your phone instead, through the ntfy app. Sent over the internet by ntfy’s server to a topic only you know the name of: anyone who had the name could read what’s sent, so keep it to yourself. A line that looks like a password or a card number is never sent.</small>
@@ -608,6 +614,34 @@
       </section>
 
       <!-- His brain on a server (main/cloud-link.js, main/web-gateway.js): this Mac his hands, eyes and ears. -->
+      <!-- His website only (devices-page.js): where he's open, each computer's switches, and this device's notifications. -->
+      <section id="page-devices" class="screen page" data-screen="settings/devices" aria-labelledby="devices-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="devices-heading">Devices</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <label class="row">
+              <span><strong>This device</strong><small>What Jester calls it, here and when he tells you where he’s open.</small></span>
+              <input id="device-name" type="text" maxlength="40" autocomplete="off" spellcheck="false" />
+            </label>
+            <div class="row">
+              <span><strong>Notifications here</strong><small id="push-hint"></small><small id="push-note" class="error" role="status"></small></span>
+              <span class="buttons">
+                <button id="push-on" type="button" class="primary" hidden>Turn on</button>
+                <button id="push-test" type="button" hidden>Send a test</button>
+                <button id="push-off" type="button" hidden>Turn off</button>
+              </span>
+            </div>
+          </div>
+          <h2 class="group">Where Jester is</h2>
+          <div id="devices-list" class="cards"></div>
+          <p id="devices-none" class="note" hidden>No device has opened him yet.</p>
+          <p class="note">He’s one Jester on all of them: the same memory, tasks and notes. Each device has its own chat going on, and what you ask for on a computer is done on the one you name, the one you’re on, or the one you touched last.</p>
+        </div>
+      </section>
+
       <section id="page-cloud" class="screen page" data-screen="settings/cloud" aria-labelledby="cloud-heading" inert>
         <header class="top">
           <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>

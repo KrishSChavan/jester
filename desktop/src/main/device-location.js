@@ -69,7 +69,7 @@ export function createDeviceLocate({ gateway, hands, log = () => undefined }) {
       const client = current();
       if (!client) return { ok: false, code: 2, message: 'No device is using Jester just now.' };
       if (isMac(client)) {
-        const got = await hands.where(timeoutMs);
+        const got = await hands.where(timeoutMs, client.role === 'mac' ? String(client.device?.id || '') : '');
         return got?.ok ? { ...got, device: 'your Mac', key: 'mac' } : { ok: false, code: got?.code || 2, message: got?.message || '' };
       }
       const id = `where-${++nextId}`;

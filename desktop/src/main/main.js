@@ -38,6 +38,9 @@ import { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, nativeImag
 import fs from 'node:fs';
 import path from 'node:path';
 import { format } from 'node:util';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { ACTIONS, ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
 import { createDesktopHost } from './agent/host.js';
 import { runDesktopAgent } from './agent/loop.js';
@@ -104,6 +107,10 @@ import { createWatch } from './watch.js';
 import { createWeather, unitsFor, weatherLines } from './weather.js';
 import { createWhereabouts } from './whereabouts.js';
 import { createDeviceLocate } from './device-location.js';
+import { createDevices } from './devices.js';
+import { createPush } from './push.js';
+import { apply as applyMove, collect as collectMove } from './move-in.js';
+import { createSessions, following, sessionFile, sessionKeyOf } from './sessions.js';
 import { trayModel } from './tray-menu.js';
 import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault.js';
 import { importChats } from './chat-import.js';
@@ -217,6 +224,12 @@ let voiceRunner = null;
 /** The user's own scripts, in Controls (scripts.js). */
 let scripts = null;
 let conversation = null;
+/** A chat per device (sessions.js): `conversation` and `conversationLog` are the one in front. */
+let sessions = null;
+/** On a server: where he's open (devices.js). */
+let devices = null;
+/** On a server: notifications to his app on the user's devices (push.js), in place of ntfy. */
+let push = null;
 let recollections = null;
 /** The conversation going on, word for word (conversation-log.js), and what becomes of each once it's over (chat-keeper.js). */
 let conversationLog = null;
@@ -460,7 +473,7 @@ function desktopState() {
     missing: missingFor(permissions, settings).map((item) => item.id),
     voice: voiceState(),
     // Their phone: whether it's set up and on. Never the topic's name, which is asked for by Settings alone.
-    phone: phone ? { on: phone.ready, set: !!phone.state().topic } : null,
+    phone: SERVER ? { on: !!push?.ready, set: !!push?.ready, push: true } : phone ? { on: phone.ready, set: !!phone.state().topic } : null,
     // Their Gmail: whether there's a client to sign in with, whether they're signed in and as whom. No key.
     mail: google ? google.state() : null,
     speechModel: speech?.model || null,
@@ -626,10 +639,12 @@ const TASK_OVER = { type: MSG.VOICE, voice: { phase: 'thinking', done: true } };
  * Whether he's talking goes to the recognizer too, which listens for being
  * talked over only then.
  */
-function showConversation(voice) {
+function showConversation(voice, key = 'local') {
   if (voice.phase === 'speaking') speech?.setSpeaking(!voice.done);
   else if (voice.active === false || voice.start) speech?.setSpeaking(false);
   const message = { type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } };
+  // On a server, a chat per device: its frames go to the pages showing that chat.
+  if (SERVER) return postRemote(message, (remote) => viewingOf(remote) === key);
   const talk = talkWindow();
   if (!talk || voice.active === false || voice.done) return post(message);
   postTo(talk.webContents, message);
@@ -638,23 +653,110 @@ function showConversation(voice) {
 }
 
 /** The conversation going on, as his window shows it: what was said before it was picked up marked so, and a line kept as only that it held a secret, too. */
-function currentChat() {
+function currentChat(key = sessions.frontKey) {
+  const going = sessions.get(key).log;
   return {
-    id: conversationLog.chatId(),
-    lines: conversationLog.entries().map(({ who, text, at, earlier, hidden, card, sources }) => ({ who, text, at, ...(earlier ? { earlier: true } : {}), ...(hidden ? { hidden: true } : {}), ...(!hidden && cardOf(card) ? { card: cardOf(card) } : {}), ...(!hidden && sourcesOf(sources).length ? { sources: sourcesOf(sources) } : {}) }))
+    id: going.chatId(),
+    lines: going.entries().map(({ who, text, at, earlier, hidden, card, sources }) => ({ who, text, at, ...(earlier ? { earlier: true } : {}), ...(hidden ? { hidden: true } : {}), ...(!hidden && cardOf(card) ? { card: cardOf(card) } : {}), ...(!hidden && sourcesOf(sources).length ? { sources: sourcesOf(sources) } : {}) }))
   };
 }
 
-let chatTimer = null;
+const chatTimers = new Map();
 /** Forget it all ended the chat going on: it isn't in Chats, so the window mustn't say it is. */
 let chatForgotten = false;
-/** The conversation going on, to his window (only), once a change has settled: the log says so as it happens. */
-function showChat() {
-  clearTimeout(chatTimer);
-  chatTimer = setTimeout(() => {
-    if (conversationLog) toHome({ type: 'jester/chat', chat: currentChat(), forgotten: chatForgotten });
+/**
+ * A conversation going on, to the windows showing it (his own; on a server, the pages on that chat), once a change
+ * has settled: the log says so as it happens.
+ */
+function showChat(key = 'local') {
+  clearTimeout(chatTimers.get(key));
+  chatTimers.set(key, setTimeout(() => {
+    chatTimers.delete(key);
+    if (!sessions) return;
+    const message = { type: 'jester/chat', chat: currentChat(key), forgotten: chatForgotten };
+    if (SERVER) postRemote(message, (remote) => viewingOf(remote) === key);
+    else toHome(message);
     chatForgotten = false;
-  }, 0);
+    if (SERVER) showOtherChats();
+  }, 0));
+}
+
+let devicesTimer = null;
+/** Where he's open changed: Settings' Devices reads it again, and so does each page's banner of other chats. */
+function devicesChanged() {
+  clearTimeout(devicesTimer);
+  devicesTimer = setTimeout(() => {
+    postRemote({ type: 'jester/devices-changed' });
+    if (sessions) showOtherChats();
+  }, 200);
+  devicesTimer.unref?.();
+}
+
+/** Whether what's due while they're away can reach them: his app's notifications on a server, ntfy in the app alone. */
+const phoneReady = () => (SERVER ? !!push?.ready : !!phone?.ready);
+
+/** The newest line of his that each chat's device has been told of: one isn't sent twice. */
+const repliedAt = new Map();
+/**
+ * A line of his was added to a chat on a server: when nobody's looking at that chat on its device (a task begun from
+ * the phone finishing with the app closed, or his yes-or-no about it), it goes to that device as a notification.
+ */
+function replied(key) {
+  if (!SERVER || !push || !sessions?.has(key)) return;
+  const line = sessions.get(key).log.entries().at(-1);
+  if (!line || line.who !== 'jester' || line.hidden || !String(line.text || '').trim()) return;
+  const mark = `${line.at}|${line.text.length}`;
+  if (repliedAt.get(key) === mark) return;
+  repliedAt.set(key, mark);
+  if (!push.has(key) || devices.inFront(key)) return;
+  push.send({ title: 'Jester', text: line.text, tag: 'reply' }, { devices: [key] }).catch(() => undefined);
+}
+
+/** What a chat's device is called, for the chat kept of it: nothing in the app on its own, where there's only the one. */
+const deviceLabel = (key) => (SERVER && key !== 'local' ? devices?.get(key)?.name || '' : '');
+
+/** On a server: which chat a page is showing. Its own device's, unless it's looking at another's (jester/chats view). */
+function viewingOf(remote) {
+  return (remote?.viewing && sessions?.has(remote.viewing) && remote.viewing) || devices?.idOf(remote) || 'local';
+}
+
+/** On a server: the device the user's at, whose chat is the one in front: talked through, or last typed on. */
+function frontDevice() {
+  const voice = webGateway?.voiceClient;
+  if (voice) return viewingOf(voice);
+  const page = (webGateway?.clients || []).filter((client) => client.role === 'page').sort((a, b) => (b.activeAt || 0) - (a.activeAt || 0))[0];
+  return page ? viewingOf(page) : '';
+}
+
+/**
+ * The chats going on on other devices, for a page's banner (the user, 2026-11-18: "see current chat from:" a device,
+ * one with a running task first): each with something said in it, but the one the page is showing.
+ */
+function otherChats(remote) {
+  const showing = viewingOf(remote);
+  const own = devices.idOf(remote);
+  const computers = remoteHands?.list() || [];
+  const others = sessions.list()
+    .filter((session) => session.key !== showing && session.log.entries().length)
+    .map((session) => {
+      const lines = session.log.entries();
+      return { key: session.key, chat: session.log.chatId(), name: devices.get(session.key)?.name || (session.key === 'local' ? 'Jester, with no device open' : 'another device'), running: !!session.conversation.acting || computers.some((computer) => computer.running && computer.chat === session.key), at: Date.parse(lines.at(-1)?.at) || 0, lines: lines.length, own: session.key === own };
+    })
+    .sort((a, b) => Number(b.running) - Number(a.running) || b.at - a.at);
+  return { others, viewing: showing === own ? null : { key: showing, name: devices.get(showing)?.name || 'another device' } };
+}
+
+let othersTimer = null;
+function showOtherChats() {
+  clearTimeout(othersTimer);
+  othersTimer = setTimeout(() => {
+    for (const client of webGateway?.clients || []) if (client.role === 'page') client.message({ type: 'jester/chats-live', ...otherChats(client) }, { id: 'jester-desktop', url: 'jester://ext/_desktop/worker' });
+  }, 150);
+}
+
+/** The chat a page's message is for: on a server, the one it's showing, which is in front from now. */
+function sessionOf(sender) {
+  return sessions.used(SERVER && sender?.remote ? viewingOf(sender.remote) : 'local');
 }
 
 /** The Chats panel lists them again. */
@@ -675,21 +777,22 @@ function toHome(message) {
  * once he's answered that (Ollama does one thing at a time). Not while he's at work on something the conversation
  * going on asked for, or a question of his waits: its result or its answer would land in the wrong chat.
  */
-function resumeChat(id, text) {
+function resumeChat(id, text, session = sessions.front()) {
   const chat = keeper.get(id);
   if (!chat) return { ok: false, error: 'That chat isn’t kept any more.' };
-  if (assistant.asking) return { ok: false, error: 'Jester is waiting for a yes or no. Answer him first, then pick this chat up.' };
-  if (conversation.acting) return { ok: false, error: 'Jester is still working on what you asked. Pick this chat up once he’s done, or stop him with the × beside his pill.' };
+  const { conversation: talk, log: going } = session;
+  if (SERVER ? talk.asking : assistant.asking) return { ok: false, error: 'Jester is waiting for a yes or no. Answer him first, then pick this chat up.' };
+  if (talk.acting) return { ok: false, error: 'Jester is still working on what you asked. Pick this chat up once he’s done, or stop him with the × beside his pill.' };
   let over = [];
-  if (id !== conversationLog.chatId()) {
+  if (id !== going.chatId()) {
     // Whatever he was saying for the conversation going on stops with it.
-    conversation.end();
-    over = conversationLog.restore(chat.lines, id);
-    keeper.keep(over);
+    talk.end();
+    over = going.restore(chat.lines, id);
+    keeper.keep(over, { device: deviceLabel(session.key) });
     log('chat carried on:', chat.lines.length, 'lines');
   }
   const typed = String(text ?? '').trim().slice(0, TYPED_MAX);
-  Promise.resolve(typed ? conversation.told(typed, { typed: true }) : undefined)
+  Promise.resolve(typed ? talk.told(typed, { typed: true }) : undefined)
     .catch(() => undefined)
     .finally(() => over.length && keeper.sumUp(over));
   return { ok: true };
@@ -1098,7 +1201,7 @@ async function setupState() {
     voiceprint: !!voiceprint,
     vault: !!vault,
     day: !!whereabouts?.connected || !!calendars?.connected,
-    phone: !!phone?.ready,
+    phone: phoneReady(),
     mail: !!google?.signedIn,
     chrome: !!chromeLink?.linked
   });
@@ -1574,6 +1677,33 @@ function listenToPages() {
     if (message?.type === MSG.GET_STATE && url.startsWith('jester://ext/src/calibration/')) return { settings: await loadSettings(), engine };
     if (!url.startsWith('jester://app/')) return undefined;
     switch (message?.type) {
+      // His website's Settings › Devices: notifications to this device, from his own app (push.js).
+      case 'jester/push': {
+        if (!SERVER || !push || !sender?.remote) return { ok: false };
+        const device = devices.idOf(sender.remote);
+        if (message.op === 'subscribe') {
+          const ok = await push.subscribe(device, message.subscription);
+          return { ok, on: push.has(device), error: ok ? '' : 'That isn’t a subscription a browser’s push service gave.' };
+        }
+        if (message.op === 'unsubscribe') await push.unsubscribe(device);
+        else if (message.op === 'test') {
+          const sent = await push.send({ title: 'Jester', text: 'This is Jester, on this device. What you’re due while you’re away from your devices comes here.' }, { devices: [device], anyway: true });
+          return { ok: sent.went, on: push.has(device), error: sent.went ? '' : `It didn’t go: ${push.state().last?.problem || 'this device isn’t taking notifications'}.` };
+        }
+        return { ok: true, on: push.has(device), key: push.publicKey };
+      }
+      // His website's Settings › Devices: where he's open, a device's name, one forgotten.
+      // A computer's switches, thrown from another device (the phone as a remote).
+      case 'jester/computer':
+        if (!SERVER || !remoteHands) return { ok: false };
+        return remoteHands.set(String(message.device ?? ''), message.change && typeof message.change === 'object' ? message.change : {});
+      case 'jester/devices': {
+        if (!SERVER || !devices) return { ok: false, devices: [] };
+        const here = devices.idOf(sender?.remote);
+        if (message.op === 'rename') devices.rename(String(message.id ?? ''), message.name);
+        else if (message.op === 'forget') devices.forget(String(message.id ?? ''));
+        return { ok: true, here, devices: devices.list({ viewer: here }).map((device) => ({ ...device, notifies: !!push?.has(device.id) })) };
+      }
       // His website's Settings: a sign-in link for another device, or his website on a Home Screen that asks. A code
       // that works for a day (web-gateway.js INSTALL_MS), never the key itself.
       case 'jester/web-link':
@@ -1645,7 +1775,7 @@ function listenToPages() {
       // Controls, a screen of his window. On a server, his website's: the Mac's scripts, through the Mac's link.
       case 'jester/scripts':
         if (!url.startsWith('jester://app/home/')) return { ok: false };
-        if (SERVER) return remoteHands.scripts(message);
+        if (SERVER) return remoteHands.scripts(message, devices.idOf(sender?.remote));
         if (!scripts) return { ok: false, why: 'Jester is still starting.' };
         return scriptsAsked(message);
       case 'jester/desktop-calibrate':
@@ -1683,7 +1813,7 @@ function listenToPages() {
         return { ok: true };
       case 'jester/desktop-forget':
         chatForgotten = true;
-        conversation.forget();
+        for (const session of sessions.list()) session.conversation.forget();
         keeper.forgetAll();
         await briefingManager?.forgetAll();
         await offers?.forgetAll();
@@ -1869,7 +1999,7 @@ function listenToPages() {
           showTalk();
           return cloudLink?.told(String(message.text).slice(0, TYPED_MAX)) ? { ok: true } : { ok: false, error: 'Jester’s server isn’t reachable right now.' };
         }
-        conversation.told(String(message.text).slice(0, TYPED_MAX), { typed: true });
+        sessionOf(sender).conversation.told(String(message.text).slice(0, TYPED_MAX), { typed: true });
         return { ok: true };
       // On a server: the address Google's sign-in landed on, pasted in a browser (web/shim.js), taken to his own port.
       case 'jester/sign-in-return':
@@ -1903,8 +2033,15 @@ function listenToPages() {
         const id = String(message.id ?? '');
         if (message.op === 'list') return { chats: keeper.list() };
         if (message.op === 'get') return { chat: keeper.get(id) };
-        if (message.op === 'current') return { chat: currentChat() };
-        if (message.op === 'resume') return resumeChat(id, message.text);
+        if (message.op === 'current') return { chat: currentChat(SERVER && sender?.remote ? viewingOf(sender.remote) : 'local'), ...(SERVER && sender?.remote ? otherChats(sender.remote) : {}) };
+        if (message.op === 'resume') return resumeChat(id, message.text, sessionOf(sender));
+        // On a server: another device's chat, looked at from this one (and typed into); '' goes back to its own.
+        if (message.op === 'view' && SERVER && sender?.remote) {
+          const key = String(message.key ?? '');
+          sender.remote.viewing = key && sessions.has(key) ? key : '';
+          showOtherChats();
+          return { ok: true, chat: currentChat(viewingOf(sender.remote)), ...otherChats(sender.remote) };
+        }
         // Deleted, it's forgotten: he isn't told of it again either.
         if (message.op === 'remove') return { ok: keeper.remove(id) };
         return { ok: false };
@@ -1912,6 +2049,11 @@ function listenToPages() {
       // What his window shows: the conversation's frames go to it alone while that's the orb. And whether it's on
       // screen yet, for the orb's intro: shown before its page had loaded, it missed jester/home-shown.
       case 'jester/home-screen':
+        // On a server: which of his screens a device is showing (devices.js).
+        if (SERVER) {
+          devices.seen(sender?.remote, { screen: String(message.screen ?? '') });
+          return { ok: true, shown: true };
+        }
         noteHomeScreen(message.screen);
         researchPresentation.sync();
         return { ok: true, shown: !!homeWindow()?.isVisible() };
@@ -2297,19 +2439,41 @@ function webKey() {
 }
 
 /**
+ * A Mac linking for the first time sent its Jester (move-in.js): kept as this server's own, and started again with
+ * it, since tasks, reminders and the models are read at the start (the service starts him again by itself).
+ */
+async function movedIn(client, frame) {
+  let result;
+  try {
+    result = await applyMove(frame.move, { storage: storage.local, dataDir: app.getPath('userData'), from: client.device?.name });
+  } catch (err) {
+    result = { ok: false, why: err.message };
+  }
+  log(result.ok ? `move: a Mac’s Jester moved in (${result.moved.length} things)` : `move: not taken: ${result.why}`);
+  client.send({ t: 'moved-in', ok: result.ok, already: result.already === true, why: result.why || '' });
+  // At once: nothing here writes its own tasks or reminders over the ones just moved in.
+  if (result.ok && !env.JESTER_NO_RESTART) setTimeout(() => app.exit(0), 150);
+}
+
+/**
  * JESTER_SERVER: his window as a website (web-gateway.js). Its pages are his own window's, their messages answered
  * as that window's are, and the browser last clicked in is his ears and mouth.
  */
 function startWebGateway() {
   const key = webKey();
+  devices = createDevices({ storage: storage.local, computers: () => remoteHands?.list() || [], voiceClient: () => webGateway?.voiceClient || null, onChange: devicesChanged, log });
+  devices.start().catch((err) => log('devices: couldn’t be read:', err.message));
   remoteHands = createRemoteHands({
-    // The Mac's task has a question: asked in the conversation, aloud or written, and answered there.
-    onAsk: (label) => conversation?.ask(label),
-    onTold: (text) => {
+    // A computer's task has a question: asked in the chat that started it, aloud or written, and answered there.
+    onAsk: (label, chat) => sessions?.get(chat && chat !== 'local' ? chat : sessions.frontKey).conversation.ask(label),
+    // Typed in a computer's own window: said to him in that computer's chat.
+    onTold: (text, computer) => {
       webActiveAt = Date.now();
-      conversation?.told(text, { typed: true });
+      sessions?.used(computer?.id || 'local').conversation.told(text, { typed: true });
     },
-    onChange: () => post(desktopState()),
+    // A task begun on a computer itself is the chat in front's.
+    adopt: () => sessions?.frontKey || 'local',
+    onChange: () => (post(desktopState()), devicesChanged()),
     // The Mac's scripts changed, or the Mac came or went: Controls, on his website, reads them again.
     onScriptsChanged: (change) => post({ type: 'jester/scripts-changed', ...change }),
     log
@@ -2319,17 +2483,22 @@ function startWebGateway() {
     port: Number(env.JESTER_WEB_PORT) || 8770,
     log,
     onConnect: (client) => {
-      // The Mac is his hands (and maybe his ears); a browser is his window.
+      // Which of the user's devices it is, for where he's open and whose chat is whose (devices.js).
+      devices.join(client);
+      // A computer is his hands (and maybe his ears); a browser is his window.
       if (client.role === 'mac') return remoteHands.join(client);
       webActiveAt = Date.now();
-      client.leave = addRemotePage(client);
+      client.leave ||= addRemotePage(client);
+      return undefined;
     },
     onClose: (client) => {
       client.leave?.();
       remoteHands.leave(client);
       deviceLocate?.gone(client);
+      devices.leave(client);
     },
-    onOther: (client, frame) => remoteHands.frame(client, frame),
+    onSeen: (client, seen) => devices.seen(client, seen),
+    onOther: (client, frame) => (frame?.t === 'move-in' && client.role === 'mac' ? void movedIn(client, frame) : remoteHands.frame(client, frame)),
     onMessage: (client, message) => {
       webActiveAt = Date.now();
       // The page last heard from is the device in use, when none has been talked through (device-location.js).
@@ -2354,6 +2523,34 @@ function startWebGateway() {
 }
 
 /**
+ * The first time this Mac links to a server, its Jester is sent there (move-in.js): keys, tasks, reminders, chats,
+ * calendars, taught phrases, voiceprint and settings. Once per server: what's there afterwards is the one that counts.
+ */
+async function moveIn() {
+  if ((await storage.local.get('cloudMoved')).cloudMoved === cloudTarget.origin) return;
+  const move = await collectMove({ storage: storage.local, dataDir: app.getPath('userData') });
+  if (cloudLink.send({ t: 'move-in', move })) log('cloud: sending this Mac’s Jester to the server, the first time it links');
+}
+
+let thisDevice = null;
+/** This computer, as his server knows it: an id made once and kept, and the name the user gave the computer. */
+async function deviceIdentity() {
+  let id = (await storage.local.get('deviceId')).deviceId;
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(String(id || ''))) {
+    id = randomUUID();
+    await storage.local.set({ deviceId: id });
+  }
+  let name = '';
+  try {
+    if (process.platform === 'darwin') name = execFileSync('/usr/sbin/scutil', ['--get', 'ComputerName'], { encoding: 'utf8', timeout: 3000 }).trim();
+  } catch {
+    /* its host name will do */
+  }
+  name ||= os.hostname().replace(/\.local$/, '').replace(/-/g, ' ');
+  return { id, name: name.slice(0, 40) };
+}
+
+/**
  * "Use Jester in the cloud": this Mac is the hands, eyes and ears of his brain on a server (cloud-link.js). His window
  * is the server's website; the mic, when the server opens it, is heard there; what the server asks done is done here.
  */
@@ -2362,6 +2559,8 @@ function startCloudLink() {
   let voiceOpen = false;
   cloudLink = createCloudLink({
     link: cloudTarget,
+    // Which of the user's computers this is, for where he's open (devices.js).
+    device: thisDevice,
     log,
     onVoice: (op) => {
       const open = op === 'open';
@@ -2383,9 +2582,20 @@ function startCloudLink() {
       voicePage.play(sound.bytes, sound.type).catch((err) => log('cloud: couldn’t play his voice:', err.message)).finally(() => cloudLink.status({ ended: sound.id }));
     },
     onHands: handsAsked,
-    handsState: () => ({ running: assistant.running, asking: assistant.asking, abilities: macAbilities }),
+    // What its hands are doing, and its own switches: his website shows them, and throws them (the phone as a remote).
+    // The server's answer to this Mac's Jester moving in: taken, or it has one already. Either way, not sent again.
+    onFrame: (frame) => {
+      if (frame?.t !== 'moved-in') return;
+      log(frame.ok ? 'cloud: this Mac’s Jester moved to the server: it’s starting again with it' : `cloud: nothing moved to the server: ${frame.why || 'it didn’t say why'}`);
+      if (frame.ok || frame.already) storage.local.set({ cloudMoved: cloudTarget.origin }).catch(() => undefined);
+    },
+    handsState: () => ({ running: assistant.running, asking: assistant.asking, abilities: macAbilities, doing: assistant.doing || '', engine: engine.state === ENGINE.SLEEPING ? 'sleeping' : String(engine.state || ''),
+      switches: { enabled: settings?.enabled !== false, gestures: settings?.gesturesEnabled !== false, pointer: settings?.pointerEnabled !== false } }),
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
-    onChange: () => post(desktopState())
+    onChange: (connected) => {
+      post(desktopState());
+      if (connected) moveIn().catch((err) => log('cloud: couldn’t send this Mac’s Jester:', err.message));
+    }
   });
   refreshMacAbilities();
   setInterval(refreshMacAbilities, 5000).unref?.();
@@ -2434,6 +2644,19 @@ async function handsAsked(frame) {
       if (!locateHere) return { ok: false, code: 2 };
       const got = await locateHere({ timeoutMs: Math.min(Math.max(Number(frame.timeoutMs) || 25000, 5000), 90000) });
       return got?.ok ? { ok: true, lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0 } : { ok: false, code: got?.code || 2, message: String(got?.message || '').slice(0, 200) };
+    }
+    // A switch of this Mac's Jester thrown from his website (the phone as a remote), or its task stopped.
+    case 'set': {
+      const change = frame.change && typeof frame.change === 'object' ? frame.change : {};
+      if (typeof change.sleep === 'boolean') sleep(change.sleep);
+      if (change.stop === true) await assistant.cancel();
+      const next = {};
+      if (typeof change.gestures === 'boolean') next.gesturesEnabled = change.gestures;
+      if (typeof change.enabled === 'boolean') next.enabled = change.enabled;
+      if (typeof change.pointer === 'boolean') next.pointerEnabled = change.pointer;
+      if (Object.keys(next).length) await saveSettings(next);
+      cloudLink?.stateChanged();
+      return { ok: true };
     }
     // Controls on his website: this Mac's scripts, within what the server may ask (script-remote.js).
     case 'scripts':
@@ -2739,38 +2962,60 @@ async function start() {
   keeper = createChatKeeper({
     chats: createChatArchive({ file: path.join(app.getPath('userData'), 'chats.json'), log }),
     recollections,
-    live: () => conversationLog?.chatId() || '',
+    // Every chat going on, on any device (sessions.js).
+    live: () => (sessions ? sessions.list().map((session) => session.log.chatId()).filter(Boolean) : []),
     onChats: chatsChanged,
     log
   });
-  // A conversation is over once it's gone quiet: kept then, rather than when the hour comes round.
-  const memory = createConversationLog({
-    file: path.join(app.getPath('userData'), 'conversation.json'),
-    endAfterMs: NEW_AFTER_MS,
-    // Not while a task he handed on is at work, or its result is being said: that's still this conversation.
-    busy: () => !!conversation?.acting,
-    onEnded: (entries) => keeper.over(entries),
-    // His window shows the conversation going on, as it goes.
-    onChange: showChat
-  });
-  conversationLog = memory;
+  // A chat per device (sessions.js): on a server each device has its own conversation going on; in the app, the one.
+  sessions = createSessions({ make: makeSession, frontKey: () => (SERVER ? frontDevice() : '') });
+  conversation = following(() => sessions.front().conversation);
+  conversationLog = following(() => sessions.front().log);
+  // Chats that were going on when he last stopped, on devices that aren't back yet: theirs to end and keep.
+  for (const file of fs.readdirSync(app.getPath('userData'))) if (sessionKeyOf(file)) sessions.get(sessionKeyOf(file));
+  sessions.get('local');
   // The hour, and the week a chat's kept for, are kept to even with nothing said.
   setInterval(() => {
-    memory.expire();
+    for (const session of sessions.list()) session.log.expire();
     keeper.sweep();
   }, LOG_CHECK_MS);
-  conversation = createConversation({
+
+  function makeSession(key) {
+  // The computers' hands, for this chat: what it asks goes to its own device first, and their questions come back to it.
+  const hands = SERVER ? remoteHands.for(key, () => key) : null;
+  let own = null;
+  // On a server he may be speaking for another device's chat: this one's turn doesn't cut that off.
+  let speaking = 0;
+  const voice = !SERVER ? speaker : {
+    prepare: (...args) => speaker.prepare?.(...args),
+    say: (...args) => {
+      speaking += 1;
+      return Promise.resolve(speaker.say(...args)).finally(() => (speaking -= 1));
+    },
+    stop: () => (speaking > 0 ? speaker.stop() : undefined)
+  };
+  // A conversation is over once it's gone quiet: kept then, rather than when the hour comes round.
+  const memory = createConversationLog({
+    file: path.join(app.getPath('userData'), sessionFile(key)),
+    endAfterMs: NEW_AFTER_MS,
+    // Not while a task he handed on is at work, or its result is being said: that's still this conversation.
+    busy: () => !!own?.acting,
+    onEnded: (entries) => keeper.over(entries, { device: deviceLabel(key) }),
+    // His window shows the conversation going on, as it goes.
+    onChange: () => (showChat(key), replied(key))
+  });
+  own = createConversation({
     chat: (request) => askModel({ ...request, request: talking }),
     // A timer ringing: turned off by their saying so, or by their talking to him at all.
     ring: { ringing: () => !!ring?.ringing, stop: (by) => !!ring?.stop(by) },
-    speaker,
+    speaker: voice,
     memory,
     // What's over is in Chats at once, word for word, and summed up for him once he's answered, whichever way it ended.
-    archive: (entries) => keeper.keep(entries),
+    archive: (entries) => keeper.keep(entries, { device: deviceLabel(key) }),
     recollections: {
       keep: (entries) => keeper.sumUp(entries),
       // A chat picked up again is the one going on, not one that's over.
-      relevant: (text) => recollections.relevant(text, { except: conversationLog?.chatId() }),
+      relevant: (text) => recollections.relevant(text, { except: memory.chatId() }),
       forget: () => recollections.forget()
     },
     warm: warmUp,
@@ -2782,7 +3027,7 @@ async function start() {
     knowsYou: () => !!voiceprint && listening,
     // On a server, the Mac's (remote-hands.js): what it knows and does, over its link.
     commands: SERVER
-      ? remoteHands.commands
+      ? hands.commands
       : {
           knows: (text) => voiceRunner.knows(text),
           risky: (text) => voiceRunner.risky(text),
@@ -2798,8 +3043,16 @@ async function start() {
       forget: (request) => vaultMemory.forget(request),
       note: (request) => vaultMemory.note(request)
     },
-    // Where the user is, the weather there and their calendars, once connected in Settings.
-    situation,
+    // Where the user is, the weather there and their calendars, once connected in Settings. On a server, where he's
+    // open and what each device is being used for, too (devices.js): he's one Jester on all of them.
+    situation: !SERVER ? situation : {
+      live: () => situation.live(),
+      brief: async (text, options) => {
+        const got = await situation.brief(text, options);
+        const open = devices?.lines(key) || '';
+        return open ? { ...got, block: [got.block, open].filter(Boolean).join('\n') } : got;
+      }
+    },
     // Their to-do list, reminders and timers.
     tasks,
     // Their own scripts: run by "run", or kept with a task to run later.
@@ -2836,7 +3089,7 @@ async function start() {
       ...(remoteHands.abilities || { computer: false }),
       web: webReady() || !!remoteHands.abilities?.web,
       voice: !!voiceprint,
-      phone: !!phone?.ready,
+      phone: !!push?.ready,
       mail: !!google?.signedIn
     } : ({
       chrome: !!chromeLink?.linked,
@@ -2845,15 +3098,18 @@ async function start() {
       voice: !!voiceprint,
       gestures: settings?.gesturesEnabled !== false,
       watch: !!watch?.state?.paired,
-      phone: !!phone?.ready,
+      phone: phoneReady(),
       scripts: (scripts?.count || 0) > 0,
       mail: !!google?.signedIn,
       computer: process.platform === 'darwin' ? 'Mac' : 'computer'
     }),
-    assistant: SERVER ? remoteHands.assistant : assistant,
-    show: showConversation,
+    assistant: SERVER ? hands.assistant : assistant,
+    show: (frame) => showConversation(frame, key),
     log
   });
+  return { conversation: own, log: memory };
+  }
+
   // Telling the user when something's time comes (tell.js): said if they're here, held until they're back if not.
   teller = createTeller({
     where: () => presence.where,
@@ -2867,7 +3123,8 @@ async function start() {
     held: () => clock.held + clock.waiting,
     // Away, a line goes to their phone, if it's set up. With a film or a call on, it's shown and not said: on the
     // screen, and written in his window with its card.
-    phone: (message) => phone.send(message),
+    // On a server that's his own app's notifications (push.js), on every device that takes them.
+    phone: (message) => (SERVER ? push.send(message) : phone.send(message)),
     watching: () => presence.watching,
     show: (text, title, card, more) => {
       overlays.toast(text, { detail: title });
@@ -2938,6 +3195,10 @@ async function start() {
   });
   phone = createPhone({ storage: storage.local, log, onChange: () => post(desktopState()) });
   await phone.start();
+  if (SERVER) {
+    push = createPush({ storage: storage.local, log, onChange: devicesChanged });
+    await push.start();
+  }
   // Their Gmail: signed in to with Google, to read only, and watched for what matters.
   // On a server, Google's page opens in the browser that asked, and the address it lands on is pasted back (signInReturned).
   google = createGoogle({ storage: storage.local, open: (url) => (SERVER ? openInBrowser(url) : shell.openExternal(url)), log, onChange: () => post(desktopState()) });
@@ -3099,7 +3360,10 @@ async function start() {
     if (area === 'local' && changes.settings) refresh();
   });
 
-  if (cloudTarget) startCloudLink();
+  if (cloudTarget) {
+    thisDevice = await deviceIdentity();
+    startCloudLink();
+  }
   if (SERVER) {
     // No camera, menu bar, permissions or shortcut on a server: his window is the website, already listening.
     await refresh();

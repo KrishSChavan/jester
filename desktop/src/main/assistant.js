@@ -341,6 +341,10 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     get running() {
       return !!current;
     },
+    /** What the task at work is, in the words it was begun with: for another device that asks (remote-hands.js). */
+    get doing() {
+      return current ? String(current.caption || '').slice(0, 200) : '';
+    },
 
     /** Stops the task running, and resolves once it has (or after a moment). */
     /** `only`: stop that task, if it's still the one at work (a search's Stop, clicked as it ended). */

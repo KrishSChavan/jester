@@ -44,9 +44,11 @@ export function parseCloudLink(link) {
  * @param {(request:object) => Promise<any>} deps.onHands   do what the server asks; the result goes back
  * @param {() => object} deps.handsState   { running, asking, abilities }: sent when it changes
  * @param {() => number} deps.idleSeconds
+ * @param {{id:string, name:string}} [deps.device]   which of the user's computers this is (devices.js)
+ * @param {(frame:object) => void} [deps.onFrame]   anything else the server says (a move's answer)
  * @param {(connected:boolean) => void} [deps.onChange]
  */
-export function createCloudLink({ link, onVoice, onPlay, onHands, handsState, idleSeconds, onChange = () => undefined, log = () => undefined, WebSocketImpl = WebSocket }) {
+export function createCloudLink({ link, device = null, onVoice, onPlay, onHands, handsState, idleSeconds, onChange = () => undefined, onFrame = () => undefined, log = () => undefined, WebSocketImpl = WebSocket }) {
   let socket = null;
   let connected = false;
   let closed = false;
@@ -67,7 +69,7 @@ export function createCloudLink({ link, onVoice, onPlay, onHands, handsState, id
       tries = 0;
       lastState = '';
       log('cloud: connected to', link.origin);
-      send({ t: 'hello', role: 'mac' });
+      send({ t: 'hello', role: 'mac', device });
       if (wantsClaim) send({ t: 'voice-claim' });
       send({ t: 'presence', idleSeconds: idleSeconds() });
       pushState();
@@ -90,7 +92,7 @@ export function createCloudLink({ link, onVoice, onPlay, onHands, handsState, id
             (result) => send({ t: 'hands-reply', id: frame.id, result: result ?? null }),
             (err) => send({ t: 'hands-reply', id: frame.id, error: String(err?.message || err) })
           );
-      }
+      } else onFrame(frame);
     });
     socket.on('close', () => {
       const was = connected;
@@ -156,6 +158,12 @@ export function createCloudLink({ link, onVoice, onPlay, onHands, handsState, id
     },
     /** Something changed that the server should know at once. */
     stateChanged: pushState,
+    /** Anything else for the server: this Mac's things, moved in (move-in.js). */
+    send(frame) {
+      if (!connected) return false;
+      socket.send(JSON.stringify(frame));
+      return true;
+    },
     /** This Mac's scripts, or what's on, changed: Controls on his website reads them again. */
     scriptsChanged(change = {}) {
       send({ t: 'scripts-changed', change: { ...(typeof change.script === 'string' ? { script: change.script } : {}) } });

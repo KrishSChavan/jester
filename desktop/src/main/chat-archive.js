@@ -161,8 +161,10 @@ export function createChatArchive({ file, now = Date.now, newId = randomUUID, lo
   if (fresh()) write();
 
   const lastOf = (chat) => Date.parse(chat.lines.at(-1)?.at) || chat.endedAt;
-  const summary = ({ id, startedAt, endedAt, title, lines }) => ({
+  const summary = ({ id, startedAt, endedAt, title, lines, device }) => ({
     id,
+    // The device it was on, where there's more than one (sessions.js).
+    ...(device ? { device } : {}),
     startedAt,
     endedAt,
     // When the last thing was said: what the list goes by.
@@ -178,7 +180,7 @@ export function createChatArchive({ file, now = Date.now, newId = randomUUID, lo
      * @param {{who:string, text:string, at:string, chat?:string}[]} entries
      * @returns {string} the chat's id, or '' when nothing was kept
      */
-    keep(entries) {
+    keep(entries, { device = '' } = {}) {
       const list = (Array.isArray(entries) ? entries : []).filter(said);
       if (!list.some(yours)) return '';
       const id = String(list.find((entry) => entry.chat)?.chat || newId());
@@ -195,7 +197,8 @@ export function createChatArchive({ file, now = Date.now, newId = randomUUID, lo
       const old = chats.find((chat) => chat.id === id);
       fresh();
       chats = chats.filter((chat) => chat.id !== id);
-      chats.push({ id, startedAt: Date.parse(lines[0].at), endedAt: at, title: old?.title || '', lines });
+      const on = String(device || old?.device || '').slice(0, 40);
+      chats.push({ id, startedAt: Date.parse(lines[0].at), endedAt: at, title: old?.title || '', lines, ...(on ? { device: on } : {}) });
       try {
         write();
       } catch (err) {

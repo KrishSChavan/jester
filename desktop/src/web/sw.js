@@ -4,6 +4,8 @@
  *
  * Nothing of his is kept: only that page and its icon are, and everything else goes straight to the server, as it
  * would with no worker at all. His socket isn't a worker's to see.
+ *
+ * And what he sends this device while his app's closed (main/push.js): shown as a notification, which opens him.
  */
 
 const CACHE = 'jester-offline-1';
@@ -31,4 +33,27 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   if (event.request.mode !== 'navigate') return;
   event.respondWith(fetch(event.request).catch(() => caches.match(OFFLINE)));
+});
+
+// A line from him (push.js), read only here: the push service carried it sealed. Every one is shown, as iPhones ask.
+self.addEventListener('push', (event) => {
+  let said = {};
+  try {
+    said = event.data?.json() || {};
+  } catch {
+    said = { body: event.data?.text() || '' };
+  }
+  const title = String(said.title || 'Jester');
+  event.waitUntil(self.registration.showNotification(title, { body: String(said.body || ''), icon: '/web/icons/icon-192.png', badge: '/web/icons/icon-192.png', ...(said.tag ? { tag: String(said.tag) } : {}), data: { url: '/' } }));
+});
+
+// Tapped: his app, brought forward if it's open, opened if not.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((open) => {
+      const there = open.find((client) => new URL(client.url).origin === self.location.origin);
+      return there ? there.focus() : self.clients.openWindow('/');
+    })
+  );
 });

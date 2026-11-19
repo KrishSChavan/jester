@@ -13,9 +13,26 @@
   -webkit-app-region: no-drag;
 }
 
-#gestures,
-#sleep {
+/* Settings rows that are his website's alone (Devices), and the one that isn't (ntfy: his own app notifies here). */
+.row.web-only {
+  display: flex;
+}
+
+#phone-row {
   display: none;
+}
+
+.row.device {
+  flex-wrap: wrap;
+}
+
+/* A computer's switches, under its name: side by side, from the left. */
+.row.device .buttons {
+  flex: 1 0 100%;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
 }
 
 @media (max-width: 520px) {

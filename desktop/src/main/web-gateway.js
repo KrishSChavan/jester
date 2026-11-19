@@ -194,7 +194,7 @@ export function landingAddress(pasted, page) {
  * @param {(client:object, message:object) => void} [options.onOther]   anything else a client sends (the Mac's hands)
  * @param {(client:object) => void} [options.onVoiceClient]   the client being talked to changed
  */
-export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessage, onStorage, onConnect = () => undefined, onClose = () => undefined, onAudio = () => undefined, onVoiceStatus = () => undefined, onOther = () => undefined, onVoiceClient = () => undefined, log = () => undefined }) {
+export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessage, onStorage, onConnect = () => undefined, onClose = () => undefined, onAudio = () => undefined, onVoiceStatus = () => undefined, onOther = () => undefined, onVoiceClient = () => undefined, onSeen = () => undefined, log = () => undefined }) {
   if (!key || key.length < 16) throw new Error('The web gateway needs a key of at least 16 characters');
   const clients = new Set();
   /** The client being talked to: the mic is theirs, and so is his voice. */
@@ -333,6 +333,10 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
       // What it's on (device-location.js names it: "your iPhone"), and whether it's the Mac's own window (hello).
       agent: String(request.headers['user-agent'] || '').slice(0, 300),
       macWindow: false,
+      // Where it connects from, as `tailscale serve` says: a computer and the browsers on it share one.
+      from: String(request.headers['x-forwarded-for'] || '').split(',')[0].trim().slice(0, 64),
+      device: { id: '', name: '', app: false },
+      visible: true,
       message: (message, sender) => send(client, { t: 'msg', message, sender }),
       storageChanged: (changes, area) => send(client, { t: 'storage-changed', changes, area }),
       send: (frame) => send(client, frame)
@@ -358,6 +362,9 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
         switch (frame?.t) {
           case 'hello':
             client.role = frame.role === 'mac' ? 'mac' : 'page';
+            // Which of the user's devices it is (devices.js): an id it keeps, a computer's own name, his app or a tab.
+            client.device = { id: String(frame.device?.id ?? '').slice(0, 64), name: String(frame.device?.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 40), app: frame.device?.app === true };
+            if (typeof frame.visible === 'boolean') client.visible = frame.visible;
             // His website in the Mac's own window (web/shim.js says so): the Mac answers where it is, not the page.
             client.macWindow = client.role === 'page' && frame.macWindow === true;
             onConnect(client);
@@ -373,6 +380,10 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
             return;
           case 'voice-status':
             if (client === voiceClient) onVoiceStatus(frame.report || {});
+            return;
+          // Its page came to the front or went behind.
+          case 'here':
+            onSeen(client, { visible: frame.visible === true });
             return;
           default:
             onOther(client, frame);

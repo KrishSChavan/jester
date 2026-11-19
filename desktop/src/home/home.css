@@ -2119,3 +2119,46 @@ code {
     opacity: 0.6;
   }
 }
+
+/* His website: the chat going on on another device, to look at from here (others.js). Closable. */
+.others {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 16px 4px;
+  padding: 3px 4px 3px 4px;
+  border: 1px solid color-mix(in srgb, var(--ring) 45%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ring) 10%, transparent);
+  font-size: 13px;
+}
+
+.others-see {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.others-see span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.others .icon-svg {
+  width: 18px;
+  height: 18px;
+  color: var(--orb);
+}
+
+/* Settings rows for his website alone (web.css shows them there). */
+.row.web-only {
+  display: none;
+}

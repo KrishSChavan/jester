@@ -23,6 +23,24 @@
   let tries = 0;
   let claimed = false;
 
+  /**
+   * Which of the user's devices this is (main/devices.js): an id made here once and kept, apart for a browser and for
+   * his app on the Home Screen, which keep their own storage. With storage refused, it's a new device each time.
+   */
+  const standalone = () => globalThis.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+  function deviceId() {
+    try {
+      let id = localStorage.getItem('jesterDevice');
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(id || '')) {
+        id = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(12)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        localStorage.setItem('jesterDevice', id);
+      }
+      return id;
+    } catch {
+      return '';
+    }
+  }
+
   function connect() {
     socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/socket`);
     socket.binaryType = 'arraybuffer';
@@ -30,7 +48,7 @@
       open = true;
       tries = 0;
       // The Mac's own window (his website in Electron) says so: the Mac says where it is for it (device-location.js).
-      socket.send(JSON.stringify({ t: 'hello', role: 'page', ...(/\bElectron\//.test(navigator.userAgent) ? { macWindow: true } : {}) }));
+      socket.send(JSON.stringify({ t: 'hello', role: 'page', device: { id: deviceId(), app: standalone() }, visible: document.visibilityState !== 'hidden', ...(/\bElectron\//.test(navigator.userAgent) ? { macWindow: true } : {}) }));
       if (claimed) socket.send(JSON.stringify({ t: 'voice-claim' }));
       for (const frame of queue) socket.send(frame);
       queue = [];
@@ -117,6 +135,9 @@
   globalThis.chrome.storage = { local: area('local'), session: area('session'), onChanged: event(storageListeners) };
   // His window can't close a browser's tab.
   globalThis.close = () => undefined;
+  // In front or behind: he knows where he's being looked at (main/devices.js).
+  document.addEventListener('visibilitychange', () => send({ t: 'here', visible: document.visibilityState !== 'hidden' }));
+
   // For pages that do something else in a browser: Settings' card for putting him on a Home Screen (home/install.js).
   globalThis.jesterWeb = { claim: () => claim(), installPrompt: null };
 

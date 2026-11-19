@@ -29,7 +29,7 @@ const WORKER_URL = `${EXT_ROOT}src/background/service-worker.js`;
  * Pages never see them, through storage or its change events, and they're
  * sealed on disk.
  */
-export const PRIVATE_KEYS = Object.freeze(['cloudBrain', 'modelConnections', 'modelConnection', 'desktopLearned', 'watchKey', 'puterToken', 'voiceprint', 'voiceLearned', 'calendarFeeds', 'phone', 'google', 'mail', 'briefingSnapshots']);
+export const PRIVATE_KEYS = Object.freeze(['cloudBrain', 'modelConnections', 'modelConnection', 'desktopLearned', 'watchKey', 'puterToken', 'voiceprint', 'voiceLearned', 'calendarFeeds', 'phone', 'google', 'mail', 'briefingSnapshots', 'push']);
 const isPrivate = (key) => PRIVATE_KEYS.includes(key);
 const withoutPrivate = (items) => Object.fromEntries(Object.entries(items || {}).filter(([key]) => !isPrivate(key)));
 
@@ -67,10 +67,10 @@ export function post(message) {
   for (const remote of remotes) remote.message(message, sender);
 }
 
-/** A message from the worker to the pages in browsers elsewhere only: his window, where it's a website. */
-export function postRemote(message) {
+/** A message from the worker to the pages in browsers elsewhere only: his window, where it's a website. `only`: those of them it's for. */
+export function postRemote(message, only = null) {
   const sender = { id: RUNTIME_ID, url: WORKER_URL };
-  for (const remote of remotes) remote.message(message, sender);
+  for (const remote of remotes) if (!only || only(remote)) remote.message(message, sender);
 }
 
 /** A page in a browser elsewhere joins the pages messages reach. Returns what takes it away again. */

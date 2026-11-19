@@ -107,7 +107,8 @@ export function createChats({ go, onPickedUp }) {
       title.textContent = chat.title;
       const when = document.createElement('time');
       when.dateTime = new Date(chat.lastAt).toISOString();
-      when.textContent = `${clock(chat.lastAt)} · ${chat.lines} line${chat.lines === 1 ? '' : 's'}`;
+      // On his website, a chat per device: which one it was on.
+      when.textContent = `${clock(chat.lastAt)} · ${chat.lines} line${chat.lines === 1 ? '' : 's'}${chat.device ? ` · ${chat.device}` : ''}`;
       button.append(title, when);
       button.addEventListener('click', () => open(chat.id));
       parts.push(button);

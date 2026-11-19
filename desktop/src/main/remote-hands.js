@@ -1,24 +1,29 @@
 /**
- * His hands, when his brain is on a server (main.js's JESTER_SERVER): the Mac's.
+ * His hands, when his brain is on a server (main.js's JESTER_SERVER): the user's computers'.
  *
- * The conversation (conversation.js) does things through two objects: `commands` (does the matcher know these
+ * A conversation (conversation.js) does things through two objects: `commands` (does the matcher know these
  * words, are they risky, are they the user's scripts, and do them) and `assistant` (is a task running, is a question
- * waiting, ask one, answer it, stop). On a server both are the Mac's, over the web gateway's socket: the Mac runs
+ * waiting, ask one, answer it, stop). On a server both are a computer's, over the web gateway's socket: each Mac runs
  * Jester too, with "Use Jester in the cloud" on (cloud-link.js), and does what's asked with its own voice runner and
  * assistant, exactly as it would for its own conversation.
  *
- * With no Mac connected there are no hands: nothing is known or risky, a command is answered with why it can't be
- * done, and a question (a script's "Run it?") is asked here and answered by what the user says or types next.
+ * More than one computer can be connected (the user, 2026-11-18: "my laptop should be able to see if there are other
+ * laptops with him signed in and coordinate with them"). Each chat has its own `commands` and `assistant` (`for`),
+ * and what it asks goes to one computer (`pick`): the one named in the words ("on my desktop"), else the one the chat
+ * is on, else the one touched last. A task's question comes back to the chat that started it.
  *
- * Controls, on his website, is the Mac's scripts too: what its page asks goes to the Mac (op 'scripts', the page's
- * message as it is), which decides what it may do (script-remote.js), and the Mac says when they've changed.
+ * With no computer connected there are no hands: nothing is known or risky, a command is answered with why it can't
+ * be done, and a question (a script's "Run it?") is asked here and answered by what the user says or types next.
+ *
+ * Controls, on his website, is a computer's scripts too: what its page asks goes to that computer (op 'scripts', the
+ * page's message as it is), which decides what it may do (script-remote.js), and says when they've changed.
  *
  * Frames, on the gateway's socket:
- *   server → Mac   { t: 'hands', id, op, ...args }            op: knows | risky | scriptsAsk | run | confirm | answer | reask | cancel | scripts | where
+ *   server → Mac   { t: 'hands', id, op, ...args }            op: knows | risky | scriptsAsk | run | confirm | answer | reask | cancel | scripts | where | set
  *   Mac → server   { t: 'hands-reply', id, result } | { t: 'hands-reply', id, error }
- *   Mac → server   { t: 'hands-state', running, asking, abilities }   whenever any of it changes
+ *   Mac → server   { t: 'hands-state', running, asking, abilities, engine, switches, doing }   whenever any of it changes
  *   Mac → server   { t: 'hands-ask', label }                  its task has a question: asked in the conversation
- *   Mac → server   { t: 'presence', idleSeconds }             how long since the user touched the Mac
+ *   Mac → server   { t: 'presence', idleSeconds }             how long since the user touched it
  *   Mac → server   { t: 'told', text }                        typed in the Mac's own window: said to him here
  *   Mac → server   { t: 'scripts-changed', change }           its scripts or what's on changed: Controls reads them again
  */
@@ -41,42 +46,75 @@ export const NO_MAC_SCRIPTS = 'They run on your Mac, and it isn’t connected to
 const SCRIPTS_MS = { choose: 10 * 60 * 1000, save: 10 * 60 * 1000, inspect: 3 * 60 * 1000, edit: 3 * 60 * 1000, run: 2 * 60 * 1000, 'scene-run': 2 * 60 * 1000, refresh: 2 * 60 * 1000 };
 const SCRIPTS_QUICK_MS = 15000;
 
+const EMPTY = Object.freeze({ running: false, asking: false, abilities: {}, engine: '', switches: {}, doing: '' });
+
+/** A computer's name as it's listened for in what's asked: "Krish’s MacBook Pro" → "krishs macbook pro". */
+const plain = (text) => String(text ?? '').toLowerCase().replace(/[‘’']/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * Whether words name a computer: all of its name ("on Krish's MacBook Pro"), or what kind it is where only one is
+ * that ("on my MacBook", "on the iMac", "on my desktop" for the one that isn't a laptop).
+ */
+export function namedIn(text, computers) {
+  const said = ` ${plain(text)} `;
+  if (!/ (?:on|at|from|to|using) /.test(said)) return null;
+  const whole = computers.filter((computer) => plain(computer.name) && said.includes(` ${plain(computer.name)} `));
+  if (whole.length === 1) return whole[0];
+  for (const word of ['macbook pro', 'macbook air', 'macbook', 'imac', 'mac mini', 'mac studio', 'laptop', 'desktop', 'pc']) {
+    if (!new RegExp(` (?:on|at|from|to|using) (?:my |the )?${word} `).test(said)) continue;
+    const laptop = (computer) => /macbook|laptop|book/.test(plain(computer.name));
+    const fits = computers.filter((computer) => (word === 'laptop' ? laptop(computer) : word === 'desktop' || word === 'pc' ? !laptop(computer) : plain(computer.name).includes(word)));
+    if (fits.length === 1) return fits[0];
+  }
+  return null;
+}
+
 /**
  * @param {object} deps
- * @param {(client:object, frame:object) => void} [deps.send]   to one client (the gateway's client.send)
- * @param {(label:string) => void} [deps.onAsk]   the Mac's task has a question for the user: ask it in the conversation
- * @param {(text:string) => void} [deps.onTold]   typed to him in the Mac's own window
- * @param {(state:object) => void} [deps.onChange]   the Mac came, went, or its state changed
- * @param {(change:object) => void} [deps.onScriptsChanged]   the Mac's scripts changed, or the Mac came or went: Controls reads them again
+ * @param {(label:string, chat:string) => void} [deps.onAsk]   a computer's task has a question for the user: ask it in the chat that started it
+ * @param {(text:string, computer:object) => void} [deps.onTold]   typed to him in a computer's own window
+ * @param {(state:object) => void} [deps.onChange]   a computer came, went, or its state changed
+ * @param {(change:object) => void} [deps.onScriptsChanged]   a computer's scripts changed, or one came or went: Controls reads them again
+ * @param {() => string} [deps.adopt]   the chat that takes a computer's task no chat here started (begun on the computer itself): the one in front
  * @param {() => number} [deps.now]
  */
-export function createRemoteHands({ onAsk = () => undefined, onTold = () => undefined, onChange = () => undefined, onScriptsChanged = () => undefined, log = () => undefined, now = Date.now } = {}) {
-  /** The Mac connected, if one is: the gateway's client. */
-  let mac = null;
-  let state = { running: false, asking: false, abilities: {} };
-  /** The Mac's idle seconds, and when they were said. */
-  let idle = null;
+export function createRemoteHands({ onAsk = () => undefined, onTold = () => undefined, onChange = () => undefined, onScriptsChanged = () => undefined, adopt = () => 'local', log = () => undefined, now = Date.now } = {}) {
+  /** The computers connected, by the gateway's client: { client, id, name, state, idle, joinedAt, owner }. */
+  const macs = new Map();
   let nextId = 0;
   const waiting = new Map();
-  /** A question asked here, with no Mac: what settles it. */
-  let localAsk = null;
+  let joins = 0;
 
-  function request(op, args = {}, timeoutMs = QUICK_MS) {
-    if (!mac) return Promise.reject(Object.assign(new Error(NO_MAC), { code: 'no_mac' }));
+  const idleOf = (mac) => (mac.idle ? mac.idle.seconds + (now() - mac.idle.at) / 1000 : Infinity);
+  /** The one being used: touched last, and of those that haven't said, the one that came last. */
+  const nearest = () => [...macs.values()].sort((a, b) => idleOf(a) - idleOf(b) || b.joinedAt - a.joinedAt)[0] || null;
+  const byId = (id) => (id ? [...macs.values()].find((mac) => mac.id === id) || null : null);
+
+  /**
+   * Which computer something's asked of: the one named in the words, else the one the chat is on, else the one
+   * being used.
+   */
+  function pick({ text = '', device = '' } = {}) {
+    if (!macs.size) return null;
+    if (macs.size === 1) return macs.values().next().value;
+    return namedIn(text, [...macs.values()]) || byId(device) || nearest();
+  }
+
+  function request(mac, op, args = {}, timeoutMs = QUICK_MS) {
+    if (!mac || !macs.has(mac.client)) return Promise.reject(Object.assign(new Error(NO_MAC), { code: 'no_mac' }));
     const id = ++nextId;
-    const client = mac;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         waiting.delete(id);
         reject(Object.assign(new Error('The Mac didn’t answer in time'), { code: 'timeout' }));
       }, timeoutMs);
-      waiting.set(id, { resolve, reject, timer, client });
-      client.send({ t: 'hands', id, op, ...args });
+      waiting.set(id, { resolve, reject, timer, client: mac.client });
+      mac.client.send({ t: 'hands', id, op, ...args });
     });
   }
 
-  /** Ask the Mac, and take `fallback` if it can't say. */
-  const quick = (op, args, fallback) => request(op, args).catch((err) => (err.code !== 'no_mac' && log(`hands: ${op} not answered:`, err.message), fallback));
+  /** Ask a computer, and take `fallback` if it can't say. */
+  const quick = (mac, op, args, fallback) => request(mac, op, args).catch((err) => (err.code !== 'no_mac' && log(`hands: ${op} not answered:`, err.message), fallback));
 
   function settleAll(client, why) {
     for (const [id, entry] of waiting) {
@@ -87,99 +125,190 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
     }
   }
 
-  function askHere(label) {
-    localAsk?.settle(false);
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => settle(false), ASK_MS);
-      const settle = (yes) => {
-        clearTimeout(timer);
-        if (localAsk?.settle === settle) localAsk = null;
-        resolve(!!yes);
-      };
-      localAsk = { label, settle };
-      onAsk(label);
-    });
+  /** A computer as it's listed: for Settings' Devices, and for him to know of. */
+  const listed = (mac) => ({ id: mac.id, name: mac.name, running: !!mac.state.running, asking: !!mac.state.asking, doing: mac.state.doing || '', engine: mac.state.engine || '', switches: { ...mac.state.switches }, abilities: mac.state.abilities, idleSeconds: idleOf(mac), chat: mac.owner || '' });
+
+  /**
+   * A chat's own `commands` and `assistant` (conversation.js).
+   * @param {string} chat  which chat they're for: a computer's question comes back to it
+   * @param {() => string} [device]  the device that chat is on, when it's a computer: what's asked goes there first
+   */
+  function hands(chat = 'local', device = () => '') {
+    /** The computer this chat last asked something of: its task, and its question, are this chat's. */
+    let mine = null;
+    /** A question asked here, with no computer: what settles it. */
+    let localAsk = null;
+    const target = (text) => pick({ text, device: device() });
+    const own = (mac) => {
+      mine = mac;
+      if (mac) mac.owner = chat;
+      return mac;
+    };
+    /** The computer whose task is this chat's: the one it last asked, or one with a task no chat started, if this chat's in front. */
+    const current = () => {
+      if (mine && macs.has(mine.client) && mine.owner === chat) return mine;
+      return [...macs.values()].find((mac) => mac.owner === chat || (!mac.owner && adopt() === chat)) || null;
+    };
+
+    function askHere(label) {
+      localAsk?.settle(false);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => settle(false), ASK_MS);
+        const settle = (yes) => {
+          clearTimeout(timer);
+          if (localAsk?.settle === settle) localAsk = null;
+          resolve(!!yes);
+        };
+        localAsk = { label, settle };
+        onAsk(label, chat);
+      });
+    }
+
+    return {
+      /** conversation.js's `commands`. */
+      commands: {
+        knows: (text) => quick(target(text), 'knows', { text }, false),
+        risky: (text) => quick(target(text), 'risky', { text }, false),
+        scriptsAsk: (text) => quick(target(text), 'scriptsAsk', { text }, false),
+        async run(text, said, context) {
+          try {
+            const result = await request(own(target(`${text} ${said || ''}`)), 'run', { text, said, context: context || {} }, RUN_MS);
+            return { outcome: result?.outcome ?? null };
+          } catch (err) {
+            return { outcome: { ok: false, text: err.code === 'no_mac' ? NO_MAC : `I couldn’t get your Mac to do that: ${err.message}.` } };
+          }
+        }
+      },
+
+      /** conversation.js's `assistant`: the computer's this chat is using, or a question asked here when there's none. */
+      assistant: {
+        get running() {
+          return !!current()?.state.running;
+        },
+        get asking() {
+          return !!localAsk || !!current()?.state.asking;
+        },
+        confirm(label) {
+          const mac = own(target(''));
+          if (!mac) return askHere(String(label));
+          return request(mac, 'confirm', { label: String(label) }, ASK_MS + QUICK_MS).then((yes) => !!yes, () => false);
+        },
+        answer(yes) {
+          if (localAsk) return localAsk.settle(!!yes);
+          if (current()) request(current(), 'answer', { yes: !!yes }).catch(() => undefined);
+          return undefined;
+        },
+        reask() {
+          if (localAsk) {
+            onAsk(localAsk.label, chat);
+            return true;
+          }
+          const mac = current();
+          if (!mac) return false;
+          request(mac, 'reask').catch(() => undefined);
+          return !!mac.state.asking;
+        },
+        cancel() {
+          localAsk?.settle(false);
+          if (current()) return request(current(), 'cancel').catch(() => undefined);
+          return Promise.resolve();
+        }
+      }
+    };
   }
 
+  const local = hands('local');
+
   return {
-    /** The gateway's client said it's a Mac. A newer one takes over from an older. */
+    /** The gateway's client said it's a computer of the user's. The same one again takes over from its older line. */
     join(client) {
-      if (mac && mac !== client) settleAll(mac, 'Another Mac connected');
-      mac = client;
-      state = { running: false, asking: false, abilities: {} };
-      log('hands: the Mac is connected');
-      onChange(state);
+      const id = String(client.device?.id || `mac-${client.id ?? ++joins}`);
+      for (const [other, mac] of macs) {
+        if (mac.id !== id || other === client) continue;
+        settleAll(other, 'It connected again');
+        macs.delete(other);
+      }
+      macs.set(client, { client, id, name: String(client.device?.name || 'your Mac'), state: { ...EMPTY }, idle: null, joinedAt: ++joins, owner: '' });
+      log('hands: connected,', macs.size === 1 ? 'the Mac' : `${macs.size} computers`);
+      onChange();
       onScriptsChanged({ mac: true });
     },
-    /** A client went: if it was the Mac, there are no hands until it's back. */
+    /** A client went: if it was a computer, its hands go with it. */
     leave(client) {
-      if (client !== mac) return;
-      mac = null;
-      idle = null;
-      state = { running: false, asking: false, abilities: {} };
+      if (!macs.delete(client)) return;
       settleAll(client, NO_MAC);
-      log('hands: the Mac is gone');
-      onChange(state);
-      onScriptsChanged({ mac: false });
+      log('hands: a computer is gone;', macs.size, 'left');
+      onChange();
+      onScriptsChanged({ mac: macs.size > 0 });
     },
     /** A frame from a client the gateway didn't take itself. */
     frame(client, frame) {
-      if (client !== mac) return;
+      const mac = macs.get(client);
+      if (!mac) return;
       if (frame.t === 'hands-reply') {
         const entry = waiting.get(frame.id);
-        if (!entry) return;
+        if (!entry || entry.client !== client) return;
         waiting.delete(frame.id);
         clearTimeout(entry.timer);
         if (frame.error) entry.reject(new Error(String(frame.error)));
         else entry.resolve(frame.result);
       } else if (frame.t === 'hands-state') {
-        state = { running: !!frame.running, asking: !!frame.asking, abilities: frame.abilities && typeof frame.abilities === 'object' ? frame.abilities : {} };
-        onChange(state);
+        const switches = frame.switches && typeof frame.switches === 'object' ? Object.fromEntries(Object.entries(frame.switches).filter(([, on]) => typeof on === 'boolean').slice(0, 8)) : {};
+        mac.state = { running: !!frame.running, asking: !!frame.asking, abilities: frame.abilities && typeof frame.abilities === 'object' ? frame.abilities : {}, engine: String(frame.engine || '').slice(0, 24), switches, doing: String(frame.doing || '').slice(0, 200) };
+        onChange();
       } else if (frame.t === 'hands-ask') {
-        onAsk(String(frame.label || '').slice(0, 300));
+        if (!mac.owner) mac.owner = adopt();
+        onAsk(String(frame.label || '').slice(0, 300), mac.owner);
       } else if (frame.t === 'told' && typeof frame.text === 'string' && frame.text.trim()) {
-        onTold(frame.text.trim().slice(0, 12000));
+        mac.idle = { seconds: 0, at: now() };
+        onTold(frame.text.trim().slice(0, 12000), listed(mac));
       } else if (frame.t === 'presence' && Number.isFinite(frame.idleSeconds)) {
-        idle = { seconds: Math.max(0, frame.idleSeconds), at: now() };
+        mac.idle = { seconds: Math.max(0, frame.idleSeconds), at: now() };
       } else if (frame.t === 'scripts-changed') {
         const change = frame.change && typeof frame.change === 'object' && !Array.isArray(frame.change) ? frame.change : {};
         onScriptsChanged({ script: typeof change.script === 'string' ? change.script.slice(0, 64) : undefined });
       }
     },
     get connected() {
-      return !!mac;
+      return macs.size > 0;
     },
-    /** What the Mac says it can do (abilities.js's state), or null with none connected. */
+    /** The computers connected, the one being used first. */
+    list: () => [...macs.values()].sort((a, b) => idleOf(a) - idleOf(b) || b.joinedAt - a.joinedAt).map(listed),
+    /** What the computer being used says it can do (abilities.js's state), or null with none connected. */
     get abilities() {
-      return mac ? state.abilities : null;
+      return nearest()?.state.abilities || null;
     },
-    /** Seconds since the user touched the Mac, as of now; Infinity with no Mac or nothing said yet. */
+    /** Seconds since the user touched any of them, as of now; Infinity with none or nothing said yet. */
     idleSeconds() {
-      return idle ? idle.seconds + (now() - idle.at) / 1000 : Infinity;
+      return Math.min(Infinity, ...[...macs.values()].map(idleOf));
     },
 
-    /** conversation.js's `commands`. */
-    commands: {
-      knows: (text) => quick('knows', { text }, false),
-      risky: (text) => quick('risky', { text }, false),
-      scriptsAsk: (text) => quick('scriptsAsk', { text }, false),
-      async run(text, said, context) {
-        try {
-          const result = await request('run', { text, said, context: context || {} }, RUN_MS);
-          return { outcome: result?.outcome ?? null };
-        } catch (err) {
-          return { outcome: { ok: false, text: err.code === 'no_mac' ? NO_MAC : `I couldn’t get your Mac to do that: ${err.message}.` } };
-        }
+    /** A chat's own commands and assistant. */
+    for: hands,
+    /** The first chat's (and the only one's, where there's one). */
+    commands: local.commands,
+    assistant: local.assistant,
+
+    /**
+     * A switch of a computer's Jester, thrown from his website (the phone as a remote): asleep, gestures, the cursor,
+     * Jester himself; or its task stopped.
+     * @param {string} device  which computer, or '' for the one being used
+     */
+    async set(device, change) {
+      try {
+        return (await request(byId(device) || nearest(), 'set', { change }, QUICK_MS)) ?? { ok: false };
+      } catch (err) {
+        return { ok: false, why: err.code === 'no_mac' ? NO_MAC : `Your Mac didn’t answer: ${err.message}.` };
       }
     },
 
     /**
-     * Where the Mac is, from Location Services (mac-location.js): the user's using it, or his website in its window
+     * Where a computer is, from Location Services (mac-location.js): the user's using it, or his website in its window
      * (device-location.js). As whereabouts.js takes a position: { ok, lat, lon, accuracy } or { ok: false, code }.
      */
-    async where(timeoutMs = 25000) {
+    async where(timeoutMs = 25000, device = '') {
       try {
-        const got = await request('where', { timeoutMs }, timeoutMs + QUICK_MS);
+        const got = await request(byId(device) || nearest(), 'where', { timeoutMs }, timeoutMs + QUICK_MS);
         return got && typeof got === 'object' ? got : { ok: false, code: 2 };
       } catch (err) {
         return { ok: false, code: err.code === 'timeout' ? 3 : 2, message: err.code === 'no_mac' ? '' : err.message };
@@ -187,10 +316,11 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
     },
 
     /**
-     * Controls, asked on his website: the Mac's answer, as main.js's scriptsAsked would give it there, or why not.
+     * Controls, asked on his website: the computer's answer, as main.js's scriptsAsked would give it there, or why not.
      * @param {object} message  the page's { op, … }, as it sent it
+     * @param {string} [device]  the computer the page is on, when it's one of them
      */
-    async scripts(message) {
+    async scripts(message, device = '') {
       const op = String(message?.op ?? '');
       let asked;
       try {
@@ -199,42 +329,10 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
         return { ok: false, why: 'That couldn’t be sent to your Mac.' };
       }
       try {
-        const result = await request('scripts', { message: asked }, SCRIPTS_MS[op] || SCRIPTS_QUICK_MS);
+        const result = await request(byId(device) || nearest(), 'scripts', { message: asked }, SCRIPTS_MS[op] || SCRIPTS_QUICK_MS);
         return result && typeof result === 'object' ? result : { ok: false, why: 'Your Mac didn’t say.' };
       } catch (err) {
         return { ok: false, why: err.code === 'no_mac' ? NO_MAC_SCRIPTS : `Your Mac didn’t answer: ${err.message}.` };
-      }
-    },
-
-    /** conversation.js's `assistant`: the Mac's, or a question asked here when there's no Mac. */
-    assistant: {
-      get running() {
-        return !!mac && state.running;
-      },
-      get asking() {
-        return !!localAsk || (!!mac && state.asking);
-      },
-      confirm(label) {
-        if (!mac) return askHere(String(label));
-        return request('confirm', { label: String(label) }, ASK_MS + QUICK_MS).then((yes) => !!yes, () => false);
-      },
-      answer(yes) {
-        if (localAsk) return localAsk.settle(!!yes);
-        if (mac) request('answer', { yes: !!yes }).catch(() => undefined);
-      },
-      reask() {
-        if (localAsk) {
-          onAsk(localAsk.label);
-          return true;
-        }
-        if (!mac) return false;
-        request('reask').catch(() => undefined);
-        return state.asking;
-      },
-      cancel() {
-        localAsk?.settle(false);
-        if (mac) return request('cancel').catch(() => undefined);
-        return Promise.resolve();
       }
     }
   };

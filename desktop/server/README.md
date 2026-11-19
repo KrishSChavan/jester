@@ -95,8 +95,8 @@ Then, in his Settings on the website:
 
 - **Models:** add your Groq key and tick **Talking**; add your Claude key and tick **Actions**. Your Mac's keys stay
   sealed in its keychain, so the server needs its own.
-- **Assistant and voice:** his voice, your phone (ntfy), and your voice (teach it again on the website, with your
-  laptop's or phone's mic).
+- **Assistant and voice:** his voice, and your voice (teach it again on the website, with your laptop's or phone's
+  mic). Notifications are in Settings › Devices.
 - **Weather and calendars:** **Where your device is** (the phone or computer you're using says where it is, after
   its browser asks you once), or **a place**. Add your calendars' links again.
 - **Memory:** it reads `~/vault`. **Choose** uses that folder; there's no folder picker on a server.
@@ -119,6 +119,32 @@ In Jester on the Mac: **Settings › Jester in the cloud**, paste his link, and 
 - The Mac's clock is off: reminders, timers, mail and briefs come from the server, once.
 
 **Stop** on the same page goes back to Jester on the Mac alone.
+
+**The first time a Mac links**, its Jester moves in (`src/main/move-in.js`): the models' keys, the Gmail sign-in,
+calendars, tasks and reminders, taught phrases, your voiceprint, recent chats and settings go to the server over the
+link, once, and the server starts again with them. Keys are sealed on the server's disk. After that the server's is
+the one that counts: a Mac linking again moves nothing. What's the Mac's alone stays there (its scripts and scenes,
+the watch's key, the pointer's calibration).
+
+### 6b. Every device, linked
+
+- **Devices** (Settings › Devices on the website): every phone, browser and computer he's been opened on, whether
+  he's open there now and on what, and when it was last used. He's told the same with what you say, so "where are you
+  open?" has an answer. Name this device there.
+- **A chat per device.** The phone and the laptop each have their own chat going on, so both can be asked something
+  at once. A banner on his screen offers the chat going on on another device (one with a running task first): tap it
+  to see that chat and type into it; close it to keep it out of the way. Chats that are over are one list, each
+  marked with its device.
+- **Notifications from his own app**, in place of ntfy: on the phone, open Jester from the Home Screen, then
+  Settings › Devices › **Notifications here › Turn on**. What he has to tell you while you're away from your
+  devices, a task finishing, or a yes-or-no he needs, comes as a notification. It's encrypted to the device (Web
+  Push): the push service that carries it can't read it.
+- **The phone as a remote.** What you ask for on a computer is done on your Mac. The hand and the moon on his screen
+  are the Mac's (gestures, sleep), Controls runs its scripts, and Settings › Devices has its Sleep, Gestures and
+  Stop its task.
+- **More than one computer.** Each Mac that links is listed. What's asked goes to the one you name ("on my
+  MacBook", "on the desktop"), else the one the chat is on, else the one you touched last; a task's question comes
+  back to the chat that started it.
 
 ### 7. Email (Gmail), optional
 
