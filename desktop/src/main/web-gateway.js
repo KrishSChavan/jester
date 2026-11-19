@@ -50,7 +50,7 @@ const TYPES = {
  * Only his window's own files: the home page, what it imports, and the mic's worklet. Never the data folder, or the
  * main process's code. Checked on the file a path resolves to, so `..` can't step out of them.
  */
-const SERVED_DIRS = [path.join(ROOTS.app, 'home'), path.join(ROOTS.app, 'vendor'), path.join(ROOTS.app, 'worklets'), path.join(ROOTS.ext, 'src', 'common'), path.join(ROOTS.ext, 'icons'), WEB_ROOT];
+const SERVED_DIRS = [path.join(ROOTS.app, 'home'), path.join(ROOTS.app, 'controls'), path.join(ROOTS.app, 'vendor'), path.join(ROOTS.app, 'worklets'), path.join(ROOTS.ext, 'src', 'common'), path.join(ROOTS.ext, 'icons'), WEB_ROOT];
 const SERVED_FILES = [path.join(ROOTS.app, 'main', 'os-actions.js'), path.join(ROOTS.app, 'main', 'watch-status.js')];
 
 /** A key the gateway can be opened with: printed by the server's setup, kept in its data folder. */

@@ -10,13 +10,17 @@
  * With no Mac connected there are no hands: nothing is known or risky, a command is answered with why it can't be
  * done, and a question (a script's "Run it?") is asked here and answered by what the user says or types next.
  *
+ * Controls, on his website, is the Mac's scripts too: what its page asks goes to the Mac (op 'scripts', the page's
+ * message as it is), which decides what it may do (script-remote.js), and the Mac says when they've changed.
+ *
  * Frames, on the gateway's socket:
- *   server → Mac   { t: 'hands', id, op, ...args }            op: knows | risky | scriptsAsk | run | confirm | answer | reask | cancel
+ *   server → Mac   { t: 'hands', id, op, ...args }            op: knows | risky | scriptsAsk | run | confirm | answer | reask | cancel | scripts
  *   Mac → server   { t: 'hands-reply', id, result } | { t: 'hands-reply', id, error }
  *   Mac → server   { t: 'hands-state', running, asking, abilities }   whenever any of it changes
  *   Mac → server   { t: 'hands-ask', label }                  its task has a question: asked in the conversation
  *   Mac → server   { t: 'presence', idleSeconds }             how long since the user touched the Mac
  *   Mac → server   { t: 'told', text }                        typed in the Mac's own window: said to him here
+ *   Mac → server   { t: 'scripts-changed', change }           its scripts or what's on changed: Controls reads them again
  */
 
 /** Quick questions about words: a Mac that doesn't answer in this long is taken as not knowing them. */
@@ -27,6 +31,15 @@ const RUN_MS = 10 * 60 * 1000;
 const ASK_MS = 60 * 1000;
 
 export const NO_MAC = 'Your Mac isn’t connected to me right now, so I can’t do that from here. Open Jester on it with “Use Jester in the cloud” on, and ask again.';
+/** Controls, with no Mac: its scripts are there. */
+export const NO_MAC_SCRIPTS = 'They run on your Mac, and it isn’t connected to me right now. Open Jester on it with “Use Jester in the cloud” on, and they’ll be here.';
+
+/**
+ * How long Controls waits on the Mac for each thing it asks: a folder picked, or a yes, waits on the user there; a
+ * draft on the talking model; a run on the script (a light's first connection takes a few seconds).
+ */
+const SCRIPTS_MS = { choose: 10 * 60 * 1000, save: 10 * 60 * 1000, inspect: 3 * 60 * 1000, edit: 3 * 60 * 1000, run: 2 * 60 * 1000, 'scene-run': 2 * 60 * 1000, refresh: 2 * 60 * 1000 };
+const SCRIPTS_QUICK_MS = 15000;
 
 /**
  * @param {object} deps
@@ -34,9 +47,10 @@ export const NO_MAC = 'Your Mac isn’t connected to me right now, so I can’t 
  * @param {(label:string) => void} [deps.onAsk]   the Mac's task has a question for the user: ask it in the conversation
  * @param {(text:string) => void} [deps.onTold]   typed to him in the Mac's own window
  * @param {(state:object) => void} [deps.onChange]   the Mac came, went, or its state changed
+ * @param {(change:object) => void} [deps.onScriptsChanged]   the Mac's scripts changed, or the Mac came or went: Controls reads them again
  * @param {() => number} [deps.now]
  */
-export function createRemoteHands({ onAsk = () => undefined, onTold = () => undefined, onChange = () => undefined, log = () => undefined, now = Date.now } = {}) {
+export function createRemoteHands({ onAsk = () => undefined, onTold = () => undefined, onChange = () => undefined, onScriptsChanged = () => undefined, log = () => undefined, now = Date.now } = {}) {
   /** The Mac connected, if one is: the gateway's client. */
   let mac = null;
   let state = { running: false, asking: false, abilities: {} };
@@ -95,6 +109,7 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
       state = { running: false, asking: false, abilities: {} };
       log('hands: the Mac is connected');
       onChange(state);
+      onScriptsChanged({ mac: true });
     },
     /** A client went: if it was the Mac, there are no hands until it's back. */
     leave(client) {
@@ -105,6 +120,7 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
       settleAll(client, NO_MAC);
       log('hands: the Mac is gone');
       onChange(state);
+      onScriptsChanged({ mac: false });
     },
     /** A frame from a client the gateway didn't take itself. */
     frame(client, frame) {
@@ -125,6 +141,9 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
         onTold(frame.text.trim().slice(0, 12000));
       } else if (frame.t === 'presence' && Number.isFinite(frame.idleSeconds)) {
         idle = { seconds: Math.max(0, frame.idleSeconds), at: now() };
+      } else if (frame.t === 'scripts-changed') {
+        const change = frame.change && typeof frame.change === 'object' && !Array.isArray(frame.change) ? frame.change : {};
+        onScriptsChanged({ script: typeof change.script === 'string' ? change.script.slice(0, 64) : undefined });
       }
     },
     get connected() {
@@ -151,6 +170,26 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
         } catch (err) {
           return { outcome: { ok: false, text: err.code === 'no_mac' ? NO_MAC : `I couldn’t get your Mac to do that: ${err.message}.` } };
         }
+      }
+    },
+
+    /**
+     * Controls, asked on his website: the Mac's answer, as main.js's scriptsAsked would give it there, or why not.
+     * @param {object} message  the page's { op, … }, as it sent it
+     */
+    async scripts(message) {
+      const op = String(message?.op ?? '');
+      let asked;
+      try {
+        asked = JSON.parse(JSON.stringify(message ?? {}));
+      } catch {
+        return { ok: false, why: 'That couldn’t be sent to your Mac.' };
+      }
+      try {
+        const result = await request('scripts', { message: asked }, SCRIPTS_MS[op] || SCRIPTS_QUICK_MS);
+        return result && typeof result === 'object' ? result : { ok: false, why: 'Your Mac didn’t say.' };
+      } catch (err) {
+        return { ok: false, why: err.code === 'no_mac' ? NO_MAC_SCRIPTS : `Your Mac didn’t answer: ${err.message}.` };
       }
     },
 

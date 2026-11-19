@@ -58,8 +58,8 @@
           </div>
           <button id="light" class="light" type="button"><i></i><span id="light-text" aria-live="polite" aria-atomic="true">Starting…</span></button>
           <div class="rights">
-            <!-- Controls: the user's scripts, in a window of their own (src/controls/). -->
-            <button id="to-controls" class="icon" type="button" aria-label="Controls" title="Controls: your scripts">
+            <!-- Controls: the user's scripts (src/controls/), a screen that slides in from the right, as Settings does. -->
+            <button id="to-controls" class="icon" type="button" data-go="controls" aria-label="Controls" title="Controls: your scripts">
               <svg class="icon-svg"><use href="#i-sliders" /></svg>
             </button>
             <button id="to-settings" class="icon" type="button" data-go="settings" aria-label="Settings" title="Settings">
@@ -164,6 +164,12 @@
       </section>
 
       <!-- Settings: a list of pages, each sliding in from the right. -->
+      <!-- Controls: a card for each of the user's scripts, and scenes. Drawn in a shadow root (controls.js): its own ids
+           and styles, its own screens for adding a folder and making a scene, and its own way back. -->
+      <section id="controls" class="screen" data-screen="controls" aria-label="Controls" inert>
+        <div id="controls-host" class="controls-host"></div>
+      </section>
+
       <section id="settings" class="screen" data-screen="settings" aria-labelledby="settings-title" inert>
         <header class="top">
           <button class="icon" type="button" data-go="main" aria-label="Back to Jester" title="Back to Jester"><svg class="icon-svg"><use href="#i-back" /></svg></button>

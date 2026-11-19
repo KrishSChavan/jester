@@ -7,7 +7,8 @@
  *
  *   - his ears and mouth, when the Mac is the one being talked to: the always-on mic's audio goes up, and his voice
  *     comes down to play here, through the same hidden voice page as ever (voice-page.js);
- *   - his hands (remote-hands.js): the server asks, the Mac's own voice runner and assistant do it;
+ *   - his hands (remote-hands.js): the server asks, the Mac's own voice runner and assistant do it, and Controls on
+ *     his website runs the Mac's scripts (script-remote.js says what it may);
  *   - how long since the user touched the Mac, so the server knows whether they're here.
  *
  * Reconnects by itself, a little slower each time, for as long as it's on.
@@ -155,6 +156,10 @@ export function createCloudLink({ link, onVoice, onPlay, onHands, handsState, id
     },
     /** Something changed that the server should know at once. */
     stateChanged: pushState,
+    /** This Mac's scripts, or what's on, changed: Controls on his website reads them again. */
+    scriptsChanged(change = {}) {
+      send({ t: 'scripts-changed', change: { ...(typeof change.script === 'string' ? { script: change.script } : {}) } });
+    },
     close() {
       closed = true;
       clearTimeout(retry);

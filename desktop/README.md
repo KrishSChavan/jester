@@ -73,7 +73,8 @@ front window fills its display.
 | `scripts/hear-check.mjs` | `npm run hear-check`: his own speech service on audio from files: a made-up voice learned from use, or (`kept`) what he wasn't sure of, scored against the real voiceprint. |
 | `src/main/abilities.js` | What he can do, for his prompt: one entry per ability, a connector's listed as his when it's on and as not connected (with where in Settings) when it's off. |
 | `src/main/scripts.js`, `script-manifest.js`, `script-runner.js`, `script-words.js`, `script-draft.js` | The user's own scripts: folders added in Controls, each with a `jester.json` saying what its block holds; run one command at a time, plainly or served; matched from their words with no model; a folder without one drafted by the talking model. |
-| `src/controls/` | The Controls window: a card for each script (buttons, sliders, colours, chips that aim them), scenes, and adding a folder (+, or dropped on the window) with a review before it's added. |
+| `src/controls/` | Controls, a screen of his window and his website, drawn in a shadow root (`mountControls`): a card for each script (buttons, sliders, colours, chips that aim them), scenes, and adding a folder (+, or dropped on it) with a review before it's added. |
+| `src/main/script-remote.js` | What his website's Controls may ask of the Mac's scripts, through the server: running them, yes; reading or adding a folder only once it's picked in the Mac's own dialog, and a new or changed command only once the Mac's own dialog says yes. |
 | `scripts/talk-check.mjs` | `npm run talk-check`: how well a model talks as Jester, and how fast. |
 | `scripts/speed-check.mjs` | `npm run speed-check`: how soon his voice starts after he hears you, with the real model and his real voice, against how it was. |
 | `scripts/voice-check.mjs` | `npm run voice-check`: his real voice making the kinds of line he says: how soon the first sound is ready, and each read back by his own recognizer. `-- --play` to hear it, `-- --voice lewis` for another. |
@@ -2335,13 +2336,17 @@ Built 2026-11-18, from the user's request: "attach a folder for scripts for him 
 lights … a new window called controls … a block for lights … turn them off and control their brightness and white
 level". Their choices are in the memory note `script-controls`.
 
-**Controls** is a window of its own (not a screen of his window: the user asked for one), opened from the menu-bar
-menu (Controls…), the sliders button beside the gear in his window, or by saying "open controls". Each script
+**Controls** is a screen of his window, sliding in from the right as Settings does (it was a window of its own until
+the user asked, the same day, for it to be "part of the view instead"), opened from the menu-bar menu (Controls…),
+the sliders button beside the gear, or by saying "open controls". It's drawn in a shadow root (`src/controls/`,
+`mountControls`), so its ids and styles are its own, with its own screens for reading a folder, the review and a
+scene, and its own Esc: the menu or a question closes first, then its own screens, then it goes back to the orb.
+Each script
 folder added is a card: what's on (when the script can say), chips that aim it at part of it (a room), buttons
 (lit by what's on: On while they're on), sliders and colour swatches, and a line saying what the last press did.
 Scenes sit above the cards: a name and steps ("Goodnight": all off), run by a click or by saying the name.
 
-**Adding one**: + (or drop the folder on the window). A folder with a `jester.json` is shown for review as it is;
+**Adding one**: + (or drop the folder on Controls). A folder with a `jester.json` is shown for review as it is;
 one without is drafted: its file names, README, the start of each script and, only for a script whose source shows
 an argument parser, its `--help` go to the talking model, which writes a `jester.json`; it's checked like any other
 and shown for review. Review shows a live preview, each control's name (editable), the command it runs, its first
@@ -2399,6 +2404,18 @@ scripts by the talking model the first time it's said, and remembered.
 
 **Menu bar**: each script shown there (⋯ › Show in the menu bar, on by default) is a submenu of what's on, its
 buttons, and its sliders' and choices' presets, acting on all of it; and a Scenes submenu.
+
+**On his website** (Jester in the cloud, the user's choice 2026-11-18: Controls "part of the website too"), the same
+screen is there, phone included, and it's the Mac's scripts: what the page asks goes to the server, then to the Mac
+over its link (remote-hands.js `scripts`, cloud-link.js), which answers as his own window would; when they change,
+the Mac says so and the page reads them again. With the Mac away, Controls says so and offers Try again. What the
+website may ask is narrower than his own window (`src/main/script-remote.js`), since a `jester.json` decides what
+runs: running controls and scenes, checking what's on, editing scenes, the menu-bar switch, Show in Finder and
+taking a script out go through; a folder is read only if it was picked in the Mac's own folder dialog in the last
+hour (Controls' + there, which opens on the Mac) or is in Controls already; and a `jester.json` is saved only to
+such a folder, and only after the Mac's own dialog, listing the commands, says yes, whenever the script is new or
+what it runs changes (renaming, icons, words, Ask first and taking controls out don't ask). A phone's browser shows
+no + and no Show in Finder: adding is from the Mac.
 
 Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice commands) is now **General**.
 
@@ -2581,7 +2598,8 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
 
 22. **Your scripts in Controls** (built 2026-11-18; the lights were run through the real app on a scratch profile
     with your real `~/bluetooth lights`, never with your own Jester or its settings): restart Jester (menu bar ›
-    Restart Jester), then menu bar › Controls…, or the sliders button beside the gear. Press + and choose
+    Restart Jester), then menu bar › Controls…, or the sliders button beside the gear (Controls slides in from the
+    right, in his window; since 2026-11-18 it's no longer a window of its own). Press + and choose
     `~/bluetooth lights`: it has its `jester.json`, so the review shows the Lights block; press Add to Controls.
     The first time Jester itself uses Bluetooth, macOS may ask whether "Jester" may: allow it (the Watch's helper
     asked the same). The card should say "All 3 on · …% · The Brexx" within a few seconds. Try the chips, On/Off,

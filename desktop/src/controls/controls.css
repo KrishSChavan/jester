@@ -1,7 +1,9 @@
-/* Controls: a card for each of the user's scripts, and scenes above them. Nightshade, as in Jester's own window
-   (home.css): the same palette and the same title bar around the window's own buttons. Dark only. */
+/* Controls: a card for each of the user's scripts, and scenes above them, on a screen of Jester's window, in a shadow
+   root of its own (controls.js): nothing here reaches his window, nor his window's rules in here. Nightshade, as his
+   window is (home.css): the same palette, and its title bar's height and room for the window's own buttons (--bar,
+   --inset-l, --inset-r), which come from there. Dark only. */
 
-:root {
+:host {
   color-scheme: dark;
   --ground: #08060c;
   --raised: #110d18;
@@ -18,28 +20,15 @@
   --ok: #78d3a6;
   --warn: #f1b46a;
   --bad: #ff8a9b;
-  --bar: 52px;
-  --inset-l: 84px;
-  --inset-r: 12px;
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-:root[data-platform='win'] {
-  --inset-l: 16px;
-  --inset-r: 150px;
 }
 
 * {
   box-sizing: border-box;
 }
 
-html,
-body {
-  height: 100%;
-  margin: 0;
-}
-
-body {
+:host {
+  display: block;
   overflow: hidden;
   background: var(--ground);
   color: var(--text);
@@ -91,7 +80,7 @@ button:disabled {
 /* ——— Screens: the blocks, and what slides over them ——— */
 
 #screens {
-  position: fixed;
+  position: absolute;
   inset: 0;
   overflow: clip;
 }
@@ -1383,4 +1372,12 @@ input[type='checkbox']:checked::after {
 
 .toast.bad {
   border-color: color-mix(in srgb, var(--bad) 50%, transparent);
+}
+
+/* On a phone (his website), Safari zooms in on a field whose words are under 16 px as it's tapped: these stay put. */
+@media (hover: none) and (pointer: coarse) {
+  input:not([type='checkbox'], [type='radio'], [type='range']),
+  select {
+    font-size: 16px;
+  }
 }

@@ -134,6 +134,13 @@ button:disabled {
   visibility: visible;
 }
 
+/* Controls draws itself in here, in a shadow root (src/controls/): the whole screen, its title bar too. */
+.controls-host {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
 /* The bar along the top is the window's title bar: it drags the window. */
 .top {
   flex: none;

@@ -1,7 +1,12 @@
 /**
- * The Controls window: a card for each of the user's scripts, with its buttons, sliders and choices; scenes above
- * them; and the way to add a folder (+, drop it on the window, or the card at the end), which shows what its block
- * will be before it's added (the user, 2026-11-18: "he drafts, you approve").
+ * Controls: a card for each of the user's scripts, with its buttons, sliders and choices; scenes above them; and the
+ * way to add a folder (+, drop it on the screen, or the card at the end), which shows what its block will be before
+ * it's added (the user, 2026-11-18: "he drafts, you approve").
+ *
+ * A screen of his window, sliding in from the right as Settings does (the user, 2026-11-18: "make the controls window
+ * part of the view instead of making it a new window"), mounted in a shadow root there (mountControls), so its ids
+ * and styles never meet the window's. On his website it's the same screen, run on the Mac through the cloud link
+ * (main.js, remote-hands.js): there, adding a folder is the Mac's to do, and with the Mac away there's nothing to show.
  *
  * The page never sees a command line: it asks main.js to run a control of a script with a value and an aim
  * (scripts.js builds the arguments from the folder's jester.json). A card is built once for its shape and then only
@@ -18,7 +23,13 @@ const KEYS_MS = 400;
 const RESULT_MS = 5000;
 const AIMS_KEY = 'controlsAims';
 
-const $ = (id) => document.getElementById(id);
+import { VIEW } from './view.js';
+
+/** The shadow root it's drawn in, once mounted. */
+let root = null;
+/** mountControls' options: whether its screen is showing, the way back to the orb, and what this window can do. */
+let options = { active: () => true, leave: () => undefined, onMac: true, canDrop: false };
+const $ = (id) => root.getElementById(id);
 const send = (message) => chrome.runtime.sendMessage({ type: 'jester/scripts', ...message }).catch((err) => ({ ok: false, why: err?.message || 'Jester didn’t answer.' }));
 
 /** An element, with attributes and children. */
@@ -45,8 +56,6 @@ function icon(name, extra = '') {
   return svg;
 }
 
-document.documentElement.dataset.platform = /Win/.test(navigator.platform) ? 'win' : 'mac';
-
 let data = { blocks: [], scenes: [] };
 /** The chip picked on each card, kept across openings. */
 let aims = {};
@@ -68,28 +77,35 @@ const cards = new Map();
 let screen = 'main';
 let editingScenes = false;
 let justAdded = '';
+/** Why there's nothing to show (his website, with the Mac away), or '' when there's a list. */
+let away = '';
 
 // ——— Screens ———
 
 function show(name) {
   screen = name;
-  for (const section of document.querySelectorAll('.screen')) {
+  for (const section of root.querySelectorAll('.screen')) {
     const on = section.id === name;
     section.classList.toggle('shown', on);
     section.inert = !on;
   }
   closeMenu();
-  if (name === 'main') $('add').focus({ preventScroll: true });
+  if (name === 'main' && options.active()) ($('add').hidden ? $('leave') : $('add')).focus({ preventScroll: true });
 }
 
-for (const back of document.querySelectorAll('[data-back]')) back.addEventListener('click', () => show('main'));
-addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape') return;
-  if (!$('confirm').hidden) return answerConfirm(false);
-  if (!$('menu').hidden) return closeMenu();
-  if (screen === 'reading') return cancelReading();
-  if (screen !== 'main') show('main');
-});
+/**
+ * Esc, while Controls is showing: what's open in it closes first (the question, the menu, a screen of its own). Only
+ * with none of those is it his window's, which goes back to the orb. Taken before his window's own Esc (capture).
+ */
+function onEscape(event) {
+  if (event.key !== 'Escape' || !options.active()) return;
+  if (!$('confirm').hidden) answerConfirm(false);
+  else if (!$('menu').hidden) closeMenu();
+  else if (screen === 'reading') cancelReading();
+  else if (screen !== 'main') show('main');
+  else return;
+  event.preventDefault();
+}
 
 function toast(text, bad = false) {
   const el = $('toast');
@@ -342,8 +358,12 @@ function renderBlocks() {
     cards.delete(id);
   }
   const none = !data.blocks.length;
-  $('welcome').hidden = !none;
-  $('drop-card').hidden = none;
+  $('away').hidden = !away;
+  $('away-why').textContent = away;
+  // With the Mac away, nothing can be added either.
+  $('add').hidden = !options.onMac || !!away;
+  $('welcome').hidden = !none || !!away;
+  $('drop-card').hidden = none || !options.onMac;
   renderScenes();
 }
 
@@ -351,7 +371,7 @@ function renderBlocks() {
 
 function renderScenes() {
   const section = $('scenes');
-  section.hidden = !data.blocks.length && !data.scenes.length;
+  section.hidden = (!data.blocks.length && !data.scenes.length) || !!away;
   section.classList.toggle('editing', editingScenes);
   $('scenes-edit').hidden = !data.scenes.length;
   $('scenes-edit').setAttribute('aria-pressed', String(editingScenes));
@@ -375,11 +395,6 @@ async function runScene(scene, button) {
   toast(reply.text || reply.why || (reply.ok ? 'Done.' : 'That didn’t work.'), !reply.ok);
 }
 
-$('scenes-edit').addEventListener('click', () => {
-  editingScenes = !editingScenes;
-  renderScenes();
-});
-$('scene-new').addEventListener('click', () => openScene(null));
 
 /** The scene being made or changed: its name, steps and whether it asks first. */
 let scene = null;
@@ -446,13 +461,7 @@ function renderSteps() {
 function sayName() {
   $('scene-say').textContent = ($('scene-name').value.trim() || 'goodnight').toLowerCase();
 }
-$('scene-name').addEventListener('input', sayName);
-$('scene-add-step').addEventListener('click', () => {
-  scene.steps.push(defaultStep(scene.steps.at(-1)?.script));
-  renderSteps();
-});
-
-$('scene-save').addEventListener('click', async () => {
+async function saveScene() {
   const reply = await send({ op: 'scene-save', scene: { id: scene.id || undefined, name: $('scene-name').value, askFirst: $('scene-ask').checked, steps: scene.steps } });
   if (!reply.ok) {
     $('scene-error').textContent = reply.why || 'That scene can’t be saved.';
@@ -462,13 +471,13 @@ $('scene-save').addEventListener('click', async () => {
   editingScenes = false;
   show('main');
   toast(scene.id ? 'Scene saved.' : `Scene saved. Say “Jester, ${$('scene-name').value.trim().toLowerCase()}” to run it.`);
-});
+}
 
-$('scene-delete').addEventListener('click', async () => {
+async function deleteScene() {
   if (!(await confirmIt(`Delete the ${scene.name} scene?`, 'Delete'))) return;
   await send({ op: 'scene-remove', id: scene.id });
   show('main');
-});
+}
 
 // ——— The ⋯ menu ———
 
@@ -482,6 +491,8 @@ function openMenu(id, anchor) {
   menu.querySelector('[data-op="refresh"]').hidden = !view.hasStatus;
   menu.querySelector('[data-op="menu"]').setAttribute('aria-checked', String(!!view.menu));
   menu.querySelector('[data-op="edit"]').hidden = !view.controls;
+  // Finder is the Mac's: shown only where the Mac is.
+  menu.querySelector('[data-op="reveal"]').hidden = !options.onMac;
   menu.hidden = false;
   const box = anchor.getBoundingClientRect();
   const width = menu.offsetWidth;
@@ -494,11 +505,12 @@ function closeMenu() {
   $('menu').hidden = true;
 }
 
-addEventListener('mousedown', (event) => {
-  if (!$('menu').hidden && !$('menu').contains(event.target)) closeMenu();
-});
+/** A press anywhere but the menu closes it. In from outside the shadow root, a target is its host: the path isn't. */
+function onPress(event) {
+  if (!$('menu').hidden && !event.composedPath().includes($('menu'))) closeMenu();
+}
 
-$('menu').addEventListener('click', async (event) => {
+async function onMenuClick(event) {
   const op = event.target.closest('button')?.dataset.op;
   if (!op) return;
   const view = currentView(menuFor);
@@ -513,7 +525,7 @@ $('menu').addEventListener('click', async (event) => {
     if (!reply.ok) return toast(reply.why || 'That can’t be edited here.', true);
     openReview(reply);
   }
-});
+}
 
 async function askRemove(view) {
   if (!(await confirmIt(`Remove ${view.name} from Controls? Its folder and jester.json stay as they are, and you can add it again.`, 'Remove'))) return;
@@ -534,8 +546,6 @@ function answerConfirm(yes) {
   confirming?.(yes);
   confirming = null;
 }
-$('confirm-yes').addEventListener('click', () => answerConfirm(true));
-$('confirm-no').addEventListener('click', () => answerConfirm(false));
 
 // ——— Adding a folder ———
 
@@ -565,34 +575,38 @@ function cancelReading() {
   reading += 1;
   show('main');
 }
-$('reading-cancel').addEventListener('click', cancelReading);
 
 async function choose() {
   const reply = await send({ op: 'choose' });
   if (reply?.folder) inspect(reply.folder);
+  else if (reply?.why) toast(reply.why, true);
 }
-$('add').addEventListener('click', choose);
-$('welcome-choose').addEventListener('click', choose);
-$('drop-card').addEventListener('click', choose);
 
+/**
+ * A folder dragged onto Controls, while it's showing: only in his own window, where the preload can say where a
+ * dropped folder is (a website's page is never told).
+ */
 let depth = 0;
 const carriesFiles = (event) => [...(event.dataTransfer?.types || [])].includes('Files');
-addEventListener('dragenter', (event) => {
-  if (!carriesFiles(event) || screen !== 'main') return;
+const takesDrops = () => options.canDrop && options.active();
+function onDragEnter(event) {
+  if (!carriesFiles(event) || !takesDrops() || screen !== 'main') return;
   event.preventDefault();
   depth += 1;
   $('drop').hidden = false;
-});
-addEventListener('dragover', (event) => {
-  if (!carriesFiles(event)) return;
+}
+function onDragOver(event) {
+  if (!carriesFiles(event) || !takesDrops()) return;
   event.preventDefault();
   event.dataTransfer.dropEffect = screen === 'main' ? 'copy' : 'none';
-});
-addEventListener('dragleave', () => {
+}
+function onDragLeave() {
+  if (!depth) return;
   depth = Math.max(0, depth - 1);
   if (!depth) $('drop').hidden = true;
-});
-addEventListener('drop', (event) => {
+}
+function onDrop(event) {
+  if (!carriesFiles(event) || !takesDrops()) return;
   event.preventDefault();
   depth = 0;
   $('drop').hidden = true;
@@ -601,7 +615,7 @@ addEventListener('drop', (event) => {
   const folder = file && globalThis.jesterFiles?.pathOf(file);
   if (folder) inspect(folder);
   else toast('Jester couldn’t tell where that folder is. Use + to choose it.', true);
-});
+}
 
 // ——— Checking a folder's block before it's added ———
 
@@ -703,9 +717,7 @@ function renderPreview() {
   card._parts.summary.textContent = manifest.about || '';
   $('review-preview').replaceChildren(card);
 }
-$('review-name').addEventListener('input', renderPreview);
-
-$('review-save').addEventListener('click', async () => {
+async function saveReview() {
   const button = $('review-save');
   button.disabled = true;
   const reply = await send({ op: 'save', folder: review.folder, manifest: reviewed() });
@@ -714,14 +726,21 @@ $('review-save').addEventListener('click', async () => {
   justAdded = reply.script;
   show('main');
   toast(review.script ? 'Saved.' : `${reviewed().name} added. Jester can run it when you ask, too.`);
-});
+}
 
 // ——— Keeping up with Jester ———
 
 let reloading = null;
 async function reload() {
   const reply = await send({ op: 'list' });
-  if (reply?.ok === false && !reply.blocks) return;
+  if (reply?.ok === false && !reply.blocks) {
+    // His website, with the Mac away: why, and nothing to press. In his own window, Jester's still starting.
+    if (!reply.why) return;
+    away = reply.why;
+    data = { blocks: [], scenes: [] };
+    return renderBlocks();
+  }
+  away = '';
   data = { blocks: reply.blocks || [], scenes: reply.scenes || [] };
   renderBlocks();
 }
@@ -733,8 +752,75 @@ function reloadSoon() {
   }, 60);
 }
 
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === 'jester/scripts-changed') reloadSoon();
-});
+/** Everything that's pressed, typed or dropped, once the view's in place. */
+function bind() {
+  for (const back of root.querySelectorAll('[data-back]')) back.addEventListener('click', () => show('main'));
+  $('leave').addEventListener('click', () => options.leave());
+  $('scenes-edit').addEventListener('click', () => {
+    editingScenes = !editingScenes;
+    renderScenes();
+  });
+  $('scene-new').addEventListener('click', () => openScene(null));
+  $('scene-name').addEventListener('input', sayName);
+  $('scene-add-step').addEventListener('click', () => {
+    scene.steps.push(defaultStep(scene.steps.at(-1)?.script));
+    renderSteps();
+  });
+  $('scene-save').addEventListener('click', saveScene);
+  $('scene-delete').addEventListener('click', deleteScene);
+  $('menu').addEventListener('click', onMenuClick);
+  $('confirm-yes').addEventListener('click', () => answerConfirm(true));
+  $('confirm-no').addEventListener('click', () => answerConfirm(false));
+  $('reading-cancel').addEventListener('click', cancelReading);
+  $('add').addEventListener('click', choose);
+  $('welcome-choose').addEventListener('click', choose);
+  $('drop-card').addEventListener('click', choose);
+  $('review-name').addEventListener('input', renderPreview);
+  $('review-save').addEventListener('click', saveReview);
+  $('away-retry').addEventListener('click', reload);
+  // Adding a folder is the Mac's: a phone's browser has no folders of the Mac's to choose, and nowhere to drop one.
+  $('add').hidden = !options.onMac;
+  $('welcome-choose').hidden = !options.onMac;
+  $('welcome-drop').hidden = !options.canDrop;
+  $('welcome-mac').hidden = options.onMac;
+  addEventListener('keydown', onEscape, true);
+  addEventListener('mousedown', onPress);
+  addEventListener('dragenter', onDragEnter);
+  addEventListener('dragover', onDragOver);
+  addEventListener('dragleave', onDragLeave);
+  addEventListener('drop', onDrop);
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === 'jester/scripts-changed') reloadSoon();
+  });
+}
 
-reload();
+/**
+ * Controls, drawn in `host`'s shadow root, with its own stylesheet.
+ * @param {HTMLElement} host
+ * @param {object} [given]
+ * @param {() => boolean} [given.active]  its screen is the one showing: only then do Esc and a dropped folder go to it
+ * @param {() => void} [given.leave]  back to the orb
+ * @param {boolean} [given.onMac]  the Mac's own window (his, or his website in it): folders can be chosen, and Finder shown
+ * @param {boolean} [given.canDrop]  a dropped folder's place can be known (his own window's preload)
+ * @returns {{opened: () => void}}  opened: its screen's come in, so what's on is read again
+ */
+export function mountControls(host, given = {}) {
+  options = { ...options, ...given };
+  root = host.attachShadow({ mode: 'open' });
+  root.innerHTML = VIEW;
+  const style = document.createElement('link');
+  style.rel = 'stylesheet';
+  style.href = new URL('./controls.css', import.meta.url).href;
+  root.prepend(style);
+  bind();
+  reload();
+  return {
+    opened() {
+      // As his window's other screens do: the way back has the focus.
+      if (screen === 'main') $('leave').focus({ preventScroll: true });
+      reload();
+      // What's on, read again for the scripts that say, if it wasn't lately (main.js).
+      send({ op: 'opened' });
+    }
+  };
+}

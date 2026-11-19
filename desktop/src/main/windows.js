@@ -52,7 +52,7 @@ export function onHomeVisibility(listener) {
 }
 const changedHome = (visible) => { for (const listener of homeListeners) listener({ visible }); };
 
-const showable = (screen) => (/^(main|chats|settings(\/[a-z-]+)?)$/.test(String(screen)) ? String(screen) : 'main');
+const showable = (screen) => (/^(main|chats|controls|settings(\/[a-z-]+)?)$/.test(String(screen)) ? String(screen) : 'main');
 
 /**
  * Jester shows in the Dock and ⌘-Tab while a window of his own is open (his window, or calibration's), minimized
@@ -61,7 +61,7 @@ const showable = (screen) => (/^(main|chats|settings(\/[a-z-]+)?)$/.test(String(
  */
 function leaveDockIfAlone() {
   const open = (win) => win && !win.isDestroyed() && (win.isVisible() || win.isMinimized());
-  if (!open(home) && !open(calibration) && !open(controls) && !open(cloud)) app.dock?.hide();
+  if (!open(home) && !open(calibration) && !open(cloud)) app.dock?.hide();
 }
 
 /**
@@ -74,8 +74,8 @@ function leaveDockIfAlone() {
  */
 export function showHome({ screen = 'main', quiet = false } = {}) {
   const goTo = showable(screen);
-  // Using him in the cloud, talking to him and his chats are the server's: its page, in a window of its own.
-  if (cloudPage && !goTo.startsWith('settings')) return showCloud({ quiet });
+  // Using him in the cloud, talking to him, his chats and Controls are the server's: its page, in a window of its own.
+  if (cloudPage && !goTo.startsWith('settings')) return showCloud({ quiet, screen: goTo });
   if (home && !home.isDestroyed()) {
     const away = !home.isVisible() || home.isMinimized();
     if (home.isMinimized()) home.restore();
@@ -181,8 +181,10 @@ export function setCloudPage(page, { onFocus = () => undefined } = {}) {
  * (web/shim.js) gives it, over its socket. Its mic is never its own: the Mac's voice page is his ears here, and
  * Electron refuses the page any media (installMediaPermissions only allows jester:// pages).
  */
-function showCloud({ quiet = false } = {}) {
+function showCloud({ quiet = false, screen = '' } = {}) {
   if (cloud && !cloud.isDestroyed()) {
+    // To the screen asked for: the page goes to the one its address names (home.js), and the address is ours to set.
+    if (screen) cloud.webContents.executeJavaScript(`location.hash = ${JSON.stringify(showable(screen))}`).catch(() => undefined);
     if (cloud.isMinimized()) cloud.restore();
     if (quiet) cloud.showInactive();
     else {
@@ -225,7 +227,7 @@ function showCloud({ quiet = false } = {}) {
     cloud = null;
     leaveDockIfAlone();
   });
-  cloud.loadURL(cloudPage);
+  cloud.loadURL(screen && screen !== 'main' ? `${cloudPage}#${showable(screen)}` : cloudPage);
   return cloud;
 }
 
@@ -263,62 +265,6 @@ export function closeSafely(win) {
   const fallback = setTimeout(destroy, 3000);
   win.once('leave-full-screen', () => setTimeout(destroy, 100));
   win.setFullScreen(false);
-}
-
-let controls = null;
-const CONTROLS_PAGE = 'jester://app/controls/controls.html';
-
-/**
- * Controls: a card for each of the user's scripts, and their scenes (src/controls/). A window of its own, unlike
- * Chats and Settings (the user, 2026-11-18: "create a new window called controls"), small enough to sit beside
- * what they're doing, like a remote. `onShown`: it's come to the front, so what's on is worth reading again.
- * @param {{quiet?:boolean, onShown?:() => void}} [options]
- */
-export function showControls({ quiet = false, onShown = () => undefined } = {}) {
-  if (controls && !controls.isDestroyed()) {
-    if (controls.isMinimized()) controls.restore();
-    if (quiet) controls.showInactive();
-    else {
-      app.dock?.show();
-      controls.show();
-      controls.focus();
-    }
-    return controls;
-  }
-  controls = new BrowserWindow({
-    width: 440,
-    height: 700,
-    minWidth: 360,
-    minHeight: 420,
-    title: 'Controls',
-    show: false,
-    backgroundColor: HOME_GROUND,
-    acceptFirstMouse: true,
-    titleBarStyle: 'hidden',
-    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 18, y: 18 } } : { titleBarOverlay: { color: HOME_GROUND, symbolColor: '#a79bbe', height: 52 } }),
-    ...(ICON ? { icon: path.join(here, ICON) } : {}),
-    webPreferences: pageDefaults
-  });
-  controls.once('ready-to-show', () => {
-    if (quiet) controls.showInactive();
-    else {
-      app.dock?.show();
-      controls.show();
-      controls.focus();
-    }
-  });
-  controls.on('focus', () => onShown());
-  controls.on('closed', () => {
-    controls = null;
-    leaveDockIfAlone();
-  });
-  controls.loadURL(CONTROLS_PAGE);
-  return controls;
-}
-
-/** The Controls window, if it's open. */
-export function controlsWindow() {
-  return controls && !controls.isDestroyed() ? controls : null;
 }
 
 let calibration = null;

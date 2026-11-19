@@ -105,6 +105,10 @@ In Jester on the Mac: **Settings › Jester in the cloud**, paste his link, and 
 - His window (the Dock icon, or Talk in the menu bar) is the server's website.
 - Settings stays this Mac's own: gestures, permissions, Chrome, Apple Watch.
 - What you ask him to do on the computer, by voice on any device or typed on the website, is done on the Mac.
+- **Controls** (the sliders button) is on the website too, phone included, and runs your Mac's scripts (your
+  lights) through the Mac's link. Adding a script folder is the Mac's: its + opens a folder dialog on the Mac, and
+  a script that's new, or runs something new, is only added once you say yes in a dialog on the Mac. With the Mac
+  away, Controls says so.
 - The Mac's clock is off: reminders, timers, mail and briefs come from the server, once.
 
 **Stop** on the same page goes back to Jester on the Mac alone.

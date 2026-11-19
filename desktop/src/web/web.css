@@ -1,7 +1,7 @@
 /*
  * His window as a website (main/web-gateway.js adds this after home.css). The app's window is a fixed size with
  * room left for the traffic lights; a browser is any size, a phone's included, and has no camera to sleep or
- * gestures to switch: those are the Mac's.
+ * gestures to switch: those are the Mac's. Controls is here too: its scripts run on the Mac, through the cloud link.
  */
 :root,
 :root[data-platform] {
@@ -14,8 +14,7 @@
 }
 
 #gestures,
-#sleep,
-#to-controls {
+#sleep {
   display: none;
 }
 

@@ -16,6 +16,7 @@ import { cardElement, refreshBriefingCards, refreshCards, shelfOf, tookOffers, w
 import { onRender, save, showing, startSettings, state } from './settings.js';
 import { renderResearchState } from './research.js';
 import { fitBox, putInBox, typingBox } from './typing.js';
+import { mountControls } from '../controls/controls.js';
 
 const $ = (id) => document.getElementById(id);
 document.documentElement.dataset.platform = /^Win/i.test(navigator.platform) ? 'win' : 'mac';
@@ -476,8 +477,25 @@ const screens = createScreens({
     if (screen === 'main' || screen === 'setup') askSetup();
     chats.shown(screen);
     tasksPanel.shown(screen);
+    if (screen === 'controls') controls.opened();
     history.replaceState(null, '', `#${screen}`);
   }
+});
+
+// Controls (src/controls/), on its screen: the user's scripts. On his website it's the Mac's scripts, through the
+// cloud link: choosing a folder there opens a dialog on the Mac, so it's offered only in the Mac's own window.
+const website = !!globalThis.jesterWeb;
+const controls = mountControls($('controls-host'), {
+  active: () => screens.current === 'controls',
+  leave: () => screens.go('main'),
+  onMac: !website || /\bElectron\//.test(navigator.userAgent),
+  canDrop: !!globalThis.jesterFiles
+});
+// Asked for from elsewhere (the Mac's menu bar, "open controls", for his website in the Mac's window): a screen's
+// name put in the address, which always holds the one showing.
+addEventListener('hashchange', () => {
+  const asked = decodeURIComponent(location.hash.slice(1));
+  if (asked && asked !== screens.current) screens.go(asked === 'chat' ? 'chats' : asked);
 });
 
 document.addEventListener('click', (event) => {
@@ -542,8 +560,6 @@ for (const form of document.querySelectorAll('.type')) {
   });
 }
 $('listen').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/talk-listen', on: !state().desktop?.continuous?.wanted }));
-// Controls is a window of its own: the user's scripts, beside whatever they're doing.
-$('to-controls').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/scripts', op: 'open' }));
 $('gestures').addEventListener('click', () => save({ gesturesEnabled: state().settings?.gesturesEnabled === false }));
 $('sleep').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-sleep', on: state().desktop?.engine?.state !== ENGINE.SLEEPING }));
 // The banner's button goes to Getting started (its data-go), where what's needed is listed.

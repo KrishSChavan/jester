@@ -1,6 +1,6 @@
 /**
  * The window's screens, on one strip from left to right: a chat, Chats (and
- * Tasks, in the same place), the orb, Settings, then Settings' pages. Going from one to another slides the new
+ * Tasks, in the same place), the orb, Settings (and Controls, in the same place), then Settings' pages. Going from one to another slides the new
  * one in from the side it's on and pushes the old one out the other way, so
  * Chats comes in from the left of the orb and Settings from the right, as their
  * buttons sit, and going back slides it all the other way.
@@ -11,7 +11,7 @@ export function placeOf(screen) {
   const name = String(screen);
   if (name === 'chat') return -2;
   if (name === 'chats' || name === 'tasks') return -1;
-  if (name === 'settings' || name === 'setup') return 1;
+  if (name === 'settings' || name === 'setup' || name === 'controls') return 1;
   if (name.startsWith('settings/')) return 2;
   return 0;
 }
@@ -26,7 +26,7 @@ export function backOf(screen) {
   const name = String(screen);
   if (name === 'chat') return 'chats';
   if (name.startsWith('settings/')) return 'settings';
-  if (name === 'chats' || name === 'tasks' || name === 'settings' || name === 'setup') return 'main';
+  if (name === 'chats' || name === 'tasks' || name === 'settings' || name === 'setup' || name === 'controls') return 'main';
   return null;
 }
 

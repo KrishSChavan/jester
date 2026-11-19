@@ -114,7 +114,8 @@ import { VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
-import { closeSafely, controlsWindow, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showControls, showHome, showSettings, showTalk, talkWindow } from './windows.js';
+import { closeSafely, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
+import { createScriptsRemote } from './script-remote.js';
 
 const env = process.env;
 /** His brain on a server, his window a website: see JESTER_SERVER above. */
@@ -223,6 +224,8 @@ let keeper = null;
 let spend = null;
 /** Taught phrases, learned tasks and shortcuts (learned.js). */
 let learned = null;
+/** What his website's Controls may ask of the Mac's scripts (script-remote.js). */
+let scriptsRemote = null;
 /** The Obsidian vault Jester keeps its memory in (vault.js), its search (vault-index.js), and the memory between them. */
 let vault = null;
 let vaultIndex = null;
@@ -1278,33 +1281,50 @@ function onJester(op) {
   else if (op === 'calibrate') showCalibration(pointerDisplay());
   else if (op === 'settings') showSettings();
   else if (op === 'sleep') sleep(true);
-  else if (op === 'controls') showControlsWindow();
+  else if (op === 'controls') showControlsScreen();
 }
 
 /**
- * Controls, opened or brought forward: what's on is read again for each script that says so and wasn't read in
- * the last half minute (the user chose "check when Controls opens"). A served script stays logged in a minute
- * after, so the first press is quick.
+ * Controls: a screen of his window (the user, 2026-11-18: "part of the view instead of ... a new window"), from the
+ * menu bar, "open controls", or the sliders button beside the gear. Linked to the cloud, it's his website's, in the
+ * Mac's window there (windows.js showHome).
  */
-function showControlsWindow() {
-  return showControls({
-    onShown: () => {
-      scripts?.list().then(({ blocks }) => {
-        for (const block of blocks) if (block.hasStatus && (!block.state || Date.now() - block.state.at > 30000)) scripts.refresh(block.id).catch(() => undefined);
-      }, () => undefined);
-    }
-  });
+function showControlsScreen() {
+  return showHome({ screen: 'controls' });
 }
 
 /**
- * What Controls (and his window's button for it) asks of the scripts. The page sends a script's id, a control's id,
- * a value and an aim, never a command line: scripts.js makes that from the folder's jester.json.
+ * Controls has come in: what's on is read again for each script that says so and wasn't read in the last half minute
+ * (the user chose "check when Controls opens"). A served script stays logged in a minute after, so the first press is
+ * quick.
+ */
+async function controlsOpened() {
+  const { blocks } = await scripts.list();
+  for (const block of blocks) if (block.hasStatus && (!block.state || Date.now() - block.state.at > 30000)) scripts.refresh(block.id).catch(() => undefined);
+}
+
+/** The folder dialog for adding a script: '' if it was cancelled. Asked for from his website, it's in front first. */
+async function chooseScriptFolder({ fromServer = false } = {}) {
+  if (fromServer) app.focus({ steal: true });
+  const win = fromServer ? null : homeWindow();
+  const options = { title: 'Add a script folder', buttonLabel: 'Add', message: 'Choose the folder your script is in.', properties: ['openDirectory'] };
+  const { canceled, filePaths } = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  return canceled ? '' : filePaths?.[0] || '';
+}
+
+/**
+ * What Controls asks of the scripts. The page sends a script's id, a control's id, a value and an aim, never a
+ * command line: scripts.js makes that from the folder's jester.json. From his website, through the server, it's
+ * scriptsRemote's to pass on (script-remote.js).
  */
 async function scriptsAsked(message) {
   const id = String(message.script ?? '');
   switch (message.op) {
     case 'open':
-      showControlsWindow();
+      showControlsScreen();
+      return { ok: true };
+    case 'opened':
+      await controlsOpened();
       return { ok: true };
     case 'list':
       return { ok: true, ...(await scripts.list()) };
@@ -1314,10 +1334,8 @@ async function scriptsAsked(message) {
       await scripts.refresh(id);
       return { ok: true };
     case 'choose': {
-      const win = controlsWindow();
-      const options = { title: 'Add a script folder', buttonLabel: 'Add', message: 'Choose the folder your script is in.', properties: ['openDirectory'] };
-      const { canceled, filePaths } = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
-      return { ok: !canceled && !!filePaths?.[0], folder: canceled ? '' : filePaths?.[0] || '' };
+      const folder = await chooseScriptFolder();
+      return { ok: !!folder, folder };
     }
     case 'inspect':
       return scripts.inspect(String(message.folder ?? ''));
@@ -1506,7 +1524,7 @@ async function onTrayAction(id, checked, item) {
   }
   switch (id) {
     case 'controls':
-      return showControlsWindow();
+      return showControlsScreen();
     case 'enabled':
       return saveSettings({ enabled: checked });
     case 'gestures':
@@ -1616,9 +1634,10 @@ function listenToPages() {
           return { ok: false };
         } catch (error) { return { ok: false, error: error.message || 'That briefing could not be opened.' }; }
       }
-      // Controls, and his window's button that opens it.
+      // Controls, a screen of his window. On a server, his website's: the Mac's scripts, through the Mac's link.
       case 'jester/scripts':
-        if (!url.startsWith('jester://app/controls/') && !(url.startsWith('jester://app/home/') && message.op === 'open')) return { ok: false };
+        if (!url.startsWith('jester://app/home/')) return { ok: false };
+        if (SERVER) return remoteHands.scripts(message);
         if (!scripts) return { ok: false, why: 'Jester is still starting.' };
         return scriptsAsked(message);
       case 'jester/desktop-calibrate':
@@ -2279,6 +2298,8 @@ function startWebGateway() {
       conversation?.told(text, { typed: true });
     },
     onChange: () => post(desktopState()),
+    // The Mac's scripts changed, or the Mac came or went: Controls, on his website, reads them again.
+    onScriptsChanged: (change) => post({ type: 'jester/scripts-changed', ...change }),
     log
   });
   webGateway = createWebGateway({
@@ -2390,6 +2411,10 @@ async function handsAsked(frame) {
     case 'cancel':
       await assistant.cancel();
       return true;
+    // Controls on his website: this Mac's scripts, within what the server may ask (script-remote.js).
+    case 'scripts':
+      if (!scriptsRemote) return { ok: false, why: 'Jester is still starting on your Mac.' };
+      return scriptsRemote.handle(frame.message && typeof frame.message === 'object' ? frame.message : {});
     default:
       throw new Error(`Not something the Mac does: ${frame.op}`);
   }
@@ -2525,10 +2550,32 @@ async function start() {
     log,
     onChange: (change) => {
       post({ type: 'jester/scripts-changed', ...change });
+      // Linked to the cloud, Controls on his website is this Mac's too.
+      cloudLink?.scriptsChanged(change);
       updateTray();
     }
   });
   scripts.ready().then(updateTray);
+  // What his website's Controls may ask of them, through the server (script-remote.js): a folder is chosen, and what
+  // runs allowed, here on the Mac.
+  scriptsRemote = createScriptsRemote({
+    scripts,
+    ask: (message) => scriptsAsked(message),
+    choose: () => chooseScriptFolder({ fromServer: true }),
+    confirm: async ({ adding, name, folder, lines }) => {
+      app.focus({ steal: true });
+      const { response } = await dialog.showMessageBox({
+        type: 'question',
+        buttons: [adding ? 'Add It' : 'Allow', 'Don’t Allow'],
+        defaultId: 1,
+        cancelId: 1,
+        message: adding ? `Add “${name}” to Controls?` : `Change what “${name}” runs?`,
+        detail: `Asked from Jester’s website. It would let Jester run these on this Mac, from ${folder.replace(/^\/Users\/[^/]+/, '~')}:\n\n${lines.slice(0, 16).join('\n')}${lines.length > 16 ? `\n…and ${lines.length - 16} more` : ''}`
+      });
+      return response === 0;
+    },
+    log
+  });
   voiceRunner = createVoiceRunner({
     driver: input,
     dispatch,
