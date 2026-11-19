@@ -90,7 +90,7 @@
           <button id="sleep" class="round" type="button"><svg class="icon-svg"><use href="#i-moon" /></svg></button>
           <form id="type" class="type">
             <label class="unseen" for="text">Type to him</label>
-            <input id="text" type="text" placeholder="Type to him" autocomplete="off" spellcheck="true" maxlength="2000" data-autofocus />
+            <textarea id="text" rows="1" placeholder="Type to him" autocomplete="off" spellcheck="true" maxlength="12000" data-autofocus></textarea>
             <button id="send" class="send" type="submit" aria-label="Send"><svg class="icon-svg"><use href="#i-send" /></svg></button>
           </form>
           <button id="listen" class="round mic" type="button" aria-pressed="false" aria-label="Listening for his name"><svg class="icon-svg"><use href="#i-mic" /></svg></button>
@@ -156,7 +156,7 @@
         <footer class="bottom">
           <form id="chat-type" class="type">
             <label class="unseen" for="chat-text">Carry on this chat</label>
-            <input id="chat-text" type="text" placeholder="Carry on this chat" autocomplete="off" spellcheck="true" maxlength="2000" />
+            <textarea id="chat-text" rows="1" placeholder="Carry on this chat" autocomplete="off" spellcheck="true" maxlength="12000"></textarea>
             <button class="send" type="submit" aria-label="Send"><svg class="icon-svg"><use href="#i-send" /></svg></button>
           </form>
           <button id="chat-resume" class="chip strong" type="button" title="Make this the chat going on, to talk or type in">Pick up</button>

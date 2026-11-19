@@ -498,6 +498,7 @@ window.addEventListener('keydown', (event) => {
     else if (document.activeElement === $('text') && $('text').value) {
       $('text').value = '';
       $('type').classList.remove('filled');
+      fitBox($('type'));
     }
   } else if (screens.current === 'main' && !command && !event.altKey && event.key.length === 1 && event.key !== ' ' && !event.target.closest?.('input, select, textarea, [contenteditable]')) {
     // On his screen, typing anywhere is typing to him.
@@ -515,10 +516,38 @@ $('type').addEventListener('submit', (event) => {
   $('type').classList.remove('filled');
   chrome.runtime.sendMessage({ type: 'jester/talk-type', text });
 });
+/**
+ * The box to type in: Return sends, Shift-Return starts a new line and makes it a taller box, for a passage and what
+ * to do with it in one message. Pasted lines, or more than fits on one, make it taller too. Sent or emptied, it's one
+ * line again.
+ */
+function fitBox(form) {
+  const box = form.querySelector('textarea');
+  if (!box.value) form.classList.remove('tall');
+  else if (!form.classList.contains('tall') && (box.value.includes('\n') || box.scrollHeight > box.clientHeight + 2)) form.classList.add('tall');
+  box.style.height = '';
+  if (form.classList.contains('tall')) box.style.height = `${box.scrollHeight}px`;
+}
+for (const form of document.querySelectorAll('.type')) {
+  const box = form.querySelector('textarea');
+  box.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || event.isComposing || event.altKey || event.metaKey || event.ctrlKey) return;
+    if (event.shiftKey) {
+      // The new line is the box's own to make; it's taller first, so it's seen going in.
+      form.classList.add('tall');
+      requestAnimationFrame(() => fitBox(form));
+      return;
+    }
+    event.preventDefault();
+    form.requestSubmit();
+  });
+  form.addEventListener('submit', () => requestAnimationFrame(() => fitBox(form)));
+}
 // Typing to him, here or to carry a chat on: his model loads meanwhile, rather than after Return.
 for (const form of document.querySelectorAll('.type')) {
   form.addEventListener('input', () => {
-    form.classList.toggle('filled', !!form.querySelector('input').value.trim());
+    fitBox(form);
+    form.classList.toggle('filled', !!form.querySelector('textarea').value.trim());
     if (Date.now() - typedAt < TYPING_MS) return;
     typedAt = Date.now();
     chrome.runtime.sendMessage({ type: 'jester/talk-typing' });

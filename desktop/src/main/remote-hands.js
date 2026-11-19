@@ -122,7 +122,7 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
       } else if (frame.t === 'hands-ask') {
         onAsk(String(frame.label || '').slice(0, 300));
       } else if (frame.t === 'told' && typeof frame.text === 'string' && frame.text.trim()) {
-        onTold(frame.text.trim().slice(0, 2000));
+        onTold(frame.text.trim().slice(0, 12000));
       } else if (frame.t === 'presence' && Number.isFinite(frame.idleSeconds)) {
         idle = { seconds: Math.max(0, frame.idleSeconds), at: now() };
       }

@@ -125,6 +125,8 @@ const PERMISSION_POLL_MS = 2000;
 const FRONT_POLL_MS = 500;
 /** The extension's voice shortcut, kept for the desktop. */
 const VOICE_SHORTCUT = 'Alt+Shift+J';
+/** The most typed to him at once: a pasted passage or two of an essay, not a book (remote-hands.js has the same). */
+const TYPED_MAX = 12000;
 /** Long enough for the overlay's page to load. */
 const STARTED_TOAST_MS = 2000;
 /** The conversation log's hour is checked this often, so a sleeping Mac doesn't stretch it. */
@@ -682,7 +684,7 @@ function resumeChat(id, text) {
     keeper.keep(over);
     log('chat carried on:', chat.lines.length, 'lines');
   }
-  const typed = String(text ?? '').trim().slice(0, 2000);
+  const typed = String(text ?? '').trim().slice(0, TYPED_MAX);
   Promise.resolve(typed ? conversation.told(typed, { typed: true }) : undefined)
     .catch(() => undefined)
     .finally(() => over.length && keeper.sumUp(over));
@@ -1838,9 +1840,9 @@ function listenToPages() {
         // In the cloud, typed here is said to him there; his answer's in his window, which is the server's.
         if (cloudTarget) {
           showTalk();
-          return cloudLink?.told(String(message.text).slice(0, 2000)) ? { ok: true } : { ok: false, error: 'Jester’s server isn’t reachable right now.' };
+          return cloudLink?.told(String(message.text).slice(0, TYPED_MAX)) ? { ok: true } : { ok: false, error: 'Jester’s server isn’t reachable right now.' };
         }
-        conversation.told(String(message.text).slice(0, 2000), { typed: true });
+        conversation.told(String(message.text).slice(0, TYPED_MAX), { typed: true });
         return { ok: true };
       // On a server: the address Google's sign-in landed on, pasted in a browser (web/shim.js), taken to his own port.
       case 'jester/sign-in-return':

@@ -27,7 +27,7 @@
  *   npm run talk-check -- saved-all            every saved model, ticked or not
  *   npm run talk-check -- ollama:qwen3.5:9b    one Ollama model
  *   npm run talk-check -- --trials 1 ...       each case once (3 by default)
- *   npm run talk-check -- --only live ...      only the weather-and-calendars cases (or old, memory, facts, or self)
+ *   npm run talk-check -- --only live ...      only the weather-and-calendars cases (or old, memory, facts, self or writing)
  *   npm run talk-check -- --match 'joke|gym'   only the cases whose words match
  *   npm run talk-check -- --held ...           Claude held to the reply's schema, as before 2026-11-14, to compare
  *   npm run talk-check -- --show ...           what he said each time, not only when it was wrong
@@ -426,14 +426,30 @@ if (run && !process.versions.electron) {
     // account are; a newsletter, a receipt and one written to steer him aren't).
     { text: '(new mail: which is worth telling)', judging: true }
   ].map((want) => ({ ...want, self: true }));
-  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES, ...TASK_CASES, ...BRIEF_CASES];
+  // Help with writing (2026-11-18): asked for Google Docs comments on an essay, Claude Haiku 5.5 gave advice ("Try this:
+  // you make a strong case…"), described the line to highlight rather than quoting it, and took the next passage for a
+  // new subject, asking what was wanted of it. Whether the next passage is a new subject is no longer the model's to say
+  // (conversation.js nextPassage), so only what it says of it is checked.
+  const ESSAY_1 = 'What is interesting in Europe is that what seems to be driving the development of these guardrails, as much as societal considerations and worries about EU citizen rights, is the software industry itself which is crying out for regulation. The motivation for regulation is pure self-interest. Software engineers have learned from other major developments (witness blockchain and crypto) that there will not be full tech adoption by the citizenry without solid regulations. They also *need* guardrails in order to be sure they are not subject to all kinds of litigation later, and so that they can develop sustainable business models.';
+  const ESSAY_2 = 'Could the proliferation of machine intelligence highlight the extraordinary capability of humans to engage in creative, intelligent, embodied activities (perhaps working with machines as in the case of collaborative robots)? As AI automates boring work, will we be freed up to do the wonderful things that are intrinsically human? It is interesting that the management literature these days focuses more and more upon humans as emotionally intelligent, socially intelligent, empathetic creatures—human capacities that machines cannot truly embody. I have seen AI automation applied in bereavement services in a bank free up human workers to care for grieving families in ways they could not before the AI came along.';
+  const COMMENTED = [['you', ESSAY_1], ['you', 'Give me a comment to make on this text in google docs'], ['jester', 'The self-interest point is sharp, but if the industry wants these rules, it will also want a hand in writing them. Who makes sure the guardrails serve citizens and not just business models?']];
+  const ADVICE = /^\s*(?:try this|you could (?:say|write|ask|point)|consider (?:saying|writing|asking)|maybe (?:say|write|ask))/i;
+  const WHAT_WANTED = /\b(?:what would you like|what do you want|do you want (?:me )?to|want me to (?:draft|write|comment)|is this another)\b/i;
+  const WRITING_CASES = [
+    { text: 'Give me a comment to make on this text in google docs', history: [['you', ESSAY_1]], sayNot: ADVICE, comment: true },
+    { text: 'tell me what to highlight in docs', history: COMMENTED, quoteFrom: ESSAY_1 },
+    { text: `now this:\n${ESSAY_2}`, history: [...COMMENTED, ['you', 'tell me what to highlight in docs'], ['jester', 'Highlight "The motivation for regulation is pure self-interest."']], sayNot: WHAT_WANTED, comment: true },
+    { text: ESSAY_2, history: COMMENTED, sayNot: WHAT_WANTED, comment: true },
+    { text: 'what to highlight', history: [...COMMENTED, ['you', `now this:\n${ESSAY_2}`], ['jester', 'Machines can free people for the human work, but only if the time saved goes to care and not to cutting staff. Did the bank keep those workers on?']], quoteFrom: ESSAY_2 }
+  ].map((want) => ({ ...want, writing: true }));
+  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES, ...TASK_CASES, ...BRIEF_CASES, ...WRITING_CASES];
   // --only live|memory|old|facts|self: just those.
   const onlyAt = process.argv.indexOf('--only');
   const ONLY = onlyAt > 0 ? process.argv[onlyAt + 1] : '';
   // --match <words>: just the cases whose words hold them (a regular expression).
   const matchAt = process.argv.indexOf('--match');
   const MATCH = matchAt > 0 ? new RegExp(process.argv[matchAt + 1], 'i') : null;
-  const group = (want) => (want.live ? 'live' : want.old ? 'old' : want.facts ? 'facts' : want.self ? 'self' : 'memory');
+  const group = (want) => (want.writing ? 'writing' : want.live ? 'live' : want.old ? 'old' : want.facts ? 'facts' : want.self ? 'self' : 'memory');
   const RUN = ALL.filter((want) => (!ONLY || group(want) === ONLY) && (!MATCH || MATCH.test(want.text)));
 
   /** The words the app would keep for a reply: only when the user's words ask, and as they were said. '' for none. */
@@ -498,10 +514,19 @@ if (run && !process.versions.electron) {
     // What he says for a task is the app's line, not the model's.
     if (want.task) return found.filter((problem) => !/"say"/.test(problem));
     if (want.maxWords && words > want.maxWords) found.push(`"say" runs to ${words} words, over ${want.maxWords}`);
+    // What to highlight: their own words, quoted as they are, so they can be found in the document.
+    if (want.quoteFrom) {
+      const plain = (line) => line.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\*/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const quotes = [...String(reply.say).matchAll(/["“]([^"”]{12,})["”]|(?:^|\s)['‘]([^'’]{12,}?)['’](?=[\s.,;:!?]|$)/g)].map((match) => plain(match[1] ?? match[2]).replace(/[.,;:!?]+$/, ''));
+      if (!quotes.length) found.push('nothing quoted to highlight');
+      else if (!quotes.some((quote) => plain(want.quoteFrom).includes(quote))) found.push('quoted words that aren’t in their text');
+    }
+    // A comment, not word that one's ready: two sentences' worth at least.
+    if (want.comment && words < 15) found.push('no comment in it');
     return found;
   }
 
-  const kind = (want) => (want.remember ? 'KEEP' : want.note ? 'NOTE' : want.do ? 'DO' : want.live ? 'DAY' : want.facts ? 'FACT' : want.self ? 'SELF' : 'TALK');
+  const kind = (want) => (want.writing ? 'WRITE' : want.remember ? 'KEEP' : want.note ? 'NOTE' : want.do ? 'DO' : want.live ? 'DAY' : want.facts ? 'FACT' : want.self ? 'SELF' : 'TALK');
 
   /** A task book for its rules alone (whether words ask for a task): nothing's kept in it. */
   const taskBook = createTasks({ file: path.join(app.getPath('userData'), 'tasks.json'), clock: { add: () => undefined, remove: () => undefined } });
