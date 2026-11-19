@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { appChanges, build, BUNDLE_ID, helperChanges, helperName, USAGE } from '../desktop/scripts/jester-app.mjs';
+import { appChanges, build, BUNDLE_ID, helperChanges, helperName, remakeOnQuit, USAGE } from '../desktop/scripts/jester-app.mjs';
 import { art, COLOURS, icoFile } from '../desktop/scripts/make-icons.mjs';
 import { listedAsFor } from '../desktop/src/main/permission-list.js';
 
@@ -76,28 +76,34 @@ test('a .ico is a directory of PNGs: 256 written as 0, offsets past the director
   assert.equal(file.subarray(52, 56).toString('latin1'), '\x89PNG');
 });
 
+/** A stand-in for npm's Electron.app (its plist, executable, icon and helpers) and a Jester.icns, in `scratch`. */
+function fakeElectron(scratch) {
+  const from = path.join(scratch, 'Electron.app');
+  const plist = (file, entries) => {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict></dict></plist>');
+    for (const [key, value] of entries) execFileSync('plutil', ['-replace', key, '-string', value, file]);
+  };
+  plist(path.join(from, 'Contents/Info.plist'), [['CFBundleName', 'Electron'], ['CFBundleExecutable', 'Electron'], ['CFBundleIconFile', 'electron.icns'], ['CFBundleShortVersionString', '44.0.0']]);
+  fs.mkdirSync(path.join(from, 'Contents/MacOS'), { recursive: true });
+  fs.writeFileSync(path.join(from, 'Contents/MacOS/Electron'), 'main');
+  fs.mkdirSync(path.join(from, 'Contents/Resources'), { recursive: true });
+  fs.writeFileSync(path.join(from, 'Contents/Resources/electron.icns'), 'old icon');
+  for (const helper of ['Electron Helper', 'Electron Helper (Renderer)']) {
+    plist(path.join(from, `Contents/Frameworks/${helper}.app/Contents/Info.plist`), [['CFBundleName', helper], ['CFBundleExecutable', helper], ['CFBundleIdentifier', 'com.github.Electron.helper']]);
+    fs.mkdirSync(path.join(from, `Contents/Frameworks/${helper}.app/Contents/MacOS`), { recursive: true });
+    fs.writeFileSync(path.join(from, `Contents/Frameworks/${helper}.app/Contents/MacOS/${helper}`), helper);
+  }
+  fs.mkdirSync(path.join(from, 'Contents/Frameworks/Electron Framework.framework'), { recursive: true });
+  const icon = path.join(scratch, 'Jester.icns');
+  fs.writeFileSync(icon, 'new icon');
+  return { from, icon };
+}
+
 test('Jester.app is made from an Electron.app: renamed helpers, his plist, his icon', { skip: process.platform !== 'darwin' && 'plutil is macOS\'s' }, () => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-app-test-'));
   try {
-    const from = path.join(scratch, 'Electron.app');
-    const plist = (file, entries) => {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict></dict></plist>');
-      for (const [key, value] of entries) execFileSync('plutil', ['-replace', key, '-string', value, file]);
-    };
-    plist(path.join(from, 'Contents/Info.plist'), [['CFBundleName', 'Electron'], ['CFBundleExecutable', 'Electron'], ['CFBundleIconFile', 'electron.icns']]);
-    fs.mkdirSync(path.join(from, 'Contents/MacOS'), { recursive: true });
-    fs.writeFileSync(path.join(from, 'Contents/MacOS/Electron'), 'main');
-    fs.mkdirSync(path.join(from, 'Contents/Resources'), { recursive: true });
-    fs.writeFileSync(path.join(from, 'Contents/Resources/electron.icns'), 'old icon');
-    for (const helper of ['Electron Helper', 'Electron Helper (Renderer)']) {
-      plist(path.join(from, `Contents/Frameworks/${helper}.app/Contents/Info.plist`), [['CFBundleName', helper], ['CFBundleExecutable', helper], ['CFBundleIdentifier', 'com.github.Electron.helper']]);
-      fs.mkdirSync(path.join(from, `Contents/Frameworks/${helper}.app/Contents/MacOS`), { recursive: true });
-      fs.writeFileSync(path.join(from, `Contents/Frameworks/${helper}.app/Contents/MacOS/${helper}`), helper);
-    }
-    fs.mkdirSync(path.join(from, 'Contents/Frameworks/Electron Framework.framework'), { recursive: true });
-    const icon = path.join(scratch, 'Jester.icns');
-    fs.writeFileSync(icon, 'new icon');
+    const { from, icon } = fakeElectron(scratch);
 
     const target = path.join(scratch, 'out/Jester.app');
     build(target, { version: '9.9.9', made: 'the test', from, icon });
@@ -117,6 +123,33 @@ test('Jester.app is made from an Electron.app: renamed helpers, his plist, his i
     // The source is untouched, and nothing is left from the building.
     assert.ok(fs.existsSync(path.join(from, 'Contents/Frameworks/Electron Helper.app')));
     assert.deepEqual(fs.readdirSync(path.join(scratch, 'out')), ['Jester.app']);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('quitting, Jester.app remakes itself once its icon has changed, and only the copy that is running', { skip: process.platform !== 'darwin' && 'plutil is macOS\'s' }, () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-app-test-'));
+  try {
+    const { from, icon } = fakeElectron(scratch);
+    const app = path.join(scratch, 'app.noindex/Jester.app');
+    const options = { app, from, icon, register: false };
+    build(app, { version: '0.1.0', made: 'an older icon', from, icon });
+    const running = path.join(app, 'Contents/MacOS/Electron');
+
+    // npm's Electron, or another copy, quitting: not this one's to remake.
+    assert.equal(remakeOnQuit(path.join(from, 'Contents/MacOS/Electron'), options), '');
+    assert.equal(fs.readFileSync(path.join(app, 'Contents/Resources/Jester.icns'), 'utf8'), 'new icon');
+    const made = () => execFileSync('plutil', ['-extract', 'JesterMadeFrom', 'raw', '-o', '-', path.join(app, 'Contents/Info.plist')], { encoding: 'utf8' }).trim();
+    assert.equal(made(), 'an older icon');
+
+    fs.writeFileSync(icon, 'the jester');
+    assert.match(remakeOnQuit(running, options), /^Remade .*Jester\.app \(recipe \d+, Electron 44\.0\.0, icon [0-9a-f]{12}, Jester /);
+    assert.equal(fs.readFileSync(path.join(app, 'Contents/Resources/Jester.icns'), 'utf8'), 'the jester');
+    assert.match(made(), /icon [0-9a-f]{12}/);
+    // Up to date now: the next quit leaves it be.
+    assert.equal(remakeOnQuit(running, options), '');
+    assert.deepEqual(fs.readdirSync(path.dirname(app)), ['Jester.app']);
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }

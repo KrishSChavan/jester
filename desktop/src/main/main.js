@@ -85,6 +85,7 @@ import { CHECK_MS, createMail, mailCard, mailLine } from './mail.js';
 import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
+import { remakeOnQuit } from '../../scripts/jester-app.mjs';
 import { missingFor } from './permission-list.js';
 import { createRing } from './ring.js';
 import { createRingPage } from './ring-page.js';
@@ -3487,5 +3488,12 @@ if (!app.requestSingleInstanceLock()) {
     clock?.stop();
     spend?.flush().catch(() => undefined);
     scripts?.close();
+    // Last: Jester.app made again if his icon or Electron changed, so the next start, however it's started, shows them.
+    try {
+      const done = remakeOnQuit(process.execPath);
+      if (done) console.log(`[jester] ${done}`);
+    } catch (err) {
+      console.error(`[jester] Jester.app couldn't be remade: ${err.message}`);
+    }
   });
 }

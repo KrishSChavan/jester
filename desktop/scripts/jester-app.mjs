@@ -94,9 +94,9 @@ function setPlist(file, changes) {
 }
 
 /** What a copy made now would be made from: when it differs from a copy's, the copy is remade. */
-function recipe() {
-  const electron = plistValue(path.join(ELECTRON_APP, 'Contents/Info.plist'), 'CFBundleShortVersionString');
-  const icon = crypto.createHash('sha256').update(fs.readFileSync(ICON)).digest('hex').slice(0, 12);
+function recipe({ from = ELECTRON_APP, icon: iconFile = ICON } = {}) {
+  const electron = plistValue(path.join(from, 'Contents/Info.plist'), 'CFBundleShortVersionString');
+  const icon = crypto.createHash('sha256').update(fs.readFileSync(iconFile)).digest('hex').slice(0, 12);
   const version = JSON.parse(fs.readFileSync(path.join(desktop, 'package.json'), 'utf8')).version || '0.0.0';
   return { version, made: `recipe ${RECIPE}, Electron ${electron}, icon ${icon}, Jester ${version}` };
 }
@@ -148,6 +148,24 @@ export function build(target, { version, made, from = ELECTRON_APP, icon = ICON 
 
   fs.rmSync(target, { recursive: true, force: true });
   fs.renameSync(staging, target);
+}
+
+/**
+ * Jester.app remaking itself as it quits, when its icon or Electron has changed since it was made. Started from the
+ * launcher, the Dock or his own restart, nothing else remakes it: jesterApp() runs only from npm's scripts, and never
+ * under a running copy. Done as the last thing the running copy does, so whatever starts him next starts the new one.
+ * @param {string} running  the quitting app's executable (process.execPath)
+ * @param {{app?:string, from?:string, icon?:string, register?:boolean}} [options]
+ * @returns {string} what was done, or '' when there was nothing to do
+ */
+export function remakeOnQuit(running, { app = JESTER_APP, from = ELECTRON_APP, icon = ICON, register = true } = {}) {
+  if (!running.startsWith(`${app}/`) || !fs.existsSync(from) || !fs.existsSync(icon)) return '';
+  const wanted = recipe({ from, icon });
+  if (madeFrom(app) === wanted.made) return '';
+  build(app, { ...wanted, from, icon });
+  // So the Dock and Finder take the new icon now, not after a while.
+  if (register) spawnSync(LSREGISTER, ['-f', app]);
+  return `Remade ${app} (${wanted.made}).`;
 }
 
 /**
