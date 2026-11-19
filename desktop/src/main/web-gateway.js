@@ -240,6 +240,9 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
       role: 'page',
       url: 'jester://app/home/home.html',
       address: request.socket.remoteAddress,
+      // What it's on (device-location.js names it: "your iPhone"), and whether it's the Mac's own window (hello).
+      agent: String(request.headers['user-agent'] || '').slice(0, 300),
+      macWindow: false,
       message: (message, sender) => send(client, { t: 'msg', message, sender }),
       storageChanged: (changes, area) => send(client, { t: 'storage-changed', changes, area }),
       send: (frame) => send(client, frame)
@@ -265,6 +268,8 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
         switch (frame?.t) {
           case 'hello':
             client.role = frame.role === 'mac' ? 'mac' : 'page';
+            // His website in the Mac's own window (web/shim.js says so): the Mac answers where it is, not the page.
+            client.macWindow = client.role === 'page' && frame.macWindow === true;
             onConnect(client);
             return;
           case 'msg':

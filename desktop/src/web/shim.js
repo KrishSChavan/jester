@@ -29,7 +29,8 @@
     socket.onopen = () => {
       open = true;
       tries = 0;
-      socket.send(JSON.stringify({ t: 'hello', role: 'page' }));
+      // The Mac's own window (his website in Electron) says so: the Mac says where it is for it (device-location.js).
+      socket.send(JSON.stringify({ t: 'hello', role: 'page', ...(/\bElectron\//.test(navigator.userAgent) ? { macWindow: true } : {}) }));
       if (claimed) socket.send(JSON.stringify({ t: 'voice-claim' }));
       for (const frame of queue) socket.send(frame);
       queue = [];
@@ -47,6 +48,7 @@
         waiting.delete(frame.id);
       } else if (frame.t === 'msg') {
         if (frame.message?.type === 'jester/open-url') openUrl(frame.message);
+        if (frame.message?.type === 'jester/where-ask') answerWhere(frame.message);
         for (const listener of messageListeners) {
           try {
             listener(frame.message, frame.sender, () => undefined);
@@ -199,6 +201,21 @@
   //
   // Google's sign-in sends the browser back to a port on the computer that asked, which here is his server. The tab
   // it lands on shows nothing; its address is what he needs, pasted here.
+
+  /**
+   * Where this device is, asked by his server (main/device-location.js) when he's talked to here and the last
+   * position is old, or this is a different device: the browser's own location, which it asks the user about the
+   * first time. Answered with why not, too, so Settings can say.
+   */
+  function answerWhere({ id, timeoutMs }) {
+    const answer = (fields) => ask({ t: 'msg', message: { type: 'jester/where-told', id, ...fields } }).catch(() => undefined);
+    if (!globalThis.isSecureContext || !navigator.geolocation) return answer({ ok: false, code: 2, message: 'This browser can’t tell where it is.' });
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => answer({ ok: true, lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy }),
+      (error) => answer({ ok: false, code: error.code, message: error.message }),
+      { enableHighAccuracy: false, maximumAge: 5 * 60 * 1000, timeout: Math.min(Math.max(Number(timeoutMs) || 20000, 3000), 85000) }
+    );
+  }
 
   function openUrl({ url, landing }) {
     if (!/^https:\/\//.test(String(url))) return;

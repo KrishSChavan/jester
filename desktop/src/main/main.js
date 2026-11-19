@@ -103,6 +103,7 @@ import { createTray } from './tray.js';
 import { createWatch } from './watch.js';
 import { createWeather, unitsFor, weatherLines } from './weather.js';
 import { createWhereabouts } from './whereabouts.js';
+import { createDeviceLocate } from './device-location.js';
 import { trayModel } from './tray-menu.js';
 import { createVault, detectObsidianVaults, findVaultRoot, PATHS } from './vault.js';
 import { importChats } from './chat-import.js';
@@ -1573,6 +1574,9 @@ function listenToPages() {
     if (message?.type === MSG.GET_STATE && url.startsWith('jester://ext/src/calibration/')) return { settings: await loadSettings(), engine };
     if (!url.startsWith('jester://app/')) return undefined;
     switch (message?.type) {
+      // On a server: a browser saying where it is, asked by device-location.js (web/shim.js answers).
+      case 'jester/where-told':
+        return { ok: !!sender?.remote && !!deviceLocate?.told(sender.remote, message) };
       case 'jester/research': {
         if (!url.startsWith('jester://app/home/')) return { ok: false };
         // The bar's Stop: what it shows (a search, or a briefing's reading), and nothing else at work.
@@ -2242,6 +2246,10 @@ async function selfTestAgent() {
 /** On a server: the last time anything was done in a browser with his window open (presence's idle seconds). */
 let webActiveAt = Date.now();
 let webGateway = null;
+/** On a server: where the device being used is (device-location.js), for whereabouts. */
+let deviceLocate = null;
+/** This computer's own position (mac-location.js, or locateByPage): his, and the server's when asked through the link. */
+let locateHere = null;
 /** On a server: the Mac's hands, when it's connected (remote-hands.js). */
 let remoteHands = null;
 /** On a Mac using him in the cloud: the server's link ("https://…/?key=…", parsed), and the line to it (cloud-link.js). */
@@ -2315,10 +2323,13 @@ function startWebGateway() {
     onClose: (client) => {
       client.leave?.();
       remoteHands.leave(client);
+      deviceLocate?.gone(client);
     },
     onOther: (client, frame) => remoteHands.frame(client, frame),
     onMessage: (client, message) => {
       webActiveAt = Date.now();
+      // The page last heard from is the device in use, when none has been talked through (device-location.js).
+      client.activeAt = webActiveAt;
       return fromRemote(client, message);
     },
     onStorage: (area, op, arg) => remoteStorage(area, op, arg),
@@ -2329,8 +2340,11 @@ function startWebGateway() {
       presence?.seen('typed');
     }
   });
+  // Where the user is: where the device they're using is, its browser's or the Mac's.
+  deviceLocate = createDeviceLocate({ gateway: webGateway, hands: remoteHands, log });
+  // The key itself never goes to the log (it reaches the journal): setup.sh prints the link once, from its file.
   webGateway.ready.then(
-    (port) => console.log(`Jester's window: open http://127.0.0.1:${port}/?key=${key} (through Tailscale, https://<this server>.<tailnet>.ts.net/?key=${key})`),
+    (port) => console.log(`Jester's window: listening on 127.0.0.1:${port}; its link, with the key, is in ${path.join(app.getPath('userData'), 'web-key')}`),
     (err) => console.error('Jester’s window couldn’t start:', err.message)
   );
 }
@@ -2411,6 +2425,12 @@ async function handsAsked(frame) {
     case 'cancel':
       await assistant.cancel();
       return true;
+    // Where this Mac is, for the server: the user's using it, or his website in its window (device-location.js).
+    case 'where': {
+      if (!locateHere) return { ok: false, code: 2 };
+      const got = await locateHere({ timeoutMs: Math.min(Math.max(Number(frame.timeoutMs) || 25000, 5000), 90000) });
+      return got?.ok ? { ok: true, lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0 } : { ok: false, code: got?.code || 2, message: String(got?.message || '').slice(0, 200) };
+    }
     // Controls on his website: this Mac's scripts, within what the server may ask (script-remote.js).
     case 'scripts':
       if (!scriptsRemote) return { ok: false, why: 'Jester is still starting on your Mac.' };
@@ -2665,8 +2685,11 @@ async function start() {
   // A Mac asks Location Services itself, as Jester: the first time, macOS asks whether "Jester" may know, and a
   // position waits for that answer, so it's first asked from Settings (90 s).
   const macLocation = loadMacLocation({ log });
+  locateHere = macLocation ? createMacLocate({ native: macLocation }) : locateByPage;
+  // On a server, "where you are" is where the device being used is: its browser's, or the Mac's (device-location.js).
   whereabouts = createWhereabouts({
-    locate: macLocation ? createMacLocate({ native: macLocation }) : locateByPage,
+    locate: SERVER ? (options) => deviceLocate?.locate(options) ?? { ok: false, code: 2 } : locateHere,
+    device: SERVER ? () => deviceLocate?.device() || '' : null,
     setting: () => ({ source: settings?.locationSource, place: settings?.locationPlace }),
     log,
     onChange: showDay

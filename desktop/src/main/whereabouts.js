@@ -83,9 +83,11 @@ const PROBLEMS = { 1: 'denied', 2: 'unavailable', 3: 'timeout' };
  * @param {(...parts:any[]) => void} [deps.log]
  * @param {() => number} [deps.now]
  * @param {() => void} [deps.onChange]  for Settings
+ * @param {(() => string) | null} [deps.device]  on a server, which device a position would come from now (device-location.js):
+ *   one from another device is no longer where they are, however new
  */
-export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetch, log = () => undefined, now = Date.now, onChange = () => undefined }) {
-  /** The last position: {lat, lon, accuracy, at}. */
+export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetch, log = () => undefined, now = Date.now, onChange = () => undefined, device = null }) {
+  /** The last position: {lat, lon, accuracy, at, device, key}: on a server, the device it came from, as said and as known. */
   let fix = null;
   /** Its name, and where that was: {lat, lon, place}. */
   let named = null;
@@ -93,6 +95,8 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
   /** Why there's no position: 'denied', 'unavailable', 'timeout', or what else went wrong. */
   let problem = '';
   let failedAt = 0;
+  /** On a server, the device that couldn't say: another can be asked at once. */
+  let failedKey = '';
   /** There's been a position since this source was chosen: macOS has said yes. */
   let located = false;
   let pending = null;
@@ -123,7 +127,7 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
    */
   function refresh({ patient = false } = {}) {
     if (source() !== 'here') return Promise.resolve(null);
-    if (!patient && !pending && failedAt && now() - failedAt < RETRY_MS) return Promise.resolve(null);
+    if (!patient && !pending && failedAt && now() - failedAt < RETRY_MS && (!device || failedKey === device())) return Promise.resolve(null);
     pending ||= (async () => {
       try {
         // Until there's been a position, macOS's question may be up, from whichever asked first.
@@ -131,10 +135,11 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
         if (!got?.ok || !Number.isFinite(got.lat) || !Number.isFinite(got.lon)) {
           problem = PROBLEMS[got?.code] || got?.message || 'unavailable';
           failedAt = now();
+          failedKey = device?.() || '';
           log('location: none:', problem);
           return null;
         }
-        fix = { lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0, at: now() };
+        fix = { lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0, at: now(), device: String(got.device || ''), key: String(got.key || '') };
         located = true;
         problem = '';
         failedAt = 0;
@@ -178,10 +183,12 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
         return place && Number.isFinite(place.lat) ? described({ lat: place.lat, lon: place.lon }, { city: place.name, region: place.region || '', country: place.country || '', countryCode: place.countryCode || '' }, 'place') : null;
       }
       if (from !== 'here') return null;
+      // Another device in use (his website, on a phone now, not the Mac): it's somewhere else, so it's asked at once.
+      const switched = !!device && !!fix?.key && !!device() && device() !== fix.key;
       const age = fix ? now() - fix.at : Infinity;
-      if (age > STALE_MS || (fresh && age > FRESH_MS)) {
+      if (age > STALE_MS || switched || (fresh && age > FRESH_MS)) {
         const asking = refresh();
-        if (!fix || fresh) {
+        if (!fix || fresh || switched) {
           let timer;
           await Promise.race([asking, new Promise((resolve) => (timer = setTimeout(resolve, waitMs)))]);
           clearTimeout(timer);
@@ -212,7 +219,9 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
         problem: from === 'here' ? problem : '',
         town: from === 'place' ? [place?.name, place?.countryCode === 'US' ? place?.region : place?.country].filter(Boolean).join(', ') : place ? townOf(place) : '',
         accuracy: from === 'here' && fix ? Math.round(fix.accuracy) : 0,
-        at: from === 'here' ? fix?.at || 0 : 0
+        at: from === 'here' ? fix?.at || 0 : 0,
+        // On a server: the device it came from ("your iPhone").
+        device: from === 'here' ? fix?.device || '' : ''
       };
     }
   };

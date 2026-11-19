@@ -821,8 +821,17 @@ function ago(at) {
   return `${hours} hour${hours === 1 ? '' : 's'} ago`;
 }
 
-/** Why there's no position, and what to do about it. */
-function locationProblem(problem) {
+/**
+ * Why there's no position, and what to do about it. On his website (a server), it's the device being used that
+ * couldn't say: a browser's own location, or the Mac's for Jester's window there (main/device-location.js).
+ */
+function locationProblem(problem, onServer = false) {
+  if (onServer) {
+    if (problem === 'denied') return 'The device you’re using said no to sharing where it is. On a phone or another computer, allow location for this site in the browser’s settings (on an iPhone: Settings › Privacy & Security › Location Services › Safari Websites, and Settings › Apps › Safari › Location). On your Mac, Jester needs Location Services in System Settings › Privacy & Security. Then Locate again.';
+    if (problem === 'timeout') return 'No position came in time. If your browser asked whether this site may know where you are, allow it, then Locate again.';
+    if (problem === 'unavailable') return 'The device you’re using couldn’t tell where it is just now. Locate again, or name a place instead.';
+    return problem ? `Couldn’t get a position: ${problem}` : '';
+  }
   const mac = platform() === 'darwin';
   if (problem === 'denied') {
     return mac
@@ -883,8 +892,10 @@ function renderDay() {
   // Main's word for it: it's saved and acted on before main answers, and the page's copy of settings comes after.
   const source = namingPlace ? 'place' : location.source || settings.locationSource || 'off';
   const mac = platform() === 'darwin';
-  $('location-here').textContent = mac ? 'This Mac’s location' : 'This computer’s location';
-  $('location-actions').querySelector('strong').textContent = mac ? 'This Mac’s position' : 'This computer’s position';
+  // His website: where the device being used is, not the server's (main/device-location.js).
+  const onServer = !!desktop?.server;
+  $('location-here').textContent = onServer ? 'Where your device is' : mac ? 'This Mac’s location' : 'This computer’s location';
+  $('location-actions').querySelector('strong').textContent = onServer ? 'Your device’s position' : mac ? 'This Mac’s position' : 'This computer’s position';
   $('locationSource').value = source;
   const shared = ' Your position goes to OpenStreetMap, to name the street you’re on, and to Open-Meteo, to the nearest kilometre, for the weather.';
   $('location-hint').textContent =
@@ -895,11 +906,15 @@ function renderDay() {
           ? `${[day.place.name, day.place.countryCode === 'US' ? day.place.region : day.place.country].filter(Boolean).join(', ')}: the weather there, wherever you are.`
           : 'Name the place below.'
         : location.town
-          ? `${location.town}, from ${mac ? 'Location Services' : 'Windows’ location'}.${shared}`
+          ? `${location.town}, from ${onServer ? location.device || 'the device you’re using' : mac ? 'Location Services' : 'Windows’ location'}.${shared}`
           : location.locating
-            ? `Finding where this ${mac ? 'Mac' : 'computer'} is… If ${mac ? 'macOS' : 'Windows'} asks whether Jester may use your location, allow it.`
-            : `Jester asks ${mac ? 'Location Services' : 'Windows'} where you are when you talk to him, at most every 15 minutes.${shared}`;
-  $('location-problem').textContent = source === 'here' ? locationProblem(location.problem) : '';
+            ? onServer
+              ? 'Finding where your device is… If your browser asks whether this site may know your location, allow it.'
+              : `Finding where this ${mac ? 'Mac' : 'computer'} is… If ${mac ? 'macOS' : 'Windows'} asks whether Jester may use your location, allow it.`
+            : onServer
+              ? `Jester asks the device you’re talking to him on where you are (its browser, or your Mac’s Location Services in Jester’s window there), at most every 15 minutes, and again as soon as you switch devices.${shared}`
+              : `Jester asks ${mac ? 'Location Services' : 'Windows'} where you are when you talk to him, at most every 15 minutes.${shared}`;
+  $('location-problem').textContent = source === 'here' ? locationProblem(location.problem, onServer) : '';
   $('place-form').hidden = source !== 'place';
   if (document.activeElement !== $('place-name')) $('place-name').value = day.place ? [day.place.name, day.place.countryCode === 'US' ? day.place.region : day.place.country].filter(Boolean).join(', ') : '';
   $('location-actions').hidden = source !== 'here';
@@ -909,7 +924,8 @@ function renderDay() {
       ? `To within ${location.accuracy} m, ${ago(location.at)}.`
       : 'Not found yet.';
   $('location-again').disabled = !!location.locating;
-  $('location-privacy').hidden = location.problem !== 'denied';
+  // The Mac's privacy settings open on the Mac only: a website can't open a phone's.
+  $('location-privacy').hidden = location.problem !== 'denied' || onServer;
   $('weatherUnits').value = day.units || 'auto';
   $('weather-hint').textContent = source === 'off' ? 'Needs a location.' : day.weather || (source === 'place' && !day.place ? 'Needs a place.' : 'Fetching it…');
   // Built again only when it's changed, and not while a name's being typed.

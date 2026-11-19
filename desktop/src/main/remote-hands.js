@@ -14,7 +14,7 @@
  * message as it is), which decides what it may do (script-remote.js), and the Mac says when they've changed.
  *
  * Frames, on the gateway's socket:
- *   server → Mac   { t: 'hands', id, op, ...args }            op: knows | risky | scriptsAsk | run | confirm | answer | reask | cancel | scripts
+ *   server → Mac   { t: 'hands', id, op, ...args }            op: knows | risky | scriptsAsk | run | confirm | answer | reask | cancel | scripts | where
  *   Mac → server   { t: 'hands-reply', id, result } | { t: 'hands-reply', id, error }
  *   Mac → server   { t: 'hands-state', running, asking, abilities }   whenever any of it changes
  *   Mac → server   { t: 'hands-ask', label }                  its task has a question: asked in the conversation
@@ -170,6 +170,19 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
         } catch (err) {
           return { outcome: { ok: false, text: err.code === 'no_mac' ? NO_MAC : `I couldn’t get your Mac to do that: ${err.message}.` } };
         }
+      }
+    },
+
+    /**
+     * Where the Mac is, from Location Services (mac-location.js): the user's using it, or his website in its window
+     * (device-location.js). As whereabouts.js takes a position: { ok, lat, lon, accuracy } or { ok: false, code }.
+     */
+    async where(timeoutMs = 25000) {
+      try {
+        const got = await request('where', { timeoutMs }, timeoutMs + QUICK_MS);
+        return got && typeof got === 'object' ? got : { ok: false, code: 2 };
+      } catch (err) {
+        return { ok: false, code: err.code === 'timeout' ? 3 : 2, message: err.code === 'no_mac' ? '' : err.message };
       }
     },
 
