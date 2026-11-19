@@ -1,0 +1,110 @@
+# Builds the Jester people download, for macOS and Windows, and starts each one to see that it runs.
+#
+#   - Push a tag like v0.1.0: both are built, checked, and published as a GitHub Release with that name
+#     (its notes come from docs/releases/<tag>.md when there is one).
+#   - Run it by hand (Actions › Build Jester › Run workflow): both are built and checked, and kept as the
+#     run's artifacts for a week, without publishing anything.
+#
+# Neither build is signed with a paid certificate: docs/install-mac.md and docs/install-windows.md say what
+# that means for whoever installs it. The Windows build is never run anywhere else before it's published, so
+# the check here (npm run dist-check, with the real speech models) is what stands between it and a release.
+
+name: Build Jester
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    name: macOS (Apple silicon)
+    runs-on: macos-15
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Tests
+        working-directory: .
+        run: npm test
+      - name: Build the app
+        run: npm run dist
+      - name: Start it, fetching the real models
+        run: npm run dist-check -- --real-models --app dist/mac-arm64/Jester.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jester-mac
+          path: |
+            desktop/dist/Jester-mac-arm64.dmg
+            desktop/dist/Jester-mac-arm64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows (x64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Build the app
+        run: npm run dist
+      - name: Start it, fetching the real models
+        run: npm run dist-check -- --real-models
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jester-windows
+          path: desktop/dist/Jester-windows-x64-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -la downloads
+          notes="docs/releases/$TAG.md"
+          if [ -f "$notes" ]; then
+            gh release create "$TAG" downloads/* --title "Jester $TAG" --notes-file "$notes" --verify-tag
+          else
+            gh release create "$TAG" downloads/* --title "Jester $TAG" --generate-notes --verify-tag
+          fi
