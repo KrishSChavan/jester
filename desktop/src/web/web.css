@@ -186,3 +186,8 @@ a.button {
   color: var(--text);
   text-decoration: none;
 }
+
+/* He said something this browser couldn't play before a tap (web/shim.js): at the top, clear of the bars below. */
+.jester-landing.jester-hear {
+  inset: calc(env(safe-area-inset-top, 0px) + 12px) 12px auto 12px;
+}

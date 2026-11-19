@@ -160,6 +160,26 @@ test('his voice plays on the browser being talked to, and is over when it says s
   await playing;
 });
 
+test('a phone that held his voice for a tap says so in the log, and the line is over for the server', async (t) => {
+  let voice;
+  const lines = [];
+  const { g } = gateway({ onVoiceStatus: (report) => voice.status(report) });
+  voice = createRemoteVoicePage(g, { log: (...words) => lines.push(words.join(' ')) });
+  t.after(() => g.close());
+  const port = await g.ready;
+  const page = connect(port);
+  await page.opened;
+  page.ws.send(JSON.stringify({ t: 'voice-claim' }));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const playing = voice.play(Buffer.from('RIFF'), 'audio/wav');
+  const sound = await page.next((f) => f.t === 'play');
+  // What web/shim.js sends when the browser refuses to play before a touch.
+  page.ws.send(JSON.stringify({ t: 'voice-status', report: { voice: 'held until this browser is tapped: it plays no sound before' } }));
+  page.ws.send(JSON.stringify({ t: 'voice-status', report: { ended: sound.id } }));
+  await playing;
+  assert.deepEqual(lines, ['web voice: held until this browser is tapped: it plays no sound before']);
+});
+
 test('keys sealed on a server open again only with its own key file', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-sealer-'));
   try {

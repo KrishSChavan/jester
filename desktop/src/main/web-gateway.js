@@ -602,6 +602,8 @@ export function createRemoteVoicePage(gateway, { log = () => undefined } = {}) {
     /** What the client being talked to said: its mic, or a sound that ended. */
     status(report) {
       if (report?.mic) log('web mic:', report.mic);
+      // Held for a tap, or played after one (web/shim.js): a phone plays no sound before it's touched.
+      if (report?.voice) log('web voice:', report.voice);
       if (report?.gone) finish();
       else if (report?.ended !== undefined && playing.has(report.ended)) finish(report.ended);
     }

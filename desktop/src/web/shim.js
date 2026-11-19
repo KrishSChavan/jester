@@ -7,7 +7,8 @@
  *
  * The same socket is his ears and mouth in this browser, like the app's hidden voice page (src/voice/voice.js): the
  * mic is opened when the server says so, and only on the browser being talked to, which is whichever was last
- * clicked in (`voice-claim`). His voice plays here too. A click is also what lets a browser play sound at all.
+ * clicked in (`voice-claim`), or his app on a phone's Home Screen as it opens. His voice plays here too, through
+ * players readied by the first touch: a browser plays no sound before one (see `ready`).
  */
 (() => {
   const RUNTIME_ID = 'jester-desktop';
@@ -168,7 +169,6 @@
 
   let stream = null;
   let context = null;
-  let player = null;
   let micWanted = false;
 
   function status(report) {
@@ -203,8 +203,9 @@
       tap.port.onmessage = ({ data }) => open && socket.send(data.buffer);
       context.createMediaStreamSource(stream).connect(tap);
       tap.connect(context.destination);
-      await context.resume();
-      status({ mic: stream.getAudioTracks()[0]?.label || 'open' });
+      // A phone may not start it without a touch: ready() starts it at the next one.
+      const started = await Promise.race([context.resume().then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 1500))]);
+      status({ mic: started || context?.state === 'running' ? stream?.getAudioTracks()[0]?.label || 'open' : 'waiting for a tap: this browser starts no mic before one' });
     } catch (error) {
       const why = error?.message || String(error);
       closeMic();
@@ -212,21 +213,145 @@
     }
   }
 
-  /** What's waiting to be played after `player`, already loaded: {id, sound, over}. A queued piece starts here as the one
-   * before it ends, rather than once the server's heard that it has (2026-11-19, a pause after every sentence). */
-  let waitingSounds = [];
+  /*
+   * His voice. A browser plays nothing until the page has been touched, and an iPhone plays only from a player that
+   * was readied in a touch: measured in iOS 27's Safari (2026-11-19), a new <audio> made 12 s after a tap is refused,
+   * while one that had load() called in the tap plays then. His voice came as a new <audio> per sentence, seconds
+   * after any tap, so a phone said nothing. Now two players are made once, readied by load() in the first touch,
+   * click or key (no sound, so the user's music isn't stopped), and every sentence plays through them: one plays
+   * while the next loads, as each starts when the one before ends (2026-11-19, a pause after every sentence).
+   *
+   * A sentence that comes before any touch can't be played at all. It's kept, the server is told it's over (its
+   * words are on the screen), and a bar offers it: "Hear it" is a tap, which is what plays it.
+   */
+  const players = [new Audio(), new Audio()];
+  /** The piece playing: {id, url, el}. */
+  let playing = null;
+  /** The pieces after it, in order. The first may be loading in the other player already. */
+  let upcoming = [];
+  /** Pieces this browser wouldn't play before a touch, kept for the bar. */
+  let held = [];
+  let heldTimer = null;
+  let readied = false;
+  const HELD_MS = 2 * 60 * 1000;
 
-  function stopPlaying() {
-    const over = [player, ...waitingSounds];
-    player = null;
-    waitingSounds = [];
-    for (const each of over) each?.sound.pause();
-    for (const each of over) each?.over();
+  for (const el of players) {
+    el.preload = 'auto';
+    el.addEventListener('ended', () => el.piece && over(el.piece));
+    el.addEventListener('error', () => el.piece && over(el.piece));
+    // Paused by the phone itself (a call, the lock screen's controls, the app put away): over. Still paused, so not a
+    // pause of its last piece's arriving after its next one has started.
+    el.addEventListener('pause', () => el.piece && el.piece === playing && el.paused && !el.ended && over(el.piece));
   }
 
-  function start(next) {
-    player = next;
-    next.sound.play().catch(next.over);
+  /** In a touch, a click or a key: the players may play from now on, and a mic refused its start without one opens. */
+  function ready() {
+    // A touch that scrolled isn't one a browser counts.
+    if (navigator.userActivation && !navigator.userActivation.isActive) return;
+    if (context?.state === 'suspended' && micWanted) context.resume().then(() => status({ mic: 'open, after a tap' }), () => undefined);
+    if (readied) return;
+    readied = true;
+    for (const el of players) if (!el.piece) el.load();
+  }
+
+  /** A player for a piece, so it loads while the one before it plays. None while both are busy. */
+  function load(piece) {
+    if (piece.el) return piece.el;
+    const el = players.find((each) => !each.piece);
+    if (!el) return null;
+    el.piece = piece;
+    piece.el = el;
+    el.src = piece.url;
+    return el;
+  }
+
+  /** Its player is free for the next piece. */
+  function letGo(piece) {
+    const el = piece.el;
+    if (!el) return;
+    el.piece = null;
+    piece.el = null;
+    el.pause();
+    el.removeAttribute('src');
+  }
+
+  /** The server hears that a piece is over once: played, refused, or stopped. */
+  function told(piece) {
+    if (piece.told) return;
+    piece.told = true;
+    status({ ended: piece.id });
+  }
+
+  function over(piece) {
+    if (piece.done) return;
+    piece.done = true;
+    letGo(piece);
+    URL.revokeObjectURL(piece.url);
+    upcoming = upcoming.filter((each) => each !== piece);
+    told(piece);
+    if (playing !== piece) return;
+    playing = null;
+    startNext();
+  }
+
+  function startNext() {
+    const piece = upcoming.shift();
+    if (!piece) return;
+    playing = piece;
+    const el = load(piece);
+    if (!el) return over(piece);
+    el.play().catch((error) => {
+      if (piece.done || held.includes(piece)) return;
+      if (error?.name === 'NotAllowedError') hold(piece);
+      else over(piece);
+    });
+    if (upcoming[0]) load(upcoming[0]);
+    return undefined;
+  }
+
+  /** Refused before a touch: this piece and the ones after it wait for the bar's tap. */
+  function hold(piece) {
+    if (!held.length) status({ voice: 'held until this browser is tapped: it plays no sound before' });
+    readied = false;
+    const pieces = [piece, ...(playing === piece ? upcoming : [])];
+    if (playing === piece) {
+      playing = null;
+      upcoming = [];
+    }
+    for (const each of pieces) {
+      letGo(each);
+      told(each);
+      held.push(each);
+    }
+    clearTimeout(heldTimer);
+    heldTimer = setTimeout(dropHeld, HELD_MS);
+    offerHeld();
+  }
+
+  function dropHeld() {
+    clearTimeout(heldTimer);
+    for (const piece of held) URL.revokeObjectURL(piece.url);
+    held = [];
+    document.getElementById('jester-hear')?.remove();
+  }
+
+  /** The bar's "Hear it", a tap: what was kept plays now. */
+  function hearHeld() {
+    ready();
+    const pieces = held;
+    held = [];
+    dropHeld();
+    status({ voice: `a held line played after a tap (${pieces.length} ${pieces.length === 1 ? 'piece' : 'pieces'})` });
+    upcoming.push(...pieces);
+    if (!playing) startNext();
+  }
+
+  function stopPlaying() {
+    const pieces = [playing, ...upcoming].filter(Boolean);
+    playing = null;
+    upcoming = [];
+    for (const piece of pieces) over(piece);
+    dropHeld();
   }
 
   function play({ id, bytes, type, stop, queued }) {
@@ -235,27 +360,37 @@
     const raw = atob(bytes);
     const data = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i += 1) data[i] = raw.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([data], { type }));
-    const sound = new Audio(url);
-    sound.preload = 'auto';
-    let done = false;
-    const entry = { id, sound, over: () => undefined };
-    entry.over = () => {
-      if (done) return;
-      done = true;
-      URL.revokeObjectURL(url);
-      waitingSounds = waitingSounds.filter((each) => each !== entry);
-      status({ ended: id });
-      if (player !== entry) return;
-      player = null;
-      const next = waitingSounds.shift();
-      if (next) start(next);
-    };
-    sound.onended = entry.over;
-    sound.onpause = () => !sound.ended && entry.over();
-    sound.onerror = entry.over;
-    if (player) waitingSounds.push(entry);
-    else start(entry);
+    const piece = { id, url: URL.createObjectURL(new Blob([data], { type })) };
+    // The pieces before it are waiting for a tap: so is this one.
+    if (held.length) return hold(piece);
+    upcoming.push(piece);
+    if (!playing) startNext();
+    else load(upcoming[0]);
+    return undefined;
+  }
+
+  /** The bar at the top of his page: he said something this browser couldn't play, and a tap that plays it. */
+  function offerHeld() {
+    if (document.getElementById('jester-hear')) return;
+    const box = document.createElement('div');
+    box.id = 'jester-hear';
+    box.className = 'jester-landing jester-hear';
+    box.setAttribute('role', 'alert');
+    const words = document.createElement('p');
+    words.textContent = 'Jester said something. This browser plays sound only after a tap.';
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.textContent = 'Not now';
+    no.onclick = dropHeld;
+    const yes = document.createElement('button');
+    yes.type = 'button';
+    yes.className = 'primary';
+    yes.textContent = 'Hear it';
+    yes.onclick = hearHeld;
+    const buttons = document.createElement('div');
+    buttons.append(no, yes);
+    box.append(words, buttons);
+    document.body.append(box);
   }
 
   // ---------------------------------------------------------------------------
@@ -407,9 +542,20 @@
 
   // A click or a key here makes this the browser he's talking to. Not in Jester's own app on a Mac, whose window this
   // is when it uses him in the cloud: the Mac's own voice page is his ears there, and it claims him itself.
+  //
+  // The end of a touch, a click or a key is what lets a browser play his voice (ready): a touch's start isn't one.
+  //
+  // His app on a phone's Home Screen is in the user's hand while it's open, so it's talked through as it opens or
+  // comes to the front, as the Mac's window is when it's focused. Before, it waited for a tap, and what he said as it
+  // opened went to nobody (2026-11-19: "Nobody's browser is open to play his voice" each time it was opened).
   if (!/\bElectron\//.test(navigator.userAgent)) {
     addEventListener('pointerdown', claim, { capture: true });
     addEventListener('keydown', claim, { capture: true });
+    for (const type of ['touchend', 'click', 'keydown']) addEventListener(type, ready, { capture: true, passive: true });
+    if (standalone()) {
+      if (document.visibilityState !== 'hidden') claim();
+      document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && claim());
+    }
   }
   connect();
 })();
