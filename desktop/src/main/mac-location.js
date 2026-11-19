@@ -7,7 +7,13 @@
  * use the Mac's location; once allowed, a position comes from Core Location directly.
  *
  * The answer has the page's shape, so whereabouts.js takes either: {ok, lat, lon, accuracy}, or {ok:false, code},
- * code 1 not allowed (or Location Services off), 2 no position to be had, 3 not in time.
+ * code 1 not allowed (or Location Services off), 2 no position to be had, 3 not in time; with `asking` when it's
+ * macOS's question that wasn't answered in time.
+ *
+ * The question is put with Jester in front (`front`). He lives in the menu bar, and asked from there, at launch or
+ * when he was spoken to, macOS never showed it: the user, 2026-11-19, had to switch Location off and on in his
+ * Settings, with his window in front, before it came. And it's put again every few seconds until it's answered, in
+ * case the first was asked before he'd got to the front.
  */
 
 import { createRequire } from 'node:module';
@@ -21,6 +27,8 @@ const require = createRequire(import.meta.url);
 /** Core Location's "denied" (kCLErrorDenied); its other errors mean no position just now. */
 const CL_DENIED = 1;
 const POLL_MS = 200;
+/** Unanswered, macOS's question is put again this often: a second asking while it's up does nothing. */
+const REASK_MS = 3000;
 
 /**
  * The native module, or null: not a Mac, or not built (npm run location; npm run app and the launcher build it).
@@ -40,21 +48,28 @@ export function loadMacLocation({ file = ADDON, platform = process.platform, log
  * A `locate` for whereabouts.js, reading the native module.
  * @param {object} deps
  * @param {{status:() => string, ask:() => string, locate:() => number, latest:() => any}} deps.native
+ * @param {() => (void|Promise<void>)} [deps.front]  brings Jester to the front, before macOS is asked
  * @param {() => number} [deps.now]
  * @param {(ms:number) => Promise<void>} [deps.wait]
  */
-export function createMacLocate({ native, now = Date.now, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+export function createMacLocate({ native, front = null, now = Date.now, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   return async function locate({ timeoutMs }) {
     const until = now() + timeoutMs;
     let status = native.status();
     if (status === 'not-determined') {
-      // macOS's question, for "Jester", waited on as long as the caller will.
+      // macOS's question, for "Jester", put with him in front and waited on as long as the caller will.
+      await Promise.resolve(front?.()).catch(() => undefined);
       native.ask();
+      let asked = now();
       while (status === 'not-determined' && now() < until) {
         await wait(POLL_MS);
         status = native.status();
+        if (status === 'not-determined' && now() - asked >= REASK_MS) {
+          native.ask();
+          asked = now();
+        }
       }
-      if (status === 'not-determined') return { ok: false, code: 3, message: 'macOS’s question wasn’t answered' };
+      if (status === 'not-determined') return { ok: false, code: 3, asking: true, message: 'macOS’s question wasn’t answered' };
     }
     if (status !== 'allowed') return { ok: false, code: 1, message: status === 'off' ? 'Location Services are off' : `Location Services: ${status}` };
     const asked = native.locate();

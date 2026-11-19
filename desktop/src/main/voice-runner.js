@@ -177,6 +177,7 @@ export function dictation(text) {
  * @param {{call: Function}} deps.driver
  * @param {(action:string, options:object) => Promise<{ok:boolean, label:string, detail:string}>} deps.dispatch
  * @param {() => boolean} deps.canPost  false until macOS allows Accessibility
+ * @param {() => string} [deps.whyNoInput]  what he says then, with where it's allowed (main.js inputRefusal)
  * @param {(op:string) => void} deps.onJester  calibrate, settings, sleep
  * @param {(file:string, args:string[]) => Promise<string>} [deps.run]  runs open, osascript, shortcuts
  * @param {(platform:string) => object[]} [deps.installed]
@@ -205,6 +206,7 @@ export function createVoiceRunner({
   driver,
   dispatch,
   canPost,
+  whyNoInput = null,
   onJester,
   run = runFile,
   installed = installedApps,
@@ -222,6 +224,8 @@ export function createVoiceRunner({
 }) {
   const mac = platform === 'darwin';
   const primary = mac ? 'cmd' : 'ctrl';
+  /** What he says when asked to click, type or read the screen without Accessibility: what's missing, and where it's allowed. */
+  const noInput = () => whyNoInput?.() || 'Allow Accessibility in Jester’s Settings first.';
   /** Words holding a password or card number (vault-memory.js secretIn) aren't kept anywhere, dev.log included. */
   const log = (...parts) => write(...parts.map((part) => (typeof part === 'string' && secretIn(part) ? `(words holding ${secretIn(part)}, left out)` : part)));
   /** `front`: the names of an app this step brought forward, for the next step to wait on. */
@@ -680,6 +684,9 @@ export function createVoiceRunner({
       } : bad(done.text || 'That didn’t work in Chrome.')), text, said) };
     }
     if (unknown) {
+      // The laptop's assistant reads the screen and works it by hand, and so does a way learned from it: neither can
+      // without Accessibility, and saying so now beats a task that starts and then can't see.
+      if (assistant && !canPost()) return { steps, outcome: bad(noInput()) };
       // A question's answer is the assistant's to find: a way learned for the command it came as would do it and tell nothing.
       const known = !researched && learned && assistant?.replay && !asksToBeTold(said || text) ? await learned.find(text).catch(() => null) : null;
       if (superseded()) return cancelled();
@@ -708,7 +715,7 @@ export function createVoiceRunner({
       return { steps, outcome: bad(unknownLine) };
     }
     if (superseded()) return cancelled();
-    if (steps.some(needsInput) && !canPost()) return { steps, outcome: bad('Allow Accessibility in Jester’s Settings first.') };
+    if (steps.some(needsInput) && !canPost()) return { steps, outcome: bad(noInput()) };
     // "Open Spotify and play …": Spotify, though it wasn't running when the apps were read.
     for (const [i, step] of steps.entries()) {
       if (step.kind === 'play' && !step.service && steps.slice(0, i).some((earlier) => earlier.kind === 'open' && /spotify/i.test(earlier.app || ''))) step.service = 'spotify';
@@ -716,6 +723,8 @@ export function createVoiceRunner({
     const { pick, ...outcome } = await performSteps(steps, apps);
     // A search found the music, but its result wasn't pressed: picking one is the assistant's.
     if (outcome.ok && pick) {
+      // The search is up; pressing its result is by hand.
+      if (assistant && !canPost()) return { steps, outcome: ok(`${outcome.text}. ${noInput()}`) };
       if (await assistantReady()) {
         await wait(SEARCH_LOAD_MS);
         return { steps, outcome: await assisted(text, '', [], { pick: true, said }) };

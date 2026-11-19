@@ -22,6 +22,8 @@
  * @property {boolean} [phone]  their phone is set up and on
  * @property {boolean} [mail]  their Gmail is signed in to
  * @property {boolean} [chrome]  his Chrome extension is linked
+ * @property {boolean} [gestures]  hand gestures are switched on
+ * @property {string} [os]  'macOS' or 'Windows': who it is that has to allow things
  * @property {{fetching?:{id:string}|null, waiting?:string[], error?:string, words?:string, firstMb?:number}|null} [fetch]
  *   how the download of what he hears and speaks with stands (main.js modelsState)
  */
@@ -54,7 +56,9 @@ export function setupSteps(state = {}) {
     {
       id: 'permissions',
       title: 'Let him hear you and work the computer',
-      why: missing.length ? `macOS has to allow it: ${missing.join(' and ')}.` : 'macOS has allowed what he needs.',
+      why: missing.length
+        ? `${state.os || 'macOS'} has to allow it: ${missing.join(' and ')}. He asks for each as it’s first needed; here you can allow them now.`
+        : `${state.os || 'macOS'} has allowed what he needs so far. Anything else is asked for when it’s first used.`,
       done: missing.length === 0,
       required: true,
       go: 'settings/permissions'
@@ -104,6 +108,16 @@ export function setupSteps(state = {}) {
       done: !!state.ownVoice,
       required: false,
       go: 'settings/assistant'
+    },
+    {
+      id: 'gestures',
+      title: 'Work the computer with your hands',
+      why: state.gestures
+        ? 'On: he watches for your hand through the camera. A raised finger opens the microphone; an open palm points.'
+        : 'Off until you turn Gestures on, which is when the camera is asked for. Then a raised finger opens the microphone, and other poses do what you choose.',
+      done: !!state.gestures,
+      required: false,
+      go: 'settings/general'
     },
     {
       id: 'vault',

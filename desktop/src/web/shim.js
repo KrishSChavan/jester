@@ -269,15 +269,90 @@
    * Where this device is, asked by his server (main/device-location.js) when he's talked to here and the last
    * position is old, or this is a different device: the browser's own location, which it asks the user about the
    * first time. Answered with why not, too, so Settings can say.
+   *
+   * A browser that's never been answered for this site may only put its question after a tap, and his server asks
+   * whenever it needs to know, with no tap behind it: asked that way, some never show the question at all (the
+   * user, 2026-11-19: nothing asked until Location was switched off and on in Settings, which is a tap). So while
+   * the answer is still "ask", a bar says what he wants and why, and its button asks from a tap. `sure`: asked
+   * for from Settings, on purpose; otherwise a "Not now" stands until the page is opened again.
    */
-  function answerWhere({ id, timeoutMs }) {
+  let whereDeclined = false;
+  function answerWhere({ id, timeoutMs, sure }) {
     const answer = (fields) => ask({ t: 'msg', message: { type: 'jester/where-told', id, ...fields } }).catch(() => undefined);
     if (!globalThis.isSecureContext || !navigator.geolocation) return answer({ ok: false, code: 2, message: 'This browser can’t tell where it is.' });
-    navigator.geolocation.getCurrentPosition(
-      ({ coords }) => answer({ ok: true, lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy }),
-      (error) => answer({ ok: false, code: error.code, message: error.message }),
-      { enableHighAccuracy: false, maximumAge: 5 * 60 * 1000, timeout: Math.min(Math.max(Number(timeoutMs) || 20000, 3000), 85000) }
-    );
+    const limit = Math.min(Math.max(Number(timeoutMs) || 20000, 3000), 85000);
+    let done = false;
+    let tapped = false;
+    /** Whether the browser still has to ask: its question may be up, or waiting for a tap. */
+    let unanswered = false;
+    let timer = null;
+    const finish = (fields) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      document.getElementById('jester-where')?.remove();
+      answer(fields);
+    };
+    const locate = () =>
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => finish({ ok: true, lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy }),
+        (error) => {
+          // Refused without a tap, while the browser had still to ask: it wants the tap first. The bar's still there.
+          if (error.code === 1 && unanswered && !tapped) return;
+          finish({ ok: false, code: error.code, message: error.message });
+        },
+        { enableHighAccuracy: false, maximumAge: 5 * 60 * 1000, timeout: limit }
+      );
+    timer = setTimeout(() => finish({ ok: false, code: 3, message: '', ...(unanswered ? { asking: true } : {}) }), limit);
+    const state = navigator.permissions?.query ? navigator.permissions.query({ name: 'geolocation' }).then((status) => status.state, () => 'unknown') : Promise.resolve('unknown');
+    state.then((allowed) => {
+      if (done) return;
+      if (allowed === 'denied') return finish({ ok: false, code: 1, message: 'Location is turned off for this site.' });
+      if (allowed === 'granted') return locate();
+      if (whereDeclined && !sure) return finish({ ok: false, code: 1, message: 'Not now.' });
+      unanswered = true;
+      askForWhere(
+        () => {
+          tapped = true;
+          locate();
+        },
+        () => {
+          whereDeclined = true;
+          finish({ ok: false, code: 1, message: 'Not now.' });
+        }
+      );
+      // And at once, for a browser that will ask without the tap.
+      locate();
+    });
+  }
+
+  /** The bar over his page: what he wants to know and why, and the tap a browser needs before it asks. */
+  function askForWhere(allow, later) {
+    document.getElementById('jester-where')?.remove();
+    const box = document.createElement('div');
+    box.id = 'jester-where';
+    box.className = 'jester-landing';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-label', 'Location');
+    const words = document.createElement('p');
+    words.textContent = 'Jester would like to know where this device is, for the weather and what’s near you. Your browser will ask you to allow it.';
+    const yes = document.createElement('button');
+    yes.type = 'button';
+    yes.className = 'primary';
+    yes.textContent = 'Allow location';
+    yes.onclick = () => {
+      words.textContent = 'Your browser is asking: choose Allow.';
+      yes.disabled = true;
+      allow();
+    };
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.textContent = 'Not now';
+    no.onclick = later;
+    const buttons = document.createElement('div');
+    buttons.append(no, yes);
+    box.append(words, buttons);
+    document.body.append(box);
   }
 
   function openUrl({ url, landing }) {

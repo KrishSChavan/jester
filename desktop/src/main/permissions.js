@@ -40,33 +40,45 @@ const SETTINGS_URLS = {
     camera: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Camera',
     microphone: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
     accessibility: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility',
-    screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'
+    screen: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+    location: 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices',
+    bluetooth: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth',
+    files: 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders',
+    automation: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Automation'
   },
   win32: {
     camera: 'ms-settings:privacy-webcam',
-    microphone: 'ms-settings:privacy-microphone'
+    microphone: 'ms-settings:privacy-microphone',
+    location: 'ms-settings:privacy-location'
   }
 };
 
-export function readStatuses(platform = process.platform) {
+/**
+ * @param {string} [platform]
+ * @param {Record<string, string>} [others]  what Electron can't read and main.js knows: `location` (Location
+ *   Services, once Settings says to use this computer's), `bluetooth` (from the watch's helper) and `files` (a vault
+ *   macOS won't let him into)
+ */
+export function readStatuses(platform = process.platform, others = {}) {
   if (platform === 'darwin') {
     return {
       camera: systemPreferences.getMediaAccessStatus('camera'),
       microphone: systemPreferences.getMediaAccessStatus('microphone'),
       accessibility: systemPreferences.isTrustedAccessibilityClient(false) ? 'granted' : 'not-determined',
-      screen: screenStatus()
+      screen: screenStatus(),
+      ...others
     };
   }
   if (platform === 'win32') {
-    return { camera: systemPreferences.getMediaAccessStatus('camera'), microphone: systemPreferences.getMediaAccessStatus('microphone') };
+    return { camera: systemPreferences.getMediaAccessStatus('camera'), microphone: systemPreferences.getMediaAccessStatus('microphone'), ...others };
   }
   // Linux has no per-app switch for these.
   return { camera: 'granted', microphone: 'granted' };
 }
 
-export function readPermissions(platform = process.platform) {
+export function readPermissions(platform = process.platform, others = {}) {
   // Run on npm's own Electron.app rather than Jester.app, it's "Electron" that macOS lists and asks about.
-  return permissionItems(platform, readStatuses(platform), { listedAs: listedAsFor(process.execPath, platform) });
+  return permissionItems(platform, readStatuses(platform, others), { listedAs: listedAsFor(process.execPath, platform) });
 }
 
 /** Shows the OS prompt where there is one; resolves when it is answered. */

@@ -9,6 +9,7 @@
  *   npm run dist-check -- --models <dir>    real models already on this computer: he must load them and listen
  *   npm run dist-check -- --real-models     fetch the real ones (about 500 MB) as a new user's would, then listen
  *   npm run dist-check -- --app <path>      another copy than dist/'s (the executable, or a .app)
+ *   npm run dist-check -- --fresh           with no settings at all, as on a new computer: gestures must start off
  *
  * Nothing of the user's is touched: a data folder under the system's temp one, no camera or mic (JESTER_FAKE_MEDIA),
  * no real input (JESTER_DRIVER_DRY), no link to Chrome, and windows that open faint and unfocused (JESTER_QUIET).
@@ -73,8 +74,9 @@ async function pretendModels() {
 }
 
 // He's set to listen, as someone who's pressed the microphone under the orb has him: with real models, that loads them.
-const listens = real || !!given;
-fs.writeFileSync(path.join(scratch, 'storage-local.json'), JSON.stringify({ settings: { enabled: true, voiceEnabled: true, continuousAssistant: listens, gesturesEnabled: true } }));
+const fresh = args.includes('--fresh');
+const listens = !fresh && (real || !!given);
+if (!fresh) fs.writeFileSync(path.join(scratch, 'storage-local.json'), JSON.stringify({ settings: { enabled: true, voiceEnabled: true, continuousAssistant: listens, gesturesEnabled: true } }));
 
 const served = real || given ? null : await pretendModels();
 const env = {
@@ -99,7 +101,9 @@ const wanted = [
   { name: 'the extension’s engine page loaded and reported', line: /^\[jester\] status \w+/m },
   ...fetched,
   ...(listens ? [{ name: 'he’s listening', line: /continuous assistant: listening/ }, { name: 'the recognizer loaded (sherpa-onnx)', line: /speech loaded: / }] : []),
-  { name: 'the engine is running on the pretend camera', line: /^\[jester\] status running/m, soft: true },
+  ...(fresh
+    ? [{ name: 'a new Jester starts with gestures off: the camera isn’t opened', line: /^\[jester\] status off Gestures off/m }]
+    : [{ name: 'the engine is running on the pretend camera', line: /^\[jester\] status running/m, soft: true }]),
   ...(listens ? [{ name: 'his own voice loaded (Kokoro)', line: /voice loaded: Kokoro/, soft: true }] : [])
 ];
 /** What it must never say. */

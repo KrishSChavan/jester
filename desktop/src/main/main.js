@@ -87,7 +87,7 @@ import { CHECK_MS, createMail, mailCard, mailLine } from './mail.js';
 import { createPhone } from './phone.js';
 import { createPresence, DAY_STARTS, dayOf, macScreenKeptAwake } from './presence.js';
 import { createSteady, steerBy } from './pointer-math.js';
-import { missingFor } from './permission-list.js';
+import { allowedIn, listedAsFor, missingFor, PERMISSIONS, refusal } from './permission-list.js';
 import { createRing } from './ring.js';
 import { createRingPage } from './ring-page.js';
 import { loadConnections } from '../../../jester-extension/src/common/credentials.js';
@@ -480,10 +480,14 @@ function dayState() {
   };
 }
 
-/** A first launch stores the desktop defaults, so every later save starts from them. */
+/**
+ * A first launch stores the desktop defaults, so every later save starts from them. A new Jester starts with his
+ * voice alone (the user, 2026-11-19): gestures, and so the camera, are off until they're turned on, which is when
+ * the camera is asked for. Whoever already has settings keeps them as they are.
+ */
 async function seedSettings() {
   const { settings } = await storage.local.get('settings');
-  if (!settings) await storage.local.set({ settings: desktopSettings(undefined) });
+  if (!settings) await storage.local.set({ settings: { ...desktopSettings(undefined), gesturesEnabled: false } });
 }
 
 function desktopState() {
@@ -585,6 +589,7 @@ function fetchFirstModels() {
 }
 
 async function refresh() {
+  const before = settings;
   settings = await loadSettings();
   speech?.setModel(settings.speechModel);
   speech?.setEnabled(settings.enabled && settings.voiceEnabled);
@@ -595,6 +600,7 @@ async function refresh() {
   speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned);
   // Voices he wasn't sure of, kept for tuning only when the user's said to (Settings › Assistant and voice).
   speech?.setKeeping(settings.keepUnsureSpeech === true ? path.join(app.getPath('userData'), 'heard') : '');
+  askForWhatsOn(before);
   updateListening();
   openVault();
   followLocation();
@@ -659,6 +665,9 @@ async function learnVoice(voice) {
 
 /** Starts teaching him the user's voice: they read each line, and what they read comes back here. */
 function teachVoice() {
+  // Never asked for the microphone: macOS asks now, and Teach is pressed again once it's answered.
+  const mic = need('microphone');
+  if (mic) return mic.note;
   if (voiceProblem()) return voiceProblem();
   clearTimeout(teaching?.limit);
   teaching = { takes: [], limit: setTimeout(() => stopTeaching(), TEACHING_MS) };
@@ -1262,6 +1271,8 @@ async function setupState() {
   const model = saved.length > 0 || !!local?.model;
   const steps = setupSteps({
     missing: missingFor(permissions, settings).map((item) => item.label),
+    os: OS_NAME,
+    gestures: settings?.gesturesEnabled !== false,
     model,
     // A key pasted and saved for actions alone: he still can't answer, and the list says why.
     otherModel: !model && ((await loadConnections().catch(() => [])) || []).length > 0,
@@ -1428,10 +1439,182 @@ function syncBriefs() {
   for (const job of wanted) if (!checkinsTold[job.id] && jobs.find((item) => item.id === job.id)?.at !== job.at) clock.add({ ...job, kind: 'checkin' });
 }
 
+/**
+ * For a test (live-check's `permissions`): JESTER_PRETEND_REFUSED=accessibility,microphone has these read as refused,
+ * and macOS's own questions and System Settings logged rather than opened. Read when it's wanted, so one run can
+ * refuse and then allow.
+ */
+const pretendRefused = (id) => String(env.JESTER_PRETEND_REFUSED || '').split(',').includes(id);
+
 /** macOS drops synthetic input silently until Accessibility is allowed. */
 function canPost() {
+  if (pretendRefused('accessibility')) return false;
   if (env.JESTER_DRIVER_DRY || process.platform !== 'darwin') return true;
   return !!permissions.find((item) => item.id === 'accessibility')?.granted;
+}
+
+// ---------------------------------------------------------------------------
+// Permissions, asked for as they're needed
+// ---------------------------------------------------------------------------
+//
+// Nothing is asked for up front (the user, 2026-11-19: "ask for all the permissions he needs as people need it,
+// and if he is asked to do something that needs permissions he does not have have him say so and point the person
+// to where in settings"). Each is asked for when what needs it is switched on or first used, and one he's asked to
+// use and hasn't got is said, with where it's allowed (permission-list.js `refusal`).
+
+/** macOS's version (15 is Sequoia, which renamed a pane), for saying where a permission is allowed. */
+const MAC_MAJOR = process.platform === 'darwin' ? Number(String(process.getSystemVersion?.() || '').split('.')[0]) || 15 : 0;
+/** Asked of the OS since he started: its own question comes up once, and after that he says where it's allowed. */
+const askedOs = new Set();
+/** Panes of the OS's settings he's opened since he started: once each, not at every request. */
+const openedPane = new Set();
+/** This Mac's Location Services (mac-location.js), or null: not a Mac, or its module didn't load. */
+let macLocation = null;
+/** His server has asked this Mac where it is (handsAsked): Location is in use here, whatever this Mac's own Settings say. */
+let whereAsked = false;
+
+/** What Electron can't read of the permissions, and he knows himself (permissions.js `others`). */
+function otherStatuses() {
+  const others = {};
+  if (macLocation && (settings?.locationSource === 'here' || whereAsked)) {
+    others.location = { allowed: 'granted', 'not-determined': 'not-determined', denied: 'denied', restricted: 'restricted', off: 'denied' }[macLocation.status()] || 'unknown';
+  } else if (process.platform === 'win32' && settings?.locationSource === 'here') {
+    const where = whereabouts?.state();
+    if (where?.problem === 'denied') others.location = 'denied';
+    else if (where?.at) others.location = 'granted';
+  }
+  const bluetooth = watch?.state?.bluetooth;
+  if (settings?.watchEnabled && (bluetooth === 'on' || bluetooth === 'denied')) others.bluetooth = bluetooth === 'on' ? 'granted' : 'denied';
+  if (vaultProblem === 'denied') others.files = 'denied';
+  return others;
+}
+
+/** His window, in front: macOS only puts some of its questions (Location's) to an app that is. Once since he started. */
+let cameForward = false;
+async function comeForward() {
+  if (cameForward || env.JESTER_QUIET) return;
+  cameForward = true;
+  showHome();
+  app.focus({ steal: true });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+}
+
+/** macOS's own question for a permission, once since he started; the list is read again when it's answered. */
+function askOs(id) {
+  if (env.JESTER_PRETEND_REFUSED) return void log('permission: would ask macOS for', id);
+  if (askedOs.has(id) || process.platform !== 'darwin') return false;
+  askedOs.add(id);
+  log('permission: asking macOS for', id);
+  // Location's question is put, with him in front, by asking for a position (mac-location.js).
+  const asked = id === 'location' ? locateHere?.({ timeoutMs: 90000 }) : requestPermission(id);
+  Promise.resolve(asked)
+    .catch(() => undefined)
+    .then(() => {
+      checkPermissions();
+      if (id === 'location') whereabouts?.locate({ patient: true }).then(() => noteWeather());
+    });
+  return true;
+}
+
+/**
+ * A permission that something just asked of him needs: null when he has it (or the OS has no such switch), else what
+ * to tell whoever asked ({say, note, where}: permission-list.js `refusal`), having done what can be done about it.
+ * Never answered, macOS's own question is put up, which it does once only. Refused, or switched on only in System
+ * Settings (Accessibility, the screen), the pane it's allowed in is opened, once since he started, when `open`:
+ * they asked for this just now, by a word or a click, rather than his only starting up with it switched on.
+ * @param {'camera'|'microphone'|'accessibility'|'screen'|'location'|'bluetooth'|'files'} id
+ * @param {{open?:boolean}} [options]
+ */
+function need(id, { open = true } = {}) {
+  if (SERVER) return null;
+  const pretend = pretendRefused(id);
+  if (!pretend && env.JESTER_FAKE_MEDIA && (id === 'camera' || id === 'microphone')) return null;
+  if (!pretend && env.JESTER_DRIVER_DRY && id === 'accessibility') return null;
+  const status = pretend ? 'denied' : readStatuses(process.platform, otherStatuses())[id];
+  // Windows has a switch for the camera, the microphone and location, and nothing to say about the rest.
+  if (status === 'granted' || !status || (process.platform !== 'darwin' && status !== 'denied')) return null;
+  const listedAs = listedAsFor(process.execPath, process.platform);
+  const words = (asking) => refusal(id, { asking, listedAs, macMajor: MAC_MAJOR });
+  if (process.platform === 'darwin' || pretend) {
+    // Never answered: macOS asks, there and then, with Allow and Don't Allow.
+    if (status === 'not-determined' && ['camera', 'microphone', 'location'].includes(id)) {
+      askOs(id);
+      return words(true);
+    }
+    // Accessibility and the screen are switched on in System Settings: asking macOS is what lists him there.
+    if (id === 'accessibility' || id === 'screen') askOs(id);
+  }
+  if (open && env.JESTER_PRETEND_REFUSED) log('permission: would open the settings for', id);
+  else if (open && !openedPane.has(id)) {
+    openedPane.add(id);
+    log('permission: opening the settings for', id);
+    openSettings(id);
+  }
+  return words(false);
+}
+
+/**
+ * What's switched on that the OS hasn't allowed, each with where it's allowed: for his prompt (abilities.js
+ * `blocked`), so what he says he can do is what he can, and asked for the rest he says where it's switched on.
+ * Location isn't here: why there's no position is told with the turn (situation.js nowhereLine).
+ */
+async function blockedNow() {
+  if (SERVER) return {};
+  const where = (id) => allowedIn(id, process.platform, { macMajor: MAC_MAJOR });
+  const blocked = {};
+  if (!canPost()) blocked.accessibility = where('accessibility');
+  if (pretendRefused('microphone') || (settings?.voiceEnabled && !mediaAllowed('audio'))) blocked.microphone = where('microphone');
+  if (settings?.gesturesEnabled !== false && !mediaAllowed('video')) blocked.camera = where('camera');
+  if (vaultProblem === 'denied') blocked.files = where('files');
+  if (settings?.watchEnabled && watch?.state?.bluetooth === 'denied') blocked.bluetooth = where('bluetooth');
+  // A picture is only missed by a model that could have read one, with pictures left on.
+  if (process.platform === 'darwin' && settings?.agentScreenshots !== false && readStatuses().screen !== 'granted' && (await assistant?.sees?.().catch(() => false))) blocked.screen = where('screen');
+  return blocked;
+}
+const OS_NAME = process.platform === 'darwin' ? 'macOS' : process.platform === 'win32' ? 'Windows' : 'The computer';
+
+/** Why he can't click, type or read the screen, for whoever just asked him to; '' when he can. */
+const inputRefusal = ({ open = true, form = 'say' } = {}) => (canPost() ? '' : need('accessibility', { open })?.[form] || '');
+
+/** What each of these needs switched on, by what's on in Settings. */
+function wantedNow(set, also = {}) {
+  if (!set?.enabled) return {};
+  return {
+    camera: set.gesturesEnabled !== false || !!set.pointerEnabled,
+    microphone: !!set.voiceEnabled && (!!set.continuousAssistant || !!also.teaching),
+    // The pointer is the real cursor, moved for them.
+    accessibility: !!set.pointerEnabled
+  };
+}
+
+/**
+ * What's switched on and needs what the OS hasn't given. Starting up with it on, macOS's question is put if it's
+ * never been answered, and no more than that. Thrown just now (`before`: the settings as they were), he also says
+ * where it's allowed when it's been refused, and opens it there.
+ */
+function askForWhatsOn(before) {
+  if (SERVER || !settings) return;
+  const now = wantedNow(settings, { teaching });
+  const was = before ? wantedNow(before) : null;
+  for (const id of ['camera', 'microphone', 'accessibility']) {
+    if (!now[id]) continue;
+    const thrown = !!was && !was[id];
+    const words = need(id, { open: thrown });
+    if (words && thrown) overlays?.toast(PERMISSIONS[id].label, { tone: 'warn', detail: words.note });
+  }
+}
+
+/**
+ * A picture of the window is wanted for the first time (a model that reads pictures is about to work, and pictures
+ * aren't turned off) and macOS has never been asked for the screen: asked now, once ever, as that's when it's needed.
+ * Refused, the task goes on from the window's words, as it always could.
+ */
+async function askForPictures() {
+  if (process.platform !== 'darwin' || settings?.agentScreenshots === false || readStatuses().screen === 'granted') return;
+  if (askedOs.has('screen') || (await storage.local.get('askedScreen')).askedScreen) return;
+  if (!(await assistant?.sees?.().catch(() => false))) return;
+  await storage.local.set({ askedScreen: Date.now() });
+  askOs('screen');
 }
 
 /** One report from the watch: asleep means a full stop for it too. */
@@ -1443,7 +1626,7 @@ function onWatchReport(report) {
     toggleVoice();
   }
   if (report.talk || report.steering || report.click) presence?.seen('watch');
-  const refused = !report.steering ? '' : engine.state === ENGINE.SLEEPING ? `Jester is asleep: ${wakeWords()}` : canPost() ? '' : 'Allow Accessibility in Jester’s Settings first';
+  const refused = !report.steering ? '' : engine.state === ENGINE.SLEEPING ? `Jester is asleep: ${wakeWords()}` : inputRefusal({ open: false, form: 'note' });
   if (refused && refused !== watchRefused) overlays.toast(refused, { tone: 'warn' });
   watchRefused = refused;
   if (refused) return pointer.nudge({ steering: false });
@@ -1570,7 +1753,7 @@ function voiceProblem({ mic = true } = {}) {
   if (!settings.voiceEnabled) return 'Voice commands are off in Jester’s Settings';
   if (engine.state === ENGINE.SLEEPING) return `Jester is asleep: ${wakeWords()}`;
   if (voiceState() === 'missing') return modelsState()?.words || 'What he hears with isn’t downloaded yet (Settings › General)';
-  if (mic && !mediaAllowed('audio')) return 'Allow the Microphone in Jester’s Settings first';
+  if (mic && !mediaAllowed('audio')) return refusal('microphone', { listedAs: listedAsFor(process.execPath, process.platform), macMajor: MAC_MAJOR }).note;
   return '';
 }
 
@@ -1599,14 +1782,16 @@ function toggleVoice() {
   if (problem) return overlays?.toast('Voice commands', { tone: 'warn', detail: problem });
   if (!mediaAllowed('audio')) {
     // Not asked yet: the first command asks macOS, and goes ahead if allowed.
-    if (process.platform === 'darwin' && readStatuses().microphone === 'not-determined') {
+    if (process.platform === 'darwin' && readStatuses().microphone === 'not-determined' && !askedOs.has('microphone')) {
+      askedOs.add('microphone');
       requestPermission('microphone').then((granted) => {
         checkPermissions();
         if (granted) toggleVoice();
       });
       return;
     }
-    return overlays?.toast('Voice commands', { tone: 'warn', detail: voiceProblem() });
+    // Refused: where it's allowed, said and opened.
+    return overlays?.toast('Voice commands', { tone: 'warn', detail: need('microphone')?.note || voiceProblem() });
   }
   conversation.hush();
   voiceRunner.prepare();
@@ -1682,7 +1867,7 @@ function watchFront() {
 function checkPermissions() {
   const before = JSON.stringify(permissions);
   const cameraBefore = permissions.find((item) => item.id === 'camera')?.granted;
-  permissions = readPermissions();
+  permissions = readPermissions(process.platform, otherStatuses());
   if (JSON.stringify(permissions) === before) return;
   const cameraNow = permissions.find((item) => item.id === 'camera')?.granted;
   // The engine checked the camera when it started and stopped there: start it again.
@@ -1869,7 +2054,9 @@ function listenToPages() {
         researchPresentation.sync();
         return desktopState();
       case 'jester/desktop-permission':
-        if (message.action === 'request') await requestPermission(String(message.id));
+        // Location's question is put by asking for a position, with him in front (mac-location.js).
+        if (message.action === 'request' && message.id === 'location') await locateHere?.({ timeoutMs: 60000 }).then(() => whereabouts?.locate({ patient: true }).then(() => noteWeather()));
+        else if (message.action === 'request') await requestPermission(String(message.id));
         else if (message.action === 'open-settings') openSettings(String(message.id));
         checkPermissions();
         return desktopState();
@@ -2762,7 +2949,9 @@ async function refreshMacAbilities() {
     pictures: await assistant.canSee().catch(() => false),
     gestures: settings?.gesturesEnabled !== false,
     watch: !!watch?.state?.paired,
-    scripts: (scripts?.count || 0) > 0
+    scripts: (scripts?.count || 0) > 0,
+    blocked: await blockedNow().catch(() => ({})),
+    os: OS_NAME
   };
 }
 
@@ -2794,8 +2983,9 @@ async function handsAsked(frame) {
     // Where this Mac is, for the server: the user's using it, or his website in its window (device-location.js).
     case 'where': {
       if (!locateHere) return { ok: false, code: 2 };
+      whereAsked = true;
       const got = await locateHere({ timeoutMs: Math.min(Math.max(Number(frame.timeoutMs) || 25000, 5000), 90000) });
-      return got?.ok ? { ok: true, lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0 } : { ok: false, code: got?.code || 2, message: String(got?.message || '').slice(0, 200) };
+      return got?.ok ? { ok: true, lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0 } : { ok: false, code: got?.code || 2, message: String(got?.message || '').slice(0, 200), ...(got?.asking ? { asking: true } : {}) };
     }
     // A switch of this Mac's Jester thrown from his website (the phone as a remote), or its task stopped.
     case 'set': {
@@ -2819,7 +3009,33 @@ async function handsAsked(frame) {
   }
 }
 
+/**
+ * A downloaded Jester opened where it landed (the disk image, or Downloads): macOS runs it from a throwaway copy
+ * there, and he'd be found by neither Spotlight nor Launchpad. Offered, once each start, to be moved to Applications,
+ * where he's started again from. True when he's been moved and this copy is quitting.
+ */
+async function offerToMove() {
+  if (!PACKAGED || process.platform !== 'darwin' || env.JESTER_DATA_DIR || app.isInApplicationsFolder()) return false;
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    message: 'Move Jester to your Applications folder?',
+    detail: 'He works best from there: macOS remembers what you’ve allowed him, and he’s where Spotlight and Launchpad look.',
+    buttons: ['Move to Applications', 'Not now'],
+    defaultId: 0,
+    cancelId: 1
+  });
+  if (response !== 0) return false;
+  try {
+    // One already there is replaced, unless it's running.
+    return app.moveToApplicationsFolder({ conflictHandler: (conflict) => conflict === 'exists' });
+  } catch (err) {
+    dialog.showErrorBox('Jester couldn’t be moved', `Drag Jester into your Applications folder yourself, then open him from there. (${err.message})`);
+    return false;
+  }
+}
+
 async function start() {
+  if (await offerToMove()) return;
   log(`Jester ${app.getVersion()}, ${PACKAGED ? 'installed' : 'from a checkout'} · ${process.platform} ${process.arch} · Electron ${process.versions.electron} · models in ${MODELS_DIR}`);
   if (!env.JESTER_KEEP_DOCK) app.dock?.hide();
   if (['light', 'dark'].includes(env.JESTER_THEME)) nativeTheme.themeSource = env.JESTER_THEME;
@@ -2838,7 +3054,7 @@ async function start() {
   await seedSettings();
   installMediaPermissions();
   // A server asks no OS for a camera or a mic: browsers ask for their own.
-  permissions = SERVER ? [] : readPermissions();
+  permissions = SERVER ? [] : readPermissions(process.platform, otherStatuses());
   if (SERVER) startWebGateway();
   // "Use Jester in the cloud": set in Settings, taken up at launch (changing it restarts him).
   else cloudTarget = parseCloudLink((await storage.local.get('cloudBrain')).cloudBrain?.link);
@@ -2902,7 +3118,9 @@ async function start() {
       return driver.call(cmd, ...rest).finally(done);
     }
   };
-  dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, onJester, toast: (text, options) => overlays.toast(text, options), log });
+  // A gesture that needs Accessibility: macOS's question the first time, and where it's allowed on the toast. Not
+  // System Settings thrown open, for what may have been a hand at rest.
+  dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, refused: () => inputRefusal({ open: false, form: 'note' }), onJester, toast: (text, options) => overlays.toast(text, options), log });
   // Switched on by refresh(), from the settings.
   speech = startSpeech({ log });
   modelFetcher = createModelFetcher({ dir: MODELS_DIR, log, onChange: modelsChanged, ...(env.JESTER_MODELS_URL ? { models: modelsAt(env.JESTER_MODELS_URL) } : {}) });
@@ -2930,7 +3148,11 @@ async function start() {
     quietly: (task) => overlays.whileHidden(task),
     // A picture of the window, when its words aren't enough: with Screen Recording allowed, and not turned off in Settings.
     picture: windowShot(),
-    onBusy: (busy, task) => researchPresentation.busy(busy, task),
+    onBusy: (busy, task) => {
+      // A task's beginning: the moment a picture of the window may first be wanted.
+      if (busy) void askForPictures().catch(() => undefined);
+      return researchPresentation.busy(busy, task);
+    },
     onVoice: (voice, task) => researchPresentation.voice(voice, task),
     onResearch: (state, task) => researchPresentation.update(state, { owner: task, stop: () => assistant.cancel(task) }),
     log,
@@ -2982,6 +3204,8 @@ async function start() {
     driver: input,
     dispatch,
     canPost,
+    // Asked to click or type without Accessibility: macOS's question, System Settings at the pane, and what he says.
+    whyNoInput: () => inputRefusal(),
     onJester,
     run: runTool,
     log,
@@ -3066,8 +3290,8 @@ async function start() {
   weather = createWeather({ log });
   // A Mac asks Location Services itself, as Jester: the first time, macOS asks whether "Jester" may know, and a
   // position waits for that answer, so it's first asked from Settings (90 s).
-  const macLocation = loadMacLocation({ log, ...(BIN ? { file: path.join(BIN, 'jester-location.node') } : {}) });
-  locateHere = macLocation ? createMacLocate({ native: macLocation }) : locateByPage;
+  macLocation = loadMacLocation({ log, ...(BIN ? { file: path.join(BIN, 'jester-location.node') } : {}) });
+  locateHere = macLocation ? createMacLocate({ native: macLocation, front: comeForward }) : locateByPage;
   // On a server, "where you are" is where the device being used is: its browser's, or the Mac's (device-location.js).
   whereabouts = createWhereabouts({
     locate: SERVER ? (options) => deviceLocate?.locate(options) ?? { ok: false, code: 2 } : locateHere,
@@ -3103,6 +3327,7 @@ async function start() {
     calendars,
     units: () => unitsFor(settings?.weatherUnits, app.getLocaleCountryCode()),
     computer: process.platform === 'darwin' ? 'Mac' : 'computer',
+    server: SERVER,
     presence,
     tasks,
     // New mail that looked worth telling, once Gmail's connected (made further down).
@@ -3256,7 +3481,10 @@ async function start() {
       phone: phoneReady(),
       scripts: (scripts?.count || 0) > 0,
       mail: !!google?.signedIn,
-      computer: process.platform === 'darwin' ? 'Mac' : 'computer'
+      computer: process.platform === 'darwin' ? 'Mac' : 'computer',
+      // What the OS hasn't allowed of what's switched on, and where it's allowed: said when he's asked for it.
+      blocked: await blockedNow(),
+      os: OS_NAME
     }),
     assistant: SERVER ? hands.assistant : assistant,
     show: (frame) => showConversation(frame, key),

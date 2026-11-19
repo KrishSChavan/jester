@@ -203,6 +203,8 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
 
     /** Whether a task could be shown a picture of a window: one can be taken, and a model for actions reads it. */
     canSee: async () => host.canPicture() && (await model.canSee().catch(() => false)),
+    /** A model ticked for actions reads pictures, whether or not one may be taken here (main.js askForPictures). */
+    sees: () => model.canSee().catch(() => false),
 
     /** Whether a question is waiting on the user. */
     get asking() {

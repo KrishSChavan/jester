@@ -34,7 +34,8 @@ export function positionFrom(answer, client) {
   if (answer?.ok === true && Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
     return { ok: true, lat, lon, accuracy: Math.max(0, Number(answer.accuracy) || 0), device: deviceName(client?.agent), key: `page-${client?.id}` };
   }
-  return { ok: false, code: [1, 2, 3].includes(answer?.code) ? answer.code : 2, message: String(answer?.message || '').slice(0, 200) };
+  // `asking`: the browser's own question about this site was still up, or waiting on a tap, when time ran out.
+  return { ok: false, code: [1, 2, 3].includes(answer?.code) ? answer.code : 2, message: String(answer?.message || '').slice(0, 200), ...(answer?.asking === true ? { asking: true } : {}) };
 }
 
 /**
@@ -65,25 +66,27 @@ export function createDeviceLocate({ gateway, hands, log = () => undefined }) {
     },
 
     /** whereabouts.js's `locate`: the device being used, asked where it is. */
-    async locate({ timeoutMs = 25000 } = {}) {
+    async locate({ timeoutMs = 25000, patient = false } = {}) {
       const client = current();
       if (!client) return { ok: false, code: 2, message: 'No device is using Jester just now.' };
       if (isMac(client)) {
         const got = await hands.where(timeoutMs, client.role === 'mac' ? String(client.device?.id || '') : '');
-        return got?.ok ? { ...got, device: 'your Mac', key: 'mac' } : { ok: false, code: got?.code || 2, message: got?.message || '' };
+        return got?.ok ? { ...got, device: 'your Mac', key: 'mac' } : { ok: false, code: got?.code || 2, message: got?.message || '', ...(got?.asking === true ? { asking: true } : {}) };
       }
       const id = `where-${++nextId}`;
       return new Promise((resolve) => {
         const timer = setTimeout(() => {
           waiting.delete(id);
           log('location: the device didn’t say in time');
-          resolve({ ok: false, code: 3, message: '' });
+          // No word at all: most likely its browser's question, up and unanswered.
+          resolve({ ok: false, code: 3, message: '', asking: true });
         }, timeoutMs);
         timer.unref?.();
         waiting.set(id, { resolve, timer, client });
         // Its browser asks the user, the first time, whether the site may know: a little less than the wait, so a
         // late answer is still its own.
-        client.message({ type: 'jester/where-ask', id, timeoutMs: Math.max(3000, timeoutMs - 2000) }, SENDER);
+        // `sure`: asked for from Settings, on purpose, so it's put to them even after a "Not now".
+        client.message({ type: 'jester/where-ask', id, timeoutMs: Math.max(3000, timeoutMs - 2000), ...(patient ? { sure: true } : {}) }, SENDER);
       });
     },
 

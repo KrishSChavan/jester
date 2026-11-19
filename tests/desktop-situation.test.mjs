@@ -6,7 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { combine, createCalendars, feedUrl, instantOf, ownerOf, readFeed, siteOf } from '../desktop/src/main/calendars.js';
 import { askModel, createConversation, personaPrompt } from '../desktop/src/main/conversation.js';
-import { asksAbout, createSituation, dayName, eventLine, placeAsked, scheduleRange } from '../desktop/src/main/situation.js';
+import { asksAbout, createSituation, dayName, eventLine, placeAsked, scheduleRange, nowhereLine } from '../desktop/src/main/situation.js';
 import { createWeather, pickPlace, placeName, unitsFor, weatherLines } from '../desktop/src/main/weather.js';
 import { addressOf, createWhereabouts, distance, placeParts, townOf } from '../desktop/src/main/whereabouts.js';
 
@@ -505,7 +505,7 @@ function situationOf({ source = 'here', events = [], unread = [], here, problem 
     between: (from, to) => combined.filter((event) => event.start < to && Math.max(event.end, event.start + 1) > from),
     nextAfter: (at) => combined.find((event) => event.start >= at) || null
   };
-  return { asked, situation: createSituation({ whereabouts, weather, calendars, units: () => 'fahrenheit', computer: 'Mac', now: () => NOW }) };
+  return { asked, situation: createSituation({ whereabouts, weather, calendars, units: () => 'fahrenheit', computer: 'Mac', platform: 'darwin', now: () => NOW }) };
 }
 
 test('what he’s told: the town, the weather now and today, the next two days; more when the words ask', async () => {
@@ -553,8 +553,24 @@ test('what he’s told: the town, the weather now and today, the next two days; 
   assert.equal(missing.untrusted, false);
   // No position: said so, and no weather made up.
   const denied = await situationOf({ here: null, problem: 'denied' }).situation.brief('is it cold out?');
-  assert.match(denied.block, /^Where the user is isn't known: this Mac's Location Services are off for Jester, so neither is the weather there\./);
+  // And why, with where it's allowed: asked for the weather, he says what's in the way rather than that he doesn't know.
+  assert.match(denied.block, /^Where the user is isn’t known, so neither is the weather there: macOS hasn’t allowed Jester this Mac’s location\. If what they asked needs it, tell them it’s switched on in System Settings › Privacy & Security › Location Services, where Jester is in the list\./);
   assert.doesNotMatch(denied.block, /°F/);
+  // macOS's question still up: that's what he's told, and to have them answer it.
+  const asking = await situationOf({ here: null, problem: 'asking' }).situation.brief('is it cold out?');
+  assert.match(asking.block, /^Where the user is isn’t known yet, so neither is the weather there: macOS is asking them, now, whether Jester may use this Mac’s location\. If what they asked needs it, tell them to choose Allow on that question, then ask again\./);
+});
+
+test('why there’s no position is said for where he runs: a Mac, Windows, or his server asking the device in use', () => {
+  assert.match(nowhereLine('denied', { computer: 'computer', platform: 'win32' }), /Windows hasn’t allowed Jester this computer’s location\. .* Windows Settings › Privacy & security › Location, where desktop apps are let use it\.$/);
+  assert.match(nowhereLine('asking', { computer: 'computer', platform: 'win32' }), /Windows is asking them, now/);
+  assert.equal(nowhereLine('timeout', { computer: 'Mac', platform: 'darwin' }), 'Where the user is isn’t known just now, so neither is the weather there: this Mac couldn’t find its location.');
+  assert.equal(nowhereLine('', { computer: 'Mac', platform: 'darwin' }), nowhereLine('unavailable', { computer: 'Mac', platform: 'darwin' }));
+  // His server: it's the device being used that has to allow it, a browser's question or the Mac's.
+  const server = (problem) => nowhereLine(problem, { server: true });
+  assert.match(server('asking'), /the device they’re using has to allow it first, and it’s asking them now\. .* press Allow location at the bottom of Jester’s page and choose Allow \(on their Mac, to answer macOS’s question\), then ask again\.$/);
+  assert.match(server('denied'), /hasn’t let Jester know where it is\. .* in their browser’s settings for this site, under Location .* on their Mac, Jester in System Settings › Privacy & Security › Location Services\.$/);
+  assert.match(server('unavailable'), /the device they’re using couldn’t find its location\.$/);
 });
 
 test('with nothing connected his prompt is what it was; connected, he answers the weather and his day himself', () => {

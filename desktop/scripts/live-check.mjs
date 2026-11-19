@@ -40,6 +40,9 @@
  *            card, the model picking which by number; "any new email?" answered from it; and Google signing him out
  *            said once. Nothing real is signed in to, read or sent.
  *   setup    Getting started says what's needed and what can be added, each with where it's done, and how it stands.
+ *   permissions  asked to type, or to do a task by hand, without Accessibility, he says what's missing and where
+ *            it's switched on, macOS is asked and its settings opened there (logged, not done), and his model is told;
+ *            allowed again, the same words are done.
  *   ring     a timer that's up is said and then rings: a pill with its name and a Stop, its card in his window
  *            saying Ringing; a click on either stops it, and so does talking to him. Silent here.
  *   models   paid models are asked before free ones; a paid one that fails is covered for by the free one, and
@@ -495,10 +498,10 @@ if (process.argv[2] === 'serve') {
     async setup() {
       const state = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/setup' });`);
       const by = Object.fromEntries((state.steps || []).map((step) => [step.id, step]));
-      check('Getting started lists what’s needed and what can be added, each with where it’s done', state.ok && state.steps.length === 11 && by.model.required && !by.listening.required && by.model.go === 'settings/models' && !by.mail.required && by.mail.go === 'settings/mail', JSON.stringify(state.steps?.map((step) => [step.id, step.done])));
+      check('Getting started lists what’s needed and what can be added, each with where it’s done', state.ok && state.steps.length === 12 && by.model.required && !by.listening.required && by.model.go === 'settings/models' && !by.mail.required && by.mail.go === 'settings/mail', JSON.stringify(state.steps?.map((step) => [step.id, step.done])));
       check('it knows what’s there already: a model, and a vault', by.model.done === true && by.vault.done === true && by.mail.done === false && by.phone.done === false, JSON.stringify([by.model.done, by.vault.done, by.mail.done, by.phone.done]));
       await inPage(`window.jesterHome.go('setup', { instant: true });`);
-      const rows = await until('the Getting started screen', () => inPage(`const rows = [...document.querySelectorAll('#setup-list > *')].map((el) => el.tagName === 'H2' ? '# ' + el.textContent : (el.classList.contains('done') ? '[x] ' : '[ ] ') + el.querySelector('.title').textContent + ' > ' + el.querySelector('button').dataset.go); return rows.length > 11 ? rows : null;`));
+      const rows = await until('the Getting started screen', () => inPage(`const rows = [...document.querySelectorAll('#setup-list > *')].map((el) => el.tagName === 'H2' ? '# ' + el.textContent : (el.classList.contains('done') ? '[x] ' : '[ ] ') + el.querySelector('.title').textContent + ' > ' + el.querySelector('button').dataset.go); return rows.length > 12 ? rows : null;`));
       check('his window draws it: needed first, then what’s optional, ticked where done', rows[0] === '# Needed' && rows.includes('[x] Give him a model to think with > settings/models') && rows.includes('# When you want them') && rows.includes('[ ] Your email > settings/mail') && rows.includes('[x] A place for what he remembers > settings/memory'), JSON.stringify(rows));
       const words = await inPage(`return [document.getElementById('setup-words').textContent, document.getElementById('sum-setup').textContent];`);
       check('and says how it stands, there and in Settings', (state.ready ? /^He’s ready[,:]/.test(words[0]) && /to add$/.test(words[1]) : /left before he’s ready\.$/.test(words[0]) && /left$/.test(words[1])), JSON.stringify(words));
@@ -507,6 +510,42 @@ if (process.argv[2] === 'serve') {
       await until('the Email page', () => inPage(`return location.hash === '#settings/mail';`)).catch(() => undefined);
       check('a step’s button goes to where it’s done', (await inPage(`return location.hash;`)) === '#settings/mail');
       await inPage(`window.jesterHome.go('main', { instant: true });`);
+    },
+
+    /**
+     * Permissions said when they're missing (2026-11-19). Accessibility is pretended refused (JESTER_PRETEND_REFUSED,
+     * which also has macOS's question and System Settings logged rather than opened), and then allowed again.
+     */
+    async permissions({ paid }) {
+      const refusal = /^I can’t click, type or read what’s on the screen: macOS hasn’t allowed it\. Switch \w+ on in System Settings › Privacy & Security › Accessibility, then ask me again\.$/;
+      process.env.JESTER_PRETEND_REFUSED = 'accessibility';
+      try {
+        const from = logLines().length;
+        const typed = await type('type hello world');
+        check('asked to type without Accessibility, he says what’s missing and where it’s switched on', refusal.test(typed), typed);
+        const logged = logLines().slice(from);
+        check('macOS is asked and its settings opened at that pane (logged here, not done)', /would ask macOS for accessibility/.test(logged) && /would open the settings for accessibility/.test(logged), logged.split('\n').filter((line) => /permission/.test(line)).join(' | '));
+        // What the laptop's assistant would do by hand is refused before it starts, not after it fails to see: the
+        // model hands it to the laptop, and no model is asked to plan it.
+        paid.answer = () => ({ say: '', do: 'rename the newest file on my desktop to plans', new: false });
+        const calls = paid.requests.length;
+        const task = await type('rename the newest file on my desktop to plans', { timeoutMs: 30000 });
+        const worked = logLines().slice(from).split('\n').filter((line) => /assistant(?: plan| task| sees|:)/.test(line));
+        check('a task for the laptop’s assistant is refused the same way, before it starts', refusal.test(task) && !worked.length, `${task} ${worked.join(' | ')}`);
+        // And his model is told, so "can you…?" is answered truly.
+        paid.answer = () => ({ say: 'Not yet: Accessibility isn’t allowed.', do: '', new: false });
+        await type('can you click things for me?');
+        const system = lastSystem(paid);
+        check('his model is told what macOS hasn’t allowed and where it’s switched on', paid.requests.length > calls && /Not allowed by macOS yet\./.test(system) && /macOS hasn’t allowed Jester Accessibility, which is switched on in System Settings › Privacy & Security › Accessibility/.test(system) && !/works any app or site the way a person would/.test(system), system.split('\n').filter((line) => /Accessib|Not allowed/.test(line)).join(' | ').slice(0, 400));
+      } finally {
+        delete process.env.JESTER_PRETEND_REFUSED;
+      }
+      paid.answer = () => ({ say: 'Yes, I can.', do: '', new: false });
+      await type('and now, can you click things for me?');
+      check('allowed again, his prompt is as it was', !/Not allowed by macOS yet/.test(lastSystem(paid)) && /works any app or site the way a person would/.test(lastSystem(paid)));
+      const after = await type('type hello world');
+      check('and the same words are done', !/can’t click/.test(after), after);
+      paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
     },
 
     /** Step 11: Gmail, signed in to through a pretend browser and watched in a pretend inbox. */

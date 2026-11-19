@@ -153,12 +153,35 @@ const ago = (ms) => {
 };
 
 /**
+ * Why there's no position, as he's told it, with what would mend it: so asked about the weather or where they are,
+ * he says what's in the way and where it's allowed, rather than that he doesn't know (the user, 2026-11-19).
+ * @param {string} problem  whereabouts.js's: 'asking', 'denied', or anything else for "couldn't just now"
+ * @param {{computer?:string, server?:boolean, platform?:string}} [options]  server: it's the device being used that's asked
+ */
+export function nowhereLine(problem, { computer = 'computer', server = false, platform = process.platform } = {}) {
+  const lead = 'Where the user is isn’t known';
+  const tell = 'If what they asked needs it, tell them';
+  if (server) {
+    if (problem === 'asking') return `${lead} yet, so neither is the weather there: the device they’re using has to allow it first, and it’s asking them now. ${tell} to press Allow location at the bottom of Jester’s page and choose Allow (on their Mac, to answer macOS’s question), then ask again.`;
+    if (problem === 'denied') return `${lead}, so neither is the weather there: the device they’re using hasn’t let Jester know where it is. ${tell} where it’s allowed: in their browser’s settings for this site, under Location (on an iPhone, Settings › Apps › Safari › Location); on their Mac, Jester in System Settings › Privacy & Security › Location Services.`;
+    return `${lead} just now, so neither is the weather there: the device they’re using couldn’t find its location.`;
+  }
+  const os = platform === 'darwin' ? 'macOS' : platform === 'win32' ? 'Windows' : 'The system';
+  const where = platform === 'darwin' ? 'System Settings › Privacy & Security › Location Services, where Jester is in the list' : platform === 'win32' ? 'Windows Settings › Privacy & security › Location, where desktop apps are let use it' : 'the system’s privacy settings';
+  if (problem === 'asking') return `${lead} yet, so neither is the weather there: ${os} is asking them, now, whether Jester may use this ${computer}’s location. ${tell} to choose Allow on that question, then ask again.`;
+  if (problem === 'denied') return `${lead}, so neither is the weather there: ${os} hasn’t allowed Jester this ${computer}’s location. ${tell} it’s switched on in ${where}.`;
+  return `${lead} just now, so neither is the weather there: this ${computer} couldn’t find its location.`;
+}
+
+/**
  * @param {object} deps
  * @param {ReturnType<import('./whereabouts.js').createWhereabouts>} deps.whereabouts
  * @param {ReturnType<import('./weather.js').createWeather>} deps.weather
  * @param {ReturnType<import('./calendars.js').createCalendars>} deps.calendars
  * @param {() => 'fahrenheit'|'celsius'} deps.units
  * @param {string} [deps.computer]  "Mac", or "computer": what he says the location is from
+ * @param {boolean} [deps.server]  on his server: where they are is where the device they're using is
+ * @param {string} [deps.platform]
  * @param {{lines:() => string}} [deps.presence]  when they sat down at the computer (presence.js)
  * @param {{wanted:(text:string) => boolean, lines:() => string}} [deps.mail]  new mail that looked worth telling
  *   (mail.js): told when their words are about their mail. Senders and subjects are other people's words.
@@ -166,14 +189,9 @@ const ago = (ms) => {
  *   (tasks.js): told when their words may be about them
  * @param {() => number} [deps.now]
  */
-export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', presence = null, tasks = null, mail = null, now = Date.now }) {
+export function createSituation({ whereabouts, weather, calendars, units, computer = 'computer', server = false, platform = process.platform, presence = null, tasks = null, mail = null, now = Date.now }) {
   function whereLine(here, asked, at) {
-    if (!here) {
-      const { problem } = whereabouts.state();
-      return problem === 'denied'
-        ? `Where the user is isn't known: this ${computer}'s Location Services are off for Jester, so neither is the weather there.`
-        : `Where the user is isn't known just now: this ${computer} couldn't find its location, so neither is the weather there.`;
-    }
+    if (!here) return nowhereLine(whereabouts.state().problem, { computer, server, platform });
     const from = here.source === 'place' ? 'the place they set in Settings, not a live location' : `this ${computer}'s location`;
     const coords = `${here.lat.toFixed(5)}, ${here.lon.toFixed(5)}`;
     if (!asked) return `Where the user is: ${here.town || `near ${coords}`} (by ${from}).`;

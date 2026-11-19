@@ -71,12 +71,16 @@ export const addressOf = (place) =>
     .filter(Boolean)
     .join(', ');
 
-/** What a failed position says, for Settings and for him. */
+/**
+ * What a failed position says, for Settings and for him. And 'asking': the question of whether Jester may know
+ * (macOS's, or a browser's for his website) is up and hasn't been answered, which is no failure: the next time a
+ * position's wanted it's asked for again at once, rather than after the usual wait.
+ */
 const PROBLEMS = { 1: 'denied', 2: 'unavailable', 3: 'timeout' };
 
 /**
  * @param {object} deps
- * @param {(options:{timeoutMs:number}) => Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, at?:number, code?:number, message?:string}>} deps.locate
+ * @param {(options:{timeoutMs:number}) => Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, at?:number, code?:number, message?:string, asking?:boolean}>} deps.locate
  *   this computer's position (mac-location.js, or main.js locateByPage)
  * @param {() => {source:'off'|'here'|'place', place?:object|null}} deps.setting  what Settings says
  * @param {typeof fetch} [deps.fetchImpl]
@@ -131,10 +135,10 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
     pending ||= (async () => {
       try {
         // Until there's been a position, macOS's question may be up, from whichever asked first.
-        const got = await locate({ timeoutMs: patient || !located ? PATIENT_MS : QUICK_MS });
+        const got = await locate({ timeoutMs: patient || !located ? PATIENT_MS : QUICK_MS, patient });
         if (!got?.ok || !Number.isFinite(got.lat) || !Number.isFinite(got.lon)) {
-          problem = PROBLEMS[got?.code] || got?.message || 'unavailable';
-          failedAt = now();
+          problem = got?.asking ? 'asking' : PROBLEMS[got?.code] || got?.message || 'unavailable';
+          failedAt = got?.asking ? 0 : now();
           failedKey = device?.() || '';
           log('location: none:', problem);
           return null;

@@ -232,6 +232,9 @@ export function forEar(text) {
       .replace(/\[([^\]]+)\]\((?:[^()\s]|\([^()\s]*\))+\)/g, '$1')
       .replace(/\s?\[\d+(?:\s?[,–-]\s?\d+)*\]/g, '')
       .replace(/\s*(?:→|->|⇒|=>|⟶|➔|➡️?)\s*/g, ', then ')
+      // The way to somewhere in Settings, as it's written for the eye: "System Settings › Privacy & Security › Camera".
+      .replace(/\s*[›»]\s*/g, ', then ')
+      .replace(/\s&\s/g, ' and ')
       .replace(/[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{200D}\u{20E3}]/gu, '')
       .replace(/\bhttps?:\/\//gi, '')
       .replace(/\bwww\./gi, '')

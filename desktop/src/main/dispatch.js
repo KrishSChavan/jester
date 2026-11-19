@@ -22,12 +22,13 @@ export function gestureName(source, gesture) {
  * @param {{call: Function}|null} deps.driver
  * @param {() => Promise<object>} deps.getSettings
  * @param {() => boolean} deps.canPost  false until macOS allows Accessibility
+ * @param {(() => string)|null} [deps.refused]  what to say then, with where it's allowed (main.js inputRefusal)
  * @param {(op:string) => void} deps.onJester  voice, calibrate
  * @param {(text:string, options?:object) => void} deps.toast
  * @param {(...parts:any[]) => void} [deps.log]
  * @param {string} [deps.platform]
  */
-export function createDispatcher({ driver, getSettings, canPost, onJester, toast, log = () => undefined, platform = process.platform }) {
+export function createDispatcher({ driver, getSettings, canPost, refused = null, onJester, toast, log = () => undefined, platform = process.platform }) {
   /**
    * `quiet`: no toast — the caller (a voice command) says how it went.
    * @returns {Promise<{plan:object, ok:boolean, label:string, detail:string}>}
@@ -47,7 +48,7 @@ export function createDispatcher({ driver, getSettings, canPost, onJester, toast
       return done(true, '', false);
     }
     if (!driver) return done(false, 'Jester’s input helper is missing. Install Jester again (from a checkout: npm run driver)');
-    if (!canPost()) return done(false, 'Allow Accessibility in Jester’s Settings first');
+    if (!canPost()) return done(false, refused?.() || 'Allow Accessibility in Jester’s Settings first');
     try {
       if (plan.kind === 'key') await driver.call('key', { key: plan.key, modifiers: plan.modifiers });
       else if (plan.kind === 'media') await driver.call('media', { key: plan.key });

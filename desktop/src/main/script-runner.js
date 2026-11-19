@@ -114,7 +114,9 @@ export function createScriptRunner({ folder, manifest, onState = () => undefined
         if (!err) return resolve({ code: 0, out, err: errText });
         if (err.killed || err.signal) return resolve({ code: 124, out, err: `${errText}\n${name} took longer than ${Math.round(timeoutMs / 1000)} seconds, so Jester stopped it.`.trim() });
         if (err.code === 'ENOENT' || err.code === 'EACCES') return resolve({ code: 126, out, err: `Jester couldn’t start ${manifest.run}: ${err.code === 'ENOENT' ? 'what runs it isn’t installed' : 'it isn’t allowed to run'}.` });
-        resolve({ code: Number.isInteger(err.code) ? err.code : 1, out, err: errText || String(err.message || '') });
+        // An AppleScript told to work another app, which macOS hasn't let Jester do: said with where it's allowed.
+        const barred = /-1743\b|Not authorized to send Apple events/i.test(errText) ? `\nmacOS hasn’t let Jester work that app from a script: switch it on under Jester in System Settings › Privacy & Security › Automation, then run it again.` : '';
+        resolve({ code: Number.isInteger(err.code) ? err.code : 1, out, err: `${errText || String(err.message || '')}${barred}` });
       });
     });
   }

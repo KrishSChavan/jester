@@ -97,8 +97,8 @@ function renderPermissions() {
   const items = desktop?.permissions || [];
   const missing = stillMissing();
   $('permissions-intro').textContent = missing.length
-    ? `Jester needs ${missing.map((item) => item.label).join(' and ')} to work. Everything it sees and hears stays on this computer.`
-    : 'Everything Jester needs is allowed. Camera frames and audio stay on this computer.';
+    ? `Jester needs ${missing.map((item) => item.label).join(' and ')} for what’s switched on. He asks for each one when it’s first needed; you can also allow them here. Everything he sees and hears stays on this computer.`
+    : 'Everything Jester needs for what’s switched on is allowed. Anything else is asked for when it’s first used. Camera frames and audio stay on this computer.';
   $('permissions').replaceChildren(
     ...items.map((item) => {
       const li = document.createElement('li');
@@ -121,6 +121,13 @@ function renderPermissions() {
       // Looked for as "Jester" in System Settings, it isn't there.
       why.textContent = `${item.why}${!item.granted && item.listedAs ? ` System Settings lists it as “${item.listedAs}”.` : ''}`;
       text.append(title, why);
+      // Where it's allowed, for one that isn't; and for Accessibility, what mends a switch that's on and does nothing.
+      if (!item.granted && item.where) {
+        const where = document.createElement('small');
+        where.className = 'where';
+        where.textContent = `Allowed in ${item.where}.${item.id === 'accessibility' && platform() === 'darwin' ? ' If Jester’s already switched on there and this still says it isn’t allowed (it happens after an update), select him in that list, remove him with the − button, then press Allow… here again.' : ''}`;
+        text.append(where);
+      }
 
       const actions = document.createElement('div');
       actions.className = 'actions';
@@ -732,7 +739,7 @@ function renderMemory() {
   // What leaves the computer: the talking model is told what bears on what's said (vault-memory.js recall).
   if (memory.root) $('vault-hint').textContent += ' What you say goes to the model ticked for Talking with About me and the parts of your notes that look related, never a line that looks like a password.';
   const problems = {
-    denied: 'macOS hasn’t let Jester into that folder. Click Open Privacy Settings, find Electron (Jester while it’s in development) under Files and Folders, turn on the folder your vault is in (Documents, say), then click Try again.',
+    denied: `macOS hasn’t let Jester into that folder. Click Open Privacy Settings, find ${desktop?.permissions?.[0]?.listedAs || 'Jester'} under Files and Folders (System Settings › Privacy & Security › Files and Folders), turn on the folder your vault is in (Documents, say), then click Try again.`,
     missing: 'That folder isn’t there any more. Choose the vault again.'
   };
   $('vault-problem').textContent = denied ? problems.denied : memory.problem ? problems[memory.problem] || memory.problem : '';
@@ -863,12 +870,14 @@ function ago(at) {
  */
 function locationProblem(problem, onServer = false) {
   if (onServer) {
+    if (problem === 'asking') return 'Your device has to allow it first. In a browser: press Allow location on the bar at the bottom of this page, then choose Allow when the browser asks. In Jester on your Mac: choose Allow on macOS’s question. Then Locate again.';
     if (problem === 'denied') return 'The device you’re using said no to sharing where it is. On a phone or another computer, allow location for this site in the browser’s settings (on an iPhone: Settings › Privacy & Security › Location Services › Safari Websites, and Settings › Apps › Safari › Location). On your Mac, Jester needs Location Services in System Settings › Privacy & Security. Then Locate again.';
     if (problem === 'timeout') return 'No position came in time. If your browser asked whether this site may know where you are, allow it, then Locate again.';
     if (problem === 'unavailable') return 'The device you’re using couldn’t tell where it is just now. Locate again, or name a place instead.';
     return problem ? `Couldn’t get a position: ${problem}` : '';
   }
   const mac = platform() === 'darwin';
+  if (problem === 'asking') return mac ? 'macOS is asking whether Jester may use this Mac’s location: choose Allow on its question. If you can’t see the question, press Locate again.' : 'Windows hasn’t answered yet. Press Locate again.';
   if (problem === 'denied') {
     return mac
       ? 'macOS hasn’t let Jester know where this Mac is. Click Open Privacy Settings, turn on Location Services, and Jester in its list, then Locate again.'

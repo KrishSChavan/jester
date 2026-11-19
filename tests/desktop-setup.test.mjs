@@ -14,19 +14,26 @@ test('a new computer: what’s needed first, each with where it’s done, then w
     ['listening', false, false, 'settings/assistant'],
     ['voiceprint', false, false, 'settings/assistant'],
     ['ownVoice', false, false, 'settings/assistant'],
+    ['gestures', false, false, 'settings/general'],
     ['vault', false, false, 'settings/memory'],
     ['day', false, false, 'settings/day'],
     ['phone', false, false, 'settings/assistant'],
     ['mail', false, false, 'settings/mail'],
     ['chrome', false, false, 'settings/chrome']
   ]);
-  assert.equal(steps[0].why, 'macOS has to allow it: Microphone and Accessibility.');
+  assert.equal(steps[0].why, 'macOS has to allow it: Microphone and Accessibility. He asks for each as it’s first needed; here you can allow them now.');
+  // Elsewhere it's that system that's named, not Apple's.
+  assert.match(setupSteps({ missing: ['Microphone'], os: 'Windows' })[0].why, /^Windows has to allow it: Microphone\./);
+  assert.match(setupSteps({ missing: [], os: 'Windows' })[0].why, /^Windows has allowed what he needs so far\. Anything else is asked for when it’s first used\.$/);
+  // Gestures start off for a new Jester, and say when the camera will be asked for.
+  assert.match(steps.find((step) => step.id === 'gestures').why, /^Off until you turn Gestures on, which is when the camera is asked for\./);
+  assert.equal(setupSteps({ gestures: true }).find((step) => step.id === 'gestures').done, true);
   assert.match(steps[1].why, /Paste a key for Claude, Gemini, Groq or another, or run Ollama/);
   // No terminal: what he hears with is a download his own button starts (he starts it himself on a first run).
   assert.equal(steps[2].why, 'Not downloaded yet. You can type to him meanwhile.');
   assert.deepEqual([steps[2].act, steps[2].button], ['fetch-models', 'Download']);
   assert.ok(!/npm|terminal|desktop folder/i.test(JSON.stringify(steps)), 'nothing sends a new user to a terminal');
-  assert.deepEqual(setupSummary(steps), { ready: false, left: 3, more: 8, words: '3 things left before he’s ready' });
+  assert.deepEqual(setupSummary(steps), { ready: false, left: 3, more: 9, words: '3 things left before he’s ready' });
   // The first thing that can be added is what lets them say his name at all: off until they turn it on.
   assert.match(steps[3].why, /^Off until you turn it on, here or with the microphone under the orb\./);
   // A key pasted and saved for actions alone: the list says why he still can't answer.
@@ -36,11 +43,11 @@ test('a new computer: what’s needed first, each with where it’s done, then w
 
 test('as things are set up they’re ticked, and he’s ready once what’s needed is', () => {
   const some = setupSteps({ missing: [], model: true });
-  assert.deepEqual(setupSummary(some), { ready: false, left: 1, more: 8, words: '1 thing left before he’s ready' });
+  assert.deepEqual(setupSummary(some), { ready: false, left: 1, more: 9, words: '1 thing left before he’s ready' });
   const ready = setupSteps({ missing: [], model: true, hearing: true, vault: true });
-  assert.deepEqual(setupSummary(ready), { ready: true, left: 0, more: 7, words: 'Ready. 7 more you can add' });
+  assert.deepEqual(setupSummary(ready), { ready: true, left: 0, more: 8, words: 'Ready. 8 more you can add' });
   assert.equal(ready.find((step) => step.id === 'vault').why, 'He keeps his notes and what he learns in your Obsidian vault.');
-  const all = setupSteps({ missing: [], model: true, hearing: true, listening: true, ownVoice: true, voiceprint: true, vault: true, day: true, phone: true, mail: true, chrome: true });
+  const all = setupSteps({ missing: [], model: true, hearing: true, listening: true, ownVoice: true, voiceprint: true, gestures: true, vault: true, day: true, phone: true, mail: true, chrome: true });
   assert.ok(all.every((step) => step.done));
   assert.deepEqual(setupSummary(all), { ready: true, left: 0, more: 0, words: 'All set' });
 });
