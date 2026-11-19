@@ -105,6 +105,9 @@ test('his sign-in page posts the password; right, the browser is signed in; wron
   const locked = await ask(port, 'POST', '/sign-in', { body: { password: 'nope' }, headers: { 'X-Forwarded-For': '203.0.113.9' } });
   assert.equal(locked.status, 429);
   assert.equal(locked.headers['retry-after'], '60');
+  // An address the sender wrote in front of the proxy's own doesn't make it someone else.
+  const dodging = await ask(port, 'POST', '/sign-in', { body: { password: 'nope' }, headers: { 'X-Forwarded-For': '198.51.100.1, 203.0.113.9' } });
+  assert.equal(dodging.status, 429);
 });
 
 test('signed out, a browser’s cookie is taken back; search engines are asked to stay out', async (t) => {

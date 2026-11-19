@@ -96,6 +96,9 @@ export function manifestFor(install = '') {
   };
 }
 
+/** The address the proxy in front of him says a request came from: the last in X-Forwarded-For, the only one it wrote. */
+export const forwardedFrom = (request) => String(request.headers['x-forwarded-for'] || '').split(',').at(-1).trim().slice(0, 64);
+
 /** A key the gateway can be opened with: printed by the server's setup, kept in its data folder. */
 export function makeKey() {
   return crypto.randomBytes(24).toString('base64url');
@@ -247,8 +250,12 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     return response.end();
   };
 
-  /** Where a request comes from, as `tailscale serve` says it (he only listens to this machine): for counting wrong tries. */
-  const sourceOf = (request) => String(request.headers['x-forwarded-for'] || '').split(',')[0].trim().slice(0, 64) || String(request.socket.remoteAddress || 'unknown');
+  /**
+   * Where a request comes from, for counting wrong tries: the last address in X-Forwarded-For, which is the one
+   * Tailscale's proxy on this machine wrote (he only listens to this machine). Anything before it is the sender's
+   * own say-so, and a sender could change it with every try.
+   */
+  const sourceOf = (request) => forwardedFrom(request) || String(request.socket.remoteAddress || 'unknown');
 
   const json = (response, status, body, headers = {}) => {
     response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
@@ -386,7 +393,7 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
       agent: String(request.headers['user-agent'] || '').slice(0, 300),
       macWindow: false,
       // Where it connects from, as `tailscale serve` says: a computer and the browsers on it share one.
-      from: String(request.headers['x-forwarded-for'] || '').split(',')[0].trim().slice(0, 64),
+      from: forwardedFrom(request),
       device: { id: '', name: '', app: false },
       visible: true,
       message: (message, sender) => send(client, { t: 'msg', message, sender }),
