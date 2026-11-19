@@ -164,6 +164,15 @@ export function createConversationLog({ file, now = Date.now, endAfterMs = Infin
       write();
       changed();
     },
+    /** The newest line taken back out, when it's `who`'s and says `text`: words that turned out not to be said to him. */
+    take(who, text) {
+      const last = data.entries.at(-1);
+      if (!last || last.who !== who || last.text !== String(text)) return false;
+      data.entries.pop();
+      write();
+      changed();
+      return true;
+    },
     /** The last few things said in the conversation going on, oldest first. */
     current(count) {
       expire();

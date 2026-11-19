@@ -14,7 +14,6 @@ const REOPEN_MS = 1000;
 let stream = null;
 let context = null;
 let reopening = null;
-let player = null;
 
 function closeMic() {
   stream?.getTracks().forEach((track) => {
@@ -54,26 +53,93 @@ async function openMic() {
   }
 }
 
+/**
+ * His voice, through one audio context that stays open while he talks: each piece of a line is started on the
+ * context's own clock the moment the one before it ends. A new player per piece, started once main had heard the last
+ * one end, left a pause at the end of every sentence (2026-11-19).
+ */
+/** With nothing said for this long, the output is let go: the next line opens it again. */
+const OUTPUT_IDLE_MS = 30000;
+let output = null;
+/** What's playing or waiting its turn: {id, source}. */
+let sounds = [];
+/** When, on the output's clock, what's been given to it ends. */
+let endsAt = 0;
+let idleTimer = null;
+/** Counted up by a stop and by a line that isn't queued: a piece still being got ready from before is dropped. */
+let generation = 0;
+
 function stopPlaying() {
-  player?.pause();
-  player = null;
+  generation += 1;
+  const over = sounds;
+  sounds = [];
+  endsAt = 0;
+  for (const { id, source } of over) {
+    source.onended = null;
+    try {
+      source.stop();
+    } catch {
+      // Never started.
+    }
+    status({ ended: id });
+  }
 }
 
-onPlay(({ id, bytes, type, stop }) => {
-  stopPlaying();
-  if (stop) return;
-  const url = URL.createObjectURL(new Blob([bytes], { type }));
-  const sound = new Audio(url);
-  player = sound;
-  const over = () => {
-    URL.revokeObjectURL(url);
-    if (player === sound) player = null;
+function idle() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (sounds.length) return idle();
+    Promise.resolve(output?.close()).catch(() => undefined);
+    output = null;
+  }, OUTPUT_IDLE_MS);
+}
+
+/** A 16-bit mono WAV (main/voice/voices.js wav()) as an AudioBuffer: read here, so nothing waits on a decoder. */
+function wavBuffer(bytes, into) {
+  const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const pcm = data.byteLength >= 44 && data.getUint32(0, false) === 0x52494646 && data.getUint16(20, true) === 1 && data.getUint16(22, true) === 1 && data.getUint16(34, true) === 16;
+  if (!pcm) return null;
+  const rate = data.getUint32(24, true);
+  const count = Math.floor(Math.min(data.getUint32(40, true), data.byteLength - 44) / 2);
+  const buffer = into.createBuffer(1, Math.max(1, count), rate);
+  const channel = buffer.getChannelData(0);
+  for (let index = 0; index < count; index++) channel[index] = data.getInt16(44 + index * 2, true) / 32768;
+  return buffer;
+}
+
+async function play({ id, bytes, type, queued }) {
+  if (!queued) stopPlaying();
+  const mine = generation;
+  clearTimeout(idleTimer);
+  const ended = () => {
+    sounds = sounds.filter((sound) => sound.id !== id);
     status({ ended: id });
+    idle();
   };
-  sound.onended = over;
-  sound.onpause = over;
-  sound.onerror = over;
-  sound.play().catch(over);
+  try {
+    output ||= new AudioContext({ latencyHint: 'interactive' });
+    const context = output;
+    if (context.state !== 'running') await context.resume();
+    const raw = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const buffer = wavBuffer(raw, context) || (await context.decodeAudioData(raw.slice().buffer));
+    if (context !== output || mine !== generation) return ended();
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(context.destination);
+    const at = Math.max(context.currentTime, endsAt);
+    endsAt = at + buffer.duration;
+    sounds.push({ id, source });
+    source.onended = ended;
+    source.start(at);
+  } catch (error) {
+    console.error('voice: couldn’t play', error?.message || error, type);
+    ended();
+  }
+}
+
+onPlay((sound) => {
+  if (sound.stop) return stopPlaying();
+  play(sound);
 });
 
 navigator.mediaDevices.addEventListener('devicechange', reopen);

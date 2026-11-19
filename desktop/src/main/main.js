@@ -2651,7 +2651,7 @@ function startCloudLink() {
       if (sound.stop) return voicePage.stop();
       // Only with the voice page open (the server listening here): his voice is played by it.
       if (!voiceOpen) return cloudLink.status({ ended: sound.id });
-      voicePage.play(sound.bytes, sound.type).catch((err) => log('cloud: couldn’t play his voice:', err.message)).finally(() => cloudLink.status({ ended: sound.id }));
+      voicePage.play(sound.bytes, sound.type, { queued: sound.queued === true }).catch((err) => log('cloud: couldn’t play his voice:', err.message)).finally(() => cloudLink.status({ ended: sound.id }));
     },
     onHands: handsAsked,
     // What its hands are doing, and its own switches: his website shows them, and throws them (the phone as a remote).
@@ -2931,7 +2931,7 @@ async function start() {
   speaker = createSpeaker({
     // A self-test is never heard: the fake mic would hear it, and so would the room.
     voice: env.JESTER_FAKE_MEDIA ? null : kokoro,
-    play: (bytes, type) => voicePage.play(bytes, type),
+    play: (bytes, type, options) => voicePage.play(bytes, type, options),
     stopPlaying: () => voicePage.stop(),
     system: systemVoice({ muted: !!env.JESTER_FAKE_MEDIA }),
     log

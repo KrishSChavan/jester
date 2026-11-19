@@ -126,7 +126,7 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
         return;
       }
       if (frame.t === 'voice') onVoice(frame.op === 'open' ? 'open' : 'close');
-      else if (frame.t === 'play') onPlay(frame.stop ? { stop: true } : { id: frame.id, type: String(frame.type || 'audio/wav'), bytes: Buffer.from(String(frame.bytes || ''), 'base64') });
+      else if (frame.t === 'play') onPlay(frame.stop ? { stop: true } : { id: frame.id, type: String(frame.type || 'audio/wav'), bytes: Buffer.from(String(frame.bytes || ''), 'base64'), queued: frame.queued === true });
       else if (frame.t === 'hands') {
         Promise.resolve()
           .then(() => onHands(frame))

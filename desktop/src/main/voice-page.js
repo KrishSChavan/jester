@@ -19,19 +19,23 @@ const RELOAD_MS = 1000;
 export function createVoicePage({ log = () => undefined } = {}) {
   let win = null;
   let plays = 0;
-  /** The sound playing: its id, and what ends it. */
-  let playing = null;
+  /** The sounds playing or queued after it: id → what ends each. */
+  const playing = new Map();
 
-  const finish = () => {
-    clearTimeout(playing?.limit);
-    playing?.resolve();
-    playing = null;
+  /** One sound over, or with no id every one of them. */
+  const finish = (id) => {
+    for (const [each, sound] of [...playing]) {
+      if (id !== undefined && each !== id) continue;
+      clearTimeout(sound.limit);
+      playing.delete(each);
+      sound.resolve();
+    }
   };
 
   ipcMain.on('jester:voice-status', (event, report) => {
     if (event.sender !== win?.webContents) return;
     if (report?.mic) log('always-on mic:', report.mic);
-    if (playing && report?.ended === playing.id) finish();
+    if (report?.ended !== undefined && playing.has(report.ended)) finish(report.ended);
   });
 
   return {
@@ -57,19 +61,23 @@ export function createVoicePage({ log = () => undefined } = {}) {
       win?.destroy();
       win = null;
     },
-    /** @returns {Promise<void>} when the sound has ended, or been stopped */
-    play(bytes, type) {
+    /**
+     * `queued`: it starts the moment what's playing ends, with no gap, rather than in its place.
+     * @returns {Promise<void>} when the sound has ended, or been stopped
+     */
+    play(bytes, type, { queued = false } = {}) {
       if (!win) return Promise.reject(new Error('The voice page isn’t open'));
-      finish();
+      if (!queued) finish();
       plays += 1;
       const id = plays;
-      win.webContents.send('jester:voice-play', { id, bytes, type });
-      return new Promise((resolve) => {
-        playing = { id, resolve, limit: setTimeout(finish, PLAY_LIMIT_MS) };
+      const ended = new Promise((resolve) => {
+        playing.set(id, { resolve, limit: setTimeout(() => finish(id), PLAY_LIMIT_MS) });
       });
+      win.webContents.send('jester:voice-play', { id, bytes, type, queued });
+      return ended;
     },
     stop() {
-      if (!playing) return;
+      if (!playing.size) return;
       win?.webContents.send('jester:voice-play', { stop: true });
       finish();
     }

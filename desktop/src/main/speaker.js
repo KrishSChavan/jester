@@ -376,7 +376,7 @@ export const runsOn = (piece) => !PAUSES.test(piece);
 /**
  * @param {object} deps
  * @param {{sound:(text:string, options:{signal?:AbortSignal, tight?:boolean}) => Promise<{bytes:Uint8Array, type:string}|null>}|null} [deps.voice]  his own voice: null from `sound` when it isn't there; `tight` for a piece that runs on into the next
- * @param {(bytes:Uint8Array, type:string) => Promise<void>} deps.play
+ * @param {(bytes:Uint8Array, type:string, options?:{queued?:boolean}) => Promise<void>} deps.play  `queued`: started as what's playing ends, not in its place
  * @param {() => void} deps.stopPlaying
  * @param {{say:Function, stop:Function}} deps.system
  * @param {(...parts:any[]) => void} [deps.log]
@@ -422,28 +422,48 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
       const dropEarly = () => early?.controller.abort();
       if (early) signal.addEventListener('abort', dropEarly, { once: true });
       let next = pieces.length ? early?.made || made(pieces[0], signal, pace) : null;
+      /** The piece playing, handed over: its place in the line, and its end (an error, or null when it played). */
+      let current = null;
+      /** What's left of the line, in the computer's voice, from piece `from` on: after the piece playing ends. */
+      const rest = async (from) => {
+        stopPlaying();
+        begin();
+        await system.say(pieces.slice(from).join(' '));
+      };
       for (let index = 0; index < pieces.length; index++) {
         const sound = await next;
         if (index === 0) signal.removeEventListener('abort', dropEarly);
         if (signal.aborted) return;
         if (!sound) {
-          // His own voice isn't there, or failed part-way: the computer's says what's left.
-          begin();
-          await system.say(pieces.slice(index).join(' '));
-          return;
+          // His own voice isn't there, or failed part-way: the computer's says what's left, once his has.
+          const failed = current && (await current.ended);
+          if (signal.aborted) return;
+          if (failed) log('Jester’s voice:', failed.message);
+          return void (await rest(failed ? current.index : index));
         }
         next = index + 1 < pieces.length ? made(pieces[index + 1], signal, pace) : null;
         begin();
-        try {
-          await play(sound.bytes, sound.type);
-        } catch (err) {
+        // Queued behind the piece playing, it starts as that one ends, with no gap: a sentence never waits to hear
+        // that the one before it is over (2026-11-19, a pause at the end of every sentence).
+        const ended = play(sound.bytes, sound.type, { queued: !!current }).then(
+          () => null,
+          (err) => err
+        );
+        if (current) {
+          const failed = await current.ended;
           if (signal.aborted) return;
-          log('Jester’s voice:', err.message);
-          await system.say(pieces.slice(index).join(' '));
-          return;
+          if (failed) {
+            log('Jester’s voice:', failed.message);
+            return void (await rest(current.index));
+          }
         }
-        if (signal.aborted) return;
+        current = { index, ended };
       }
+      if (!current) return;
+      const failed = await current.ended;
+      if (signal.aborted || !failed) return;
+      log('Jester’s voice:', failed.message);
+      await rest(current.index);
     },
     /** A line that's about to be said, after the one being said now: its start is made meanwhile, so no gap. */
     prepare(text, { pace = 1 } = {}) {

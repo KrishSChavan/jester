@@ -6,7 +6,7 @@ import path from 'node:path';
 import { addressed, wakesEarly } from '../desktop/src/main/wake.js';
 import { asksFirst, parseCommand, parseSequence } from '../desktop/src/main/voice-commands.js';
 import { createConversationLog, EMPTIED_EVERY_MS } from '../desktop/src/main/conversation-log.js';
-import { asAsked, askedToRemember, askModel, createConversation, LOCAL_KEEP_ALIVE, NEW_AFTER_MS, noteAsked, personaPrompt, pickModel, stamped, summarize, warmOllama } from '../desktop/src/main/conversation.js';
+import { asAsked, askedToRemember, askModel, createConversation, LOCAL_KEEP_ALIVE, NEW_AFTER_MS, firstSaid, noteAsked, personaPrompt, pickModel, quietReply, stamped, summarize, UNNAMED_LINE, warmOllama } from '../desktop/src/main/conversation.js';
 import { createRecollections, KEPT_MS } from '../desktop/src/main/recollections.js';
 import { createVault } from '../desktop/src/main/vault.js';
 import { createVaultMemory } from '../desktop/src/main/vault-memory.js';
@@ -340,6 +340,7 @@ function jester({ knows = () => false, risky = () => false, reply = { say: 'Hell
     speaker,
     memory: {
       add: (who, text) => (times.push(new Date(time).toISOString()), entries.push({ who, text })),
+      take: (who, text) => entries.at(-1)?.who === who && entries.at(-1).text === text && (times.pop(), entries.pop(), true),
       current: () => entries.map((entry, index) => ({ ...entry, at: times[index] })),
       idleFor: () => null,
       startNew: () => []
@@ -1175,6 +1176,59 @@ test('a voice only maybe the user’s needs his name to begin, can answer him ju
   assert.deepEqual(j.assistant.answers, [false]);
 });
 
+test('in the moment after he speaks, words without his name are for him only if his model reads them so', async () => {
+  // 2026-11-19, the user talking GTA with a friend: each answer ended in a question, which held the floor open for
+  // the next thing they said to the friend.
+  const asked = [];
+  const replies = {
+    'Jester, what should I play tonight?': { say: 'Something co-op. Which games do you have?', do: '', new: false },
+    'so many GTA clips, Diraj bought GTA': { say: '', do: '', new: false },
+    'Mostly GTA and Rocket League.': { say: 'Rocket League, then.', do: '', new: false }
+  };
+  const j = jester({ knowsYou: true, chat: async (request) => (asked.push(request), replies[request.text] || replies[`Jester, ${request.text}`]) });
+  await j.conversation.heard('Jester, what should I play tonight?');
+  assert.equal(asked[0].unnamed, false, 'said with his name, it’s his');
+  j.pass(3000);
+  await j.conversation.heard('so many GTA clips, Diraj bought GTA');
+  assert.equal(asked[1].unnamed, true, 'his model is told it came without his name');
+  assert.deepEqual(j.said, ['Something co-op. Which games do you have?'], 'and he says nothing to what was someone else’s');
+  assert.deepEqual(j.entries.map((entry) => entry.text), ['what should I play tonight?', 'Something co-op. Which games do you have?'], 'nor is it kept as said to him');
+  assert.equal(j.shown.at(-1).active, true, 'and he goes on waiting for an answer to his question');
+  // An answer to him is still taken in the time his question left.
+  j.pass(3000);
+  await j.conversation.heard('Mostly GTA and Rocket League.');
+  assert.equal(j.said.at(-1), 'Rocket League, then.');
+  // Once that time's over, he's just quiet.
+  j.pass(60000);
+  const asking = asked.length;
+  await j.conversation.heard('so many GTA clips, Diraj bought GTA');
+  assert.equal(asked.length, asking, 'without his name and after the moment, it never reaches his model');
+});
+
+test('the line telling his model a no-name line may be someone else’s goes in the brackets, and only then', async () => {
+  const prompts = [];
+  const request = async ({ prompt, system }) => (prompts.push({ prompt, system }), { json: { say: '', do: '', new: false } });
+  await askModel({ request, text: 'he was like I’m gooning all of today', history: [], unnamed: true });
+  await askModel({ request, text: 'what time is it', history: [] });
+  assert.match(prompts[0].prompt, new RegExp(`\\[${UNNAMED_LINE.replace(/[.?*+()]/g, '\\$&')}\\]`));
+  assert.doesNotMatch(prompts[1].prompt, /without your name/);
+  assert.match(prompts[0].system, /reply exactly \{"forYou":false,"say":"","do":"","new":false\}/);
+  assert.equal(prompts[0].system, prompts[1].system, 'the instructions stay the same, so a cached prompt stays cached');
+  assert.equal(quietReply({ say: '', do: '' }), true);
+  // Whatever else came with it, a no is a no: an overheard call to Mom isn't typed into Messages.
+  const prompted = [];
+  const said = await askModel({ request: async (sent) => (prompted.push(sent), { json: { forYou: false, say: 'Got it.', do: 'open Messages', new: false } }), text: 'Mom I already ate', history: [], unnamed: true });
+  assert.equal(quietReply(said), true);
+  assert.equal(said.do, '');
+  assert.deepEqual(Object.keys(prompted[0].schema.properties).slice(0, 2), ['forYou', 'say'], 'decided before a word is written');
+  assert.equal(prompts.length, 2);
+  // Begun as it's written only once it's said to be his.
+  assert.equal(firstSaid('{"forYou":true,"say":"The cop cars lock'), null);
+  assert.equal(firstSaid('{"forYou":true,"say":"The cop cars lock now? Bold').text, 'The cop cars lock now?');
+  assert.equal(firstSaid('{"forYou":false,"say":"Sounds like a chaotic night. Did'), null);
+  assert.equal(quietReply({ say: '', do: '', note: { title: 'Groceries', add: 'milk', open: false } }), false);
+});
+
 test('a question of his is waited on for longer than a statement', async () => {
   const asks = jester({ knowsYou: true, reply: { say: 'Want me to open it for you?', do: '', new: false } });
   await asks.conversation.heard('Jester, what do you know about me?');
@@ -1577,20 +1631,22 @@ test('each piece is made while the one before plays, and one that fails leaves t
         return { bytes: new Uint8Array([1]), type: 'audio/wav' };
       }
     },
-    play: async () => {
-      order.push('play');
-      if (order.filter((step) => step === 'play').length === 1) await new Promise((resolve) => (release = resolve));
+    play: async (_bytes, _type, { queued = false } = {}) => {
+      order.push(queued ? 'queue' : 'play');
+      if (order.filter((step) => step === 'play').length === 1 && !queued) await new Promise((resolve) => (release = resolve));
     },
     stopPlaying: () => undefined,
     system: { say: async (text) => void order.push(`system ${text}`), stop: () => undefined }
   });
   const said = speaker.say('One. Two. Three. Four.');
   await new Promise((resolve) => setImmediate(resolve));
-  // The first is still playing, and the second is already being made.
-  assert.deepEqual(order, ['make One.', 'play', 'make Two.']);
+  // The first is still playing: the second is made and queued behind it, to start as it ends, and the third is
+  // being made.
+  assert.deepEqual(order, ['make One.', 'play', 'make Two.', 'queue', 'make Three.']);
   release();
   await said;
-  assert.deepEqual(order, ['make One.', 'play', 'make Two.', 'play', 'make Three.', 'system Three. Four.']);
+  // The third failed: once the second has played, the computer's voice says what's left.
+  assert.deepEqual(order, ['make One.', 'play', 'make Two.', 'queue', 'make Three.', 'system Three. Four.']);
 });
 
 test('something new to say stops what was being made', async () => {

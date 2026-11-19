@@ -707,6 +707,20 @@ Every score is still logged ("your voice", "maybe your voice", "not your voice")
 Only with a voiceprint does he take what's said after an answer without his name;
 his name alone opens the next 8 seconds either way.
 
+A voiceprint says it was the user, not that it was said to him: people talk to
+friends in the room about the same things. So words without his name in that
+window reach his model marked as overheard, and the reply has to begin with
+`"forYou"`, decided before a word of `"say"` is written (`UNNAMED_RULE`). False,
+and he says and does nothing; the words are taken back out of the conversation
+(`memory.take`), and the window his last line opened stays open for a real
+answer. On 2026-11-19 two lines about GTA to a friend were answered, each answer
+ending in a question that held the floor for the next. qwen3.5:9b, measured
+three times over five lines to a friend and six to him, went from answering 11 of
+15 of the friend's lines to 1 of 15, but stayed quiet for 9 of 18 of the lines
+to him (it flips on the same words run to run): on that model, say his name more
+often. `npm run talk-check -- --only overheard` measures the model he talks
+through.
+
 Those 8 seconds (20 after a question) are time to **start** answering. Once speech
 begins inside the window, he keeps listening until the speaker goes quiet, even
 if the response and its transcription take longer. The listening pill stays up
@@ -882,6 +896,18 @@ characters, which a night of timing runs used up; that's why it's gone.
   about 110 ms plus 7 ms a character on an M4 Pro, eight threads (two threads:
   2.5 times that; Core ML was slower than four), so a whole long sentence would
   be most of a second before any sound.
+- Each piece is handed to the player as soon as it's made, `queued` behind the
+  one playing, and the voice page (`src/voice/voice.js`) starts it on one audio
+  context's clock the moment that one ends. Until 2026-11-19 a piece went over
+  only once the page had said the last had ended, to a new `<audio>` each time:
+  a pause at the end of every sentence the user heard as stalling, about 105 ms
+  each on the MacBook's speakers in Electron, plus a round trip to the server per
+  sentence when he lives in the cloud (measured on real Kokoro lines: the next
+  piece was always made in time; playing it was the wait). Queued, six pieces
+  play in their own length to within 3 ms. A browser talked to queues the same
+  way with `<audio>` (`src/web/shim.js`), so there's no round trip between them.
+  The context opens with the first line and closes after 30 quiet seconds: that
+  first line starts as late as before (140-270 ms).
 - `forEar` first puts what's written for the eye the way it's said: Kokoro reads
   signs literally ("$12.50" was "dollar twelve point five zero", "Nov 15" "Nove
   fifteenth", "7-9 PM" "seven dash nine"). What's shown on screen is untouched.

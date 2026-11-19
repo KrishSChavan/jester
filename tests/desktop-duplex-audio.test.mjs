@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { createSpeaker, systemVoice } from '../desktop/src/main/speaker.js';
+import { wav } from '../desktop/src/main/voice/voices.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -117,21 +118,27 @@ async function voicePage() {
   class Context {
     audioWorklet = { addModule: async () => undefined };
     destination = {};
+    state = 'running';
+    currentTime = 0;
     createMediaStreamSource() { return { connect: () => undefined }; }
+    createBuffer(channels, length, rate) {
+      const data = new Float32Array(length);
+      return { duration: length / rate, getChannelData: () => data };
+    }
+    async decodeAudioData() { return this.createBuffer(1, 2400, 24000); }
+    createBufferSource() {
+      const source = { paused: false, connect() {}, start(at) { this.at = at; }, stop() { this.paused = true; } };
+      sounds.push(source);
+      return source;
+    }
     async resume() {}
     async close() {}
   }
   class Worklet { port = {}; connect() {} }
-  class Sound {
-    paused = false;
-    constructor() { sounds.push(this); }
-    async play() {}
-    pause() { this.paused = true; this.onpause?.(); }
-  }
   const sandbox = vm.createContext({
     window: { jesterVoice: { audio: () => undefined, status: (report) => reports.push(report), onPlay: (callback) => { receive = callback; } } },
     navigator: { mediaDevices: { getUserMedia: async (constraints) => { requested.push(constraints); return stream; }, addEventListener: () => undefined } },
-    AudioContext: Context, AudioWorkletNode: Worklet, Audio: Sound, Blob,
+    AudioContext: Context, AudioWorkletNode: Worklet, Blob,
     URL: { createObjectURL: () => 'blob:fixture', revokeObjectURL: () => undefined },
     setTimeout, clearTimeout
   });
@@ -150,15 +157,37 @@ test('the continuous microphone requests echo cancellation while keeping other r
   assert.equal(requested[0].video, false);
 });
 
-test('voice-page stop pauses audio, and an old completion cannot prevent the next line from being stopped', async () => {
+/** A 16-bit mono WAV of `seconds` of quiet at 24 kHz, as main/voice/voices.js makes them. */
+const wavOf = (seconds) => wav(new Float32Array(Math.round(seconds * 24000)), 24000);
+
+test('voice-page stop stops audio, and an old completion cannot prevent the next line from being stopped', async () => {
   const { receive, sounds, reports } = await voicePage();
-  receive({ id: 1, bytes: new Uint8Array([1]), type: 'audio/wav' });
+  receive({ id: 1, bytes: wavOf(0.5), type: 'audio/wav' });
+  await tick();
   receive({ stop: true });
   assert.equal(sounds[0].paused, true);
   assert.ok(reports.some((report) => report.ended === 1));
-  receive({ id: 2, bytes: new Uint8Array([2]), type: 'audio/wav' });
-  sounds[0].onended();
+  receive({ id: 2, bytes: wavOf(0.5), type: 'audio/wav' });
+  await tick();
+  sounds[0].onended?.();
   receive({ stop: true });
   assert.equal(sounds[1].paused, true);
   assert.ok(reports.some((report) => report.ended === 2));
+});
+
+test('voice-page plays a queued piece the moment the one before it ends, on the output’s own clock', async () => {
+  const { receive, sounds, reports } = await voicePage();
+  receive({ id: 1, bytes: wavOf(1.5), type: 'audio/wav' });
+  receive({ id: 2, bytes: wavOf(0.75), type: 'audio/wav', queued: true });
+  receive({ id: 3, bytes: wavOf(2), type: 'audio/wav', queued: true });
+  await tick();
+  assert.deepEqual(sounds.map((sound) => sound.at), [0, 1.5, 2.25]);
+  assert.equal(sounds.some((sound) => sound.paused), false);
+  sounds[0].onended();
+  assert.deepEqual(reports.filter((report) => 'ended' in report).map((report) => report.ended), [1]);
+  // Not queued: it's said in place of what was playing and waiting.
+  receive({ id: 4, bytes: wavOf(1), type: 'audio/wav' });
+  await tick();
+  assert.equal(sounds[1].paused && sounds[2].paused, true);
+  assert.equal(sounds[3].at, 0);
 });

@@ -495,9 +495,9 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
       if (voiceClient) send(voiceClient, { t: 'voice', op: 'close' });
     },
     /** His voice, to the client being talked to. False when there's nobody to play it. */
-    play(id, bytes, type) {
+    play(id, bytes, type, queued = false) {
       if (!voiceClient) return false;
-      send(voiceClient, { t: 'play', id, type, bytes: Buffer.from(bytes).toString('base64') });
+      send(voiceClient, { t: 'play', id, type, bytes: Buffer.from(bytes).toString('base64'), ...(queued ? { queued: true } : {}) });
       return true;
     },
     stopPlaying() {
@@ -521,12 +521,17 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
  */
 export function createRemoteVoicePage(gateway, { log = () => undefined } = {}) {
   let plays = 0;
-  let playing = null;
+  /** The sounds playing or queued after it: id → what ends each. */
+  const playing = new Map();
   const PLAY_LIMIT_MS = 90000;
-  const finish = () => {
-    clearTimeout(playing?.limit);
-    playing?.resolve();
-    playing = null;
+  /** One sound over, or with no id every one of them. */
+  const finish = (id) => {
+    for (const [each, sound] of [...playing]) {
+      if (id !== undefined && each !== id) continue;
+      clearTimeout(sound.limit);
+      playing.delete(each);
+      sound.resolve();
+    }
   };
   return {
     open: () => gateway.openVoice(),
@@ -534,24 +539,30 @@ export function createRemoteVoicePage(gateway, { log = () => undefined } = {}) {
       finish();
       gateway.closeVoice();
     },
-    play(bytes, type) {
-      finish();
+    /** `queued`: played as what's playing there ends, with no gap and no round trip between. */
+    play(bytes, type, { queued = false } = {}) {
+      if (!queued) finish();
       plays += 1;
       const id = plays;
-      if (!gateway.play(id, bytes, type)) return Promise.reject(new Error('Nobody’s browser is open to play his voice'));
-      return new Promise((resolve) => {
-        playing = { id, resolve, limit: setTimeout(finish, PLAY_LIMIT_MS) };
+      const ended = new Promise((resolve) => {
+        playing.set(id, { resolve, limit: setTimeout(() => finish(id), PLAY_LIMIT_MS) });
       });
+      if (!gateway.play(id, bytes, type, queued)) {
+        finish(id);
+        return Promise.reject(new Error('Nobody’s browser is open to play his voice'));
+      }
+      return ended;
     },
     stop() {
-      if (!playing) return;
+      if (!playing.size) return;
       gateway.stopPlaying();
       finish();
     },
     /** What the client being talked to said: its mic, or a sound that ended. */
     status(report) {
       if (report?.mic) log('web mic:', report.mic);
-      if (playing && (report?.ended === playing.id || report?.gone)) finish();
+      if (report?.gone) finish();
+      else if (report?.ended !== undefined && playing.has(report.ended)) finish(report.ended);
     }
   };
 }

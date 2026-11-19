@@ -212,29 +212,50 @@
     }
   }
 
+  /** What's waiting to be played after `player`, already loaded: {id, sound, over}. A queued piece starts here as the one
+   * before it ends, rather than once the server's heard that it has (2026-11-19, a pause after every sentence). */
+  let waitingSounds = [];
+
   function stopPlaying() {
-    player?.pause();
+    const over = [player, ...waitingSounds];
     player = null;
+    waitingSounds = [];
+    for (const each of over) each?.sound.pause();
+    for (const each of over) each?.over();
   }
 
-  function play({ id, bytes, type, stop }) {
-    stopPlaying();
+  function start(next) {
+    player = next;
+    next.sound.play().catch(next.over);
+  }
+
+  function play({ id, bytes, type, stop, queued }) {
+    if (!queued || stop) stopPlaying();
     if (stop) return;
     const raw = atob(bytes);
     const data = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i += 1) data[i] = raw.charCodeAt(i);
     const url = URL.createObjectURL(new Blob([data], { type }));
     const sound = new Audio(url);
-    player = sound;
-    const over = () => {
+    sound.preload = 'auto';
+    let done = false;
+    const entry = { id, sound, over: () => undefined };
+    entry.over = () => {
+      if (done) return;
+      done = true;
       URL.revokeObjectURL(url);
-      if (player === sound) player = null;
+      waitingSounds = waitingSounds.filter((each) => each !== entry);
       status({ ended: id });
+      if (player !== entry) return;
+      player = null;
+      const next = waitingSounds.shift();
+      if (next) start(next);
     };
-    sound.onended = over;
-    sound.onpause = over;
-    sound.onerror = over;
-    sound.play().catch(over);
+    sound.onended = entry.over;
+    sound.onpause = () => !sound.ended && entry.over();
+    sound.onerror = entry.over;
+    if (player) waitingSounds.push(entry);
+    else start(entry);
   }
 
   // ---------------------------------------------------------------------------

@@ -27,14 +27,14 @@
  *   npm run talk-check -- saved-all            every saved model, ticked or not
  *   npm run talk-check -- ollama:qwen3.5:9b    one Ollama model
  *   npm run talk-check -- --trials 1 ...       each case once (3 by default)
- *   npm run talk-check -- --only live ...      only the weather-and-calendars cases (or old, memory, facts, self or writing)
+ *   npm run talk-check -- --only live ...      only the weather-and-calendars cases (or old, memory, facts, self, writing or overheard)
  *   npm run talk-check -- --match 'joke|gym'   only the cases whose words match
  *   npm run talk-check -- --held ...           Claude held to the reply's schema, as before 2026-11-14, to compare
  *   npm run talk-check -- --show ...           what he said each time, not only when it was wrong
  *
  * Saved models' keys are sealed with the Mac's keychain, so this runs in
  * Electron, as Jester: macOS may ask to let it use "Jester Safe Storage". Keys
- * are never printed. Each saved model gets 201 short requests (67 × 3), and a free
+ * are never printed. Each saved model gets every case three times, and a free
  * plan's per-minute pacing is waited out, however long: the app gives up past
  * 20 s (model-pool.js), but this is checking the model, not the pacing. Waits
  * aren't counted in the turn times.
@@ -182,7 +182,7 @@ if (run && !process.versions.electron) {
   child.on('exit', (code) => process.exit(code ?? 1));
 } else if (run) {
   const { app, safeStorage } = await import('electron');
-  const { askedToRemember, askModel, claimsToForget, LOCAL_KEEP_ALIVE, ollamaModels, pickModel } = await import('../src/main/conversation.js');
+  const { askedToRemember, askModel, claimsToForget, LOCAL_KEEP_ALIVE, ollamaModels, pickModel, quietReply } = await import('../src/main/conversation.js');
   const { mayAskToForget, verbatim } = await import('../src/main/vault-memory.js');
   const { moodOf } = await import('../src/main/mood.js');
   const { createTasks, reminderText, whenAsked, whenOf } = await import('../src/main/tasks.js');
@@ -442,14 +442,29 @@ if (run && !process.versions.electron) {
     { text: ESSAY_2, history: COMMENTED, sayNot: WHAT_WANTED, comment: true },
     { text: 'what to highlight', history: [...COMMENTED, ['you', `now this:\n${ESSAY_2}`], ['jester', 'Machines can free people for the human work, but only if the time saved goes to care and not to cutting staff. Did the bank keep those workers on?']], quoteFrom: ESSAY_2 }
   ].map((want) => ({ ...want, writing: true }));
-  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES, ...TASK_CASES, ...BRIEF_CASES, ...WRITING_CASES];
+  // Overheard: said without his name in the seconds after he spoke, by the user's own voice. Some are to him, some to
+  // a friend in the room (2026-11-19, two lines about GTA to a friend were answered). He answers the first and
+  // stays quiet for the second (conversation.js UNNAMED_RULE).
+  const OVERHEARD_CASES = [
+    { text: "so many GTA clips I keep getting Diraj bought GTA, he was like I'm gooning all of today and then I told him he needs to crowdfund it so we can play. Apparently you can't like steal certain cars anymore.", history: [['you', 'what are you up to tonight'], ['jester', 'Not much on my end. What are you getting into tonight?']], quiet: true },
+    { text: "You can't just break in my garbage No, you can.", history: [['you', 'apparently you cant steal certain cars in GTA anymore'], ['jester', "Crowdfunding a copy so the whole group can play sounds fair. Which car couldn't you steal?"]], quiet: true },
+    { text: 'bro pass me the charger real quick', history: [['you', 'when is my next class'], ['jester', 'DS 310 at ten thirty-five tomorrow, at the Osmond lab.']], quiet: true },
+    { text: 'nah dude I told him that already, he never listens', history: [['you', 'turn the lights off'], ['jester', 'Lights off.']], quiet: true },
+    { text: 'Mom I said I already ate, I will call you back later', history: [['you', "what's the weather"], ['jester', "It's 37 degrees and clear, with a high of 58. Want the rest of your day?"]], quiet: true },
+    { text: 'The cop cars, they lock now.', history: [['you', 'apparently you cant steal certain cars in GTA anymore'], ['jester', "Which car couldn't you steal?"]], quiet: false },
+    { text: 'yeah go ahead', history: [['you', 'is kabuki open'], ['jester', "I couldn't confirm their hours. Want me to search again?"]], quiet: false },
+    { text: 'what about tomorrow?', history: [['you', "what's the weather"], ['jester', "It's 37 degrees and clear right now, with a high of 58."]], quiet: false },
+    { text: 'how far is that from here', history: [['you', 'where should we go tonight'], ['jester', "Gigi's Southern Table is my pick, with three dollar domestics."]], quiet: false },
+    { text: 'and turn the volume down a bit', history: [['you', 'play some music'], ['jester', 'On it.']], quiet: false }
+  ].map((want) => ({ ...want, overheard: true, doAny: true }));
+  const ALL = [...CASES.map(([text, wantDo, history, more]) => ({ text, do: wantDo, history, old: true, ...more })), ...MEMORY_CASES, ...LIVE_CASES, ...FACT_CASES, ...SELF_CASES, ...TASK_CASES, ...BRIEF_CASES, ...WRITING_CASES, ...OVERHEARD_CASES];
   // --only live|memory|old|facts|self: just those.
   const onlyAt = process.argv.indexOf('--only');
   const ONLY = onlyAt > 0 ? process.argv[onlyAt + 1] : '';
   // --match <words>: just the cases whose words hold them (a regular expression).
   const matchAt = process.argv.indexOf('--match');
   const MATCH = matchAt > 0 ? new RegExp(process.argv[matchAt + 1], 'i') : null;
-  const group = (want) => (want.writing ? 'writing' : want.live ? 'live' : want.old ? 'old' : want.facts ? 'facts' : want.self ? 'self' : 'memory');
+  const group = (want) => (want.overheard ? 'overheard' : want.writing ? 'writing' : want.live ? 'live' : want.old ? 'old' : want.facts ? 'facts' : want.self ? 'self' : 'memory');
   const RUN = ALL.filter((want) => (!ONLY || group(want) === ONLY) && (!MATCH || MATCH.test(want.text)));
 
   /** The words the app would keep for a reply: only when the user's words ask, and as they were said. '' for none. */
@@ -461,6 +476,7 @@ if (run && !process.versions.electron) {
   /** What's wrong with a reply: none when it's right. */
   function problems(reply, want) {
     const found = [];
+    if (want.overheard) return quietReply(reply) === want.quiet ? [] : [want.quiet ? 'answered words to someone else' : 'quiet when spoken to'];
     // `written`: a command for the laptop or a note of his own, one or the other.
     if (want.written) return reply.do || reply.note?.add || (reply.task?.op === 'add' && taskBook.asked(want.text, '', 'add', reply.task.text)) ? [] : ['nothing written: no "do", no "note" and no task'];
     if (want.forgetting || want.judging) return reply.picked ? [reply.picked] : [];
@@ -526,7 +542,7 @@ if (run && !process.versions.electron) {
     return found;
   }
 
-  const kind = (want) => (want.writing ? 'WRITE' : want.remember ? 'KEEP' : want.note ? 'NOTE' : want.do ? 'DO' : want.live ? 'DAY' : want.facts ? 'FACT' : want.self ? 'SELF' : 'TALK');
+  const kind = (want) => (want.overheard ? (want.quiet ? 'HUSH' : 'HEAR') : want.writing ? 'WRITE' : want.remember ? 'KEEP' : want.note ? 'NOTE' : want.do ? 'DO' : want.live ? 'DAY' : want.facts ? 'FACT' : want.self ? 'SELF' : 'TALK');
 
   /** A task book for its rules alone (whether words ask for a task): nothing's kept in it. */
   const taskBook = createTasks({ file: path.join(app.getPath('userData'), 'tasks.json'), clock: { add: () => undefined, remove: () => undefined } });
@@ -597,7 +613,7 @@ if (run && !process.versions.electron) {
         }
       });
       console.log(`\n=== ${name(connection)}: ${RUN.length} cases × ${TRIALS} ===`);
-      const right = { old: 0, new: 0, live: 0, facts: 0, self: 0, oldByDo: 0, filled: 0 };
+      const right = { old: 0, new: 0, live: 0, facts: 0, self: 0, overheard: 0, oldByDo: 0, filled: 0 };
       const times = [];
       /** When his first sentence was written, for the replies sent as they're written; and any that wasn't how the reply began. */
       const firsts = [];
@@ -701,7 +717,7 @@ if (run && !process.versions.electron) {
               // As the app asks when it's spoken to: told his first sentence as soon as it's written. --held: Claude
               // held to the reply's schema, as it was before 2026-11-14, to compare.
               let first = null;
-              reply = await askModel({ request: HELD ? (options) => job({ ...options, plain: false }) : job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', mood: moodOf(want.text, history, date.getTime()), situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, tasks: true, date, onFirst: (sentence) => (first = { sentence, ms: Date.now() - started - paced }) });
+              reply = await askModel({ request: HELD ? (options) => job({ ...options, plain: false }) : job, text: want.text, history, earlier: want.earlier || [], context: want.context || '', mood: moodOf(want.text, history, date.getTime()), situation, live: want.live ? LIVE : want.liveNow || {}, can: want.can || {}, tasks: true, unnamed: !!want.overheard, date, onFirst: (sentence) => (first = { sentence, ms: Date.now() - started - paced }) });
               if (first) {
                 firsts.push(first.ms);
                 // What he'd have begun saying has to be how what he says begins.
@@ -717,7 +733,7 @@ if (run && !process.versions.electron) {
           }
         }
         const ok = outs.filter((out) => out.ok).length;
-        right[want.old ? 'old' : want.live ? 'live' : want.facts ? 'facts' : want.self ? 'self' : 'new'] += ok;
+        right[want.overheard ? 'overheard' : want.old ? 'old' : want.live ? 'live' : want.facts ? 'facts' : want.self ? 'self' : 'new'] += ok;
         if (want.old) right.oldByDo += outs.filter((out) => out.byDo).length;
         // The app keeps what was asked for even when the model left "remember" out: how often it filled it is told apart.
         const filled = want.remember ? outs.filter((out) => out.remember).length : 0;
@@ -735,7 +751,8 @@ if (run && !process.versions.electron) {
       const count = (group) => RUN.filter(group).length * TRIALS;
       const old = count((want) => want.old);
       const asked = count((want) => want.remember);
-      const memory = count((want) => !want.old && !want.live && !want.facts && !want.self);
+      const memory = count((want) => !want.old && !want.live && !want.facts && !want.self && !want.overheard);
+      const overheard = count((want) => want.overheard);
       const live = count((want) => want.live);
       const facts = count((want) => want.facts);
       const self = count((want) => want.self);
@@ -744,7 +761,8 @@ if (run && !process.versions.electron) {
         memory && `memory and notes ${right.new}/${memory} ("remember" filled when asked ${right.filled}/${asked})`,
         live && `weather and calendars ${right.live}/${live}`,
         facts && `facts and abilities ${right.facts}/${facts}`,
-        self && `manner and what he knows ${right.self}/${self}`
+        self && `manner and what he knows ${right.self}/${self}`,
+        overheard && `overheard, quiet or answered rightly ${right.overheard}/${overheard}`
       ].filter(Boolean);
       const line = `${name(connection)}: ${parts.join(' · ')} · turn median ${times[times.length >> 1] ?? '-'} ms, slowest ${times.at(-1) ?? '-'} ms${firsts.length ? ` · first sentence median ${firsts[firsts.length >> 1]} ms (${firsts.length} replies read as written)` : ''}${failed ? ` · ${failed} failed` : ''}`;
       console.log(`--- ${line}`);
