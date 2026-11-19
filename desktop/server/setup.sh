@@ -17,6 +17,15 @@ ENV_FILE="$HOME_DIR/jester.env"
 
 say() { printf '\n\033[1;35m== %s\033[0m\n' "$*"; }
 
+# This is for the Linux server, not for the Mac or PC Jester runs on: there it would only ask for a password
+# (its first sudo) and then fail, since it installs packages with apt.
+if [ "$(uname -s)" != "Linux" ] || ! command -v apt-get >/dev/null; then
+  echo "This sets up Jester's server, on Ubuntu (run it over ssh, on that machine)." >&2
+  echo "You're on $(uname -s), where there's nothing for it to do. To install Jester here, download it:" >&2
+  echo "  https://github.com/KrishSChavan/jester/releases/latest" >&2
+  exit 1
+fi
+
 if [ "$(id -u)" = 0 ]; then
   echo "Run this as your normal user (ubuntu), not root." >&2
   exit 1
