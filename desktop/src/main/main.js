@@ -1262,10 +1262,27 @@ async function checkMail() {
 }
 
 /**
+ * Where Getting started is asked from: his own window on a computer (nothing to add), or his website in a browser of
+ * the user's (a phone, another computer), which has none of a computer's steps and is told about its own
+ * notifications. The page says why it can't take them, if it can't (devices-page.js pushProblem).
+ */
+function setupPlace(sender, message) {
+  const client = sender?.remote;
+  if (!SERVER || !client || client.macWindow) return {};
+  return {
+    web: true,
+    phoneHere: /\biPhone\b|\bAndroid\b.*\bMobile\b/.test(client.agent || ''),
+    pushHere: !!push?.has(devices?.idOf(client)),
+    pushProblem: typeof message?.pushProblem === 'string' ? message.pushProblem.slice(0, 300) : ''
+  };
+}
+
+/**
  * Getting started (setup.js): what a new user still has to set up, and what they can add, from how things stand.
+ * @param {{web?:boolean, phoneHere?:boolean, pushHere?:boolean, pushProblem?:string}} [place]  asked from a browser
  * @returns {Promise<{steps:object[], ready:boolean, left:number, more:number, words:string}>}
  */
-async function setupState() {
+async function setupState(place = {}) {
   const saved = (await talking?.savedOnes().catch(() => [])) || [];
   const local = saved.length ? null : await talking?.localOne().catch(() => null);
   const model = saved.length > 0 || !!local?.model;
@@ -1285,7 +1302,8 @@ async function setupState() {
     day: !!whereabouts?.connected || !!calendars?.connected,
     phone: phoneReady(),
     mail: !!google?.signedIn,
-    chrome: !!chromeLink?.linked
+    chrome: !!chromeLink?.linked,
+    ...place
   });
   const summary = setupSummary(steps);
   // Once he's been ready, he has been set up: a launch after that with a model away (Ollama not up yet) isn't a
@@ -2117,7 +2135,7 @@ function listenToPages() {
       }
       // Getting started: what's left to set up, for his window's banner and its Getting started screen.
       case 'jester/setup':
-        return { ok: true, ...(await setupState()) };
+        return { ok: true, ...(await setupState(setupPlace(sender, message))) };
       // His window's Download and Stop, for what he hears and speaks with.
       case 'jester/desktop-models': {
         if (!modelFetcher) return desktopState();

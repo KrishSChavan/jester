@@ -109,7 +109,9 @@
   gap: 8px;
 }
 
-/* Settings that are the Mac's alone: nothing on a server can use them. */
+/* Settings that are the Mac's alone: nothing on a server can use them. Getting started leaves out its steps for
+   them on his website too (main/setup.js COMPUTER_ONLY). */
+.computer-only,
 [data-go='settings/permissions'],
 [data-go='settings/watch'],
 [data-go='settings/gestures'],

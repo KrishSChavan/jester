@@ -90,3 +90,29 @@ test('nothing he says to a new user, or shows them, is about one person', () => 
   // Nor is the link to Chrome one computer's: the unpacked extension's id is worked out where it runs.
   assert.ok(!/fepkikohkficncoppffmemobjogdfdip/.test(read('main/link-host.js')));
 });
+
+test('on his website a computer’s own steps are left out, and the phone’s step is this device’s notifications', () => {
+  const ids = (steps) => steps.map((step) => step.id);
+  const app = setupSteps({ missing: ['Microphone'] });
+  assert.ok(['permissions', 'gestures', 'chrome', 'phone'].every((id) => ids(app).includes(id)), 'his own window keeps them all');
+  assert.ok(!ids(app).includes('push'));
+  // His app on a phone: no macOS permissions, gestures or Chrome, and nothing about ntfy.
+  const phone = setupSteps({ web: true, phoneHere: true, missing: ['Microphone', 'Accessibility'] });
+  assert.ok(!['permissions', 'gestures', 'chrome', 'phone'].some((id) => ids(phone).includes(id)), ids(phone).join(' '));
+  assert.ok(!JSON.stringify(phone).includes('ntfy'));
+  const alerts = phone.find((step) => step.id === 'push');
+  assert.equal(alerts.title, 'Alerts on this phone');
+  assert.deepEqual([alerts.done, alerts.required, alerts.go, alerts.act, alerts.button], [false, false, 'settings/devices', 'push-on', 'Turn on']);
+  // A permission the server's computer lacks isn't one left for this device to give.
+  assert.equal(setupSummary(phone).left, setupSummary(phone.filter((step) => step.id !== 'permissions')).left);
+  assert.ok(!phone.some((step) => step.required && /allow/i.test(step.why)));
+  // On: done, and nothing to press but Change.
+  const on = setupSteps({ web: true, phoneHere: true, pushHere: true }).find((step) => step.id === 'push');
+  assert.equal(on.done, true);
+  assert.equal(on.act, undefined);
+  assert.match(on.why, /^On: .* comes to this phone as a notification\.$/);
+  // A browser that can't take them says why, and offers no button that would fail.
+  const problem = 'This browser can’t take notifications from a website.';
+  const cannot = setupSteps({ web: true, pushProblem: problem }).find((step) => step.id === 'push');
+  assert.deepEqual([cannot.title, cannot.why, cannot.act], ['Alerts on this device', problem, undefined]);
+});

@@ -348,9 +348,18 @@ function drawSetup() {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'chip';
-    const does = !step.done && !live && step.act === 'fetch-models';
-    // The step's own button does it there and then (the download); any other goes to where it's done.
-    if (does) button.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-models', op: 'fetch' }).then(askSetup, () => undefined));
+    const does = !step.done && !live && (step.act === 'fetch-models' || step.act === 'push-on');
+    // The step's own button does it there and then (the download, this device's notifications); any other goes to
+    // where it's done.
+    if (does && step.act === 'push-on') {
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        await devicesPage.setPush(true);
+        askSetup();
+        // Not allowed, or the server didn't take it: said where it's done, in Settings › Devices.
+        if (devicesPage.note) screens.go('settings/devices');
+      });
+    } else if (does) button.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-models', op: 'fetch' }).then(askSetup, () => undefined));
     else button.dataset.go = step.go;
     const says = step.done ? 'Change' : does ? step.button || 'Download' : live ? 'See' : 'Set up';
     button.textContent = says;
@@ -373,7 +382,8 @@ let setupAsked = null;
 function askSetup() {
   clearTimeout(setupAsked);
   setupAsked = setTimeout(async () => {
-    const reply = await chrome.runtime.sendMessage({ type: 'jester/setup' }).catch(() => null);
+    // On his website, the list has this device's notifications in it (setup.js): whether this browser can take them.
+    const reply = await chrome.runtime.sendMessage({ type: 'jester/setup', ...(globalThis.jesterWeb ? { pushProblem: devicesPage.problem() } : {}) }).catch(() => null);
     if (!reply?.ok) return;
     setup = reply;
     drawBanner();
@@ -517,7 +527,8 @@ const controls = mountControls($('controls-host'), {
   canDrop: !!globalThis.jesterFiles
 });
 // His website: Settings › Devices, and the computer whose switches the hand and the moon throw from here.
-const devicesPage = createDevicesPage({ onChange: () => drawControls() });
+// Its notifications turned on or off change Getting started too (setup.js: this device's alerts).
+const devicesPage = createDevicesPage({ onChange: () => (drawControls(), askSetup()) });
 if (website) devicesPage.load();
 // His website: the banner for a chat going on on another device.
 const others = createOthers({ onChat: (chat) => drawChat(chat) });

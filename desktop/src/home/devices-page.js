@@ -79,16 +79,19 @@ export function createDevicesPage({ onChange = () => undefined } = {}) {
     return load();
   };
 
+  /** On or off for this device: from Settings › Devices, or Getting started's "Turn on" (home.js). */
   async function setPush(on) {
     note = '';
     try {
+      // Asked for as the button's pressed, before anything is waited on: a browser only asks the user then, and an
+      // iPhone's only while the tap is still going on.
+      const allowed = on ? Notification.requestPermission() : null;
       const registration = await navigator.serviceWorker.ready;
       if (!on) {
         await (await registration.pushManager.getSubscription())?.unsubscribe();
         await ask({ type: 'jester/push', op: 'unsubscribe' });
       } else {
-        // Asked for as the button's pressed: a browser only asks the user then.
-        if ((await Notification.requestPermission()) !== 'granted') throw new Error('Notifications weren’t allowed.');
+        if ((await allowed) !== 'granted') throw new Error('Notifications weren’t allowed.');
         const { key } = (await ask({ type: 'jester/push', op: 'state' })) || {};
         if (!key) throw new Error('Jester’s server isn’t ready to send them yet.');
         const subscription = (await registration.pushManager.getSubscription()) || (await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) }));
@@ -182,5 +185,5 @@ export function createDevicesPage({ onChange = () => undefined } = {}) {
     load();
   });
 
-  return { load, computer, throwSwitch, get devices() { return devices; } };
+  return { load, computer, throwSwitch, setPush, problem: () => pushProblem({ standalone: standalone() }), get note() { return note; }, get devices() { return devices; } };
 }

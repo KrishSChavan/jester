@@ -24,6 +24,11 @@
  * @property {boolean} [chrome]  his Chrome extension is linked
  * @property {boolean} [gestures]  hand gestures are switched on
  * @property {string} [os]  'macOS' or 'Windows': who it is that has to allow things
+ * @property {boolean} [web]  asked from his website in a browser (a phone, another computer), not his own window on a
+ *   computer: a computer's own steps are left out, and the phone's step is this device's notifications
+ * @property {boolean} [phoneHere]  that browser is a phone's
+ * @property {boolean} [pushHere]  that browser takes his notifications (main/push.js)
+ * @property {string} [pushProblem]  why that browser can't, in its own words (home/devices-page.js pushProblem)
  * @property {{fetching?:{id:string}|null, waiting?:string[], error?:string, words?:string, firstMb?:number}|null} [fetch]
  *   how the download of what he hears and speaks with stands (main.js modelsState)
  */
@@ -45,12 +50,43 @@ function downloading(fetch, ids, idle) {
 }
 
 /**
+ * A computer's own: macOS's permissions, the camera's gestures, and his Chrome extension. A browser has none of
+ * them to give, so his website doesn't list them (the user, 2026-11-19, on his app on their phone).
+ */
+const COMPUTER_ONLY = ['permissions', 'gestures', 'chrome'];
+
+/**
+ * In a browser, the phone's step is this device's notifications (main/push.js), turned on there and then, in place
+ * of ntfy, which is the Mac app's alone. Settings › Devices has the same switch.
+ */
+function alertsHere({ phoneHere, pushHere, pushProblem }) {
+  const here = phoneHere ? 'this phone' : 'this device';
+  const what = 'what he has to tell you while you’re away (a reminder, a timer, a task finishing, a yes-or-no he needs)';
+  return {
+    id: 'push',
+    title: `Alerts on ${here}`,
+    why: pushHere ? `On: ${what} comes to ${here} as a notification.` : pushProblem || `Turn them on, and ${what} comes to ${here} as a notification.`,
+    done: !!pushHere,
+    required: false,
+    go: 'settings/devices',
+    ...(pushHere || pushProblem ? {} : { act: 'push-on', button: 'Turn on' })
+  };
+}
+
+/**
  * @param {SetupState} state
  * @returns {{id:string, title:string, why:string, done:boolean, required:boolean, go:string, act?:string, button?:string}[]}  what's needed
  *   first, then what's optional; `go` is the screen of his window where it's done; `act`, when the step's own button
- *   does it there and then ('fetch-models': the download), with what the `button` says
+ *   does it there and then ('fetch-models': the download; 'push-on': this device's notifications), with what the
+ *   `button` says
  */
 export function setupSteps(state = {}) {
+  const steps = allSteps(state);
+  if (!state.web) return steps;
+  return steps.filter((step) => !COMPUTER_ONLY.includes(step.id)).map((step) => (step.id === 'phone' ? alertsHere(state) : step));
+}
+
+function allSteps(state) {
   const missing = Array.isArray(state.missing) ? state.missing : [];
   return [
     {
