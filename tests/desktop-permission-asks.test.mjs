@@ -259,7 +259,8 @@ test('his website asks for location from a tap when the browser has still to ask
   const shim = read('web/shim.js');
   assert.match(shim, /navigator\.permissions\.query\(\{ name: 'geolocation' \}\)/);
   assert.match(shim, /yes\.textContent = 'Allow location';/);
-  // Refused outright, nothing's put to them; "Not now" stands unless it's asked for on purpose.
+  // Refused outright, nothing's put to them; "Not now" stands unless it's asked for on purpose (run in a browser of
+  // its own: desktop-web-location.test.mjs).
   assert.match(shim, /if \(allowed === 'denied'\) return finish\(\{ ok: false, code: 1/);
-  assert.match(shim, /if \(whereDeclined && !sure\) return finish\(/);
+  assert.match(shim, /if \(!sure && \(whereDeclined \|\| Date\.now\(\) - Number\(storedWhere\(WHERE_NO\) \|\| 0\) < NOT_NOW_MS\)\) return finish\(/);
 });

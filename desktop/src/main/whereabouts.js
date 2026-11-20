@@ -80,8 +80,9 @@ const PROBLEMS = { 1: 'denied', 2: 'unavailable', 3: 'timeout' };
 
 /**
  * @param {object} deps
- * @param {(options:{timeoutMs:number}) => Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, at?:number, code?:number, message?:string, asking?:boolean}>} deps.locate
- *   this computer's position (mac-location.js, or main.js locateByPage)
+ * @param {(options:{timeoutMs:number, patient?:boolean, fresh?:boolean}) => Promise<{ok:boolean, lat?:number, lon?:number, accuracy?:number, ageMs?:number, code?:number, message?:string, asking?:boolean}>} deps.locate
+ *   this computer's position (mac-location.js, or main.js locateByPage); on a server, a device's (device-location.js),
+ *   which may be one it kept from earlier, `ageMs` old
  * @param {() => {source:'off'|'here'|'place', place?:object|null}} deps.setting  what Settings says
  * @param {typeof fetch} [deps.fetchImpl]
  * @param {(...parts:any[]) => void} [deps.log]
@@ -129,13 +130,13 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
    * A new position from this computer, and its name. One at a time; and after one that failed, not again for two
    * minutes unless Settings asks (`patient`), or every turn would wait on Location Services saying no again.
    */
-  function refresh({ patient = false } = {}) {
+  function refresh({ patient = false, fresh = false } = {}) {
     if (source() !== 'here') return Promise.resolve(null);
     if (!patient && !pending && failedAt && now() - failedAt < RETRY_MS && (!device || failedKey === device())) return Promise.resolve(null);
     pending ||= (async () => {
       try {
         // Until there's been a position, macOS's question may be up, from whichever asked first.
-        const got = await locate({ timeoutMs: patient || !located ? PATIENT_MS : QUICK_MS, patient });
+        const got = await locate({ timeoutMs: patient || !located ? PATIENT_MS : QUICK_MS, patient, fresh });
         if (!got?.ok || !Number.isFinite(got.lat) || !Number.isFinite(got.lon)) {
           problem = got?.asking ? 'asking' : PROBLEMS[got?.code] || got?.message || 'unavailable';
           failedAt = got?.asking ? 0 : now();
@@ -143,7 +144,8 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
           log('location: none:', problem);
           return null;
         }
-        fix = { lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0, at: now(), device: String(got.device || ''), key: String(got.key || '') };
+        // One the device kept from earlier is as old as it is: asked where they are, it's asked for anew.
+        fix = { lat: got.lat, lon: got.lon, accuracy: Number(got.accuracy) || 0, at: now() - Math.max(0, Number(got.ageMs) || 0), device: String(got.device || ''), key: String(got.key || '') };
         located = true;
         problem = '';
         failedAt = 0;
@@ -191,7 +193,7 @@ export function createWhereabouts({ locate, setting, fetchImpl = globalThis.fetc
       const switched = !!device && !!fix?.key && !!device() && device() !== fix.key;
       const age = fix ? now() - fix.at : Infinity;
       if (age > STALE_MS || switched || (fresh && age > FRESH_MS)) {
-        const asking = refresh();
+        const asking = refresh({ fresh: fresh && age > FRESH_MS });
         if (!fix || fresh || switched) {
           let timer;
           await Promise.race([asking, new Promise((resolve) => (timer = setTimeout(resolve, waitMs)))]);

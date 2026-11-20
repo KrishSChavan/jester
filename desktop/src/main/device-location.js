@@ -27,12 +27,26 @@ export function deviceName(agent = '') {
   return 'your browser';
 }
 
-/** A browser's answer, as whereabouts.js takes one: a position on Earth, or why there isn't one. */
+/**
+ * Which device a page is, for whereabouts.js: the id its browser keeps (web/shim.js), not the connection's number. A
+ * phone's app makes a new connection each time it's opened or comes back from behind, and was taken each time for
+ * another device, so asked at once where it was (the user, 2026-11-19: "still asks me each time on my phone").
+ */
+export const pageKey = (client) => `page-${client?.device?.id || client?.id}`;
+
+/** A position kept on the device, as old as this at most, is taken as that old (a day: older isn't kept there). */
+const KEPT_MAX_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A browser's answer, as whereabouts.js takes one: a position on Earth, or why there isn't one. `ageMs`: it's the one
+ * the device kept from earlier, rather than ask its browser again (web/shim.js), and this old.
+ */
 export function positionFrom(answer, client) {
   const lat = Number(answer?.lat);
   const lon = Number(answer?.lon);
   if (answer?.ok === true && Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-    return { ok: true, lat, lon, accuracy: Math.max(0, Number(answer.accuracy) || 0), device: deviceName(client?.agent), key: `page-${client?.id}` };
+    const age = answer.kept === true ? Math.min(Math.max(0, Number(answer.ageMs) || 0), KEPT_MAX_MS) : 0;
+    return { ok: true, lat, lon, accuracy: Math.max(0, Number(answer.accuracy) || 0), device: deviceName(client?.agent), key: pageKey(client), ...(age ? { ageMs: age } : {}) };
   }
   // `asking`: the browser's own question about this site was still up, or waiting on a tap, when time ran out.
   return { ok: false, code: [1, 2, 3].includes(answer?.code) ? answer.code : 2, message: String(answer?.message || '').slice(0, 200), ...(answer?.asking === true ? { asking: true } : {}) };
@@ -62,11 +76,14 @@ export function createDeviceLocate({ gateway, hands, log = () => undefined }) {
     /** Which device a position would come from now: whereabouts.js asks again when it isn't the last one's. */
     device() {
       const client = current();
-      return client ? (isMac(client) ? 'mac' : `page-${client.id}`) : '';
+      return client ? (isMac(client) ? 'mac' : pageKey(client)) : '';
     },
 
-    /** whereabouts.js's `locate`: the device being used, asked where it is. */
-    async locate({ timeoutMs = 25000, patient = false } = {}) {
+    /**
+     * whereabouts.js's `locate`: the device being used, asked where it is. `fresh`: the turn's about where they are,
+     * so a position the device kept from earlier won't do.
+     */
+    async locate({ timeoutMs = 25000, patient = false, fresh = false } = {}) {
       const client = current();
       if (!client) return { ok: false, code: 2, message: 'No device is using Jester just now.' };
       if (isMac(client)) {
@@ -86,7 +103,7 @@ export function createDeviceLocate({ gateway, hands, log = () => undefined }) {
         // Its browser asks the user, the first time, whether the site may know: a little less than the wait, so a
         // late answer is still its own.
         // `sure`: asked for from Settings, on purpose, so it's put to them even after a "Not now".
-        client.message({ type: 'jester/where-ask', id, timeoutMs: Math.max(3000, timeoutMs - 2000), ...(patient ? { sure: true } : {}) }, SENDER);
+        client.message({ type: 'jester/where-ask', id, timeoutMs: Math.max(3000, timeoutMs - 2000), ...(patient ? { sure: true } : {}), ...(fresh ? { fresh: true } : {}) }, SENDER);
       });
     },
 

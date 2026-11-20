@@ -409,13 +409,23 @@
    * whenever it needs to know, with no tap behind it: asked that way, some never show the question at all (the
    * user, 2026-11-19: nothing asked until Location was switched off and on in Settings, which is a tap). So while
    * the answer is still "ask", a bar says what he wants and why, and its button asks from a tap. `sure`: asked
-   * for from Settings, on purpose; otherwise a "Not now" stands until the page is opened again.
+   * for from Settings, on purpose; otherwise a "Not now" stands for a week.
+   *
+   * Allowed once, the bar never comes back, and the position is kept here. A browser that forgets it was allowed
+   * (an iPhone's, for his app on the Home Screen, often each time it's opened: the user, 2026-11-19, "still asks me
+   * each time on my phone") isn't asked again while the one kept is under 12 hours old, unless it's asked for on
+   * purpose (`sure`) or the turn's about where they are (`fresh`): the kept one is answered with, and how old it is.
    */
   let whereDeclined = false;
-  function answerWhere({ id, timeoutMs, sure }) {
+  function answerWhere({ id, timeoutMs, sure, fresh }) {
     const answer = (fields) => ask({ t: 'msg', message: { type: 'jester/where-told', id, ...fields } }).catch(() => undefined);
     if (!globalThis.isSecureContext || !navigator.geolocation) return answer({ ok: false, code: 2, message: 'This browser can’t tell where it is.' });
     const limit = Math.min(Math.max(Number(timeoutMs) || 20000, 3000), 85000);
+    const last = keptWhere();
+    const lastAge = last ? Math.max(0, Date.now() - last.at) : Infinity;
+    /** This browser has said where it is before: the bar's done its job. */
+    const allowedBefore = !!last || storedWhere(WHERE_OK) === '1';
+    const fromLast = () => ({ ok: true, lat: last.lat, lon: last.lon, accuracy: last.accuracy, kept: true, ageMs: lastAge });
     let done = false;
     let tapped = false;
     /** Whether the browser still has to ask: its question may be up, or waiting for a tap. */
@@ -428,24 +438,7 @@
       document.getElementById('jester-where')?.remove();
       answer(fields);
     };
-    const locate = () =>
-      navigator.geolocation.getCurrentPosition(
-        ({ coords }) => finish({ ok: true, lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy }),
-        (error) => {
-          // Refused without a tap, while the browser had still to ask: it wants the tap first. The bar's still there.
-          if (error.code === 1 && unanswered && !tapped) return;
-          finish({ ok: false, code: error.code, message: error.message });
-        },
-        { enableHighAccuracy: false, maximumAge: 5 * 60 * 1000, timeout: limit }
-      );
-    timer = setTimeout(() => finish({ ok: false, code: 3, message: '', ...(unanswered ? { asking: true } : {}) }), limit);
-    const state = navigator.permissions?.query ? navigator.permissions.query({ name: 'geolocation' }).then((status) => status.state, () => 'unknown') : Promise.resolve('unknown');
-    state.then((allowed) => {
-      if (done) return;
-      if (allowed === 'denied') return finish({ ok: false, code: 1, message: 'Location is turned off for this site.' });
-      if (allowed === 'granted') return locate();
-      if (whereDeclined && !sure) return finish({ ok: false, code: 1, message: 'Not now.' });
-      unanswered = true;
+    const offer = () =>
       askForWhere(
         () => {
           tapped = true;
@@ -453,12 +446,92 @@
         },
         () => {
           whereDeclined = true;
+          storeWhere(WHERE_NO, String(Date.now()));
           finish({ ok: false, code: 1, message: 'Not now.' });
         }
       );
+    const locate = () =>
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => {
+          // Kept even when it comes too late for this question: the next is answered with it.
+          keepWhere(coords);
+          finish({ ok: true, lat: coords.latitude, lon: coords.longitude, accuracy: coords.accuracy });
+        },
+        (error) => {
+          // Refused without a tap, while the browser had still to ask: it wants the tap first. Allowed before, the
+          // bar's only put up now; otherwise it's up already.
+          if (error.code === 1 && unanswered && !tapped) {
+            if (allowedBefore && !document.getElementById('jester-where')) offer();
+            return;
+          }
+          // No position to be had just now (indoors, no signal): where it was last is better than nothing.
+          if (error.code !== 1 && last && !sure) return finish(fromLast());
+          // Refused: what was kept goes, and the bar isn't put up again for a week, unless it's asked for on purpose.
+          if (error.code === 1) forgetWhere();
+          finish({ ok: false, code: error.code, message: error.message });
+        },
+        { enableHighAccuracy: false, maximumAge: 5 * 60 * 1000, timeout: limit }
+      );
+    timer = setTimeout(() => finish(last && !sure ? fromLast() : { ok: false, code: 3, message: '', ...(unanswered ? { asking: true } : {}) }), limit);
+    const state = navigator.permissions?.query ? navigator.permissions.query({ name: 'geolocation' }).then((status) => status.state, () => 'unknown') : Promise.resolve('unknown');
+    state.then((allowed) => {
+      if (done) return;
+      if (allowed === 'denied') return finish({ ok: false, code: 1, message: 'Location is turned off for this site.' });
+      if (allowed === 'granted') return locate();
+      // The browser would ask again: not while the one kept here will do.
+      if (last && !sure && !fresh && lastAge < KEEP_WHERE_MS) return finish(fromLast());
+      unanswered = true;
+      // Allowed here before: the browser's own question, if it has one, with no bar of his.
+      if (allowedBefore) return locate();
+      if (!sure && (whereDeclined || Date.now() - Number(storedWhere(WHERE_NO) || 0) < NOT_NOW_MS)) return finish({ ok: false, code: 1, message: 'Not now.' });
+      offer();
       // And at once, for a browser that will ask without the tap.
       locate();
     });
+  }
+
+  /** Where this device was last, as this browser said: kept here, and only here. */
+  const WHERE = 'jesterWhere';
+  /** When "Not now" was said to the bar, or the browser's question refused. */
+  const WHERE_NO = 'jesterWhereNo';
+  /** This browser has said where it is, once. */
+  const WHERE_OK = 'jesterWhereOk';
+  const KEEP_WHERE_MS = 12 * 60 * 60 * 1000;
+  const NOT_NOW_MS = 7 * 24 * 60 * 60 * 1000;
+  function storedWhere(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+  function storeWhere(key, value) {
+    try {
+      if (value === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, value);
+    } catch {
+      /* storage refused: asked as before */
+    }
+  }
+  /** The position kept, if it's a day old at most. */
+  function keptWhere() {
+    try {
+      const kept = JSON.parse(storedWhere(WHERE) || 'null');
+      const fine = kept && [kept.lat, kept.lon, kept.at].every(Number.isFinite) && Date.now() - kept.at < 24 * 60 * 60 * 1000 && kept.at <= Date.now() + 60000;
+      return fine ? { lat: kept.lat, lon: kept.lon, accuracy: Math.max(0, Number(kept.accuracy) || 0), at: kept.at } : null;
+    } catch {
+      return null;
+    }
+  }
+  function keepWhere(coords) {
+    storeWhere(WHERE, JSON.stringify({ lat: coords.latitude, lon: coords.longitude, accuracy: Math.round(coords.accuracy || 0), at: Date.now() }));
+    storeWhere(WHERE_OK, '1');
+    storeWhere(WHERE_NO, null);
+  }
+  function forgetWhere() {
+    storeWhere(WHERE, null);
+    storeWhere(WHERE_OK, null);
+    storeWhere(WHERE_NO, String(Date.now()));
   }
 
   /** The bar over his page: what he wants to know and why, and the tap a browser needs before it asks. */

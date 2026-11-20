@@ -130,3 +130,63 @@ test('another device in use is somewhere else: its position is asked at once, an
   assert.equal(whereabouts.state().device, 'a browser on Windows');
   assert.deepEqual(asked, ['mac', 'page-1', 'page-2']);
 });
+
+test('a phone opened again is the same device: its new connection isn’t taken for another one and asked at once', async () => {
+  // Each opening of his app on a phone is a new connection, with a new number; the id its browser keeps is the same.
+  const opened = { ...page(4), device: { id: 'phone-abc123', app: true } };
+  const reopened = { ...page(9), device: { id: 'phone-abc123', app: true } };
+  let gateway = { voiceClient: opened, clients: [opened] };
+  const located = createDeviceLocate({ gateway: { get voiceClient() { return gateway.voiceClient; }, get clients() { return gateway.clients; } }, hands: {} });
+  assert.equal(located.device(), 'page-phone-abc123');
+  let time = 1_000_000;
+  const asked = [];
+  const whereabouts = createWhereabouts({
+    locate: async (options) => {
+      asked.push(options);
+      const asking = located.locate(options);
+      const ask = gateway.voiceClient.sent.at(-1);
+      located.told(gateway.voiceClient, { id: ask.id, ok: true, lat: 40.79, lon: -77.86, accuracy: 30 });
+      return asking;
+    },
+    device: () => located.device(),
+    setting: () => ({ source: 'here' }),
+    fetchImpl: async () => Response.json({ address: { city: 'State College', state: 'Pennsylvania', country_code: 'us' } }),
+    now: () => time
+  });
+  assert.equal((await whereabouts.here({ waitMs: 1000 })).lat, 40.79);
+  gateway = { voiceClient: reopened, clients: [reopened] };
+  time += 5 * 60 * 1000;
+  await whereabouts.here({ waitMs: 1000 });
+  assert.equal(asked.length, 1, 'opened again five minutes on: not asked');
+  assert.deepEqual(reopened.sent, []);
+});
+
+test('a position the phone kept from earlier is taken as that old, and a turn about where they are asks for a new one', async () => {
+  const client = { id: 3, agent: IPHONE, device: { id: 'phone-abc123' } };
+  assert.deepEqual(positionFrom({ ok: true, lat: 40.79, lon: -77.86, accuracy: 30, kept: true, ageMs: 3 * 3600_000 }, client), { ok: true, lat: 40.79, lon: -77.86, accuracy: 30, device: 'your iPhone', key: 'page-phone-abc123', ageMs: 3 * 3600_000 });
+  assert.equal(positionFrom({ ok: true, lat: 1, lon: 1, ageMs: 5000 }, client).ageMs, undefined, 'only a kept one has an age');
+  assert.equal(positionFrom({ ok: true, lat: 1, lon: 1, kept: true, ageMs: 9e12 }, client).ageMs, 24 * 3600_000, 'a day at most');
+  // The ask says when the turn's about where they are.
+  const phone = { ...page(5), device: { id: 'phone-abc123' } };
+  const located = createDeviceLocate({ gateway: { voiceClient: phone, clients: [phone] }, hands: {} });
+  located.locate({ timeoutMs: 20000, fresh: true });
+  assert.equal(phone.sent.at(-1).fresh, true);
+  located.locate({ timeoutMs: 20000 });
+  assert.equal('fresh' in phone.sent.at(-1), false);
+  located.gone(phone);
+  // whereabouts: a kept one, three hours old, is three hours old; asked "where am I?", it's asked for fresh.
+  let time = 10_000_000_000;
+  const asks = [];
+  const whereabouts = createWhereabouts({
+    locate: async (options) => (asks.push(options.fresh), { ok: true, lat: 40.79, lon: -77.86, accuracy: 30, ageMs: options.fresh ? 0 : 3 * 3600_000, device: 'your iPhone', key: 'page-phone-abc123' }),
+    device: () => 'page-phone-abc123',
+    setting: () => ({ source: 'here' }),
+    fetchImpl: async () => Response.json({ address: { city: 'State College', state: 'Pennsylvania', country_code: 'us' } }),
+    now: () => time
+  });
+  await whereabouts.here({ waitMs: 1000 });
+  assert.equal(whereabouts.state().at, time - 3 * 3600_000);
+  await whereabouts.here({ fresh: true, waitMs: 1000 });
+  assert.deepEqual(asks, [false, true]);
+  assert.equal(whereabouts.state().at, time);
+});
