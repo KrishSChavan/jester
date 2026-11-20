@@ -76,9 +76,12 @@ export function showHome({ screen = 'main', quiet = false } = {}) {
   const goTo = showable(screen);
   // Using him in the cloud, talking to him, his chats and Controls are the server's: its page, in a window of its own.
   if (cloudPage && !goTo.startsWith('settings')) return showCloud({ quiet, screen: goTo });
+  // And this Mac's own settings, which only this window has, open in that window's place, so there's one (cloudSpot).
+  const spot = cloudPage ? cloudSpot() : null;
   if (home && !home.isDestroyed()) {
     const away = !home.isVisible() || home.isMinimized();
     if (home.isMinimized()) home.restore();
+    if (spot) home.setBounds(spot);
     const go = { type: 'jester/home-go', screen: goTo, intro: away };
     postTo(home.webContents, go);
     // Still loading, the page isn't listening yet: it's told again once it is.
@@ -89,12 +92,14 @@ export function showHome({ screen = 'main', quiet = false } = {}) {
       home.show();
       home.focus();
     }
+    if (spot) cloud.hide();
     return home;
   }
   homeScreen = goTo;
   home = new BrowserWindow({
-    width: 600,
-    height: 760,
+    ...(spot || {}),
+    width: spot?.width || 600,
+    height: spot?.height || 760,
     minWidth: 460,
     minHeight: 560,
     title: 'Jester',
@@ -116,6 +121,8 @@ export function showHome({ screen = 'main', quiet = false } = {}) {
       home.show();
       home.focus();
     }
+    // In the website's place: it steps aside once this is there to see, not before, so nothing flashes between.
+    if (spot && cloud && !cloud.isDestroyed()) cloud.hide();
     // On screen: the orb's intro can play now, and be seen from its first frame.
     postTo(home.webContents, { type: 'jester/home-shown' });
   });
@@ -177,15 +184,45 @@ export function setCloudPage(page, { onFocus = () => undefined } = {}) {
 }
 
 /**
+ * Where the website's window is on screen, while it's there to see: this Mac's settings open just there, in its place.
+ * @returns {Electron.Rectangle|null}
+ */
+function cloudSpot() {
+  if (!cloud || cloud.isDestroyed() || !cloud.isVisible() || cloud.isMinimized()) return null;
+  return cloud.isFullScreen() ? null : cloud.getBounds();
+}
+
+/**
+ * Linked to the cloud, back from this Mac's own settings to anything else (his screen, Chats, Controls): the website's
+ * window, where this one is, and this one closes. One window, as without the cloud: before, typing on the orb's
+ * screen here opened the website's window over this one (the user, 2026-11-19: "a new window is opening up").
+ * @returns {Electron.BrowserWindow|null} the website's window, or null when not linked
+ */
+export function backToCloud(screen = 'main') {
+  if (!cloudPage) return null;
+  const leaving = home && !home.isDestroyed() ? home : null;
+  const spot = leaving?.isVisible() && !leaving.isMinimized() && !leaving.isFullScreen() ? leaving.getBounds() : null;
+  const win = showCloud({ screen: showable(screen), bounds: spot });
+  if (leaving) {
+    // Once the website's is there to see: a window that's still loading isn't yet.
+    if (win.isVisible()) closeSafely(leaving);
+    else win.once('show', () => closeSafely(leaving));
+  }
+  return win;
+}
+
+/**
  * His window, as his server's website. No preload: it's another site's page, and gets the `chrome` its own shim
  * (web/shim.js) gives it, over its socket. Its mic is never its own: the Mac's voice page is his ears here, and
  * Electron refuses the page any media (installMediaPermissions only allows jester:// pages).
+ * `bounds`: where it goes (backToCloud: where this Mac's settings were).
  */
-function showCloud({ quiet = false, screen = '' } = {}) {
+function showCloud({ quiet = false, screen = '', bounds = null } = {}) {
   if (cloud && !cloud.isDestroyed()) {
     // To the screen asked for: the page goes to the one its address names (home.js), and the address is ours to set.
     if (screen) cloud.webContents.executeJavaScript(`location.hash = ${JSON.stringify(showable(screen))}`).catch(() => undefined);
     if (cloud.isMinimized()) cloud.restore();
+    if (bounds) cloud.setBounds(bounds);
     if (quiet) cloud.showInactive();
     else {
       app.dock?.show();
@@ -195,8 +232,9 @@ function showCloud({ quiet = false, screen = '' } = {}) {
     return cloud;
   }
   cloud = new BrowserWindow({
-    width: 600,
-    height: 760,
+    ...(bounds || {}),
+    width: bounds?.width || 600,
+    height: bounds?.height || 760,
     minWidth: 380,
     minHeight: 560,
     title: 'Jester',

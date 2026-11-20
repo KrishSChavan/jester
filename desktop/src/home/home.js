@@ -501,8 +501,25 @@ refreshCards();
 // A reminder's time passing changes what it says ("overdue") with nothing else happening: looked at each minute.
 setInterval(refreshCards, 60_000);
 
+// His website: this page in a browser, or in the Mac's own window when that's linked to the cloud.
+const website = !!globalThis.jesterWeb;
+
+/**
+ * A Mac linked to the cloud: this window (the app's own page, not the website's) is only this Mac's settings and its
+ * Getting started. His screen, Chats and Controls are his website's, in the window it's in, which comes back where
+ * this one is while this one closes (main.js `jester/home-cloud`, windows.js backToCloud). Before, the orb's screen
+ * here took typing that opened the website's window over this one (the user, 2026-11-19).
+ */
+function inCloudWindow(screen) {
+  const name = String(screen);
+  if (website || !state().desktop?.cloud?.on || name.startsWith('settings') || name === 'setup') return false;
+  chrome.runtime.sendMessage({ type: 'jester/home-cloud', screen: name }).catch(() => undefined);
+  return true;
+}
+
 const screens = createScreens({
   root: $('screens'),
+  elsewhere: inCloudWindow,
   onChange: (screen) => {
     // The orb is drawn only while its screen is showing.
     orb.pause(screen !== 'main');
@@ -519,7 +536,6 @@ const screens = createScreens({
 
 // Controls (src/controls/), on its screen: the user's scripts. On his website it's the Mac's scripts, through the
 // cloud link: choosing a folder there opens a dialog on the Mac, so it's offered only in the Mac's own window.
-const website = !!globalThis.jesterWeb;
 const controls = mountControls($('controls-host'), {
   active: () => screens.current === 'controls',
   leave: () => screens.go('main'),

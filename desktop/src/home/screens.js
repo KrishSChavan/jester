@@ -37,8 +37,10 @@ const EASE = 'cubic-bezier(0.32, 0.72, 0, 1)';
  * @param {object} options
  * @param {HTMLElement} options.root  holds an element per screen, `data-screen` naming it, one of them `.shown`
  * @param {(screen:string, from:string) => void} [options.onChange]  as a screen starts coming in
+ * @param {(screen:string) => boolean} [options.elsewhere]  a screen this window doesn't show, gone to by other means
+ *   (it sees to that and says true): the screen here stays as it is
  */
-export function createScreens({ root, onChange = () => undefined }) {
+export function createScreens({ root, onChange = () => undefined, elsewhere = () => false }) {
   const element = (screen) => root.querySelector(`[data-screen="${CSS.escape(String(screen))}"]`);
   const still = matchMedia('(prefers-reduced-motion: reduce)');
   let current = root.querySelector('.screen.shown')?.dataset.screen || 'main';
@@ -70,6 +72,7 @@ export function createScreens({ root, onChange = () => undefined }) {
   function go(screen, { instant = false, focus = true } = {}) {
     const next = element(screen);
     if (!next || screen === current) return false;
+    if (elsewhere(screen)) return false;
     settle();
     const from = current;
     const prev = element(from);

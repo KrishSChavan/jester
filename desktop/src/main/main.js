@@ -127,7 +127,7 @@ import { VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
-import { closeSafely, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
+import { backToCloud, closeSafely, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
 import { createScriptsRemote } from './script-remote.js';
 
 const env = process.env;
@@ -2292,9 +2292,10 @@ function listenToPages() {
       // His window. A sentence typed is a command given on purpose, and he writes back.
       case 'jester/talk-type':
         presence?.seen('typed');
-        // In the cloud, typed here is said to him there; his answer's in his window, which is the server's.
+        // In the cloud, typed here is said to him there; his answer's in his window, which is the server's, and takes
+        // this one's place rather than opening over it (home.js keeps this window to this Mac's settings then).
         if (cloudTarget) {
-          showTalk();
+          if (url.startsWith('jester://app/home/')) backToCloud('main');
           return cloudLink?.told(String(message.text).slice(0, TYPED_MAX)) ? { ok: true } : { ok: false, error: 'Jester’s server isn’t reachable right now.' };
         }
         sessionOf(sender).conversation.told(String(message.text).slice(0, TYPED_MAX), { typed: true });
@@ -2360,6 +2361,12 @@ function listenToPages() {
         if (message.op === 'remove') return { ok: keeper.remove(id) };
         return { ok: false };
       }
+      // A Mac linked to the cloud: its window leaves this Mac's settings for his screen, Chats or Controls, which are
+      // his website's, in that window, put where this one is (home.js inCloudWindow).
+      case 'jester/home-cloud':
+        if (SERVER || !cloudTarget || !url.startsWith('jester://app/home/')) return { ok: false };
+        backToCloud(String(message.screen ?? 'main'));
+        return { ok: true };
       // What his window shows: the conversation's frames go to it alone while that's the orb. And whether it's on
       // screen yet, for the orb's intro: shown before its page had loaded, it missed jester/home-shown.
       case 'jester/home-screen':
