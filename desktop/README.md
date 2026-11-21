@@ -2843,6 +2843,12 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     hears you only after you touch the screen. A fresh start of the app (swiped away, or after a restart) still asks
     once: iPhones don't keep a Home Screen app's answer between launches (WebKit bug 327237). Settings › Apps ›
     Safari › Microphone › Allow is reported to stop even that, but it lets every website use the mic without asking.
+28. **His voice starting sooner on his website** (built 2026-11-21; measured on the server's own cores, never heard
+    there). Talk to him on the website or your phone after he's been quiet a while: he should start speaking about
+    a second after his words appear, not two to four. The server's log says `voice loaded: Kokoro (gb), … ms,
+    4 threads` once, as he starts, and never `voice: let go after 3 idle minutes`. Each turn's `turn:` line ends
+    `first sentence at X · … · speaking at Y`: Y − X was 2.1–3.4 s before this, and should be about 1.0–1.6 s (the
+    longer when his first sentence is long).
 
 ## Things learned the hard way
 
@@ -2853,6 +2859,9 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
 - In Chrome, an AudioContext suspended while its mic's track was disabled makes no sound again if the track is
   enabled before the context resumes, though both say they're live and running. Close the context and make a
   new one on the same stream instead.
+- Kokoro on four Neoverse-N1 cores (the Oracle server): on two threads a line takes longer to make than to say,
+  so every sentence waits; on four, about 0.65 of its length. Its int8 model is twice as slow there as full
+  precision.
 
 - Electron's `navigator.geolocation` on a Mac waits for Location Services to
   allow it and never asks: Chrome asks from its own layer, which Electron

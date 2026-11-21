@@ -5,8 +5,8 @@
  * that listens. Text comes in a line at a time and a WAV goes back; nothing
  * leaves the machine.
  *
- * Messages in:  start {accent} · say {id, text, sid, speed?, tight?} · drop {id}
- * Messages out: ready {loadMs, accent} · sound {id, bytes, mime, seconds, tookMs} · error {id?, detail}
+ * Messages in:  start {accent, threads?} · say {id, text, sid, speed?, tight?} · drop {id}
+ * Messages out: ready {loadMs, accent, threads} · sound {id, bytes, mime, seconds, tookMs} · error {id?, detail}
  *
  * Kokoro leaves about 50 ms of quiet before a line and 100 ms after. The quiet
  * before is cut to LEAD_S, so he's heard that much sooner; `tight` cuts the quiet
@@ -54,8 +54,9 @@ port?.on('message', ({ data }) => {
   if (data?.type === 'start') {
     const started = Date.now();
     try {
-      tts = new sherpa.OfflineTts(kokoroConfig(data.accent, { dir: data.dir, threads: data.threads }));
-      port.postMessage({ type: 'ready', loadMs: Date.now() - started, accent: data.accent });
+      const config = kokoroConfig(data.accent, { dir: data.dir, threads: data.threads });
+      tts = new sherpa.OfflineTts(config);
+      port.postMessage({ type: 'ready', loadMs: Date.now() - started, accent: data.accent, threads: config.model.numThreads });
     } catch (err) {
       port.postMessage({ type: 'error', detail: `load: ${String(err?.message || err)}` });
     }

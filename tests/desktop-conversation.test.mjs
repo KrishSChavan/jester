@@ -1549,6 +1549,57 @@ test('a line is made and played a sentence at a time, and a long first sentence 
   assert.deepEqual(spokenPieces('  '), []);
 });
 
+// 2026-11-21, "the speech is taking a while to say anything on the web": his server makes a character's worth of sound
+// in about 42 ms, where an M4 Pro takes about 10, and both take about 60 to say one.
+test('where his voice is slow to make sound, his opening sentence is cut sooner, but never so soon he waits mid-sentence', () => {
+  const server = { makeMs: 42, sayMs: 60 };
+  const mac = { makeMs: 10, sayMs: 60 };
+  // Too short to be cut before: made whole, there, it was 2 s before any sound.
+  const meeting = 'Your next meeting is at three, with Sam from design.';
+  assert.deepEqual(spokenPieces(meeting), [meeting]);
+  assert.deepEqual(spokenPieces(meeting, { timing: server }), ['Your next meeting is at three,', 'with Sam from design.']);
+  // Cut already, and cut sooner.
+  const longer = 'Your next meeting is at three, with Sam, about the launch plan for next week.';
+  assert.deepEqual(spokenPieces(longer), ['Your next meeting is at three, with Sam,', 'about the launch plan for next week.']);
+  assert.deepEqual(spokenPieces(longer, { timing: server }), ['Your next meeting is at three,', 'with Sam, about the launch plan for next week.']);
+  // A long one isn't cut any sooner: what's after the cut would take longer to make than what's before it takes to say.
+  const weather = 'It is fifty-two degrees and cloudy right now, and it should clear up by about four this afternoon.';
+  assert.deepEqual(spokenPieces(weather, { timing: server }), spokenPieces(weather));
+  assert.equal(spokenPieces(weather)[0], 'It is fifty-two degrees and cloudy right now,');
+  // A voice as quick as an M4 Pro's is cut where it always was.
+  for (const line of [meeting, longer, weather]) assert.deepEqual(spokenPieces(line, { timing: mac }), spokenPieces(line));
+});
+
+test('the speaker learns how quickly its voice makes sound, and a line made ahead is cut as it was when it was begun', async () => {
+  const made = [];
+  let holding = true;
+  const waits = [];
+  // A server's voice: 42 ms to make each character, 60 to say it.
+  const voice = {
+    sound: (text) => {
+      made.push(text);
+      const sound = { bytes: new Uint8Array([text.length]), type: 'audio/wav', tookMs: text.length * 42, seconds: (text.length * 60) / 1000 };
+      return holding ? new Promise((resolve) => waits.push(() => resolve(sound))) : Promise.resolve(sound);
+    }
+  };
+  const speaker = createSpeaker({ voice, play: async () => undefined, stopPlaying: () => undefined, system: { say: async () => undefined, stop: () => undefined } });
+  const meeting = 'Your next meeting is at three, with Sam from design.';
+  // Its first line is being made when the next is begun: not yet measured, so begun whole.
+  const first = speaker.say('Good evening, and welcome back to the flat.');
+  await new Promise((resolve) => setImmediate(resolve));
+  speaker.prepare(meeting);
+  holding = false;
+  for (const release of waits.splice(0)) release();
+  await first;
+  // Measured now, but the line begun whole is said whole: what was made of it is used, not made again.
+  await speaker.say(meeting);
+  assert.deepEqual(made, ['Good evening, and welcome back to the flat.', meeting]);
+  // Said again, it's cut by what's been measured.
+  made.length = 0;
+  await speaker.say(meeting);
+  assert.deepEqual(made, ['Your next meeting is at three,', 'with Sam from design.']);
+});
+
 test('the quiet before a piece is cut, and the quiet after one that runs on', () => {
   const rate = 1000;
   const samples = new Float32Array(300);
@@ -1763,6 +1814,31 @@ test('the voices Settings offers are the model’s own, and a setting that names
   assert.equal(config.model.numThreads, 4);
   // Four cores are left for everything else, and never fewer than two used.
   assert.deepEqual([4, 8, 10, 12, 16].map(kokoroThreads), [2, 4, 6, 8, 8]);
+  // A server has nothing else of his to leave them for: two of its four were slower than he talks (2026-11-21).
+  assert.deepEqual([2, 4, 8, 16].map((cores) => kokoroThreads(cores, { server: true })), [2, 4, 8, 8]);
+});
+
+test('on a server Kokoro is made on the threads it’s given, says so, and is kept loaded however long it’s quiet', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const service = fakeService();
+  const logged = [];
+  const kept = startKokoro({ fork: service.fork, installed: () => true, threads: 4, idleMs: null, log: (...parts) => logged.push(parts.join(' ')) });
+  kept.warm();
+  const [child] = service.children;
+  assert.deepEqual(child.sent, [{ type: 'start', accent: 'gb', threads: 4 }]);
+  child.tell({ type: 'ready', loadMs: 1700, accent: 'gb', threads: 4 });
+  assert.match(logged.join('\n'), /voice loaded: Kokoro \(gb\), 1700 ms, 4 threads/);
+  t.mock.timers.tick(24 * 60 * 60 * 1000);
+  assert.equal(kept.loaded, true);
+  assert.equal(child.killed, false);
+  kept.stop();
+  // On a computer of the user's, it's let go after three quiet minutes, as ever.
+  const laptop = fakeService();
+  const usual = startKokoro({ fork: laptop.fork, installed: () => true });
+  usual.warm();
+  assert.deepEqual(laptop.children[0].sent, [{ type: 'start', accent: 'gb' }]);
+  t.mock.timers.tick(3 * 60 * 1000);
+  assert.equal(usual.loaded, false);
 });
 
 // 2026-11-16: "when he stops listening he doesn't respond to any trigger phrase."

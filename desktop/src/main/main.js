@@ -123,7 +123,7 @@ import { createChatLearner } from './chat-learn.js';
 import { createVaultIndex } from './vault-index.js';
 import { createVaultMemory, secretIn } from './vault-memory.js';
 import { createVoicePage } from './voice-page.js';
-import { VOICES, voiceNamed } from './voice/voices.js';
+import { kokoroThreads, VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
@@ -3255,6 +3255,9 @@ async function start() {
   kokoro = startKokoro({
     fork: (file) => utilityProcess.fork(file, [], { serviceName: 'Jester voice', stdio: 'pipe' }),
     voice: () => settings?.jesterVoice,
+    // A server makes his voice on every core it has, and keeps it loaded from the start: there, two threads were slower
+    // than he talks, and loading it again after each quiet spell took 2.4 s (voices.js, kokoro.js).
+    ...(SERVER ? { threads: kokoroThreads(undefined, { server: true }), idleMs: null } : {}),
     log
   });
   // The sign-in to the voice service he used before this one: nothing uses it now.
@@ -3309,6 +3312,8 @@ async function start() {
       settings = await loadSettings();
     }
   }
+  // Once it's known which voice is his (its accent is what's loaded).
+  if (SERVER) kokoro.warm();
   openVault();
   // Where the user is, the weather and their calendars: nothing until they're connected in Settings.
   const showDay = () => post(desktopState());

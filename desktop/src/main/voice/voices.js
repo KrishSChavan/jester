@@ -43,8 +43,14 @@ export const kokoroInstalled = (models = MODELS_DIR) => fs.existsSync(path.join(
  * How many threads make a line. Measured on an M4 Pro (12 cores, 2026-11-15): a 24-character sentence takes 650 ms
  * on two, 380 on four, 310 on six and 255 on eight; Core ML was slower than four. Four cores are left for everything
  * else, and nothing else of his is busy while he's working out how to say something.
+ *
+ * A server (JESTER_SERVER) has nothing to leave them for: no hands, camera, gestures or overlays of his run there, so
+ * it uses them all. Measured on his Oracle server (four Neoverse-N1 cores, 2026-11-21): "Hey, good evening." took
+ * 1.8 s on the two it was given, longer than the 1.4 s it takes to say, so every sentence after it was waited for
+ * too; on four, 1.0 s, and each sentence made in about 0.65 of the time it takes to say. (Its int8 model was twice
+ * as slow there.)
  */
-export const kokoroThreads = (cores = os.availableParallelism()) => Math.max(2, Math.min(8, cores - 4));
+export const kokoroThreads = (cores = os.availableParallelism(), { server = false } = {}) => Math.max(2, Math.min(8, server ? cores : cores - 4));
 
 /** sherpa-onnx's config for one accent. One pronunciation list at a time: given both, it warns of every shared word. */
 export function kokoroConfig(accent, { dir = kokoroDir(), threads = kokoroThreads() } = {}) {

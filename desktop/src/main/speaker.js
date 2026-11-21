@@ -27,6 +27,13 @@ const CUT_NEAR = 40;
  * not at the comma at 73, which was 0.85 s to make.
  */
 const COMMA_WORTH = 8;
+/**
+ * Where his voice is slow to make sound, the cut comes sooner: as soon as this would have the first sound made in,
+ * but not so soon that the rest isn't made by the time it's been said. His server makes a character's worth in about
+ * 42 ms (four Neoverse-N1 cores, 2026-11-21), against about 10 on an M4 Pro, and it takes about 60 to say, so a
+ * 61-character opening sentence (the median of his there) cut at 40 was 1.6 s before any sound; cut at 26, 1.2 s.
+ */
+const FIRST_SOUND_MS = 400;
 const JOINING = /\s(?=(?:and|but|or|so|because|which|that|while|when|where|if|as|then|since|until|before|after|by|with|without|from|into|through|for|than)\s)/g;
 /** A piece that ends like this ends where the sentence pauses; one that doesn't runs on into the next (runsOn). */
 const PAUSES = /[.!?…,;:—–]["'”’)]*$/;
@@ -342,11 +349,25 @@ export function forEar(text) {
 }
 
 /**
+ * Where an opening sentence of `length` characters is cut, for a voice that takes `timing.makeMs` to make a
+ * character's worth of sound and `timing.sayMs` to say it: CUT_NEAR, or sooner for a slow one (FIRST_SOUND_MS).
+ * The part after the cut is made while the part before it is said, so the cut is no sooner than that takes.
+ */
+function cutNear(length, timing) {
+  if (!(timing?.makeMs > 0 && timing?.sayMs > 0)) return CUT_NEAR;
+  const { makeMs, sayMs } = timing;
+  return Math.min(CUT_NEAR, Math.max(CLAUSE_LEAST, Math.round(FIRST_SOUND_MS / makeMs), Math.ceil((length * makeMs) / (makeMs + sayMs))));
+}
+
+/**
  * A line as the pieces it's made and played in, put for the ear (forEar): its sentences, and a long first sentence
- * as two clauses, so the first sound comes soon. Each is made while the one before plays.
+ * as two clauses, so the first sound comes soon. Each is made while the one before plays. `timing`: how quickly the
+ * voice makes sound, measured (the speaker's), for where the first sentence is cut.
+ * @param {string} text
+ * @param {{timing?:{makeMs:number, sayMs:number}|null}} [options]
  * @returns {string[]}
  */
-export function spokenPieces(text) {
+export function spokenPieces(text, { timing = null } = {}) {
   const line = forEar(text);
   if (!line) return [];
   const pieces = [];
@@ -361,11 +382,13 @@ export function spokenPieces(text) {
   const last = line.slice(from).trim();
   if (last) pieces.push(last);
   const first = pieces[0];
-  if (first.length > LONG_PIECE) {
-    // At a comma or before a joining word, whichever is nearest CUT_NEAR and leaves enough either side.
+  const near = cutNear(first.length, timing);
+  // Long enough to cut: LONG_PIECE, or as much shorter as the cut comes sooner.
+  if (first.length > Math.max(2 * CLAUSE_LEAST, Math.round((near * LONG_PIECE) / CUT_NEAR))) {
+    // At a comma or before a joining word, whichever is nearest where the cut's wanted and leaves enough either side.
     const cuts = [
-      ...[...first.matchAll(/[,;:—–]\s/g)].map((cut) => ({ at: cut.index + 1, far: Math.abs(cut.index + 1 - CUT_NEAR) })),
-      ...[...first.matchAll(JOINING)].map((cut) => ({ at: cut.index, far: Math.abs(cut.index - CUT_NEAR) + COMMA_WORTH }))
+      ...[...first.matchAll(/[,;:—–]\s/g)].map((cut) => ({ at: cut.index + 1, far: Math.abs(cut.index + 1 - near) })),
+      ...[...first.matchAll(JOINING)].map((cut) => ({ at: cut.index, far: Math.abs(cut.index - near) + COMMA_WORTH }))
     ].filter(({ at }) => at >= CLAUSE_LEAST && first.length - at >= CLAUSE_LEAST);
     const at = cuts.sort((a, b) => a.far - b.far)[0]?.at;
     if (at) pieces.splice(0, 1, first.slice(0, at).trim(), first.slice(at).trim());
@@ -378,7 +401,7 @@ export const runsOn = (piece) => !PAUSES.test(piece);
 
 /**
  * @param {object} deps
- * @param {{sound:(text:string, options:{signal?:AbortSignal, tight?:boolean}) => Promise<{bytes:Uint8Array, type:string}|null>}|null} [deps.voice]  his own voice: null from `sound` when it isn't there; `tight` for a piece that runs on into the next
+ * @param {{sound:(text:string, options:{signal?:AbortSignal, tight?:boolean}) => Promise<{bytes:Uint8Array, type:string, seconds?:number, tookMs?:number}|null>}|null} [deps.voice]  his own voice: null from `sound` when it isn't there; `tight` for a piece that runs on into the next; how long a sound lasts and took to make, when it says, is how quickly it's measured to be
  * @param {(bytes:Uint8Array, type:string, options?:{queued?:boolean}) => Promise<void>} deps.play  `queued`: started as what's playing ends, not in its place
  * @param {() => void} deps.stopPlaying
  * @param {{say:Function, stop:Function}} deps.system
@@ -388,11 +411,26 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
   let controller = null;
   /** A piece's sound, being made ahead of its turn (prepare): the piece, and the sound or null. */
   let ahead = null;
+  /**
+   * How long his voice takes here to make a character's worth of sound, and to say it (spokenPieces' `timing`), from
+   * the pieces it's made at his usual pace: null before the first. A piece shorter than a clause is mostly the
+   * voice's own start, so it's left out.
+   */
+  let timing = null;
+  const timed = (piece, sound) => {
+    if (piece.length < CLAUSE_LEAST || !(sound?.tookMs > 0) || !(sound?.seconds > 0)) return;
+    const now = { makeMs: sound.tookMs / piece.length, sayMs: (sound.seconds * 1000) / piece.length };
+    timing = timing ? { makeMs: timing.makeMs * 0.7 + now.makeMs * 0.3, sayMs: timing.sayMs * 0.7 + now.sayMs * 0.3 } : now;
+  };
 
   /** A piece's sound, or null when his own voice can't make it: never a rejection. */
   const made = (piece, signal, pace = 1) =>
     Promise.resolve()
       .then(() => (voice ? voice.sound(piece, { signal, tight: runsOn(piece), ...(pace === 1 ? {} : { speed: pace }) }) : null))
+      .then((sound) => {
+        if (pace === 1) timed(piece, sound);
+        return sound;
+      })
       .catch((err) => {
         if (!signal?.aborted) log('Jester’s voice:', err.message);
         return null;
@@ -418,7 +456,8 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
           // A listener's trouble isn't the voice's.
         }
       };
-      const pieces = spokenPieces(text);
+      // Cut as the line made ahead was, when there is one: its start is then the same, and what's made of it is used.
+      const pieces = spokenPieces(text, { timing: ahead ? ahead.timing : timing });
       const early = ahead?.text === pieces[0] && ahead.pace === pace ? ahead : null;
       if (ahead && ahead !== early) ahead.controller.abort();
       ahead = null;
@@ -471,9 +510,9 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
     /** A line that's about to be said, after the one being said now: its start is made meanwhile, so no gap. */
     prepare(text, { pace = 1 } = {}) {
       ahead?.controller.abort();
-      const [first] = spokenPieces(text);
+      const [first] = spokenPieces(text, { timing });
       const preparing = new AbortController();
-      ahead = first ? { text: first, pace, controller: preparing, made: made(first, preparing.signal, pace) } : null;
+      ahead = first ? { text: first, pace, timing, controller: preparing, made: made(first, preparing.signal, pace) } : null;
     },
     stop() {
       ahead?.controller.abort();

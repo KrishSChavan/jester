@@ -6,6 +6,10 @@
  * someone starts talking to him (warm) or he has something to say, and let go
  * after IDLE_MS without a line. Loading takes under half a second, about what it
  * takes to say his name.
+ *
+ * Not on a server, which has the memory to spare and takes four times as long to
+ * load it (2.4 s on his, 2026-11-21: the first line after three quiet minutes
+ * waited for that every time). There it's kept (`idleMs: null`).
  */
 
 import path from 'node:path';
@@ -25,8 +29,10 @@ const REST_MS = 10 * 60 * 1000;
  * @param {(file:string) => {postMessage:Function, on:Function, kill:Function, stderr?:any}} deps.fork  starts the service
  * @param {() => string} [deps.voice]  the voice Settings names (voices.js)
  * @param {() => boolean} [deps.installed]
+ * @param {number|null} [deps.idleMs]  how long it's kept without a line; null, for good
+ * @param {number} [deps.threads]  how many make a line; the service decides, without (voices.js kokoroThreads)
  */
-export function startKokoro({ fork, voice = () => undefined, installed = kokoroInstalled, idleMs = IDLE_MS, lineMs = LINE_MS, log = () => undefined, now = Date.now }) {
+export function startKokoro({ fork, voice = () => undefined, installed = kokoroInstalled, idleMs = IDLE_MS, lineMs = LINE_MS, threads = 0, log = () => undefined, now = Date.now }) {
   let service = null;
   let accent = null;
   let idleTimer = null;
@@ -55,6 +61,7 @@ export function startKokoro({ fork, voice = () => undefined, installed = kokoroI
 
   function rest() {
     clearTimeout(idleTimer);
+    if (idleMs === null || idleMs === Infinity) return;
     idleTimer = setTimeout(() => {
       if (waiting.size) return rest();
       log(`voice: let go after ${Math.round(idleMs / 60000)} idle minutes`);
@@ -77,7 +84,7 @@ export function startKokoro({ fork, voice = () => undefined, installed = kokoroI
       if (service !== child) return;
       if (message?.type === 'ready') {
         failures = 0;
-        return log(`voice loaded: Kokoro (${message.accent}), ${message.loadMs} ms`);
+        return log(`voice loaded: Kokoro (${message.accent}), ${message.loadMs} ms${message.threads ? `, ${message.threads} threads` : ''}`);
       }
       if (message?.type === 'sound') return settle(message.id, 'resolve', { bytes: message.bytes, type: message.mime, seconds: message.seconds, tookMs: message.tookMs });
       if (message?.type === 'error') {
@@ -92,7 +99,7 @@ export function startKokoro({ fork, voice = () => undefined, installed = kokoroI
       log('voice service exited', code);
       failed(child);
     });
-    child.postMessage({ type: 'start', accent: wanted });
+    child.postMessage({ type: 'start', accent: wanted, ...(threads > 0 ? { threads } : {}) });
     rest();
     return child;
   }
