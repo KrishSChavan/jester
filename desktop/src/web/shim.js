@@ -170,6 +170,26 @@
   let stream = null;
   let context = null;
   let micWanted = false;
+  /** The mic being opened: asked for, or its sound being joined up. */
+  let micOpening = null;
+
+  /*
+   * An iPhone forgets that the mic was allowed soon after it's let go, and asks again: WebKit's rule (its
+   * UserMediaPermissionRequestManagerProxy.cpp and WebPreferencesDefaultValues.cpp, read 2026-11-21) is that a mic
+   * asked for without a tap is given without asking only within a minute of the last one being used, on an iPhone or
+   * iPad; with a tap, within ten. This mic was let go each time his server's connection dropped, which it does as his
+   * app is put away, so coming back asked again (the user, 2026-11-21: "everytime I open a new app even if the pwa is
+   * not closed and come back to it it still asks for my microphone access").
+   *
+   * Put away, an iPhone only mutes a page's mic (WebKit's InterruptAudioOnPageVisibilityChangeEnabled, on there): it's
+   * there again as the page comes back. So on an iPhone or iPad it's never let go while the page is open: closed, it's
+   * muted (its tracks disabled) and its sound closed, and opened again it's the same mic, with nothing to ask, and a
+   * new sound for it. Anywhere else it's let go, as before: those browsers keep the site's answer.
+   *
+   * A fresh start of his app on a Home Screen still asks, once: WebKit keeps no answer for those between launches
+   * (WebKit bug 327237, 2026-10-12), and nothing a page does changes that.
+   */
+  const keepsMic = /\b(?:iPhone|iPad|iPod)\b/.test(navigator.userAgent) || (/\bMacintosh\b/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
 
   function status(report) {
     if (open) socket.send(JSON.stringify({ t: 'voice-status', report }));
@@ -181,36 +201,105 @@
     if (open) socket.send(JSON.stringify({ t: 'voice-claim' }));
   }
 
+  /** The mic's there to be used again: one of its tracks hasn't ended. */
+  const kept = () => !!stream && stream.getAudioTracks().some((track) => track.readyState === 'live');
+
+  /**
+   * Nothing's heard here: the mic's sound isn't made or sent. Let go of, unless letting go would mean being asked again.
+   * Kept, it's muted, and its sound closed rather than suspended: in Chrome, a context suspended while its mic was
+   * muted made no sound again once both were back, unless it was going before the mic was (measured, 2026-11-21).
+   */
   function closeMic() {
     micWanted = false;
-    stream?.getTracks().forEach((track) => track.stop());
-    stream = null;
+    if (!keepsMic) return releaseMic();
+    for (const track of stream?.getAudioTracks() || []) track.enabled = false;
+    closeSound();
+    return undefined;
+  }
+
+  function closeSound() {
     Promise.resolve(context?.close()).catch(() => undefined);
     context = null;
   }
 
-  async function openMic() {
-    if (micWanted && stream) return;
+  function releaseMic() {
+    // Not this page's any more before its tracks stop: their end isn't taken for the device's (lostMic).
+    const tracks = stream?.getTracks() || [];
+    stream = null;
+    for (const track of tracks) track.stop();
+    closeSound();
+  }
+
+  /** Opened again while it was being opened: it may have been closed in between, so it's gone through once more. */
+  let micAgain = false;
+  function openMic() {
     micWanted = true;
+    if (micOpening) {
+      micAgain = true;
+      return micOpening;
+    }
+    micOpening = (async () => {
+      do {
+        micAgain = false;
+        await startMic();
+      } while (micAgain && micWanted);
+    })().finally(() => (micOpening = null));
+    return micOpening;
+  }
+
+  /** The mic, the one kept or a new one, made to send its sound: unless it's closed again meanwhile. */
+  async function startMic() {
+    let got = null;
+    let made = null;
     try {
-      const got = await navigator.mediaDevices.getUserMedia({ audio: MIC, video: false });
-      if (!micWanted) return got.getTracks().forEach((track) => track.stop());
-      stream = got;
-      // The recognizer wants 16 kHz mono; the audio context resamples to it.
-      context = new AudioContext({ sampleRate: 16000 });
-      await context.audioWorklet.addModule('/app/worklets/speech-capture.js');
-      const tap = new AudioWorkletNode(context, 'jester-speech-capture');
-      tap.port.onmessage = ({ data }) => open && socket.send(data.buffer);
-      context.createMediaStreamSource(stream).connect(tap);
-      tap.connect(context.destination);
+      // Open and sending already (back in front, say): nothing to do, or to say.
+      if (kept() && context?.state === 'running' && stream.getAudioTracks().every((track) => track.enabled)) return undefined;
+      if (!kept()) {
+        releaseMic();
+        got = await navigator.mediaDevices.getUserMedia({ audio: MIC, video: false });
+        if (!micWanted && !keepsMic) return got.getTracks().forEach((track) => track.stop());
+        stream = got;
+        for (const track of got.getAudioTracks()) track.addEventListener('ended', () => lostMic(got));
+      }
+      if (!micWanted) return closeMic();
+      const mic = stream;
+      for (const track of mic.getAudioTracks()) track.enabled = true;
+      if (!context) {
+        // The recognizer wants 16 kHz mono; the audio context resamples to it.
+        made = new AudioContext({ sampleRate: 16000 });
+        context = made;
+        await made.audioWorklet.addModule('/app/worklets/speech-capture.js');
+        // Closed or let go of meanwhile: so is this.
+        if (context !== made || stream !== mic) return made.close().catch(() => undefined);
+        const tap = new AudioWorkletNode(made, 'jester-speech-capture');
+        tap.port.onmessage = ({ data }) => micWanted && open && socket.send(data.buffer);
+        made.createMediaStreamSource(mic).connect(tap);
+        tap.connect(made.destination);
+      }
       // A phone may not start it without a touch: ready() starts it at the next one.
-      const started = await Promise.race([context.resume().then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 1500))]);
-      status({ mic: started || context?.state === 'running' ? stream?.getAudioTracks()[0]?.label || 'open' : 'waiting for a tap: this browser starts no mic before one' });
+      const started = context.state === 'running' || (await Promise.race([context.resume().then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 1500))]));
+      if (!micWanted) return undefined;
+      const label = stream?.getAudioTracks()[0]?.label || 'open';
+      status({ mic: started || context?.state === 'running' ? `${label}${got ? '' : ', the one kept: not asked for again'}` : 'waiting for a tap: this browser starts no mic before one' });
     } catch (error) {
+      // Let go of, or closed, on purpose while it was being joined up: nothing went wrong, and a mic kept stays kept.
+      if ((got && stream !== got) || (made && context !== made)) return undefined;
       const why = error?.message || String(error);
-      closeMic();
+      releaseMic();
       status({ mic: `not open: ${why}` });
     }
+    return undefined;
+  }
+
+  /**
+   * Ended by the browser or the phone, not here (another app took the mic, it was unplugged): gone. Asked for again
+   * if it's wanted, once his page is in front: a page behind gets no mic.
+   */
+  function lostMic(got) {
+    if (stream !== got) return;
+    releaseMic();
+    status({ mic: 'ended by this device' });
+    if (micWanted && document.visibilityState !== 'hidden') openMic();
   }
 
   /*
@@ -248,7 +337,8 @@
   function ready() {
     // A touch that scrolled isn't one a browser counts.
     if (navigator.userActivation && !navigator.userActivation.isActive) return;
-    if (context?.state === 'suspended' && micWanted) context.resume().then(() => status({ mic: 'open, after a tap' }), () => undefined);
+    // Suspended, or interrupted by an iPhone while his app was put away.
+    if (micWanted && context && context.state !== 'running' && context.state !== 'closed') context.resume().then(() => status({ mic: 'open, after a tap' }), () => undefined);
     if (readied) return;
     readied = true;
     for (const el of players) if (!el.piece) el.load();
@@ -629,6 +719,9 @@
       if (document.visibilityState !== 'hidden') claim();
       document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && claim());
     }
+    // Back in front with the mic still wanted (the connection lasted while it was away): the kept one, going again, or
+    // a new one for one that was lost meanwhile.
+    document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && micWanted && openMic());
   }
   connect();
 })();

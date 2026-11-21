@@ -2835,8 +2835,24 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     it has had). On your PC: run `Jester-windows-x64-setup.exe` (More info › Run anyway), and see that he opens,
     downloads his models, hears "Jester", answers, and that "open Notepad and type hello" does it. What his log
     says is in `%APPDATA%\Jester\logs\jester.log`. Linking with Chrome isn't built for Windows.
+27. **Your phone's mic, kept** (built 2026-11-21; run in real Chrome posing as an iPhone, with its pretend mic, against
+    the real gateway, never on an iPhone). Open his app on your Home Screen and allow the mic once. Then go to
+    another app for a few minutes and come back, a few times: it shouldn't ask again. The server's log says
+    `web mic: iPhone Microphone, the one kept: not asked for again` each time you come back. `web mic: ended by
+    this device` means the phone ended the mic itself (it will ask again then), and `waiting for a tap` means it
+    hears you only after you touch the screen. A fresh start of the app (swiped away, or after a restart) still asks
+    once: iPhones don't keep a Home Screen app's answer between launches (WebKit bug 327237). Settings › Apps ›
+    Safari › Microphone › Allow is reported to stop even that, but it lets every website use the mic without asking.
 
 ## Things learned the hard way
+
+- An iPhone gives a page the mic without asking only within a minute of the last time it was capturing, unless
+  it's asked for in a tap (ten minutes then): WebKit's `UserMediaPermissionRequestManagerProxy`. A page that stops
+  its mic and asks for it again later is asked again. Keep it, muted. A Home Screen app asks again on every fresh
+  launch whatever the page does (WebKit bug 327237).
+- In Chrome, an AudioContext suspended while its mic's track was disabled makes no sound again if the track is
+  enabled before the context resumes, though both say they're live and running. Close the context and make a
+  new one on the same stream instead.
 
 - Electron's `navigator.geolocation` on a Mac waits for Location Services to
   allow it and never asks: Chrome asks from its own layer, which Electron
