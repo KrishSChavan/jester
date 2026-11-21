@@ -6,7 +6,9 @@
  * (web-gateway.js), as a client of the role 'mac':
  *
  *   - his ears and mouth, when the Mac is the one being talked to: the always-on mic's audio goes up, and his voice
- *     comes down to play here, through the same hidden voice page as ever (voice-page.js);
+ *     is played here, through the same hidden voice page as ever (voice-page.js). It's made here too, by the Mac's
+ *     own Kokoro, when it's there: the server says what to say, piece by piece (`make`), and which piece to play;
+ *     the sound never leaves the Mac. Otherwise the server makes it and sends it down;
  *   - his hands (remote-hands.js): the server asks, the Mac's own voice runner and assistant do it, and Controls on
  *     his website runs the Mac's scripts (script-remote.js says what it may);
  *   - how long since the user touched the Mac, so the server knows whether they're here.
@@ -20,6 +22,9 @@ const RETRY_MS = [1000, 2000, 5000, 10000, 30000];
 /** How often what the hands are up to is looked at, and the user's idle time sent. */
 const STATE_MS = 200;
 const PRESENCE_MS = 10000;
+/** A piece of his voice made here and never played (a line cut short) is let go after this long, or past this many. */
+const KEEP_MS = 2 * 60 * 1000;
+const KEEP_MOST = 32;
 
 /** The link the user pasted ("https://jester.tailnet.ts.net/?key=…"), as the socket's address and its key; null if it isn't one. */
 export function parseCloudLink(link) {
@@ -74,6 +79,11 @@ export async function cloudKeyFor(server, password, { fetchImpl = globalThis.fet
  * @param {{socket:string, key:string, origin:string}} deps.link   parseCloudLink's
  * @param {(op:'open'|'close') => void} deps.onVoice   open or close the always-on mic, for the server
  * @param {(sound:{id?:number, bytes?:Buffer, type?:string, stop?:boolean}) => void} deps.onPlay   his voice, to play here
+ * @param {(text:string, options:{signal:AbortSignal, tight?:boolean, speed?:number, voice?:string}) => Promise<{bytes:Uint8Array, type:string, seconds?:number}|null>} [deps.makeVoice]
+ *   his voice made here (kokoro.js sound): null when it can't be
+ * @param {() => string} [deps.voiceState]   kokoro.js state: 'missing' means the server makes it
+ * @param {() => boolean} [deps.voiceLoaded]   whether it's loaded here: until it is, the server makes his voice
+ * @param {(voice?:string) => void} [deps.onWarm]   someone's started talking to him: his voice loads meanwhile
  * @param {(request:object) => Promise<any>} deps.onHands   do what the server asks; the result goes back
  * @param {() => object} deps.handsState   { running, asking, abilities }: sent when it changes
  * @param {() => number} deps.idleSeconds
@@ -82,7 +92,7 @@ export async function cloudKeyFor(server, password, { fetchImpl = globalThis.fet
  * @param {() => void} [deps.onRefused]   the server turned its key away: the user has to sign in again
  * @param {(connected:boolean) => void} [deps.onChange]
  */
-export function createCloudLink({ link: given, device = null, onVoice, onPlay, onHands, handsState, idleSeconds, onChange = () => undefined, onFrame = () => undefined, onRefused = () => undefined, log = () => undefined, WebSocketImpl = WebSocket }) {
+export function createCloudLink({ link: given, device = null, onVoice, onPlay, onHands, handsState, idleSeconds, makeVoice = null, voiceState = () => 'missing', voiceLoaded = () => true, onWarm = () => undefined, onChange = () => undefined, onFrame = () => undefined, onRefused = () => undefined, log = () => undefined, now = Date.now, WebSocketImpl = WebSocket }) {
   /** Where it connects, and with what key: changed when the user signs in again (`use`). */
   let link = given;
   /** The server said the key isn't its own (it was replaced): told once, and tried again more slowly. */
@@ -94,9 +104,63 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
   let retry = null;
   let lastState = '';
   let wantsClaim = true;
+  /** Pieces of his voice the server asked for, being made here: id → its AbortController. */
+  const making = new Map();
+  /** Made, and kept until the server says to play them: id → {bytes, type, at}. */
+  const kept = new Map();
 
   function send(frame) {
     if (connected) socket.send(JSON.stringify(frame));
+  }
+
+  const makesVoice = () => {
+    try {
+      return !!makeVoice && voiceState() !== 'missing';
+    } catch {
+      return false;
+    }
+  };
+
+  /** A piece the server wants said: made here and kept, and the server told how long it lasts, or that it can't be. */
+  function make(frame) {
+    const id = frame.id;
+    if (!Number.isFinite(id) || making.has(id)) return;
+    // Let go after a quiet spell (kokoro.js), it's most of a second to load again: the server makes this piece
+    // meanwhile, and the next is made here.
+    if (!voiceLoaded()) {
+      onWarm(typeof frame.voice === 'string' ? frame.voice : undefined);
+      return send({ t: 'made', id, ok: false });
+    }
+    const controller = new AbortController();
+    making.set(id, controller);
+    const options = { signal: controller.signal, ...(frame.tight === true ? { tight: true } : {}), ...(Number.isFinite(frame.speed) ? { speed: frame.speed } : {}), ...(typeof frame.voice === 'string' ? { voice: frame.voice } : {}) };
+    Promise.resolve()
+      .then(() => makeVoice(String(frame.text || ''), options))
+      .catch((err) => {
+        if (!controller.signal.aborted) log('cloud: couldn’t make his voice here:', err.message);
+        return null;
+      })
+      .then((sound) => {
+        if (making.get(id) !== controller) return;
+        making.delete(id);
+        if (controller.signal.aborted) return;
+        if (!sound?.bytes) return send({ t: 'made', id, ok: false, ...(makesVoice() ? {} : { missing: true }) });
+        for (const [each, piece] of kept) if (kept.size >= KEEP_MOST || now() - piece.at > KEEP_MS) kept.delete(each);
+        kept.set(id, { bytes: sound.bytes, type: String(sound.type || 'audio/wav'), at: now() });
+        send({ t: 'made', id, ok: true, seconds: Number(sound.seconds) || 0 });
+      });
+  }
+
+  function unmake(id) {
+    making.get(id)?.abort();
+    making.delete(id);
+    kept.delete(id);
+  }
+
+  function forgetMade() {
+    for (const controller of making.values()) controller.abort();
+    making.clear();
+    kept.clear();
   }
 
   function connect() {
@@ -111,7 +175,7 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
       tries = 0;
       lastState = '';
       log('cloud: connected to', link.origin);
-      send({ t: 'hello', role: 'mac', device });
+      send({ t: 'hello', role: 'mac', device, ...(makesVoice() ? { makesVoice: true } : {}) });
       if (wantsClaim) send({ t: 'voice-claim' });
       send({ t: 'presence', idleSeconds: idleSeconds() });
       pushState();
@@ -126,8 +190,21 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
         return;
       }
       if (frame.t === 'voice') onVoice(frame.op === 'open' ? 'open' : 'close');
-      else if (frame.t === 'play') onPlay(frame.stop ? { stop: true } : { id: frame.id, type: String(frame.type || 'audio/wav'), bytes: Buffer.from(String(frame.bytes || ''), 'base64'), queued: frame.queued === true });
-      else if (frame.t === 'hands') {
+      else if (frame.t === 'play' && frame.made !== undefined) {
+        // A piece made here: played from what's kept.
+        const piece = kept.get(frame.made);
+        kept.delete(frame.made);
+        if (!piece) {
+          log('cloud: asked to play a piece of his voice that isn’t here');
+          return send({ t: 'voice-status', report: { ended: frame.id } });
+        }
+        onPlay({ id: frame.id, type: piece.type, bytes: piece.bytes, queued: frame.queued === true });
+      } else if (frame.t === 'play') onPlay(frame.stop ? { stop: true } : { id: frame.id, type: String(frame.type || 'audio/wav'), bytes: Buffer.from(String(frame.bytes || ''), 'base64'), queued: frame.queued === true });
+      else if (frame.t === 'make') makesVoice() ? make(frame) : send({ t: 'made', id: frame.id, ok: false, missing: true });
+      else if (frame.t === 'unmake') unmake(frame.id);
+      else if (frame.t === 'warm') {
+        if (makesVoice()) onWarm(typeof frame.voice === 'string' ? frame.voice : undefined);
+      } else if (frame.t === 'hands') {
         Promise.resolve()
           .then(() => onHands(frame))
           .then(
@@ -141,6 +218,7 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
       if (socket !== mine) return;
       const was = connected;
       connected = false;
+      forgetMade();
       // The mic was the server's to open: with no server, it's closed.
       onVoice('close');
       if (was) {
@@ -187,6 +265,10 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
     get connected() {
       return connected;
     },
+    /** How many pieces of his voice made here are kept, waiting to be played. */
+    get voiceKept() {
+      return kept.size;
+    },
     /** The server turned this Mac's key away, and nothing's mended it yet. */
     get refused() {
       return refused;
@@ -201,6 +283,7 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
       socket = null;
       if (connected) {
         connected = false;
+        forgetMade();
         onVoice('close');
         onChange(false);
       }
@@ -248,6 +331,7 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
     },
     close() {
       closed = true;
+      forgetMade();
       clearTimeout(retry);
       clearInterval(stateTimer);
       clearInterval(presenceTimer);

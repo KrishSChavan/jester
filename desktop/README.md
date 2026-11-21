@@ -2849,6 +2849,13 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     4 threads` once, as he starts, and never `voice: let go after 3 idle minutes`. Each turn's `turn:` line ends
     `first sentence at X · … · speaking at Y`: Y − X was 2.1–3.4 s before this, and should be about 1.0–1.6 s (the
     longer when his first sentence is long).
+29. **His voice made on the Mac, when it's the Mac you're talking to in the cloud** (built 2026-11-21; run with the
+    real Kokoro on this Mac through the real gateway and link, played silently, never heard). Restart the Mac app,
+    and talk to him there. The server's log says `web: talking through mac #N, his voice made there`. Each `turn:`
+    line's `speaking at` should come a quarter to half a second after `first sentence at`, against 1.0–1.6 s when
+    the server made it (that's still what your phone gets). After three quiet minutes the Mac lets its voice go,
+    and the server says the first piece of the next line while the Mac loads it again (under a second): the same
+    voice either way, so you shouldn't hear the switch. If you do, say so.
 
 ## Things learned the hard way
 
@@ -2862,6 +2869,9 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
 - Kokoro on four Neoverse-N1 cores (the Oracle server): on two threads a line takes longer to make than to say,
   so every sentence waits; on four, about 0.65 of its length. Its int8 model is twice as slow there as full
   precision.
+- A Mac linked to the cloud played the server's voice, not its own: the M4 Pro makes it about four times as
+  quickly (220 ms to a short line's first piece, against a second), and the server is only 40 ms away. So the
+  server sends the words and the Mac makes, keeps and plays the sound; only a piece's number goes back and forth.
 
 - Electron's `navigator.geolocation` on a Mac waits for Location Services to
   allow it and never asks: Chrome asks from its own layer, which Electron

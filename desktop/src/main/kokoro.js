@@ -70,8 +70,9 @@ export function startKokoro({ fork, voice = () => undefined, installed = kokoroI
     idleTimer.unref?.();
   }
 
-  function load() {
-    const wanted = voiceNamed(voice()).accent;
+  /** `named`: a line's own voice (a server's, made here: cloud-link.js), rather than the one Settings names. */
+  function load(named = voice()) {
+    const wanted = voiceNamed(named).accent;
     // Another accent is another pronunciation list: it's loaded afresh, once nothing's being made.
     if (service && accent !== wanted && !waiting.size) unload();
     if (service) return service;
@@ -124,21 +125,22 @@ export function startKokoro({ fork, voice = () => undefined, installed = kokoroI
     get loaded() {
       return !!service;
     },
-    /** Loads it ahead of the first line: someone's started talking to him. */
-    warm() {
-      if (load()) rest();
+    /** Loads it ahead of the first line: someone's started talking to him. `voice`: for that one of his voices. */
+    warm(named) {
+      if (load(named)) rest();
     },
     /**
      * A line's sound. `tight`: it runs on into the next with no pause written, so none is left at its end. `speed`:
-     * how fast against his usual 1, kept between 0.88 and 1.15.
+     * how fast against his usual 1, kept between 0.88 and 1.15. `voice`: which of his voices (voices.js), when it isn't
+     * the one Settings names here.
      * @returns {Promise<{bytes:Uint8Array, type:string, seconds:number, tookMs:number}|null>} null when Kokoro isn't there
      */
-    sound(text, { signal, tight = false, speed = 1 } = {}) {
-      const child = load();
+    sound(text, { signal, tight = false, speed = 1, voice: named = voice() } = {}) {
+      const child = load(named);
       if (!child || signal?.aborted) return Promise.resolve(null);
       lines += 1;
       const id = lines;
-      const chosen = voiceNamed(voice());
+      const chosen = voiceNamed(named);
       return new Promise((resolve, reject) => {
         const drop = () => {
           if (service === child) child.postMessage({ type: 'drop', id });

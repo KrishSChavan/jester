@@ -29,6 +29,11 @@ const COOKIE = 'jester_key';
 const YEAR_S = 365 * 24 * 3600;
 /** A message bigger than this is no page's: a script's folder or a voice's take is far smaller. */
 const MAX_FRAME = 8 * 1024 * 1024;
+/**
+ * How long a Mac is given to make a piece of his voice (createRemoteVoice) before the server makes it instead. Its
+ * M4 Pro makes one in well under half a second, and loading Kokoro there first is about half a second more.
+ */
+const MAKE_MS = 4000;
 /** The extension's page policy, with the socket allowed: `'self'` covers wss:// to the same host. */
 const CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; worker-src 'self'; connect-src 'self'; frame-ancestors 'none'";
 const TYPES = {
@@ -244,6 +249,11 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
   /** Whether the mic should be open (the continuous assistant is listening). */
   let voiceWanted = false;
   let clientCount = 0;
+  /** Pieces of his voice a Mac's been asked to make: id → {client, finish}. */
+  const making = new Map();
+  /** Ones it's made and keeps until told to play them: id → the client keeping it. */
+  const kept = new Map();
+  let makes = 0;
 
   function refuse(response, status, text) {
     response.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -418,7 +428,7 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     voiceClient = client;
     if (before && voiceWanted) send(before, { t: 'voice', op: 'close' });
     if (client && voiceWanted) send(client, { t: 'voice', op: 'open' });
-    log('web: talking through', client ? `${client.role} #${client.id}` : 'nobody');
+    log('web: talking through', client ? `${client.role} #${client.id}${client.makesVoice ? ', his voice made there' : ''}` : 'nobody');
     onVoiceClient(client);
   }
 
@@ -467,6 +477,8 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
             if (typeof frame.visible === 'boolean') client.visible = frame.visible;
             // His website in the Mac's own window (web/shim.js says so): the Mac answers where it is, not the page.
             client.macWindow = client.role === 'page' && frame.macWindow === true;
+            // A Mac with his voice on it makes it there, when it's the one being talked to (createRemoteVoice).
+            client.makesVoice = client.role === 'mac' && frame.makesVoice === true;
             onConnect(client);
             return;
           case 'msg':
@@ -481,6 +493,12 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
           case 'voice-status':
             if (client === voiceClient) onVoiceStatus(frame.report || {});
             return;
+          // A piece of his voice it was asked to make (make): made and kept, or not.
+          case 'made': {
+            const asked = making.get(frame.id);
+            if (asked?.client === client) asked.finish(frame);
+            return;
+          }
           // Its page came to the front or went behind.
           case 'here':
             onSeen(client, { visible: frame.visible === true });
@@ -497,6 +515,8 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     ws.on('close', () => {
       clients.delete(client);
       log('web: gone', `#${client.id}`);
+      for (const asked of [...making.values()]) if (asked.client === client) asked.finish(null);
+      for (const [id, keeper] of [...kept]) if (keeper === client) kept.delete(id);
       onClose(client);
       if (client === voiceClient) {
         // The newest one left that has talked is talked through instead; until one claims it, nobody.
@@ -535,11 +555,70 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
       voiceWanted = false;
       if (voiceClient) send(voiceClient, { t: 'voice', op: 'close' });
     },
-    /** His voice, to the client being talked to. False when there's nobody to play it. */
-    play(id, bytes, type, queued = false) {
+    /**
+     * His voice, to the client being talked to. False when there's nobody to play it. `made`: a piece that client
+     * made and kept (make), played from there; false when it's another's, or gone.
+     */
+    play(id, bytes, type, queued = false, made = undefined) {
       if (!voiceClient) return false;
+      if (made !== undefined) {
+        const keeper = kept.get(made);
+        kept.delete(made);
+        if (keeper !== voiceClient) return false;
+        send(voiceClient, { t: 'play', id, made, ...(queued ? { queued: true } : {}) });
+        return true;
+      }
       send(voiceClient, { t: 'play', id, type, bytes: Buffer.from(bytes).toString('base64'), ...(queued ? { queued: true } : {}) });
       return true;
+    },
+    /** Whether the client being talked to makes his voice itself: a Mac with Kokoro on it. */
+    get voiceMadeThere() {
+      return !!voiceClient?.makesVoice;
+    },
+    /**
+     * A piece of his voice made by the client being talked to, a Mac with his voice on it, and kept there to play:
+     * its id there and how long it lasts, or null (it isn't one, can't, or took too long; the server makes it then).
+     * Dropped there if `signal` ends before it's played.
+     * @returns {Promise<{made:number, seconds:number}|null>}
+     */
+    make(text, { signal, tight = false, speed = 1, voice, limitMs = MAKE_MS } = {}) {
+      const client = voiceClient;
+      if (!client?.makesVoice || client.ws.readyState !== 1 || signal?.aborted) return Promise.resolve(null);
+      makes += 1;
+      const id = makes;
+      const drop = () => {
+        if (making.has(id) || kept.has(id)) send(client, { t: 'unmake', id });
+        kept.delete(id);
+        making.get(id)?.finish(null);
+      };
+      return new Promise((resolve) => {
+        const limit = setTimeout(() => {
+          if (making.has(id)) log('web: the Mac took too long to make his voice; made here instead');
+          drop();
+        }, limitMs);
+        making.set(id, {
+          client,
+          finish: (reply) => {
+            if (!making.has(id)) return;
+            making.delete(id);
+            clearTimeout(limit);
+            const ok = reply?.ok === true && client.ws.readyState === 1 && !signal?.aborted;
+            if (ok) kept.set(id, client);
+            // A Mac whose voice isn't there (not downloaded) isn't asked again until it connects again.
+            else if (reply?.missing && client.makesVoice) {
+              client.makesVoice = false;
+              log(`web: ${client.role} #${client.id} has no voice of its own now; made here`);
+            }
+            resolve(ok ? { made: id, seconds: Number(reply.seconds) || 0 } : null);
+          }
+        });
+        signal?.addEventListener('abort', drop, { once: true });
+        send(client, { t: 'make', id, text: String(text), ...(voice ? { voice } : {}), ...(tight ? { tight: true } : {}), ...(speed !== 1 ? { speed } : {}) });
+      });
+    },
+    /** Someone's started talking to him: a Mac that makes his voice loads it meanwhile. */
+    warmVoice(voice) {
+      if (voiceClient?.makesVoice) send(voiceClient, { t: 'warm', ...(voice ? { voice } : {}) });
     },
     stopPlaying() {
       if (voiceClient) send(voiceClient, { t: 'play', stop: true });
@@ -580,15 +659,18 @@ export function createRemoteVoicePage(gateway, { log = () => undefined } = {}) {
       finish();
       gateway.closeVoice();
     },
-    /** `queued`: played as what's playing there ends, with no gap and no round trip between. */
-    play(bytes, type, { queued = false } = {}) {
+    /**
+     * `queued`: played as what's playing there ends, with no gap and no round trip between. `made`: a piece the
+     * client made and kept (createRemoteVoice), played from there.
+     */
+    play(bytes, type, { queued = false, made } = {}) {
       if (!queued) finish();
       plays += 1;
       const id = plays;
       const ended = new Promise((resolve) => {
         playing.set(id, { resolve, limit: setTimeout(() => finish(id), PLAY_LIMIT_MS) });
       });
-      if (!gateway.play(id, bytes, type, queued)) {
+      if (!gateway.play(id, bytes, type, queued, made)) {
         finish(id);
         return Promise.reject(new Error('Nobody’s browser is open to play his voice'));
       }
@@ -606,6 +688,37 @@ export function createRemoteVoicePage(gateway, { log = () => undefined } = {}) {
       if (report?.voice) log('web voice:', report.voice);
       if (report?.gone) finish();
       else if (report?.ended !== undefined && playing.has(report.ended)) finish(report.ended);
+    }
+  };
+}
+
+/**
+ * His voice, for a server's speaker (speaker.js): made by the client being talked to when that's a Mac with his voice
+ * on it, and by the server's own (`local`, kokoro.js) otherwise. His server's four cores take about half a second and
+ * then 28 to 42 ms a character, against about a tenth of a second and 7 to 10 on an M4 Pro, and the Mac is a round
+ * trip of 40 ms or so away: "The speaking is still just a little slow even on the electron app" (2026-11-21).
+ * What's made there stays there, and only which piece to play is sent.
+ * @param {ReturnType<typeof createWebGateway>} gateway
+ * @param {{sound:Function, warm?:Function}} local
+ * @param {{voice?:() => string|undefined, now?:() => number}} [options]  `voice`: the one Settings names, on the server
+ */
+export function createRemoteVoice(gateway, local, { voice = () => undefined, now = Date.now } = {}) {
+  return {
+    /** Where it's made: how quickly differs (speaker.js keeps each one's timing). */
+    get where() {
+      return gateway.voiceMadeThere ? 'there' : 'here';
+    },
+    async sound(text, options = {}) {
+      const started = now();
+      const made = gateway.voiceMadeThere ? await gateway.make(text, { ...options, voice: voice() }) : null;
+      if (options.signal?.aborted) return null;
+      // How long it took, round trip and all: what the speaker cuts the first sentence by.
+      if (made) return { made: made.made, bytes: null, type: 'audio/wav', seconds: made.seconds, tookMs: now() - started };
+      return local.sound(text, options);
+    },
+    warm() {
+      local.warm?.();
+      gateway.warmVoice(voice());
     }
   };
 }

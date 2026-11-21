@@ -401,8 +401,8 @@ export const runsOn = (piece) => !PAUSES.test(piece);
 
 /**
  * @param {object} deps
- * @param {{sound:(text:string, options:{signal?:AbortSignal, tight?:boolean}) => Promise<{bytes:Uint8Array, type:string, seconds?:number, tookMs?:number}|null>}|null} [deps.voice]  his own voice: null from `sound` when it isn't there; `tight` for a piece that runs on into the next; how long a sound lasts and took to make, when it says, is how quickly it's measured to be
- * @param {(bytes:Uint8Array, type:string, options?:{queued?:boolean}) => Promise<void>} deps.play  `queued`: started as what's playing ends, not in its place
+ * @param {{sound:(text:string, options:{signal?:AbortSignal, tight?:boolean}) => Promise<{bytes:Uint8Array|null, type:string, seconds?:number, tookMs?:number, made?:number}|null>, where?:string}|null} [deps.voice]  his own voice: null from `sound` when it isn't there; `tight` for a piece that runs on into the next; how long a sound lasts and took to make, when it says, is how quickly it's measured to be; `made`, a sound made and kept where it's played (web-gateway.js createRemoteVoice), and `where`, which place it's being made in now
+ * @param {(bytes:Uint8Array|null, type:string, options?:{queued?:boolean, made?:number}) => Promise<void>} deps.play  `queued`: started as what's playing ends, not in its place; `made`: the sound kept where it's played
  * @param {() => void} deps.stopPlaying
  * @param {{say:Function, stop:Function}} deps.system
  * @param {(...parts:any[]) => void} [deps.log]
@@ -412,29 +412,36 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
   /** A piece's sound, being made ahead of its turn (prepare): the piece, and the sound or null. */
   let ahead = null;
   /**
-   * How long his voice takes here to make a character's worth of sound, and to say it (spokenPieces' `timing`), from
-   * the pieces it's made at his usual pace: null before the first. A piece shorter than a clause is mostly the
-   * voice's own start, so it's left out.
+   * How long his voice takes to make a character's worth of sound, and to say it (spokenPieces' `timing`), from the
+   * pieces it's made at his usual pace: none before the first. A piece shorter than a clause is mostly the voice's own
+   * start, so it's left out. One for each place it's made (`voice.where`): a server's for a phone, and the Mac's
+   * own when it's the Mac being talked to, four times as quick.
    */
-  let timing = null;
-  const timed = (piece, sound) => {
+  const timings = new Map();
+  const where = () => String(voice?.where ?? 'here');
+  const timingNow = () => timings.get(where()) ?? null;
+  const timed = (piece, sound, place) => {
     if (piece.length < CLAUSE_LEAST || !(sound?.tookMs > 0) || !(sound?.seconds > 0)) return;
     const now = { makeMs: sound.tookMs / piece.length, sayMs: (sound.seconds * 1000) / piece.length };
-    timing = timing ? { makeMs: timing.makeMs * 0.7 + now.makeMs * 0.3, sayMs: timing.sayMs * 0.7 + now.sayMs * 0.3 } : now;
+    const before = timings.get(place);
+    timings.set(place, before ? { makeMs: before.makeMs * 0.7 + now.makeMs * 0.3, sayMs: before.sayMs * 0.7 + now.sayMs * 0.3 } : now);
   };
 
   /** A piece's sound, or null when his own voice can't make it: never a rejection. */
-  const made = (piece, signal, pace = 1) =>
-    Promise.resolve()
+  const made = (piece, signal, pace = 1) => {
+    const place = where();
+    return Promise.resolve()
       .then(() => (voice ? voice.sound(piece, { signal, tight: runsOn(piece), ...(pace === 1 ? {} : { speed: pace }) }) : null))
       .then((sound) => {
-        if (pace === 1) timed(piece, sound);
+        // One the place it was asked of couldn't make was made here instead.
+        if (pace === 1) timed(piece, sound, sound?.made !== undefined ? place : 'here');
         return sound;
       })
       .catch((err) => {
         if (!signal?.aborted) log('Jester’s voice:', err.message);
         return null;
       });
+  };
 
   return {
     /**
@@ -457,8 +464,8 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
         }
       };
       // Cut as the line made ahead was, when there is one: its start is then the same, and what's made of it is used.
-      const pieces = spokenPieces(text, { timing: ahead ? ahead.timing : timing });
-      const early = ahead?.text === pieces[0] && ahead.pace === pace ? ahead : null;
+      const pieces = spokenPieces(text, { timing: ahead ? ahead.timing : timingNow() });
+      const early = ahead?.text === pieces[0] && ahead.pace === pace && ahead.where === where() ? ahead : null;
       if (ahead && ahead !== early) ahead.controller.abort();
       ahead = null;
       const dropEarly = () => early?.controller.abort();
@@ -487,7 +494,7 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
         begin();
         // Queued behind the piece playing, it starts as that one ends, with no gap: a sentence never waits to hear
         // that the one before it is over (2026-11-19, a pause at the end of every sentence).
-        const ended = play(sound.bytes, sound.type, { queued: !!current }).then(
+        const ended = play(sound.bytes, sound.type, { queued: !!current, ...(sound.made !== undefined ? { made: sound.made } : {}) }).then(
           () => null,
           (err) => err
         );
@@ -510,9 +517,10 @@ export function createSpeaker({ voice = null, play, stopPlaying, system, log = (
     /** A line that's about to be said, after the one being said now: its start is made meanwhile, so no gap. */
     prepare(text, { pace = 1 } = {}) {
       ahead?.controller.abort();
+      const timing = timingNow();
       const [first] = spokenPieces(text, { timing });
       const preparing = new AbortController();
-      ahead = first ? { text: first, pace, timing, controller: preparing, made: made(first, preparing.signal, pace) } : null;
+      ahead = first ? { text: first, pace, timing, where: where(), controller: preparing, made: made(first, preparing.signal, pace) } : null;
     },
     stop() {
       ahead?.controller.abort();

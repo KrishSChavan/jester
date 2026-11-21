@@ -54,7 +54,7 @@ import { createResearchPresentation } from './research-presentation.js';
 import { sourceAddress, sourcesOf } from './research-sources.js';
 import { addRemotePage, fromRemote, installBridge, onMessage, onStorageChanged, post, postRemote, postTo, remoteStorage, storage } from './chrome-bridge.js';
 import { createFileSealer } from './file-sealer.js';
-import { createRemoteVoicePage, createWebGateway, landingAddress, makeKey } from './web-gateway.js';
+import { createRemoteVoice, createRemoteVoicePage, createWebGateway, landingAddress, makeKey } from './web-gateway.js';
 import { createRemoteHands } from './remote-hands.js';
 import { cloudKeyFor, createCloudLink, parseCloudLink, serverOrigin } from './cloud-link.js';
 import { createBriefs, CHECKIN_MIN, EVENING_AT, EVENING_KEEP_MS, MORNING_ENDS, MORNING_KEEP_MS } from './briefs.js';
@@ -285,6 +285,11 @@ let weatherNote = '';
 let speaker = null;
 /** His own voice, made on this computer (kokoro.js). */
 let kokoro = null;
+/**
+ * What the speaker makes his voice with: Kokoro here, or on a server, the Mac being talked to's own when it has it
+ * (web-gateway.js createRemoteVoice).
+ */
+let ownVoice = null;
 let voicePage = null;
 /** Whether the user's at the computer (presence.js), things with a time on them (clock.js), and telling them (tell.js). */
 let presence = null;
@@ -1788,8 +1793,8 @@ function warmUp() {
   if (Date.now() - warmedAt < WARM_EVERY_MS) return;
   warmedAt = Date.now();
   vaultIndex?.warm().catch((err) => log('couldn’t get the notes’ search ready:', err.message));
-  // His voice too: half a second to load, and he'll want it within a few.
-  if (listening) kokoro?.warm();
+  // His voice too: half a second to load, and he'll want it within a few. On a server, the Mac's, if it makes it.
+  if (listening) (ownVoice || kokoro)?.warm();
 }
 
 /** The voice shortcut, gesture or menu item: start listening, or finish. */
@@ -2945,6 +2950,11 @@ function startCloudLink() {
       voicePage.play(sound.bytes, sound.type, { queued: sound.queued === true }).catch((err) => log('cloud: couldn’t play his voice:', err.message)).finally(() => cloudLink.status({ ended: sound.id }));
     },
     onHands: handsAsked,
+    // His voice, made here by the Mac's own Kokoro when the server says what to say: four times as quick as the server's.
+    makeVoice: (text, options) => kokoro.sound(text, options),
+    voiceState: () => (env.JESTER_FAKE_MEDIA ? 'missing' : kokoro?.state || 'missing'),
+    voiceLoaded: () => !!kokoro?.loaded,
+    onWarm: (voice) => kokoro?.warm(voice),
     // What its hands are doing, and its own switches: his website shows them, and throws them (the phone as a remote).
     onRefused: () => cloudRefused().catch((err) => log('cloud: couldn’t ask to sign in again:', err.message)),
     // The server's answer to this Mac's Jester moving in: taken, or it has one already. Either way, not sent again.
@@ -3262,9 +3272,10 @@ async function start() {
   });
   // The sign-in to the voice service he used before this one: nothing uses it now.
   storage.local.remove('puterToken').catch(() => undefined);
+  ownVoice = SERVER ? createRemoteVoice(webGateway, kokoro, { voice: () => settings?.jesterVoice }) : kokoro;
   speaker = createSpeaker({
     // A self-test is never heard: the fake mic would hear it, and so would the room.
-    voice: env.JESTER_FAKE_MEDIA ? null : kokoro,
+    voice: env.JESTER_FAKE_MEDIA ? null : ownVoice,
     play: (bytes, type, options) => voicePage.play(bytes, type, options),
     stopPlaying: () => voicePage.stop(),
     system: systemVoice({ muted: !!env.JESTER_FAKE_MEDIA }),
