@@ -146,7 +146,8 @@ test('repeated no-op actions stop before the third identical attempt', async () 
   });
   const result = await runAssistant({ text: goal, env, ...h });
   assert.equal(actions, 2);
-  assert.match(result.say, /not responding/);
+  // Said as where it was stuck, in a person's words: it used to be "A control is not responding."
+  assert.equal(result.say, 'I kept trying the same thing on Netflix and nothing changed, so have a look and say “keep going”.');
   // What was done comes with how it ended, for Jester Desktop's log: each step, the step that was one too many, and
   // why it stopped. Not among the result's own fields, which are what they were.
   assert.deepEqual(Object.keys(result).sort(), ['ok', 'resume', 'say']);
@@ -154,7 +155,7 @@ test('repeated no-op actions stop before the third identical attempt', async () 
   assert.match(result.trace[0], /^did: .*\(Dispatched\.\)$/);
   assert.match(result.trace[1], /^did: /);
   assert.match(result.trace[2], /^the same step a third time on a page that hadn’t changed: /);
-  assert.match(result.trace[3], /^paused \(unresponsive-control\): A control is not responding\./);
+  assert.match(result.trace[3], /^paused \(unresponsive-control\): I kept trying the same thing on Netflix/);
 });
 
 test('a tab list cut short says so; asked for again it isn’t read again, and a third asking ends as what it is', async () => {

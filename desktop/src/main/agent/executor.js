@@ -13,7 +13,7 @@
  */
 
 import { taskCaption } from './actions.js';
-import { aborted, createRun, lookStep, modelTrouble, perform, tidy, UNREADABLE, unseen } from './loop.js';
+import { aborted, createRun, learnt, lookStep, modelTrouble, perform, tidy, UNREADABLE, unseen } from './loop.js';
 import { pickPlan, PLAN_SCHEMA, plannerInput, plannerPrompt, PLANNER_TOKENS, reactivePlan, shouldPlan, STUCK_WHYS, untilMet, validatePlan, writeTarget } from './plan.js';
 import { plain, screenChanges } from './screen.js';
 
@@ -158,16 +158,20 @@ async function askPlanner(run, input, { again = false } = {}) {
 }
 
 /**
- * @param {object} options  loop.js's createRun's, and:
+ * @param {object} options  loop.js's createRun's (among them inquire, for a question only the user can settle; ways,
+ *   their earlier answers, which the planner gets too, as userChoices; and onChose, told each answer as it's made), and:
  * @param {boolean} [options.pick]  a search is waiting for its result to be pressed
  * @param {(labels:string[]) => (Promise<void>|void)} [options.onPlan]  awaited when a plan is made, to let it be read
- * @returns {Promise<{ok:boolean, say:string, cancelled?:boolean, declined?:boolean, actions:number, calls:number, pictures?:number, trace?:object[]}>}
- *   pictures: how many pictures of the window went to the model, when any did
+ * @returns {Promise<{ok:boolean, say:string, cancelled?:boolean, declined?:boolean, unanswered?:boolean, actions:number, calls:number, pictures?:number, trace?:object[], chose?:{about:string, choice:string}[]}>}
+ *   pictures: how many pictures of the window went to the model, when any did; unanswered: it ended on a question of
+ *   its own that went unanswered; chose (when any, however the run ended): what the user answered to a question that
+ *   said what it was about, for the caller to remember and give back as `ways`; trace: none when a choice of the
+ *   user's decided a step (loop.js learnt)
  *   onStep's phases also include planning, plan (labels), step (index, total, label) and replanning (attempt, of, why)
  */
 export async function runPlannedAgent({ pick = false, onPlan = () => undefined, ...options }) {
   const run = createRun(options);
-  const { goal, meant, note, previous, host, onStep, signal, platform, limits, now } = run;
+  const { goal, meant, note, previous, ways, host, onStep, signal, platform, limits, now } = run;
   const close = (result) => ({ ...result, calls: run.calls, ...(run.pictures ? { pictures: run.pictures } : {}) });
   const cancelled = () => close(run.end(false, '', { cancelled: true }));
   // What the user said stands in for the caption until the plan gives a shorter one.
@@ -185,7 +189,7 @@ export async function runPlannedAgent({ pick = false, onPlan = () => undefined, 
   let plan = pick ? pickPlan() : reactivePlan();
   if (shouldPlan(goal, { note, pick })) {
     onStep({ phase: 'planning' });
-    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: first.snapshot.app?.name, previous }));
+    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: first.snapshot.app?.name, previous, ways }));
     if (asked.stop) return close(asked.stop);
     plan = asked.plan || plan;
   }
@@ -257,7 +261,7 @@ export async function runPlannedAgent({ pick = false, onPlan = () => undefined, 
     onStep({ phase: 'replanning', attempt: replans, of: limits.replans, why });
     const front = await screenNow(run);
     if (front.ok) run.next = front.snapshot;
-    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: front.snapshot?.app?.name ?? first.snapshot.app?.name, previous, replan: { done, stuckOn: step.label, why, hint: hint || say } }), { again: true });
+    const asked = await askPlanner(run, plannerInput({ goal, meant, platform, front: front.snapshot?.app?.name ?? first.snapshot.app?.name, previous, ways, replan: { done, stuckOn: step.label, why, hint: hint || say } }), { again: true });
     if (asked.stop) return close(asked.stop);
     const fresh = asked.plan ? asked.plan.steps.filter((next) => !doneSteps.has(stepKey(next))) : [];
     // The same way again would get stuck the same way.
@@ -269,5 +273,5 @@ export async function runPlannedAgent({ pick = false, onPlan = () => undefined, 
 
   if (signal?.aborted) return cancelled();
   const say = closing || (unconfirmed ? `I did “${unconfirmed}”, but it doesn’t show on screen, so I can’t be sure it took.` : plan.say);
-  return close(run.end(true, say, { trace: run.trace }));
+  return close(run.end(true, say, learnt(run)));
 }

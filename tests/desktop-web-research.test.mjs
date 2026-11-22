@@ -55,7 +55,7 @@ test('background failure waits for explicit approval; declining cannot start com
   const pending = assistant.research('Read my Canvas assignments');
   await until(() => assistant.asking);
   // A read that failed says so, with no score: the model's 95 was for trying.
-  assert.match(questions[0], /^I couldn’t read this in the background: Canvas requires navigation\. Should I do “Read my Canvas assignments” by hand instead/);
+  assert.equal(questions[0], 'I couldn’t find that by reading in the background. Want me to do it by hand in your browser instead?', 'asked as a person would: no reason, no score, none of their own words read back');
   assert.doesNotMatch(questions[0], /\/100/);
   assert.equal(assistant.running, true);
   assistant.answer(false);
@@ -128,7 +128,7 @@ test('a low confidence strategy waits before reading and hands off only the reso
   const context = '[{"who":"you","text":"I want jazz"}]';
   const pending = assistant.research('search for it', { context });
   await until(() => assistant.asking);
-  assert.match(questions[0], /35\/100.*Spotify.*Should I do “Search Spotify for jazz” by hand instead/);
+  assert.equal(questions[0], 'I can’t get that by reading in the background. Want me to do it by hand in your browser instead?');
   assert.equal(JSON.parse(requests[0].prompt).context, context);
   assert.equal(research.find((state) => state.phase === 'review').active, false);
   assert.equal(research.find((state) => state.phase === 'review').scrapeConfidence, 35);

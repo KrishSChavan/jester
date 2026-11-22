@@ -350,7 +350,7 @@ test('a menu command that deletes asks first, by the titles the app really has',
   const replies = [{ action: { action: 'menu', path: 'File > Delete' } }];
   const result = await runDesktopAgent({ goal: 'delete this note', host: hostOn(driver), model: async () => ({ json: replies.shift() }), confirm: async (ask) => (asked.push(ask), false), platform: 'darwin' });
   assert.equal(result.declined, true);
-  assert.deepEqual(asked, [{ label: 'Choose File › Delete Note', reason: 'it may send, buy or delete something' }]);
+  assert.deepEqual(asked, [{ label: 'Choose “Delete Note” from the File menu in Notes', reason: 'it may send, buy or delete something' }]);
   assert.equal(calls.some(([cmd, params]) => cmd === 'menu' && params.press), false, 'refused, never pressed');
 });
 
@@ -447,7 +447,7 @@ test('review fixes: a group is judged on the focus it leaves, and a key that mov
     confirm: async (ask) => (asked.push(ask.label), false),
     platform: 'darwin'
   });
-  assert.deepEqual(asked, ['Press ↩'], 'judged with the composer focused');
+  assert.deepEqual(asked, ['Send this in Google Chrome'], 'judged with the composer focused');
 });
 
 test('review fixes: a menu that opened isn\'t right-clicked again, a changed screen isn\'t clicked, and unknown focus types nothing', async () => {
@@ -510,7 +510,7 @@ test('second review: a group action is judged on the screen before the group too
     confirm: async (ask) => (asked.push(ask.label), false),
     platform: 'darwin'
   });
-  assert.deepEqual(asked, ['Press ↩'], 'a click doesn\'t always take the focus: Enter may still be the dialog\'s Delete');
+  assert.deepEqual(asked, ['Press Enter in Finder'], 'a click doesn\'t always take the focus: Enter may still be the dialog\'s Delete');
 });
 
 test('second review: a focus that can\'t be read while secure input is on is a password field\'s; menus wait for a known focus', async () => {

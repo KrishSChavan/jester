@@ -2,12 +2,13 @@
  * A learned task (learned.js) done again without the model: each control
  * found afresh by its kind and name, each step judged as the assistant's are
  * and checked as it's done. Anything not as it was — a control missing, the
- * wrong app in front, a step that would now need the user's OK, one that
- * fails or changes nothing — stops it there, for the assistant to take over
+ * wrong app in front, a step that would now need the user's OK or is theirs
+ * to choose (which profile), one that fails or changes nothing — stops it there, for the assistant to take over
  * with a note of where.
  */
 
 import { classify, describeAction, pressedTwice } from './actions.js';
+import { whoIsAsked } from './fork.js';
 import { findTarget } from './screen.js';
 
 /** Steps done to what's on screen, which a fresh read must find. */
@@ -49,6 +50,10 @@ export async function replaySteps({ steps, goal, host, onStep = () => undefined,
         Object.assign(action, { from: from.id, to: to.id });
       }
     }
+    // Which profile or account is never pressed from memory (fork.js), unless the command's own words name it: a way
+    // learned before 2026-11-21 may hold such a press, and whose it should be now is the user's to say.
+    const who = whoIsAsked(action, screen, goal);
+    if (who && !(who.named && who.named.ids.includes(who.target))) return fail('which profile or account to use is the user’s to choose');
     const ready = host.prepare ? await host.prepare(action, screen) : { ok: true };
     if (signal?.aborted) return { ...fail('cancelled'), cancelled: true };
     if (!ready.ok) return fail(ready.detail);

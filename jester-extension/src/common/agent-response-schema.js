@@ -1,5 +1,5 @@
 /** Native Gemini's documented JSON Schema subset; host validation stays authoritative. */
-import { COMMAND_IDS, BROWSER_OPS, GROUP_COLORS } from './agent-actions.js';
+import { COMMAND_IDS, BROWSER_OPS, GROUP_COLORS, ASK_LIMITS } from './agent-actions.js';
 import { MEMORY_LIMITS } from './task-memory.js';
 
 const ref = (name) => ({ $ref: `#/$defs/${name}` });
@@ -13,7 +13,7 @@ const action = (names, properties = {}, required = []) => object({
 }, ['action', ...required]);
 const controls = ['target', 'type', 'select', 'scroll', 'key'];
 const single = [...controls, 'readTarget', 'find', 'form', 'section', 'observe', 'wait', 'look',
-  'navigate', 'command', 'browser', 'finish'];
+  'navigate', 'command', 'browser', 'ask', 'finish'];
 const tabId = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 const variants = (names) => ({ anyOf: names.map(ref) });
 
@@ -56,6 +56,11 @@ export const AGENT_RESPONSE_SCHEMA = {
       index: { type: 'integer', minimum: 0, maximum: 1000 }, title: string,
       color: { type: 'string', enum: GROUP_COLORS }, group: string,
       days: { type: 'integer', minimum: 1, maximum: 90 } }, ['op']),
+    // A question only the user can settle. How long its strings may be is the host validator's, as above. Its two
+    // optional fields change nothing for Claude, which this schema was already too wide to be held to
+    // (model-client.js, CLAUDE_OPTIONAL_MOST) and which is asked in the prompt alone.
+    ask: action(['ask'], { question: string, options: { type: 'array', items: string, minItems: 2, maxItems: ASK_LIMITS.options },
+      about: string }, ['question']),
     finish: action(['finish'], { say: string, success: { type: 'boolean' } }, ['say', 'success']),
     memory: object({
       subgoal: string,

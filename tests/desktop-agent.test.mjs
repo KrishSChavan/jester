@@ -237,7 +237,8 @@ test('a sensitive step waits for the user; "no" means nothing is done', async ()
   });
   assert.deepEqual(declined, { ok: false, say: 'Okay, I didn’t do that.', actions: 1, declined: true });
   assert.deepEqual(done, [{ action: 'type', id: 0, text: 'I am late' }], 'typed, but never sent');
-  assert.deepEqual(asked, [{ label: 'Click “Send”', reason: 'it may send, buy or delete something' }]);
+  // Asked as a person would ask it, and where: the pill's "Click “Send”" stays the pill's.
+  assert.deepEqual(asked, [{ label: 'Press “Send” in Messages', reason: 'it may send, buy or delete something' }]);
 
   const approved = fakeHost(MESSAGES);
   const sent = await runDesktopAgent({

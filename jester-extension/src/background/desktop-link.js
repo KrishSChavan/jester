@@ -38,8 +38,10 @@ export const desktopBindings = (settings) => Object.fromEntries(BINDING_KEYS.fil
  * @param {() => typeof chrome} [deps.api]
  * @param {string} deps.version  this extension's
  * @param {() => Promise<object>} deps.settings
- * @param {(id:string, text:string, meant:string) => Promise<{ok:boolean, say:string}>} deps.task  a command from the app,
- *   carried out; `meant`: what the app's conversation took the words to mean, or ''
+ * @param {(id:string, text:string, meant:string, options:{skipResearch:boolean, ways:string[]}) => Promise<{ok:boolean, say:string, chose?:{about:string, choice:string}[]}>} deps.task
+ *   a command from the app, carried out; `meant`: what the app's conversation took the words to mean, or ''; `ways`:
+ *   the user's earlier answers to "which?" ("Hulu profile: Krish"), to go by without asking again; `chose`: what
+ *   they chose when this task asked, for the app to remember
  * @param {() => void} deps.cancel  the app stopped it
  * @param {(op:string, args:object, options?:{signal:AbortSignal}) => Promise<unknown>} deps.request  a question from the app: knows, aim, act, web
  * @param {(state:string, detail:string) => void} [deps.onChange]
@@ -75,7 +77,7 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
     else chrome().alarms?.create(RETRY_ALARM, { periodInMinutes: RETRY_MINUTES });
     if (state !== LINK_STATE.LINKED) {
       scraperAvailable = false;
-      for (const [id, resolve] of asking) (asking.delete(id), resolve(false));
+      for (const [id, settle] of asking) (asking.delete(id), settle(null));
       for (const pending of [...scraping.values()]) pending.finish({ ok: false, code: 'scrape_unavailable', detail: 'The link to Jester Desktop closed before the web request finished.' });
       for (const controller of webRequests.values()) controller.abort();
       webRequests.clear();
@@ -104,13 +106,16 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
       case 'jester/link-error':
         return become(LINK_STATE.WAITING, String(message.detail || 'Jester Desktop isn’t running.'));
       case 'task': {
-        const result = await task(String(message.id), String(message.text || ''), String(message.meant || ''), { skipResearch: message.skipResearch === true }).catch((err) => ({ ok: false, say: String(err?.message || err) }));
-        return void post({ type: 'done', id: message.id, ok: !!result?.ok, say: String(result?.say || ''), ...(typeof result?.answer === 'string' ? { answer: result.answer.slice(0, 6000) } : {}), ...(Array.isArray(result?.sources) ? { sources: result.sources.slice(0, 24) } : {}), ...(Array.isArray(result?.trace) ? { trace: result.trace.slice(-40).map((line) => String(line).slice(0, 220)) } : {}) });
+        const ways = (Array.isArray(message.ways) ? message.ways : []).filter((way) => typeof way === 'string' && way.trim()).slice(0, 12).map((way) => way.trim().slice(0, 120));
+        const result = await task(String(message.id), String(message.text || ''), String(message.meant || ''), { skipResearch: message.skipResearch === true, ways }).catch((err) => ({ ok: false, say: String(err?.message || err) }));
+        const chose = (Array.isArray(result?.chose) ? result.chose : []).filter((entry) => typeof entry?.about === 'string' && typeof entry?.choice === 'string' && entry.about && entry.choice)
+          .slice(-5).map((entry) => ({ about: entry.about.slice(0, 40), choice: entry.choice.slice(0, 80) }));
+        return void post({ type: 'done', id: message.id, ok: !!result?.ok, say: String(result?.say || ''), ...(typeof result?.answer === 'string' ? { answer: result.answer.slice(0, 6000) } : {}), ...(Array.isArray(result?.sources) ? { sources: result.sources.slice(0, 24) } : {}), ...(Array.isArray(result?.trace) ? { trace: result.trace.slice(-40).map((line) => String(line).slice(0, 220)) } : {}), ...(chose.length ? { chose } : {}) });
       }
       case 'cancel':
         return cancel();
       case 'answer':
-        asking.get(String(message.id))?.(message.approved === true);
+        asking.get(String(message.id))?.(message);
         return asking.delete(String(message.id));
       case 'request': {
         const { id, op, type: _type, ...args } = message;
@@ -249,13 +254,24 @@ export function createDesktopLink({ api = () => globalThis.chrome, version, sett
     },
     /** A frame for the app's pill, in place of this one's. */
     pill: (voice) => post({ type: 'pill', voice }),
-    /** The app asks the user, and listens for their answer. */
-    ask(label, signal) {
+    /**
+     * The app asks the user, and listens for their answer: a yes or no to a step, or, to a question only they can
+     * settle (`open`: which profile, which account), the option they chose or their own words, null when none came.
+     * An app from before such questions answers one with a bare yes or no: a yes that says nothing of which is no
+     * answer, and is never taken for one.
+     * @param {{open?:boolean, options?:string[]}} [more]
+     * @returns {Promise<boolean|string|null>}
+     */
+    ask(label, signal, { open = false, options = [] } = {}) {
       const id = String(++next);
+      const choices = open ? (Array.isArray(options) ? options : []).filter((option) => typeof option === 'string' && option.trim()).slice(0, 4).map((option) => option.trim().slice(0, 80)) : [];
       return new Promise((resolve) => {
-        if (!post({ type: 'ask', id, label: String(label).slice(0, 400) })) return resolve(false);
-        asking.set(id, resolve);
-        signal?.addEventListener('abort', () => (asking.delete(id), resolve(false)), { once: true });
+        const none = open ? null : false;
+        if (!post({ type: 'ask', id, label: String(label).slice(0, 400), ...(open ? { open: true } : {}), ...(choices.length ? { options: choices } : {}) })) return resolve(none);
+        asking.set(id, (answer) => resolve(!answer ? none
+          : !open ? answer.approved === true
+            : answer.approved === true && typeof answer.text === 'string' && answer.text.trim() ? answer.text.trim().slice(0, 400) : null));
+        signal?.addEventListener('abort', () => (asking.delete(id), resolve(none)), { once: true });
       });
     },
     /** Jester's voice shortcut or gesture, here: the app's mic answers it. */

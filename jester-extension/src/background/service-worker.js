@@ -22,6 +22,7 @@ import { BROWSER_READS } from '../common/agent-actions.js';
 import { createBrowserTools, publicAddress } from './browser-tools.js';
 import { approvalAnswer, bookmarkNames, parseBrowserIntent, quickBrowserAction, spokenCommand } from './browser-intent.js';
 import { createDesktopLink, desktopBindings } from './desktop-link.js';
+import { chooserPick } from '../common/chooser.js';
 import { siteOf } from '../common/sites.js';
 import { loadCalibration, clearCalibration } from '../common/gaze-store.js';
 import { fromJester, fromEngine, fromPage } from '../common/senders.js';
@@ -1389,36 +1390,75 @@ function unreadablePage(tab, reason) {
     text:`Page: ${title}\nURL: ${url}\nJester cannot read or control this page: ${reason}. Browser actions still work here.`};
 }
 
+/** What is waiting on the user, for the popup: a step to allow, or (with `options`) a question to answer. */
+const approvalState = () => approval ? {id:approval.id,label:approval.label,...(approval.open ? {options:approval.options} : {})} : null;
 function publishApproval() {
-  post({type:'jester/approval-state',approval:approval ? {id:approval.id,label:approval.label} : null});
+  post({type:'jester/approval-state',approval:approvalState()});
 }
-function clearApproval(approved = false) {
+/** Settles what is waiting: a step by a yes (true), a question by the user's words. Anything else is a no, or no answer. */
+function clearApproval(answer = false) {
   if (!approval) return;
   const current = approval; approval = null;
-  clearTimeout(current.timer); current.resolve(approved); publishApproval();
+  clearTimeout(current.timer);
+  current.resolve(current.open ? (typeof answer === 'string' && answer.trim() ? answer.trim().slice(0,400) : null) : answer === true);
+  publishApproval();
 }
 
-async function requestApproval(run, label, {directQuestion = false} = {}) {
-  if (run.signal.aborted) return false;
-  // Linked, Jester Desktop asks, and hears the yes or no; the popup can still answer.
+/** "Krish or Sandeep Chavan", "A, B or C": the ways to answer, as they are said after a question. */
+const spokenOptions = (options) => options.length > 1 ? `${options.slice(0,-1).join(', ')} or ${options.at(-1)}` : options[0] || '';
+
+/**
+ * Asks the user before a step: their yes or no. With `open`, it is a question only they can settle (which profile,
+ * which account), asked the same way and answered in their own words or with one of `options`: what comes back is
+ * that answer, or null when none came. An answer chooses between things; it is never a yes to a step.
+ */
+async function requestApproval(run, label, {directQuestion = false, open = false, options = []} = {}) {
+  const none = open ? null : false;
+  if (run.signal.aborted) return none;
+  const choices = open ? options.filter(option => typeof option === 'string' && option.trim()).slice(0,4).map(option => option.trim().slice(0,80)) : [];
+  const wait = (resolve,id) => {
+    // Linked, Jester Desktop waits a minute for the answer to a question: this one outwaits it, so its answer is the one taken.
+    approval = {id,label:String(label).slice(0,400),...(open ? {open:true,options:choices} : {}),resolve,timer:setTimeout(() => clearApproval(false),open && desktop.linked ? 75000 : 60000)};
+    run.signal.addEventListener('abort',() => clearApproval(false),{once:true});
+    publishApproval();
+  };
+  // Linked, Jester Desktop asks, and hears the answer; the popup can still give it.
   if (desktop.linked) return new Promise(resolve => {
     const id = crypto.randomUUID();
-    approval = {id,label:String(label).slice(0,400),resolve,timer:setTimeout(() => clearApproval(false),60000)};
-    run.signal.addEventListener('abort',() => clearApproval(false),{once:true});
-    publishApproval();
-    desktop.ask(label,run.signal).then(yes => { if (approval?.id === id) clearApproval(yes); });
+    wait(resolve,id);
+    desktop.ask(label,run.signal,open ? {open:true,options:choices} : {}).then(answer => { if (approval?.id === id) clearApproval(answer); });
   });
-  const action = String(label).replace(/\s+/g, ' ').trim().slice(0,directQuestion ? 350 : 80);
-  await showPill(run,{phase:'thinking',step:directQuestion ? `${action} Say yes or no.` : `Allow “${action}”? Say yes or no.`},{notify:true});
-  if (run.signal.aborted || assistantRun !== run) return false;
+  const action = String(label).replace(/\s+/g, ' ').trim().slice(0,directQuestion || open ? 350 : 80);
+  // "Allow “Open github.com”? Say yes or no." was how a machine asks; the mic opening is what says an answer is wanted.
+  const asked = open ? `${action}${choices.length ? ` ${spokenOptions(choices)}?` : ''}` : directQuestion ? action : `Is it okay if I do this: “${action}”?`;
+  await showPill(run,{phase:'thinking',step:asked},{notify:true});
+  if (run.signal.aborted || assistantRun !== run) return none;
   return new Promise(resolve => {
-    const id = crypto.randomUUID();
-    approval = {id,label:String(label).slice(0,400),resolve,timer:setTimeout(() => clearApproval(false),60000)};
-    run.signal.addEventListener('abort',() => clearApproval(false),{once:true});
-    publishApproval();
-    // The microphone opens for the answer; the toolbar popup can still approve.
+    wait(resolve,crypto.randomUUID());
+    // The microphone opens for the answer; the toolbar popup can still give it.
     post({type:MSG.VOICE_CONTROL,action:'start'});
   });
+}
+
+/**
+ * The user's own answers to a task's questions ("Hulu profile: Krish"), kept so the same thing isn't asked again:
+ * asked once which profile, he does not want to be asked every time (2026-11-21). Only for Jester by itself in
+ * Chrome: linked, Jester Desktop is what remembers, and hands them over with each task. The newest thirty; a new
+ * answer about the same thing replaces the old one.
+ */
+const CHOICES_KEY = 'userChoices';
+const CHOICES_KEPT = 30;
+async function rememberedChoices() {
+  const saved = (await chrome.storage.local.get(CHOICES_KEY).catch(() => ({})))?.[CHOICES_KEY];
+  return (Array.isArray(saved) ? saved : []).filter(entry => typeof entry?.about === 'string' && typeof entry?.choice === 'string' && entry.about && entry.choice);
+}
+async function rememberChoices(chose) {
+  const made = (Array.isArray(chose) ? chose : []).filter(entry => typeof entry?.about === 'string' && typeof entry?.choice === 'string' && entry.about && entry.choice)
+    .map(entry => ({about:entry.about.slice(0,40),choice:entry.choice.slice(0,80),at:Date.now()}));
+  if (!made.length) return;
+  const same = (a,b) => a.about.toLowerCase() === b.about.toLowerCase();
+  const kept = (await rememberedChoices()).filter(entry => !made.some(next => same(next,entry)));
+  await chrome.storage.local.set({[CHOICES_KEY]:[...kept,...made.filter((entry,index) => !made.slice(index+1).some(next => same(next,entry)))].slice(-CHOICES_KEPT)}).catch(() => undefined);
 }
 
 async function observeAgent(run, options = {}) {
@@ -1431,6 +1471,12 @@ async function observeAgent(run, options = {}) {
   if (!page?.ok && !reason) {
     await abortableDelay(400,run.signal);
     page = await sendToFrame({tabId:tab.id,frameId:0},{type:'jester/agent-observe',options:pageOptions});
+  }
+  // Chrome's own words for a page with nothing of Jester's in it yet ("Could not establish connection. Receiving
+  // end does not exist.") are what the task would end by saying.
+  if (page && !page.ok && /receiving end|establish connection|cannot access|context invalidated|message port/i.test(String(page.detail || ''))) {
+    console.info('[jester] page unreadable',String(page.detail).slice(0,160));
+    page = {...page,detail:'I can’t read this page yet.'};
   }
   // Tab titles and addresses for the local planner only; the model's page never carries them.
   if (page?.ok && tabs) page.tabs = await browserTools.listTabs(tab.id);
@@ -1851,12 +1897,22 @@ async function handleWebResearch(command, understood, {fromDesktop,generation,cl
  * `meant`: what the words were taken to mean in conversation with Jester Desktop,
  * which has what came before ("try now": try what).
  */
-async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = false, meant = '', skipResearch = false} = {}) {
+async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = false, meant = '', skipResearch = false, ways = []} = {}) {
   let command = String(text || '').trim().slice(0,2000);
   let understood = fromDesktop ? String(meant || '').trim().slice(0,2000) : '';
   if (!command && !explicitResume) return null;
-  // The answer to "Allow …? Say yes or no." Anything else is a new request, and not a yes.
-  if (approval && !explicitResume) {
+  if (approval?.open && !explicitResume) {
+    // The answer to a question ("Which Hulu profile should I use?"): one of its options, or the user's own words.
+    // Calling it off, or asking for something else altogether, leaves it unanswered; the something else is then done.
+    // Jester Desktop hears the answers to what it asks, so words it hands over are always something else.
+    const said = spokenCommand(command) || command;
+    const option = fromDesktop ? null : chooserPick(approval.options.map(name => ({name})),said)?.name;
+    const off = !fromDesktop && !option && SEARCH_CANCEL.test(said);
+    const another = fromDesktop || (!option && !off && replacesSearchClarification(command));
+    clearApproval(off || another ? false : option || said.slice(0,200));
+    if (!another) return null;
+  } else if (approval && !explicitResume) {
+    // The answer to "Is it okay if I do this?" Anything else is a new request, and not a yes.
     const answer = approvalAnswer(command);
     if (assistantRun && answer !== 'yes') assistantRun.declined = true;
     clearApproval(answer === 'yes');
@@ -1910,7 +1966,7 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
       command = understood;
       understood = '';
     } else {
-      const say = 'There is no task to resume on this tab.';
+      const say = 'There’s nothing paused here for me to carry on with.';
       if (!fromDesktop) await reply(tabId,{phase:'answer',text:say,ok:false});
       return {ok:false,say};
     }
@@ -1968,11 +2024,19 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
       }) : undefined;
       // A continuation's goal is the paused one, so it carries no follow-up context.
       const previous = resume ? [] : await recentCommands();
+      // What the user has answered before: Jester Desktop's memory of it when the task is its own, else this one's.
+      const remembered = fromDesktop ? (Array.isArray(ways) ? ways : []) : (await rememberedChoices()).map(entry => `${entry.about}: ${entry.choice}`);
       if (generation !== assistantGeneration || assistantRun !== run || run.signal.aborted) return null;
       result = await runAssistant({text:command,resume,previous,env:env||{},signal:controller.signal,
         ...(understood && !resume ? {meant:understood} : {}),
+        ...(remembered.length ? {ways:remembered.slice(-12)} : {}),
         ...(pooledModel ? {modelClient:pooledModel} : {}),host:{
         observe:options => observeAgent(run,options), execute:action => executeAgent(run,action), checkpoint:persist,
+        // A question only the user can settle: asked as a step's approval is, and answered in their own words.
+        ask:({question,options}) => assistantRun === run ? requestApproval(run,question,{open:true,options}) : Promise.resolve(null),
+        // Where a key with no element named would land: the control that has the focus, as the page itself has it.
+        focused:() => assistantRun === run ? sendToFrame({tabId:run.tabId,frameId:0},{type:'jester/agent-classify',action:{action:'press_key',key:'Enter'}})
+          .then(found => found?.ok && typeof found.elementId === 'string' ? found.elementId : '',() => '') : Promise.resolve(''),
         // A bookmark the user saved is a site they chose: opening it needs no extra say-so.
         bookmark:async name => { const url = await bookmarkNamed(name); if (url) noteHosts(run,[url]); return url; },
         look:() => lookAgent(run,env),
@@ -1983,6 +2047,9 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
   if (assistantRun !== run) return null;
   // The debugging bar is only for the length of a task.
   await realInput.release(run.tabId);
+  // What the user chose when asked is theirs to be remembered by, however the task went on to end.
+  const chose = Array.isArray(result.chose) ? result.chose : [];
+  if (!fromDesktop) await rememberChoices(chose);
   await rememberCommand(resume?.goal || command,result);
   // Waiting out a provider cooldown is not inactivity: "keep going" cannot work until it ends.
   if (result.resume) {
@@ -1992,13 +2059,13 @@ async function handleVoiceCommand(text, explicitResume = false, {fromDesktop = f
   } else if (result.ok) await persist(null);
   assistantRun = null;
   clearApproval(false);
-  const said = result.say || (run.declined ? 'Okay, I didn’t do that.' : result.ok ? 'Done.' : 'The task stopped.');
+  const said = result.say || (run.declined ? 'Okay, I didn’t do that.' : result.ok ? 'Done.' : 'I had to stop there.');
   // Jester Desktop says how it went, on its own pill.
   if (!fromDesktop) await reply(run.tabId,{phase:'answer',text:said,ok:!!result.ok});
   else releaseBadge();
   await recordAction({source:'voice',action:'ASSISTANT',label:`Voice: ${(resume?.goal || command).slice(0,70)}`,ok:!!result.ok,detail:said});
   // What was done, step by step, for Jester Desktop's log (assistant.js `trace`).
-  return {ok:!!result.ok,say:said,...(fromDesktop && Array.isArray(result.trace) ? {trace:result.trace} : {})};
+  return {ok:!!result.ok,say:said,...(fromDesktop && Array.isArray(result.trace) ? {trace:result.trace} : {}),...(fromDesktop && chose.length ? {chose} : {})};
 }
 
 // ---------------------------------------------------------------------------
@@ -2221,7 +2288,7 @@ const desktop = createDesktopLink({
   version: chrome.runtime.getManifest?.().version || '',
   settings: getSettings,
   task: async (_id, text, meant, options) => {
-    return handleVoiceCommand(text,false,{fromDesktop:true,meant,skipResearch:options?.skipResearch === true});
+    return handleVoiceCommand(text,false,{fromDesktop:true,meant,skipResearch:options?.skipResearch === true,ways:options?.ways});
   },
   cancel: () => cancelAssistant(),
   request: async (op, args, options) => {
@@ -2264,7 +2331,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'jester/model-list':
       return respond(sendResponse,async () => ({ok:true,models:await listConnectionModels(message.id)}));
     case 'jester/agent-approval':
-      if (approval?.id === message.id) clearApproval(message.approved === true);
+      // A step's yes or no; or, to a question, the option clicked (`text`).
+      if (approval?.id === message.id) clearApproval(approval.open ? (typeof message.text === 'string' ? message.text : false) : message.approved === true);
       sendResponse({ok:true}); return false;
     case 'jester/cancel-task':
       cancelAssistant();
@@ -2399,7 +2467,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           webResult:lastWebResult,
           hasTarget: !!target,
           voiceBlocked,
-          approval:approval ? {id:approval.id,label:approval.label} : null,
+          approval:approvalState(),
           resumeAvailable:!assistantRun && !!pausedTask(),
           context: await refreshContext()
         });

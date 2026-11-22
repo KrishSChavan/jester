@@ -176,7 +176,7 @@ test('“keep going” with nothing paused does what the conversation took it to
   t.mock.method(console, 'info', () => {});
   const nothing = await fromDesktop('keep going');
   assert.equal(nothing.ok, false);
-  assert.match(nothing.say, /no task to resume/);
+  assert.match(nothing.say, /nothing paused here/);
   const going = await fromDesktop('keep going', 'open Chrome and open the PSU Canvas extension');
   assert.equal(going.ok, true, going.say);
   assert.deepEqual(created.map((props) => props.url), ['https://psu.instructure.com/']);

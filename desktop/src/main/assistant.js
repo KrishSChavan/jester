@@ -93,6 +93,8 @@ export function chosen(answer, options = []) {
  * @param {number} [deps.exclude]  Jester's own process, whose windows the assistant never works in
  * @param {(task:Function) => Promise} [deps.quietly]  with the overlays hidden, as screen reading needs
  * @param {(busy:boolean) => void} [deps.onBusy]  a task began, or the last one ended
+ * @param {(chose:{about:string, choice:string}) => void} [deps.onChose]  the user answered a question a task of his
+ *   asked them, which said what it was about: called as they answer, for ways.js to keep (a `run` may be given its own)
  * @param {(...parts:any[]) => void} [deps.log]
  * @param {boolean} [deps.logScreens]  log the screen the model is shown each step: your own
  *   content, so only for debugging (JESTER_LOG_SCREENS)
@@ -104,7 +106,7 @@ export function chosen(answer, options = []) {
  * @param {{paidFirst?:Function, onFailed?:Function, onUsed?:Function}} [deps.modelHooks]  model-jobs.js's: the order
  *   the saved models are tried in, one that failed and who covers for it, and what a reply cost
  */
-export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }), modelHooks = {}, web = null, webReady = () => !!web, onVoice = null, onResearch = () => undefined }) {
+export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onChose = () => undefined, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }), modelHooks = {}, web = null, webReady = () => !!web, onVoice = null, onResearch = () => undefined }) {
   const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, picture, quietly, exclude, platform });
   /** The models set for actions in Settings, and this computer's for when they can't. */
   const model = createModelJob({
@@ -211,14 +213,17 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
           ...(decision ? { scrapeConfidence: decision.scrapeConfidence, strategyReason: decision.reason } : {}) }, task);
         if (active) working(label);
       };
-      /** Asks before doing it by hand, saying what would be done; a score only when the model gave one. `tried`:
-       * reading was tried and failed, so the score was for trying and isn't said. */
+      /**
+       * Asks before doing it by hand. `tried`: reading was tried and failed. Asked the way a person would: what he
+       * was asked for they know, and why reading fell short is for his log. On 2026-11-21 he said all of it aloud:
+       * "I couldn’t read this in the background: Background research reached its reading limit before finding enough
+       * evidence. Should I do “Search the web for college football games on Saturday, November 21, 2026 tonight,
+       * including matchups, kickoff times, and TV or streaming cha” by hand instead? Say yes or no."
+       */
       const interaction = async (why, { tried = false } = {}) => {
         progress('review', why, false);
-        const what = String(decision.goal || goal).replace(/\s+/g, ' ').slice(0, 140);
-        const lead = tried ? 'I couldn’t read this in the background'
-          : `Scraping looks unreliable for this${Number.isFinite(decision.scrapeConfidence) ? ` (${decision.scrapeConfidence}/100)` : ''}`;
-        const allowed = await ask(`${lead}: ${String(why || 'background reading isn’t enough').slice(0, 220).replace(/[.!?\s]+$/, '')}. Should I do “${what}” by hand instead`, task.controller.signal);
+        log('research: asking to do it by hand:', String(why || 'background reading isn’t enough').slice(0, 220), Number.isFinite(decision.scrapeConfidence) ? `(${decision.scrapeConfidence}/100)` : '');
+        const allowed = await ask(`${tried ? 'I couldn’t find that by reading in the background' : 'I can’t get that by reading in the background'}. Want me to do it by hand in your browser instead`, task.controller.signal);
         if (task.controller.signal.aborted) return null;
         return allowed ? { handled: false, approvedInteraction: true, goal: decision.goal || goal, why,
           scrapeConfidence: decision.scrapeConfidence, strategyReason: decision.reason }
@@ -299,12 +304,17 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
 
     /**
      * @param {string} goal  what the user said
-     * @param {{note?:string, pick?:boolean, meant?:string}} [options]  note: a learned way of doing it that failed, and
-     *   where; pick: a search is waiting for its result to be pressed; meant: in conversation, what the goal was taken to mean
-     * @returns {Promise<{ok:boolean, text:string, trace?:object[]}|null>} null: cancelled, nothing to say;
-     *   trace (when done): the steps, for learned.js
+     * @param {{note?:string, pick?:boolean, meant?:string, ways?:string[], onChose?:Function}} [options]  note: a
+     *   learned way of doing it that failed, and where; pick: a search is waiting for its result to be pressed; meant:
+     *   in conversation, what the goal was taken to mean; ways: the user's earlier answers to its questions, as lines
+     *   such as "Hulu profile: Krish", which it goes by without asking again; onChose: called with {about, choice} as
+     *   soon as they answer a question of this task's (createAssistant's, when none is given)
+     * @returns {Promise<{ok:boolean, text:string, trace?:object[], chose?:{about:string, choice:string}[]}|null>}
+     *   null: cancelled, nothing to say; trace (when done, and no choice of theirs decided a step): the steps, for
+     *   learned.js; chose (when any, done or not): what the user answered to a question it asked them, for the caller
+     *   to remember and give back as `ways`. A cancelled task returns none: onChose has had each as it was made
      */
-    async run(goal, { note = '', pick = false, meant = '' } = {}) {
+    async run(goal, { note = '', pick = false, meant = '', ways = [], onChose: chose = onChose } = {}) {
       // A new command replaces one still running.
       const task = await begin('');
       working();
@@ -319,6 +329,9 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
           meant,
           note,
           pick,
+          ways,
+          // Kept as they answer: a task called off afterwards (every new command calls off the one running) returns nothing.
+          onChose: (one) => chose(one),
           previous,
           host,
           model,
@@ -357,7 +370,7 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
         log('assistant:', JSON.stringify(goal), '→', result.cancelled ? 'cancelled' : result.ok ? 'done' : 'not done', JSON.stringify(result.say), `· ${result.actions} steps · ${result.calls} model calls${result.pictures ? ` · ${result.pictures} picture${result.pictures > 1 ? 's' : ''}` : ''}`);
         previous = [...previous, { said: goal.slice(0, 200), result: result.cancelled ? 'cancelled' : result.ok ? 'done' : `failed: ${result.say}`.slice(0, 200) }].slice(-REMEMBERED);
         if (result.cancelled) return null;
-        return { ok: result.ok, text: result.say || (result.ok ? 'Done.' : 'That didn’t work.'), ...(result.ok && result.trace?.length ? { trace: result.trace } : {}) };
+        return { ok: result.ok, text: result.say || (result.ok ? 'Done.' : 'That didn’t work.'), ...(result.ok && result.trace?.length ? { trace: result.trace } : {}), ...(result.chose?.length ? { chose: result.chose } : {}) };
       } finally {
         end(task);
       }

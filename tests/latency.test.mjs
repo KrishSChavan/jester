@@ -572,7 +572,7 @@ test('repeated unreadable replies pause with a resumable task', async (_t, logs)
   assert.equal(h.modelCalls, 2);
   assert.equal(h.actions.length, 0);
   assert.equal(result.resume.goal, 'Find Dune in the catalog');
-  assert.match(result.say, /valid JSON.*keep going/);
+  assert.match(result.say, /couldn’t make sense of the model’s answer.*keep going/);
   assert.equal(taskMetrics(logs)[0].stopReason, 'invalid-reply');
 });
 

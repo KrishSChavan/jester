@@ -256,6 +256,20 @@ function renderApproval(approval) {
   approvalId = approval?.id || null;
   el('approvalCard').hidden = !approvalId;
   el('approvalText').textContent = approval?.label || '';
+  // A question (which profile, which account) is answered with one of its options, not allowed: a button for each.
+  const options = Array.isArray(approval?.options) ? approval.options : null;
+  el('approvalTitle').textContent = options ? 'Jester is asking' : 'Review action';
+  el('approveBtn').hidden = !!options;
+  el('approvalOptions').hidden = !options?.length;
+  el('approvalOptions').replaceChildren(...(options || []).map((option) => {
+    const button = document.createElement('button');
+    button.textContent = option;
+    button.addEventListener('click', async () => {
+      await chrome.runtime.sendMessage({type:'jester/agent-approval',id:approvalId,text:option});
+      renderApproval(null);
+    });
+    return button;
+  }));
 }
 for (const [id,approved] of [['approveBtn',true],['denyBtn',false]]) {
   el(id).addEventListener('click', async () => {

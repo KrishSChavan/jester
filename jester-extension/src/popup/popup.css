@@ -126,6 +126,9 @@ footer button {
   padding: 8px 12px;
 }
 
+/* The ways to answer a question Jester asks: a row is a flex box, which `hidden` alone would not hide. */
+#approvalOptions { flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+#approvalOptions[hidden] { display: none; }
 .research[hidden] { display: none; }
 .research summary { cursor: pointer; font-weight: 600; }
 .research-answer { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow-y: auto; }

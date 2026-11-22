@@ -632,7 +632,7 @@ async function refresh() {
 /** His tools are open to other apps only while Settings › Tools says so: off unless the user turns it on. */
 function syncTools() {
   if (!mcpSocket) return;
-  const on = settings?.enabled !== false && settings?.toolsForOthers === true;
+  const on = settings?.toolsForOthers === true;
   if (on === mcpSocket.listening) return;
   Promise.resolve(on ? mcpSocket.start() : mcpSocket.stop()).then(() => post(desktopState())).catch((err) => log('mcp:', err.message));
 }
@@ -3214,6 +3214,9 @@ async function start() {
   spend = createSpend({ storage: storage.local, log });
   assistant = createAssistant({
     driver: input,
+    // What they answer when a task asks which one they mean is kept as they answer (ways.js), not when the task
+    // ends: stopped a moment later, the answer was still theirs.
+    onChose: ({ about, choice }) => void ways?.set(about, choice).catch(() => undefined),
     openApp: (name) => voiceRunner.openApp(name),
     // Back to the front, for the app the assistant read: keys go wherever is in front.
     activate: (app) =>

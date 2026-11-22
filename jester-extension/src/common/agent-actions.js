@@ -15,6 +15,7 @@ const FIELDS = {
   observe: ['query'], wait: ['ms'], look: [],
   navigate: ['url'],
   command: ['actionId'], finish: ['say', 'success'],
+  ask: ['question', 'options', 'about'],
   browser: ['op', 'url', 'urls', 'query', 'tabId', 'tabIds', 'index', 'title', 'color', 'group', 'days']
 };
 
@@ -43,6 +44,8 @@ export const READ_ACTIONS = new Set([
   'observe', 'wait', 'read_element', 'read_nearby', 'find_text', 'find_elements',
   'get_form_fields', 'get_table', 'inspect_section', 'look'
 ]);
+/** A question for the user: one short sentence, two to four short ways to answer it, and what the choice is about ("Hulu profile"). */
+export const ASK_LIMITS = Object.freeze({ question: 160, option: 60, options: 4, about: 40 });
 export const COMMAND_IDS = ['PLAY', 'PAUSE', 'PLAY_PAUSE', 'SEEK_FORWARD', 'SEEK_BACK',
   'VOLUME_UP', 'VOLUME_DOWN', 'MUTE_TOGGLE', 'SPEED_UP', 'SPEED_DOWN', 'SKIP_AD', 'NEXT_VIDEO',
   'FULLSCREEN_TOGGLE', 'EXIT_FULLSCREEN'].filter((id) => Object.hasOwn(ACTIONS, id));
@@ -148,7 +151,29 @@ export function validateAction(input) {
     stringField(action.say, 'say', 500, true);
     if (typeof action.success !== 'boolean') throw new Error('Finish must declare success true or false.');
   }
+  if (action.action === 'ask') askFields(action);
   return action;
+}
+
+/**
+ * A question for the user. What it must be is checked; how long it may be is cut to, as a model's notes are
+ * (task-memory.js): a question refused for a 70-character option is a question never asked, and the model guesses.
+ */
+function askFields(action) {
+  if (typeof action.question !== 'string' || !action.question.trim()) throw new Error('Ask needs a question.');
+  action.question = action.question.replace(/\s+/g, ' ').trim().slice(0, ASK_LIMITS.question);
+  if (action.about !== undefined) {
+    if (typeof action.about !== 'string') throw new Error('Invalid about.');
+    action.about = action.about.replace(/\s+/g, ' ').trim().slice(0, ASK_LIMITS.about);
+    if (!action.about) delete action.about;
+  }
+  if (action.options !== undefined) {
+    if (!Array.isArray(action.options) || action.options.some((option) => typeof option !== 'string')) throw new Error('Ask options must be a list of short choices.');
+    const options = [...new Set(action.options.map((option) => option.replace(/\s+/g, ' ').trim().slice(0, ASK_LIMITS.option)).filter(Boolean))].slice(0, ASK_LIMITS.options);
+    // One way to answer is no choice: the question is asked open.
+    if (options.length > 1) action.options = options;
+    else delete action.options;
+  }
 }
 
 export function describeAction(action) {

@@ -239,7 +239,7 @@ test('a step that needs approval asks by voice, listens, and takes "yes" or "no"
   for (const listener of chrome.storage.onChanged.listeners) listener({ settings: { newValue: local.settings } }, 'local');
   await say('open github dot com');
   await until(() => broadcasts.some((entry) => entry.type === 'jester/approval-state' && entry.approval), 'an approval');
-  assert.ok(sent.some((entry) => entry.message.voice?.step === 'Allow “Open github.com”? Say yes or no.'));
+  assert.ok(sent.some((entry) => entry.message.voice?.step === 'Is it okay if I do this: “Open github.com”?'));
   assert.ok(broadcasts.some((entry) => entry.type === 'jester/voice-control' && entry.action === 'start'), 'The microphone opens for the answer');
   // Listening for the answer neither cancels the task nor paints over the question.
   sent.length = 0;

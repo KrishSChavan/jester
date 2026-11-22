@@ -54,6 +54,11 @@
  *            a chip, a slider dragged and a colour run from the page; "turn off the desk lamp" run with no model; a
  *            model's "run" said back as how it went; a run kept with a task and done when it's due; and a scene, made
  *            in Controls and run by its name. The lamps are a script in the scratch folder: no real device is touched.
+ *   tools    with a Claude model talking (pretended: its address is answered here, nothing reaches Anthropic), he's
+ *            given his tools by name: a call to the computer is done and its result goes back to the model, whose own
+ *            words are what's said; a question to the user shows its answers, is answered by typing, and the choice
+ *            is kept and listed in Settings › Tools and choices; and his tools open to other apps over his own
+ *            socket, speaking MCP, only while Settings says so.
  */
 
 import { spawn } from 'node:child_process';
@@ -110,8 +115,17 @@ if (!process.versions.electron) {
       if (ntfy.status === 200) ntfy.got.push(JSON.parse(init.body));
       return new Response(JSON.stringify({ id: 'x', event: 'message' }), { status: ntfy.status });
     }
+    // A Claude model, pretended (the `tools` scenario): what it's asked is kept, and it answers as scripted.
+    if (url.startsWith('https://api.anthropic.com/v1/messages')) {
+      const asked = JSON.parse(init.body);
+      claude.requests.push(asked);
+      const reply = claude.answer(asked);
+      return new Response(JSON.stringify({ id: 'msg_scratch', type: 'message', role: 'assistant', model: asked.model, content: reply.content, stop_reason: reply.stop || (reply.content.some((block) => block.type === 'tool_use') ? 'tool_use' : 'end_turn'), usage: { input_tokens: 2100, output_tokens: 30 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
     return realFetch(input, init);
   };
+  /** The pretended Claude: its requests, and what it says to each. A reply is {content: [blocks]}. */
+  const claude = { requests: [], answer: () => ({ content: [{ type: 'text', text: 'Hello from Claude.' }] }) };
   // Whether anyone's at the keys is this script's to say, not the real computer's: seconds since the last one.
   const keys = { idle: 1 };
   powerMonitor.getSystemIdleTime = () => keys.idle;
@@ -1352,6 +1366,113 @@ if (process.argv[2] === 'serve') {
       paid.answer = () => ({ say: 'Hello from paid.', do: '', new: false });
       free.answer = () => ({ say: 'Hello from free.', do: '', new: false });
       controls.destroy();
+    },
+
+    async tools() {
+      const net = await import('node:net');
+      const uses = (id, list) => inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-connections', op: 'uses', id: ${JSON.stringify(id)}, uses: ${JSON.stringify(list)} });`);
+      // Claude talks, and the others only act: the model he talks through takes tools.
+      await uses('paid', ['act']);
+      await uses('free', ['act']);
+      await uses('tooled', ['talk']);
+      try {
+        // A call to the computer: done, its result told to the model, and the model's own words said.
+        let step = 0;
+        claude.requests.length = 0;
+        claude.answer = (asked) => {
+          step += 1;
+          const told = asked.messages.at(-1)?.content;
+          if (Array.isArray(told) && told.some((block) => block.type === 'tool_result')) return { content: [{ type: 'text', text: 'Notes is open for you.' }] };
+          return { content: [{ type: 'text', text: 'Opening Notes now.' }, { type: 'tool_use', id: `toolu_${step}`, name: 'use_computer', input: { task: 'open Notes' } }] };
+        };
+        const before = his().length;
+        // Not words the matcher knows by itself ("open Notes" is done with no model at all): his model's to work out.
+        await type('I want to jot something down, sort that out for me');
+        await until('what he says once it’s done', () => his().length >= before + 2 && his().at(-1) === 'Notes is open for you.');
+        const [first, second] = claude.requests;
+        const names = (first?.tools || []).map((tool) => tool.name);
+        check('his model is given his tools by name, and no JSON to reply in', ['ask_user', 'send_message', 'use_computer', 'use_browser', 'remember_choice'].every((name) => names.includes(name)) && !/Reply with JSON/.test(first.system?.[0]?.text || ''), names.join(', '));
+        check('he says a few words of his own first, then how it went, in the model’s words', his().slice(before).join(' | ') === 'Opening Notes now. | Notes is open for you.', his().slice(before).join(' | '));
+        const result = second?.messages?.at(-1)?.content?.[0];
+        check('what the computer did goes back to the model as its tool’s result', result?.type === 'tool_result' && /^It worked\. Its report: “/.test(result.content || '') && second.messages.at(-2)?.role === 'assistant', JSON.stringify(result));
+        check('the computer was handed the task as the computer’s', /dry run: would run open \["-a",".*Notes/.test(logLines()) && /voice: "open Notes"/.test(logLines()), logLines().split('\n').filter((line) => /voice:|dry run/.test(line)).slice(-4).join(' / '));
+
+        // A question only they can settle: shown with its answers, answered by typing, and the choice kept.
+        claude.requests.length = 0;
+        claude.answer = (asked) => {
+          step += 1;
+          const told = asked.messages.at(-1)?.content;
+          if (Array.isArray(told) && told.some((block) => block.type === 'tool_result')) return { content: [{ type: 'text', text: 'Krish it is. I’ll use that one from now on.' }] };
+          return { content: [{ type: 'tool_use', id: `toolu_${step}`, name: 'ask_user', input: { question: 'Which Hulu profile should I use?', options: ['Krish', 'Sandeep Chavan'], about: 'Hulu profile' } }] };
+        };
+        const asking = his().length;
+        await inPage(`await chrome.runtime.sendMessage({ type: 'jester/talk-type', text: 'put Modern Family on Hulu' });`);
+        await until('his question', () => his().length > asking && /Which Hulu profile should I use: Krish, or Sandeep Chavan\?/.test(his().at(-1)));
+        const prompt = await until('the question’s own window', () => BrowserWindow.getAllWindows().find((win) => /overlay\/approval\.html/.test(win.webContents.getURL()) && !win.webContents.isLoading()));
+        const buttons = await until('its answers', () => prompt.webContents.executeJavaScript(`[...document.querySelectorAll('#answers button')].map((button) => button.textContent)`).then((list) => (list.length === 3 ? list : null)));
+        check('his question is written with its answers, and shown with a button for each', buttons.join(', ') === 'Krish, Sandeep Chavan, Leave it', buttons.join(', '));
+        await shotOf(prompt, 'tools-question');
+        const answered = await type('the first one');
+        check('typed, their answer is the option they meant, and his model goes on from it', answered === 'Krish it is. I’ll use that one from now on.' && /The user answered: Krish \(Kept as how they like it/.test(claude.requests.at(-1)?.messages?.at(-1)?.content?.[0]?.content || ''), `${answered} | ${claude.requests.at(-1)?.messages?.at(-1)?.content?.[0]?.content}`);
+        const kept = await inPage(`return chrome.runtime.sendMessage({ type: 'jester/ways', op: 'list' });`);
+        check('the choice is kept', kept.list?.length === 1 && kept.list[0].about === 'Hulu profile' && kept.list[0].choice === 'Krish', JSON.stringify(kept.list));
+        // The next turn is told it, before their words.
+        claude.answer = () => ({ content: [{ type: 'text', text: 'Hello.' }] });
+        await type('hello again');
+        check('how they like things done goes before their words from then on', /How they like things done, as they've told you \(go by these without asking again\): Hulu profile: Krish/.test(String(claude.requests.at(-1)?.messages?.at(-1)?.content || '')), String(claude.requests.at(-1)?.messages?.at(-1)?.content).slice(0, 200));
+
+        // Settings › Tools and choices: the choice listed, with a button that forgets it.
+        await inPage(`window.jesterHome.go('settings/tools', { instant: true });`);
+        const row = await until('the choice in Settings', () => inPage(`const rows = [...document.querySelectorAll('#ways-list .row')].map((row) => row.textContent); return rows.some((text) => /Hulu profile/.test(text)) ? rows : null;`));
+        check('Settings lists it, and his own tools are on', /Hulu profileKrishForget/.test(row.join('|')) && (await inPage(`return document.getElementById('assistantTools').checked && !document.getElementById('toolsForOthers').checked;`)), row.join('|'));
+        await shot('settings-tools');
+
+        // His tools, for other apps: closed until Settings says, then MCP over his own socket.
+        const socketFile = path.join(scratch, 'mcp.sock');
+        check('closed to other apps until they say', !fs.existsSync(socketFile));
+        await inPage(`document.getElementById('toolsForOthers').click();`);
+        await until('his socket', () => fs.existsSync(socketFile));
+        const meta = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientInfo': { name: 'live-check', version: '1' }, 'io.modelcontextprotocol/clientCapabilities': {} };
+        const ask = (messages, expected) => new Promise((resolve, reject) => {
+          const socket = net.connect(socketFile);
+          let got = '';
+          const timer = setTimeout(() => (socket.destroy(), reject(new Error(`only: ${got}`))), 8000);
+          socket.setEncoding('utf8');
+          socket.on('data', (chunk) => {
+            got += chunk;
+            const lines = got.split('\n').filter(Boolean);
+            if (lines.length < expected) return;
+            clearTimeout(timer);
+            socket.destroy();
+            resolve(lines.map((line) => JSON.parse(line)));
+          });
+          socket.on('error', reject);
+          for (const message of messages) socket.write(`${JSON.stringify(message)}\n`);
+        });
+        const [found, list, done] = await ask([
+          { jsonrpc: '2.0', id: 'd', method: 'server/discover', params: { _meta: meta } },
+          { jsonrpc: '2.0', id: 1, method: 'tools/list', params: { _meta: meta } },
+          { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'use_computer', arguments: { task: 'open Notes' }, _meta: meta } }
+        ], 3);
+        check('another app finds him, lists his tools and has the computer do something, over MCP', found.result?.supportedVersions?.[0] === '2026-07-28' && list.result?.tools?.some((tool) => tool.name === 'use_browser') && !list.result.tools.some((tool) => tool.name === 'set_task') && done.result?.isError === false && /^It worked/.test(done.result.content[0].text), JSON.stringify(done).slice(0, 300));
+        check('what another app has him do is in his log', /mcp: live-check called use_computer/.test(logLines()));
+        const config = await until('the lines to give an app', () => inPage(`const text = document.getElementById('tools-config').textContent; return !document.getElementById('tools-config-row').hidden && text ? text : null;`));
+        check('Settings shows what to paste into an app, running the bridge that ships with him', /"mcpServers"/.test(config) && /jester-mcp\.mjs/.test(config) && fs.existsSync(JSON.parse(config).mcpServers.jester.args[0]), config);
+        await shot('settings-tools-open');
+        await inPage(`document.getElementById('toolsForOthers').click();`);
+        await until('his socket, closed', () => !fs.existsSync(socketFile));
+        check('turned off, they’re closed again', true);
+        // And forgotten from Settings.
+        await inPage(`document.querySelector('#ways-list .row button').click();`);
+        await until('the choice, forgotten', () => inPage(`return chrome.runtime.sendMessage({ type: 'jester/ways', op: 'list' }).then((got) => got.list.length === 0);`));
+        check('a choice is forgotten by its button', true);
+      } finally {
+        await inPage(`window.jesterHome.go('main', { instant: true });`).catch(() => undefined);
+        claude.answer = () => ({ content: [{ type: 'text', text: 'Hello from Claude.' }] });
+        await uses('tooled', []);
+        await uses('paid', ['talk', 'act']);
+        await uses('free', ['talk', 'act']);
+      }
     }
   };
 
@@ -1366,7 +1487,8 @@ if (process.argv[2] === 'serve') {
         // His briefs and check-ins are off until their own scenario: nothing he says unasked lands in another's.
         settings: { enabled: false, voiceEnabled: false, continuousAssistant: false, watchEnabled: false, localModelUses: [], cameraDeviceId: '', longRange: false, memoryVault: vaultDir, briefMorning: false, briefEvening: false, checkIns: false, offerWork: false },
         // The free one saved first: only its plan puts it second.
-        modelConnections: [model('free', free, 'free'), model('paid', paid, 'paid')]
+        // And a Claude, ticked for nothing until the `tools` scenario: its address is answered by this script's fetch.
+        modelConnections: [model('free', free, 'free'), model('paid', paid, 'paid'), { id: 'tooled', provider: 'anthropic', model: 'claude-scratch', key: 'scratch-key', plan: 'paid', uses: [], cooldownUntil: 0 }]
       })
     );
     // A conversation summed up 31 hours ago, as recollections.js keeps it: the sentence that became a class "in about an hour".

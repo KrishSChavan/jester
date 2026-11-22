@@ -40,7 +40,7 @@ globalThis.chrome = {
     get: async () => structuredClone(tab), update: async (_id, patch) => Object.assign(tab, patch),
     sendMessage: async (tabId, message, options) => {
       sent.push({ tabId, message: structuredClone(message), options });
-      if (blockApprovalPill && message.voice?.step?.startsWith('Allow')) await blockApprovalPill;
+      if (blockApprovalPill && message.voice?.step?.startsWith('Is it okay')) await blockApprovalPill;
       if (message.type === 'jester/agent-observe') return { ok: true, pageId: 'doc1', revision: 1,
         url: tab.url, title: 'Netflix', text: '[button1] button "Play episode"' };
       if (message.type === 'jester/agent-classify') return structuredClone(classification);
@@ -194,7 +194,7 @@ test('cancelling while the approval pill is being delivered cannot publish a lat
   let release;
   blockApprovalPill = new Promise((resolve) => { release = resolve; });
   await message({ type: 'jester/voice-command', text: 'Play episode' }, engineSender);
-  await until(() => sent.some((entry) => entry.message.voice?.step?.startsWith('Allow')));
+  await until(() => sent.some((entry) => entry.message.voice?.step?.startsWith('Is it okay')));
   const before = executeCount;
   await message({ type: 'jester/cancel-task' });
   release(); blockApprovalPill = null;
@@ -320,7 +320,7 @@ test('a paused task is forgotten a minute after its last step, and a new command
   sent.length=0;
   await message({type:'jester/voice-command',text:'keep going'},engineSender);
   await until(()=>lastAnswer());
-  assert.equal(lastAnswer(),'There is no task to resume on this tab.');
+  assert.equal(lastAnswer(),'There’s nothing paused here for me to carry on with.');
 
   // Inside the minute, a different command still starts from its own goal.
   replies=[{unexpected:true},{unexpected:true}];sent.length=0;elapsed=0;

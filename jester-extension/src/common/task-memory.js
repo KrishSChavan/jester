@@ -10,7 +10,7 @@ const list = (value, max) => [...new Set((Array.isArray(value) ? value : [])
 
 export function createMemory(goal, stored = null) {
   const original = typeof goal === 'string' ? goal.trim() : '';
-  if (!original || original.length > MEMORY_LIMITS.goal) throw new Error('Please give a command under 3,000 characters.');
+  if (!original || original.length > MEMORY_LIMITS.goal) throw new Error('That’s too much for me to take in at once; try it in fewer words.');
   const source = isRecord(stored) ? stored : {};
   return {
     goal: original,

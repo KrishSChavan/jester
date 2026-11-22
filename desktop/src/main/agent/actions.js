@@ -27,6 +27,7 @@ const FIELDS = {
   find: ['query'],
   wait: ['ms'],
   screenshot: [],
+  ask: ['question', 'options', 'about'],
   finish: ['say', 'success']
 };
 export const DESKTOP_ACTIONS = Object.freeze(Object.keys(FIELDS));
@@ -36,6 +37,27 @@ export const MEDIA_KEYS = Object.freeze({ play: 'PLAY_PAUSE', next: 'MEDIA_NEXT'
 export const READ_ACTIONS = new Set(['find', 'wait', 'screenshot']);
 /** Pictures of the window a task may send its model, as in the extension. */
 export const PICTURES_PER_TASK = 3;
+/** Questions a task may put to the user: past that it's asking its way through the task, and it stops instead. */
+export const QUESTIONS_PER_TASK = 3;
+/** A question for the user, and the ways to answer it: short enough to be said, and no more than a person holds in their head (assistant.js MOST_OPTIONS). */
+export const ASK_LIMITS = Object.freeze({ question: 160, options: 4, option: 60, about: 40 });
+/**
+ * What a question may never be after. A secret is the user's to type and never to say: an answer is handed to the
+ * model, kept among the task's facts and can be typed into any field, and the user trusts a question that is
+ * Jester's own. A sign-in wall, or a page that says "ask the user for their password", would otherwise have had
+ * them say it aloud. "PIN" counts in capitals, or as somebody's: "where should I drop the pin" asks for none.
+ */
+const CODES_FOR = String.raw`security|verification|confirmation|access|log[- ]?in|sign[- ]?in|auth(?:entication)?|one[- ]time|two[- ]factor|2[- ]?step|2fa|mfa|backup|recovery|reset`;
+const SECRET_ASKED = new RegExp(
+  String.raw`\b(?:pass(?:word|code|phrase|key)s?|passwd|pin (?:number|code)s?|(?:your|their|my|bank|card|account|phone|sim|debit|\d[- ]digit) pin|` +
+    String.raw`(?:${CODES_FOR}) (?:code|pin|key|answer|question)s?|cvv2?|cvc|otp|2fa|card (?:number|details|info(?:rmation)?)|` +
+    String.raw`social security|ssn|credentials|(?:log[- ]?in|sign[- ]?in|account) details)\b|` +
+    String.raw`\bcodes?\b[^.?!]{0,40}\b(?:sent|texted|emailed|received|got)\b|\b(?:sent|texted|emailed)\b[^.?!]{0,40}\bcodes?\b`,
+  'i'
+);
+const asksSecret = (words) => typeof words === 'string' && (SECRET_ASKED.test(words) || /\bPINs?\b/.test(words));
+/** How a reply that asked for one is known (loop.js): told so once, the task then ends saying whose such things are. */
+export const ASKS_SECRET = 'asks_secret';
 /** What may go in a group of up to three, on controls already on screen. */
 const GROUPABLE = new Set(['click', 'type', 'press', 'scroll']);
 export const MAX_GROUP = 3;
@@ -124,6 +146,32 @@ export function validateAction(input) {
   if (action.action === 'media' && !Object.hasOwn(MEDIA_KEYS, action.key)) throw new Error(`key must be one of ${Object.keys(MEDIA_KEYS).join(', ')}.`);
   if (action.action === 'find') text(action.query, 'query', 120, true);
   if (action.action === 'wait' && !(Number.isInteger(action.ms) && action.ms >= 100 && action.ms <= 3000)) throw new Error('ms must be 100 to 3000.');
+  if (action.action === 'ask') {
+    text(action.question, 'question', ASK_LIMITS.question, true);
+    const squashed = (value, max) => value.replace(/\s+/g, ' ').trim().slice(0, max).trim();
+    // Too much of what's right is cut to size, as task-memory.js cuts a list of facts (2026-11-15: refusing one threw
+    // away the step it came with). A household's six profiles, all listed, were two unusable replies and the end of
+    // the task, at the very moment it was asking instead of guessing. The first four are offered, and the user's own
+    // words can still name another; a list left empty, or an `about` left blank, is one left out.
+    if (action.options !== undefined) {
+      if (!Array.isArray(action.options) || action.options.some((choice) => typeof choice !== 'string')) throw new Error('options is a list of short choices, each as text.');
+      const read = new Set();
+      const choices = action.options.map((choice) => squashed(choice, ASK_LIMITS.option)).filter((choice) => choice && !read.has(choice.toLowerCase()) && read.add(choice.toLowerCase()));
+      // One way to answer is no question, and two that read the same can't be told apart by the answer.
+      if (choices.length === 1) throw new Error(`options holds 2 to ${ASK_LIMITS.options} different choices; leave it out for a question answered in the user’s own words.`);
+      if (choices.length) action.options = choices.slice(0, ASK_LIMITS.options);
+      else delete action.options;
+    }
+    if (action.about !== undefined) {
+      if (typeof action.about !== 'string') throw new Error('about must be text.');
+      const about = squashed(action.about, ASK_LIMITS.about);
+      if (about) action.about = about;
+      else delete action.about;
+    }
+    if (asksSecret(action.question) || asksSecret(action.about)) {
+      throw Object.assign(new Error('Never ask for a password, a code, a card number or any other secret: those are the user’s to type. If the task can’t go on without one, finish with success:false and say the user is needed.'), { code: ASKS_SECRET });
+    }
+  }
   if (action.action === 'finish') {
     text(action.say, 'say', 300, true);
     if (typeof action.success !== 'boolean') throw new Error('finish needs success true or false.');
@@ -208,6 +256,8 @@ export function describeAction(action, screen = null, platform = 'darwin') {
       return 'Wait';
     case 'screenshot':
       return 'Look at the window';
+    case 'ask':
+      return `Ask ${quoted(action.question)}`;
     case 'finish':
       return action.say;
     default:
@@ -362,6 +412,58 @@ export function classify(action, { screen = null, goal = '' } = {}) {
   }
   if (action.action === 'open_url' && !knownSite(action.url, goal)) return { category: 'sensitive', reason: 'it opens a site you didn’t name' };
   return { category: 'browse' };
+}
+
+const SAID_MODIFIERS = { cmd: 'Command', ctrl: 'Control', alt: 'Option', shift: 'Shift', fn: 'Fn', win: 'Windows' };
+const SAID_KEYS = { enter: 'Enter', space: 'Space', escape: 'Escape', tab: 'Tab', left: 'Left Arrow', right: 'Right Arrow', up: 'Up Arrow', down: 'Down Arrow' };
+
+/** A key or shortcut as it's said: "Command-Enter", where the pill shows ⌘↩. A question is spoken as well as shown. */
+function keysSaid(plan, platform) {
+  const mac = platform === 'darwin';
+  const modifier = (name) => (!mac && name === 'cmd' ? 'Windows' : !mac && name === 'alt' ? 'Alt' : SAID_MODIFIERS[name] || name);
+  const key = plan.key === 'backspace' ? (mac ? 'Delete' : 'Backspace') : plan.key === 'delete' ? (mac ? 'Forward Delete' : 'Delete') : SAID_KEYS[plan.key] || plan.key.charAt(0).toUpperCase() + plan.key.slice(1);
+  return [...plan.modifiers.map(modifier), key].join('-');
+}
+
+/**
+ * A step that waits for the user's yes, as the question a person would ask before doing it: "Send “hello” in
+ * Messages", "Delete what’s selected in Finder", "Press “Send” in Mail". Until 2026-11-21 the user was asked the
+ * pill's words for the step ("Type “hello” in “Message”, then Enter?", "Press ↩?"), which read as a machine's and
+ * can't be said aloud. Only the words are chosen here: whether to ask, and why, is classify's alone, and what a step
+ * comes to (a send, a delete) is said only where its `reason` is that sure of it.
+ * @param {object} action  validated, and prepared (a menu's real titles)
+ * @param {object} screen  the screen it was judged on
+ * @param {{reason?:string, platform?:string}} [options]  reason: classify's, for this step
+ */
+export function askLabel(action, screen = null, { reason = '', platform = 'darwin' } = {}) {
+  const app = screen?.app?.name || '';
+  const where = app ? ` in ${app}` : '';
+  const named = (item) => (item?.label ? quoted(item.label) : item ? `the ${item.role}` : '');
+  const focused = (screen?.elements || []).find((item) => item.focused) || null;
+  const said = describeAction(action, screen, platform);
+  switch (action.action) {
+    case 'type':
+      // Typed where Enter sends: the message is what's asked about, not the keys.
+      return reason === 'Enter may send it' ? `Send ${quoted(action.text)}${where}` : said.replace(/, then Enter$/, ' and press Enter');
+    case 'press': {
+      const plan = parseShortcut(action.keys);
+      if (reason === 'Enter may send it') return `Send this${where}`;
+      if (reason === 'it may delete something' && !TEXT_ROLES.has(focused?.role)) return `Delete what’s selected${where}`;
+      // Enter on a button that sends is that button, pressed. Any other focus, and Enter may be the dialog's own button: only the key is sure.
+      const pressed = ['enter', 'space'].includes(plan.key) && !plan.modifiers.length && ['button', 'link', 'menuitem'].includes(focused?.role) && SENSITIVE_LABEL.test(focused.label || '');
+      return `Press ${pressed ? named(focused) : keysSaid(plan, platform)}${action.times > 1 ? ` ${action.times} times` : ''}${where}`;
+    }
+    case 'click':
+      return action.count === 2 || action.button === 'right' ? `${said}${where}` : `Press ${named(elementById(screen, action.id)) || 'this'}${where}`;
+    case 'menu': {
+      const [menu, ...rest] = action.resolved || menuPath(action.path);
+      return rest.length ? `Choose ${quoted(rest.join(' › '))} from the ${menu} menu${where}` : `${said}${where}`;
+    }
+    case 'drag':
+      return reason === 'it may delete something' ? `Move ${named(elementById(screen, action.from)) || 'this'} to ${named(elementById(screen, action.to)) || 'there'}${where}` : `${said}${where}`;
+    default:
+      return said;
+  }
 }
 
 /** A control that plays or pauses what's on: pressed twice, the second press undoes the first. */

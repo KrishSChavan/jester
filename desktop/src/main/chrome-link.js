@@ -214,7 +214,9 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
         task = { id, resolve };
         signal?.addEventListener('abort', () => task?.id === id && cancel(), { once: true });
         // ways: how the user likes things done ("Hulu profile: Krish"), which the extension's agent goes by.
-        const how = (Array.isArray(ways) ? ways : []).filter((line) => typeof line === 'string' && line.trim()).slice(0, 12).map((line) => line.slice(0, 120));
+        // They come the newest first (ways.js lines); the extension reads them the oldest first (chooser.js), so
+        // that of two about one site the newer is the one it goes by.
+        const how = (Array.isArray(ways) ? ways : []).filter((line) => typeof line === 'string' && line.trim()).slice(0, 12).map((line) => line.slice(0, 120)).reverse();
         if (!send({ type: 'task', id, text: String(text).slice(0, 2000), ...(meant ? { meant: String(meant).slice(0, 2000) } : {}), ...(skipResearch ? { skipResearch: true } : {}), ...(how.length ? { ways: how } : {}) })) finishTask({ ok: false, text: 'Chrome isn’t linked.' });
       });
     },

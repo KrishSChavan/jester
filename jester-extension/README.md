@@ -119,12 +119,24 @@ The **Permission boundary** dropdown controls actual execution:
 A task starts on the tab you are looking at — Chrome's own pages included — and
 follows the tabs it opens or switches to, on any web page; Chrome's pages, files,
 `data:` and `javascript:` addresses are never opened or followed. When a step
-needs approval the pill asks “Allow …? Say yes or no.” and the microphone opens
+needs approval the pill asks “Is it okay if I do this: “…”?” and the microphone opens
 for the answer; anything other than a yes declines it, and the toolbar popup can
 approve too. A permission review is bound to one action and live element
 identity; a stale or replaced element is rejected after approval. Reviews expire
 after 60 seconds. Sensitive-action classification is a local heuristic, so use
 **Ask before every action** if every mutation should be reviewed.
+
+Some choices are only yours: which profile, which account, which of two people.
+When a page asks who is there (Hulu's profile picker, a Google account chooser)
+and neither your request nor an earlier answer of yours names one, the task
+stops and asks (“Which Hulu profile should I use? Krish or Sandeep Chavan?”),
+and clicks the one you say; the model can ask such a question too, at most three
+a task. This is checked in code before any click (`common/chooser.js`), not left
+to the model. With no answer the task ends there, saying what it was unsure of;
+it never guesses. Your answer is remembered (`userChoices` in
+`chrome.storage.local`, the newest 30; linked, Jester Desktop remembers instead),
+so the same thing is not asked twice. An answer chooses between things: it is
+never a yes to sending, buying or deleting.
 
 A destination the model proposes (`open`, `navigate`) runs without asking only
 when it is a listed well-known site, a site the request names (“the Anthropic
