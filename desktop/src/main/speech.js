@@ -270,6 +270,13 @@ export function startSpeech({ log = () => undefined } = {}) {
     },
     /** Whatever's being heard right now doesn't count: he's just stopped talking, and it's him. */
     listenAfresh: () => resume(),
+    /**
+     * He's waiting on an answer to something he asked, for this long (0: no longer): a word or two said then is read
+     * though it's too short to tell whose voice it is (service.js ANSWER_FLOOR).
+     */
+    expect(ms) {
+      service?.postMessage({ type: 'awaiting', ms: Number(ms) > 0 ? Number(ms) : 0 });
+    },
     /** Playback, for low-latency interruption checks. Never resets the mic. */
     setSpeaking(on) {
       const next = on === true;

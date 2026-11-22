@@ -3531,6 +3531,8 @@ async function start() {
     thinkAhead: async () => (await talking.savedOnes())[0]?.plan === 'paid',
     // Only with the mic open: typing to him with it closed, there's nobody to wait for.
     knowsYou: () => !!voiceprint && listening,
+    // Waiting on an answer to a question of his: a "yes" is too short for a voiceprint, so it's read all the same.
+    expecting: (ms) => speech?.expect(ms),
     // On a server, the Mac's (remote-hands.js): what it knows and does, over its link.
     commands: SERVER
       ? hands.commands

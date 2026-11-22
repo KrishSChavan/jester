@@ -10,7 +10,12 @@ This is for **Jester Desktop**. The Chrome extension's policy is
   stay on your computer too. While someone is speaking, the last couple of
   seconds are read for his name, so he can show he's listening at once; that
   reading is thrown away. Once you've taught him your voice, a voice that
-  isn't yours is never turned into text at all.
+  isn't yours is never turned into text at all, with one exception: for up
+  to a minute after he's asked you something, a word or two said then is
+  read even when it's too short to tell whose voice it is, because a "yes"
+  always is. In that minute someone else's "yes" would count as yours.
+  Anything longer, and anything that sounds nothing like you, is still left
+  unread.
 - **The camera.** Frames are read on your computer for gestures and the
   pointer, and never kept or sent.
 - **His voice** is made on your computer.

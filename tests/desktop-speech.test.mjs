@@ -362,3 +362,52 @@ test('a voice that isn’t the user’s is never read for his name, and a slow c
   await teaching.feed(3);
   assert.equal(taught, 0);
 });
+
+test('while he waits on an answer, a word too short for the voiceprint is read all the same; never his own voice dying away, a long clip or a far-off voice', async () => {
+  // 2026-11-21: the user's own bare yeses scored 0.26 to 0.44 against their voiceprint. Below 0.35 they were never
+  // read, so no spoken yes to a question of his could count.
+  const low = [0.3, Math.sqrt(1 - 0.3 ** 2)];
+  const run = async ({ voice = low, before = async () => undefined, seconds = 0.6 } = {}) => {
+    let decodes = 0;
+    const s = service({ voice, decode: async () => (decodes++, { text: 'Yes.' }) });
+    await s.post({ type: 'start', model: 'fake' });
+    await s.post({ type: 'voiceprint', print: [1, 0] });
+    await s.post({ type: 'listen' });
+    await before(s);
+    await s.feed(seconds);
+    await s.feed(1.2, 0);
+    return { heard: s.messages.find((m) => m.type === 'heard'), stranger: s.messages.some((m) => m.type === 'stranger'), decodes };
+  };
+  const unasked = await run();
+  assert.equal(unasked.heard, undefined);
+  assert.equal(unasked.stranger, true);
+  assert.equal(unasked.decodes, 0, 'not read at all');
+  const asked = await run({ before: (s) => s.post({ type: 'awaiting', ms: 60000 }) });
+  assert.equal(asked.heard?.text, 'Yes.');
+  assert.equal(asked.heard.unsure, true, 'as a voice that may be theirs: whoever asked says what it’s worth');
+  // No longer awaited.
+  const over = await run({ before: async (s) => { await s.post({ type: 'awaiting', ms: 60000 }); await s.post({ type: 'awaiting', ms: 0 }); } });
+  assert.equal(over.decodes, 0);
+  // On his last word, as answers come: read.
+  const eager = await run({ before: async (s) => { await s.post({ type: 'awaiting', ms: 60000 }); await s.post({ type: 'speaking', on: true }); await s.post({ type: 'speaking', on: false }); } });
+  assert.equal(eager.heard?.text, 'Yes.');
+  // Under most of a sentence of his: that could be him.
+  const under = await run({ before: async (s) => { await s.post({ type: 'awaiting', ms: 60000 }); await s.post({ type: 'speaking', on: true }); await s.feed(1); await s.post({ type: 'speaking', on: false }); }, seconds: 0.2 });
+  assert.equal(under.heard, undefined);
+  assert.equal(under.decodes, 0);
+  // More than a word or two, or nothing like their voice.
+  const long = await run({ before: (s) => s.post({ type: 'awaiting', ms: 60000 }), seconds: 4 });
+  assert.equal(long.heard, undefined);
+  const far = await run({ voice: [0.1, Math.sqrt(1 - 0.1 ** 2)], before: (s) => s.post({ type: 'awaiting', ms: 60000 }) });
+  assert.equal(far.heard, undefined);
+  assert.equal(far.decodes, 0);
+});
+
+test('the speech host tells the service how long an answer is awaited, and when it no longer is', () => {
+  const s = speechHost();
+  s.host.listen(() => {}, () => {}, () => {}, () => {});
+  s.host.expect(60000);
+  s.host.expect(0);
+  s.host.expect(-5);
+  assert.deepEqual(s.sent.filter((m) => m.type === 'awaiting').map((m) => m.ms), [60000, 0, 0]);
+});

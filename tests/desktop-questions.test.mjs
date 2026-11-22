@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { createChromeLink } from '../desktop/src/main/chrome-link.js';
 import { createCloudLink, parseCloudLink } from '../desktop/src/main/cloud-link.js';
-import { createConversation, questionLine } from '../desktop/src/main/conversation.js';
+import { agrees, createConversation, questionLine } from '../desktop/src/main/conversation.js';
 import { createRemoteHands } from '../desktop/src/main/remote-hands.js';
 import { createWebGateway } from '../desktop/src/main/web-gateway.js';
 
@@ -124,7 +124,7 @@ test('he asks a question the way a person would: no “say yes or no”, and the
 });
 
 /** A conversation whose assistant is waiting on a question. */
-function talking(asked) {
+function talking(asked, { now, expecting, knowsYou = true } = {}) {
   const answers = [];
   const said = [];
   const entries = [];
@@ -134,10 +134,12 @@ function talking(asked) {
     speaker: { say: async (line) => said.push(line), stop: () => undefined },
     memory: { add: (who, text) => entries.push({ who, text }), current: () => entries, idleFor: () => null, startNew: () => [] },
     recollections: { keep: async () => undefined, relevant: () => [] },
-    knowsYou: () => true,
+    knowsYou: () => knowsYou,
     commands: { knows: async () => false, risky: async () => false, run: async () => ({ outcome: null }) },
     assistant,
-    show: () => undefined
+    show: () => undefined,
+    ...(now ? { now } : {}),
+    ...(expecting ? { expecting } : {})
   });
   return { conversation, assistant, answers, said, entries };
 }
@@ -156,7 +158,7 @@ test('what’s said to a question that wants their own answer is the answer, wit
   assert.equal(j.said.length, 0, 'none of it was a turn for his model');
 });
 
-test('leave is given the ways people give it, and never by a voice that only may be theirs or by half a sentence', async () => {
+test('leave is given the ways people give it, in a voice too short to be sure of as well, and never by half a sentence', async () => {
   const j = talking({ label: 'Send the message to Dad', options: [], open: false });
   for (const yes of ['Yes.', 'yeah, go ahead', 'Sure, send it', 'okay do it', 'go for it', 'Yes please']) await j.conversation.heard(yes);
   assert.deepEqual(j.answers, [true, true, true, true, true, true]);
@@ -164,8 +166,74 @@ test('leave is given the ways people give it, and never by a voice that only may
   assert.deepEqual(j.answers.slice(6), [false, false, false, false, false]);
   const before = j.answers.length;
   await j.conversation.heard('okay so what does it say');
+  await j.conversation.heard('yes but use the other account');
+  await j.conversation.heard('sure, tell me about the weather');
+  assert.equal(j.answers.length, before, 'none of them is an answer');
+  // A yes with what it's for said after it.
+  for (const yes of ['yes, go ahead and click it', 'Yeah you can do that', 'okay, click allow', 'sure go ahead and send it please']) await j.conversation.heard(yes);
+  assert.deepEqual(j.answers.slice(before), [true, true, true, true]);
+  // 2026-11-21: the user's own bare yeses scored 0.26 to 0.44 against their voiceprint, none as surely theirs.
   await j.conversation.heard('Yes.', { unsure: true });
-  assert.equal(j.answers.length, before, 'neither is an answer');
+  await j.conversation.heard('go ahead', { unsure: true });
+  assert.deepEqual(j.answers.slice(before + 4), [true, true]);
+});
+
+test('agrees reads a yes alone or a yes and its go-ahead, and nothing with a condition or a question in it', () => {
+  for (const yes of ['yes', 'Yeah.', 'ok', 'go ahead', 'yes go ahead and click on it', 'yep, that’s fine', 'Sure, please do that']) assert.equal(agrees(yes), true, yes);
+  for (const not of ['', 'yes but not that one', 'okay so what', 'yes, which one?', 'sure if it’s free', 'yesterday I went out', 'okay wait', 'yes click the other one', 'I don’t know', 'yes go ahead and click it and then open the other tab and send that to him too']) assert.equal(agrees(not), false, not);
+});
+
+test('waiting on a yes or a no he isn’t deaf to anything else said to him: the question is left, and that’s answered', async () => {
+  // 2026-11-21: for the minute a question waited, all but a bare yes or no was let pass, his name or not ("I need to
+  // hit the stop listening and then start listening for him to hear me").
+  const j = talking({ label: 'Click Allow', options: [], open: false });
+  await j.conversation.heard('Jester, what does that do?');
+  assert.deepEqual(j.answers, [false], 'the question is left');
+  assert.deepEqual(j.entries.filter((entry) => entry.who === 'you').map((entry) => entry.text), ['what does that do?']);
+  assert.deepEqual(j.said, ['Hello there.'], 'and what they said is answered');
+  // Without his name, and with no question of his just asked aloud: someone talking in the room.
+  const k = talking({ label: 'Click Allow', options: [], open: false });
+  await k.conversation.heard('I think we should get lunch.');
+  await k.conversation.heard('Jester, what does that do?', { unsure: true });
+  assert.deepEqual(k.answers, [false], 'his name will do from a voice that may be theirs; no name won’t');
+});
+
+test('once he’s asked, a short answer is read whoever’s voice it seems, and what’s said next in their voice is to him', async () => {
+  let time = 5000;
+  const awaited = [];
+  const j = talking({ label: 'Click Allow', options: [], open: false }, { now: () => time, expecting: (ms) => awaited.push(ms) });
+  await j.conversation.ask('Click Allow');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(j.said, ['Click Allow?']);
+  assert.deepEqual(awaited, [60000], 'for as long as the question waits, and only once it’s been asked');
+  // A yes begun before he asked was a yes to something else.
+  await j.conversation.heard('Yes.', { startedAt: 4000 });
+  assert.deepEqual(j.answers, []);
+  time += 3000;
+  // Their voice for sure, just after he asked, and no yes or no: to him.
+  await j.conversation.heard('what does that do', { startedAt: time - 500 });
+  assert.deepEqual(j.answers, [false]);
+  assert.equal(awaited.at(-1), 0, 'and he’s no longer waiting');
+});
+
+test('a yes said the moment he stops asking is taken, not let pass as his own voice dying away', async () => {
+  let time = 5000;
+  const j = talking({ label: 'Click Allow', options: [], open: false }, { now: () => time });
+  await j.conversation.ask('Click Allow');
+  await new Promise((resolve) => setImmediate(resolve));
+  // 0.3 s after his last word, in a voice that may be theirs: until 2026-11-21 dropped for 1.2 s after he spoke.
+  time += 900;
+  await j.conversation.heard('Yes.', { unsure: true, startedAt: time - 600 });
+  assert.deepEqual(j.answers, [true]);
+  // An answer that shares its words with the question isn't his echo.
+  const k = talking({ label: 'Want me to read it', options: [], open: false }, { now: () => time });
+  await k.conversation.ask('Want me to read it');
+  await new Promise((resolve) => setImmediate(resolve));
+  time += 2000;
+  await k.conversation.heard('Yes, read it.', { unsure: true, startedAt: time - 800 });
+  assert.deepEqual(k.answers, [true]);
+  assert.equal(agrees('Yes, read it.', 'Want me to read it'), true);
+  assert.equal(agrees('Yes, read me the news', 'Want me to read it'), false);
 });
 
 test('a Mac’s open question is asked on the server with its options, and the answer goes back as their words', async (t) => {

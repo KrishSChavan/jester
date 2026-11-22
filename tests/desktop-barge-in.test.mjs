@@ -205,7 +205,7 @@ test('interrupting a streamed answer aborts it and never waits for or resumes it
   assert.deepEqual(j.ran, []);
 });
 
-test('interrupting an approval question retains its boundary and an unsure yes still cannot approve', async () => {
+test('interrupting an approval question retains its boundary, and a yes too short for the voiceprint to be sure of still approves', async () => {
   const j = rig();
   const { speaking } = await j.start();
   j.assistant.asking = true;
@@ -213,10 +213,11 @@ test('interrupting an approval question retains its boundary and an unsure yes s
   const startedAt = j.advance(100);
   j.conversation.hearing({ startedAt, interrupt: true, verified: true });
   await speaking;
+  // 2026-11-21: none of the user's own kept yeses scored as surely theirs, so no spoken yes had ever counted.
   await j.conversation.heard('Yes.', { startedAt, unsure: true });
-  assert.deepEqual(j.assistant.answers, []);
-  await j.conversation.heard('Yes.', { startedAt, unsure: false });
   assert.deepEqual(j.assistant.answers, [true]);
+  await j.conversation.heard('Yes.', { startedAt, unsure: false });
+  assert.deepEqual(j.assistant.answers, [true, true]);
 });
 
 test('an interrupted command still asks before a risky action', async () => {

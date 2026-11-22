@@ -539,7 +539,8 @@ test('speech outside the reply window, before it opened, or after a reset is sti
   for (const kind of ['late', 'before', 'reset']) {
     const j = jester();
     await j.conversation.heard('Jester.');
-    const startedAt = kind === 'late' ? j.pass(8000) : kind === 'before' ? 999 : j.pass(1000);
+    // Begun on his last words (a second and a half), it's an answer still: before that, it isn't.
+    const startedAt = kind === 'late' ? j.pass(12000) : kind === 'before' ? 1000 - 1501 : j.pass(1000);
     j.pass(60000);
     if (kind === 'reset') j.conversation.reset();
     const shown = j.shown.length;
@@ -1151,7 +1152,7 @@ test('a voiceprint: takes averaged, voices compared, and short clips given a low
   assert.equal(TEACHING_LINES.length, 5);
 });
 
-test('a voice only maybe the user’s needs his name to begin, can answer him just after he’s spoken, and can’t say yes to a task', async () => {
+test('a voice only maybe the user’s needs his name to begin, can answer him just after he’s spoken, and can say yes or no to what he’s asked', async () => {
   const j = jester({ knowsYou: true });
   await j.conversation.heard('What should I cook tonight?', { unsure: true });
   assert.equal(j.entries.length, 0);
@@ -1169,11 +1170,13 @@ test('a voice only maybe the user’s needs his name to begin, can answer him ju
   assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 2);
   await j.conversation.heard('And a drink?');
   assert.equal(j.entries.filter((entry) => entry.who === 'you').length, 2, 'nor does their own voice carry on once it’s over');
-  // A yes lets a task go ahead, so it must be theirs; a no or a stop is anyone's to give.
+  // A yes is a word, and no voiceprint can tell whose a word is: asked for a sure voice, no spoken yes ever counted
+  // (2026-11-21, "he is unable to register my simple yes").
   j.assistant.asking = true;
   await j.conversation.heard('Jester, yes.', { unsure: true });
+  await j.conversation.heard('Yes.', { unsure: true });
   await j.conversation.heard('No.', { unsure: true });
-  assert.deepEqual(j.assistant.answers, [false]);
+  assert.deepEqual(j.assistant.answers, [true, true, false]);
 });
 
 test('in the moment after he speaks, words without his name are for him only if his model reads them so', async () => {

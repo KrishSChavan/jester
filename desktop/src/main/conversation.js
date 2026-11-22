@@ -38,7 +38,13 @@ import { timedWords } from './script-words.js';
 import { BARE_ANSWER, offerAsked, offerReply, offersLine } from './offers.js';
 
 /** How long he waits for more: after just his name, and after answering, with no need to say it again. */
-const OPEN_MS = 8000;
+const OPEN_MS = 12000;
+/**
+ * Words begun this long before he'd finished are still an answer to him: people start on the last word of a question.
+ */
+const EARLY_MS = 1500;
+/** How long a question that asks leave is waited on (assistant.js APPROVAL_MS): a short answer is read for as long. */
+const LEAVE_MS = 60000;
 /** And after a question of his, which wants an answer: long enough to think of one. */
 const ASKED_MS = 20000;
 /**
@@ -107,6 +113,32 @@ const STOP = /^\W*(?:stop|cancel|never ?mind|stop it|stop talking|shut up|be qui
  * longer tells them to "say yes or no" (the user, 2026-11-21, on how he talks: robotic): "yeah, go ahead", "send it".
  */
 const YES = /^\W*(?:(?:yes|yeah|yep|yup|sure|ok|okay|alright|please|absolutely|definitely|of course)[\s,]+)*(?:yes|yeah|yep|yup|sure|ok|okay|alright|absolutely|definitely|of course|do it|go ahead|go for it|please do|allow(?: it)?|send it|that['’]?s (?:fine|right)|sounds good)(?: please| thanks| thank you)?\W*$/i;
+/**
+ * A yes with the thing said after it: "yes, go ahead and click it", "sure, you can do that". Not one with a
+ * condition, a correction or a question in it ("yes but the other one", "okay so what"): that isn't leave, it's
+ * something said to him, and is taken as that.
+ */
+const YES_FIRST = /^\W*(?:yes|yeah|yep|yup|sure|ok|okay|alright|absolutely|definitely|of course|go ahead|go for it|please do|do it)\b/i;
+const GOES_AHEAD = /\b(?:go ahead|go for it|do (?:it|that|so)|you (?:can|may)|click|press|tap|allow|approve|confirm|proceed|continue|send|open|please|that['’]?s (?:fine|right|okay|ok)|it['’]?s (?:fine|okay|ok)|sounds good)\b/i;
+const NOT_PLAIN = /\b(?:but|not|no|nope|never|wait|instead|other|another|different|first|before|after|unless|except|only|actually|though|what|why|which|who|whose|how|where|when|if|or)\b|n['’]t\b|\?/i;
+const MOST_YES_WORDS = 10;
+const YES_WORD = /^(?:yes|yeah|yep|yup|sure|ok|okay|alright|absolutely|definitely|of|course|please|it|that|this|now|the|just|and|thanks|thank|you)$/;
+const plainWords = (text) => String(text ?? '').toLowerCase().replace(/['’]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
+/**
+ * Whether what was said gives leave: a yes alone, or a yes and the go-ahead it's for, or a yes and the question's
+ * own words back ("Yes, read it." to "Want me to read it?").
+ * @param {string} meant
+ * @param {string} [label]  what he asked
+ */
+export function agrees(meant, label = '') {
+  const said = String(meant ?? '');
+  if (YES.test(said)) return true;
+  const words = plainWords(said);
+  if (!YES_FIRST.test(said) || NOT_PLAIN.test(said) || words.length > MOST_YES_WORDS) return false;
+  if (GOES_AHEAD.test(said)) return true;
+  const asked = new Set(plainWords(label));
+  return asked.size > 0 && words.every((word) => YES_WORD.test(word) || asked.has(word));
+}
 const NO = /^\W*(?:(?:no|nope|nah|actually|wait)[\s,]+)*(?:no|nope|nah|don['’]?t|do not|cancel|stop|never ?mind|not (?:now|yet)|hold on|leave it|forget it)(?: (?:send|do) (?:it|that))?(?: thanks| thank you| please)?\W*$/i;
 /**
  * A few words for when a tool that takes a while is begun and his model said nothing first: about the thing itself,
@@ -773,7 +805,7 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, work = null, ring = null, scripts = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, brain = null, ways = null, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, expecting = () => undefined, vaultMemory = null, situation = null, tasks = null, briefs = null, work = null, ring = null, scripts = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, brain = null, ways = null, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
@@ -797,6 +829,9 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   let quietUntil = 0;
   let openSince = 0;
   let openUntil = 0;
+  /** Until when a short answer is being read whoever's voice it seems (expect), and when he last asked leave. */
+  let expectUntil = 0;
+  let leaveAskedAt = 0;
   /** What he's said lately, for telling his voice from the user's. */
   let lately = [];
   /** What was connected the last time it was told (abilities.js). */
@@ -1124,15 +1159,35 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     log('talked over: listening');
   }
 
+  /**
+   * He's waiting on an answer for this long (0: no longer). A word or two ("yes", a name) is too short for a
+   * voiceprint to tell whose it is, so while he waits, what's heard reads such an answer all the same (`expecting`:
+   * speech/service.js ANSWER_FLOOR). Never cut short by a shorter wait begun while a longer one runs.
+   */
+  function expect(ms) {
+    const until = ms > 0 ? now() + ms : 0;
+    if (until && until <= expectUntil) return;
+    if (!until && !expectUntil) return;
+    expectUntil = until;
+    try {
+      expecting(ms > 0 ? ms : 0);
+    } catch (err) {
+      log('couldn’t say an answer is awaited:', err.message);
+    }
+  }
+
   /** The pill listens on, for what's said next. */
   function stayOpen(ms = OPEN_MS) {
     openSince = now();
     openUntil = openSince + ms;
+    // A question of his: its answer may be one word.
+    if (ms >= ASKED_MS && knowsYou()) expect(ms);
     show({ active: true, start: true, hold: ms });
   }
 
-  // The window is for starting an answer. Recognition may finish much later.
-  const withinWindow = (startedAt = now()) => openUntil > 0 && startedAt >= openSince && startedAt < openUntil;
+  // The window is for starting an answer. Recognition may finish much later. Begun on his last words (EARLY_MS), it's
+  // an answer still: until 2026-11-21 it had to begin after he'd finished, to the millisecond.
+  const withinWindow = (startedAt = now()) => openUntil > 0 && startedAt >= openSince - EARLY_MS && startedAt < openUntil;
 
   /**
    * What his memory and the user's notes hold on what was said, given the moment it takes and no longer.
@@ -1742,6 +1797,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     /** The moment his last line left for an answer: still theirs if these words turn out not to have been to him. */
     const wasOpen = { since: openSince, until: openUntil };
     openUntil = 0;
+    expect(0);
     typing = typed;
     // Quicker to someone in a hurry, slower to someone low: for all he says this turn.
     pace = paceFor(moodOf(text, memory.current(), now()));
@@ -2085,7 +2141,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       passedBy = [...passedBy.filter((line) => now() - line.at < PASSED_MS), { text: String(text).replace(/\s+/g, ' ').trim().slice(0, PASSED_CHARS), at: now() }].slice(-PASSED_MOST);
     }
     const { words, at } = nameAt(text);
-    log(`heard and let pass — ${why} (${words} word${words === 1 ? '' : 's'}${at ? `, his name ${at === 1 ? 'first' : `word ${at}`}` : ', no name in it'})`);
+    // When, by his own last words: "he didn't hear me after he answered" is then a number, not a guess (2026-11-21).
+    const spoke = lately.at(-1)?.at;
+    const when = Number.isFinite(spoke) ? `; ${((now() - spoke) / 1000).toFixed(1)} s after he last spoke, ${openUntil > now() ? 'still listening for an answer' : 'no longer listening for one'}` : '';
+    log(`heard and let pass — ${why} (${words} word${words === 1 ? '' : 's'}${at ? `, his name ${at === 1 ? 'first' : `word ${at}`}` : ', no name in it'}${when})`);
     return null;
   }
 
@@ -2119,9 +2178,17 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     }
     let cutIn = Number.isFinite(startedAt) && interruption?.startedAt === startedAt ? interruption : null;
     const overlapped = overlappedSpeech(startedAt);
+    /** Surely the user: a voiceprint, and a clip long enough for it to tell. */
+    const sure = knowsYou() && !unsure;
+    // What he's waiting on, answered: a yes or a no to leave he's asked, or anything at all to a question only they
+    // can settle. Not words begun before he'd asked: those were a yes to something else.
+    const asking = assistant.asking && !(Number.isFinite(startedAt) && startedAt < leaveAskedAt);
+    // An open answer could be anything, so his own voice garbled could pass for one: begun while he was still
+    // speaking, it counts only in a voice that's surely theirs.
+    const answers = asking && !!meant && (assistant.asked?.open ? sure || !overlapped : agrees(meant, assistant.asked?.label) || NO.test(meant));
     // Short output echoes such as "yes" still need screening after the quiet
     // guard expires; they must never become an approval of his own question.
-    if (overlapped && !cutIn && !(knowsYou() && !unsure) && playbackEcho(meant)) return passed(text, 'playback echo');
+    if (overlapped && !cutIn && !sure && playbackEcho(meant)) return passed(text, 'playback echo');
     // A verified speaker or a screened early transcript can take the floor
     // without his name. Bare VAD, an unsure speaker and playback cannot.
     if (talking || now() < quietUntil) {
@@ -2129,50 +2196,81 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         searchClarification = null;
         briefingOffer = null;
         workOffer = null;
-        if (!cutIn) listenInstead({ startedAt, verified: !unsure && knowsYou() });
+        if (!cutIn) listenInstead({ startedAt, verified: sure });
         if (assistant.asking) assistant.answer(false);
         else if (assistant.running) assistant.cancel();
         return Promise.resolve();
       }
       if (!cutIn) {
-        if (!cutsIn(meant, unsure)) return passed(text, talking ? 'he was talking' : 'he’d just stopped talking');
-        listenInstead({ startedAt, verified: !unsure && knowsYou() });
-        cutIn = interruption;
+        // An answer to what he's asked is taken as he finishes asking it, and a quick word once he's stopped is taken
+        // too: a "yes" is too short for the voiceprint to be sure of, and it comes at once. Until 2026-11-21 both
+        // were let pass here for 1.2 s after his last word, and a yes never got through ("he is unable to register
+        // my simple yes"). His own voice began while he was speaking (overlapped), and was screened just above.
+        const quick = !talking && !overlapped && (woken || !playbackEcho(meant));
+        if (answers) {
+          // He needn't finish asking what's been answered.
+          if (talking) hush();
+        } else if (cutsIn(meant, unsure)) {
+          listenInstead({ startedAt, verified: sure });
+          cutIn = interruption;
+        } else if (!quick) return passed(text, talking ? 'he was talking' : 'he’d just stopped talking');
       }
     }
     // A short interruption can finish after playback's quiet guard expires.
     if (!cutIn && overlapped && cutsIn(meant, unsure)) {
-      listenInstead({ startedAt, verified: !unsure && knowsYou() });
+      listenInstead({ startedAt, verified: sure });
       cutIn = interruption;
     }
-    if ((cutIn ? !cutIn.verified && repeatedPlayback(meant) : echoes(meant))) {
+    // His own words, heard back. Not a voice that's surely theirs, nor an answer begun after he'd stopped: "Yes, read
+    // it." to "Want me to read it?" shares most of its words with the question (2026-11-21, thrown away as his echo).
+    if (cutIn ? !cutIn.verified && repeatedPlayback(meant) : !sure && !(answers && !overlapped) && echoes(meant)) {
       log('that was me:', JSON.stringify(text));
       return null;
     }
+    /** Said to him while he waited on a yes or a no, and neither: the question is left, and this is taken instead. */
+    let instead = false;
     // A question he's waiting on is answered without his name, or the user's
     // yes would have to start with it. Anything else overheard is just that.
-    if (assistant.asking) {
+    if (asking) {
       // A question only they can settle (which profile, which of two people): what they say is the answer, in their
       // own words, and "never mind" leaves it unanswered. A voice that only may be theirs will do: it chooses, it
       // doesn't give leave, and anything that sends or buys still asks for a yes of its own.
       if (assistant.asked?.open) {
+        if (!answers) return passed(text, 'he was still asking');
         typing = false;
         const left = STOP.test(meant) || TAKEN_BACK.test(meant);
         // In the conversation, after the question it answers.
         memory.add('you', meant);
+        expect(0);
         assistant.answer(left ? null : meant);
         return null;
       }
-      // Answered aloud: what's said about it next is said aloud too. A yes lets a task go ahead, so it must be them.
-      if (YES.test(meant) && unsure) log('a yes in a voice only maybe yours: not taken');
-      else if (YES.test(meant)) {
+      // Answered aloud: what's said about it next is said aloud too. A yes is taken from a voice that only may be
+      // theirs: it's a word, said in the seconds after he asked, and no voiceprint can tell whose a word is. Of the
+      // user's own yeses kept on 2026-11-21, none scored as surely theirs, and asking for that meant no spoken yes
+      // ever counted. What it gives up: someone else's "yes", in the minute after he asks, counts as well.
+      if (agrees(meant, assistant.asked?.label)) {
+        if (unsure) log('a yes in a voice that may be yours, to what he’d just asked: taken');
         typing = false;
+        expect(0);
         assistant.answer(true);
-      } else if (NO.test(meant)) {
+        return null;
+      }
+      if (NO.test(meant)) {
         typing = false;
+        expect(0);
         assistant.answer(false);
-      } else return passed(text, 'he was waiting on a yes or a no');
-      return null;
+        return null;
+      }
+      // Anything else. To him (his name, or surely their voice just after he asked): he isn't deaf to it for the
+      // minute the question waits, as he was until 2026-11-21 (the user: "I need to hit the stop listening and then
+      // start listening for him to hear me"). The question is left, and what they said is answered.
+      const toHim = !!meant && (woken || !!cutIn?.verified || (sure && withinWindow(startedAt)));
+      if (!toHim) return passed(text, 'he was waiting on a yes or a no');
+      log('said something else while he waited on a yes or a no: the question is left, and that’s answered');
+      expect(0);
+      assistant.answer(false);
+      instead = true;
     }
     if (assistant.running && STOP.test(meant)) {
       assistant.cancel();
@@ -2182,7 +2280,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // Without his name it's for him only just after he's spoken to them. Then a voice that only may be theirs is
     // taken for theirs: it's an answer to him, seconds after he spoke (2026-11-15: every "yes" to a question of his
     // scored as maybe, and went unheard).
-    if (!woken && !cutIn && !withinWindow(startedAt) && !answersOffer(meant, startedAt)) {
+    if (!woken && !cutIn && !instead && !withinWindow(startedAt) && !answersOffer(meant, startedAt)) {
       // His name within it, though not as a call: all of it goes to his model, which says whether it was to him.
       if (named(meant)) return turn(meant, { overheard: true, unsure, unnamed: true, mentioned: true, lag, startedAt });
       return passed(text, 'not said to him', { theirs: !unsure });
@@ -2374,7 +2472,25 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      * The assistant's question: out loud, or written to someone typing to him. `options`, `open`: one they answer
      * in their own words; `again`: asked again, what came back being no answer to it.
      */
-    ask: (label, more = {}) => say(questionLine(label, more), typing ? { written: true } : {}),
+    ask(label, more = {}) {
+      const line = questionLine(label, more);
+      if (typing) return say(line, { written: true });
+      // Words begun before now aren't its answer.
+      leaveAskedAt = now();
+      const hushed = hushes;
+      const asked = say(line);
+      // Once it's been asked: a short answer is read whoever's voice it seems, for as long as he waits (expect), and
+      // what's said next without his name is to him. Not before: nobody's heard the question yet. The pill is left
+      // as it is, showing the question (stayOpen would put it back to listening).
+      Promise.resolve(asked).then(() => {
+        if (!assistant.asking || hushed !== hushes) return;
+        expect(LEAVE_MS);
+        if (!knowsYou()) return;
+        openSince = now();
+        openUntil = openSince + ASKED_MS;
+      });
+      return asked;
+    },
     /** He stops mid-sentence. */
     hush,
     /** Starts over, with nothing kept: what he was answering, or a task's result to come, is dropped with the rest. */
@@ -2392,6 +2508,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       controller?.abort();
       dropPending();
       openUntil = 0;
+      expect(0);
       hush();
       memory.clear();
       recollections.forget();
@@ -2414,6 +2531,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       resets += 1;
       wokenEarly = false;
       openUntil = 0;
+      expect(0);
       hush();
       dropPending();
       if (typedTurn && typedTurn === turns) return;
@@ -2437,6 +2555,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       controller?.abort();
       dropPending();
       openUntil = 0;
+      expect(0);
       hush();
       show({ phase: 'speaking', done: true });
       if (!assistant.running) show({ active: false });

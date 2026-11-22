@@ -6,7 +6,7 @@
  * Float32 chunks; a voice-activity detector decides where the utterance ends,
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
- * Messages in:  start {model} · begin · listen · speaking {on} · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
+ * Messages in:  start {model} · begin · listen · speaking {on} · awaiting {ms} · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
  * Messages out: ready {model, loadMs} · speech/activity {startedAt, interrupt?, verified?, text?} · partial {text} · final {text, decodeMs} · wake · early {text, startedAt, unsure?} · resumed · heard {text, startedAt, decodeMs, afterMs, early?, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · ended {startedAt} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
@@ -96,6 +96,21 @@ const LOOK_FAST_S = 15;
 const KEPT_WINDOWS = Math.ceil((PREROLL_S * SAMPLE_RATE) / WINDOW) + 2;
 /** The detector counts samples in 32 bits and finds nothing past 37 hours of them (measured), so it starts over. */
 const VAD_RESTART_S = 6 * 60 * 60;
+/**
+ * A word or two said in answer to a question of his ("yes", "Krish") is too short to tell whose voice it is. On
+ * 2026-11-21 the bare yes-and-no clips kept on the user's server, six of them, scored 0.26 to 0.44 against their
+ * voiceprint: three "maybe", three "not theirs" and so never read, and none "theirs", which is what leave to do
+ * something asked for. So a spoken yes could not work ("he is unable to register my simple yes"). While he's
+ * waiting on an answer (`awaiting`), a short utterance that ends once he's stopped speaking is read from
+ * ANSWER_FLOOR up and passed as maybe theirs: whoever asked decides what a yes, a no or a name is worth, and screens
+ * it against his own words. It may begin on his last word (ANSWER_EARLY_MS), as answers do, and no sooner: nothing
+ * said while he's still speaking, or under most of a sentence of his, is given that room.
+ */
+const ANSWER_FLOOR = 0.2;
+/** With the second kept before speech: about a second and a half of talking. */
+const ANSWER_SECONDS = 2.6;
+const ANSWER_EARLY_MS = 600;
+const AWAIT_MOST_MS = 2 * 60 * 1000;
 const SAVE_DIR = process.env.JESTER_SAVE_SPEECH || '';
 /** Kept for tuning, when the user's said to: voices that scored at least this, and weren't plainly theirs. */
 const KEEP_FLOOR = 0.2;
@@ -127,6 +142,9 @@ let learned = [];
 let teaching = false;
 /** Playback is active: only then do the extra low-latency speaker/text checks. */
 let speaking = false;
+/** When his playback last ended, and until when an answer to a question of his is awaited (ANSWER_FLOOR). */
+let quietSince = 0;
+let awaitUntil = 0;
 
 function freshState(listening = false) {
   // `windows` is everything since `begin`; `speechAt` the window where speech was first detected.
@@ -250,11 +268,14 @@ async function overheard(samples, ahead = null, startedAt = null) {
 }
 
 /** Who it was, then, if that's someone to listen to, what they said: a stranger's words aren't read. */
-async function judge(samples) {
+async function judge(samples, startedAt = null) {
   const seconds = samples.length / SAMPLE_RATE;
   const voice = voiceprint || teaching ? voiceOf(samples) : null;
   const { score, enrolled } = voiceprint ? (voice ? scored(voice, voiceprint, learned) : { score: 0, enrolled: 0 }) : { score: null, enrolled: null };
-  const who = voiceprint && !teaching ? judged(score, seconds) : 'you';
+  let who = voiceprint && !teaching ? judged(score, seconds) : 'you';
+  // A short answer to what he's just asked, ended once he'd stopped: read, and whoever asked says what it's worth.
+  const answer = who === 'stranger' && !speaking && seconds <= ANSWER_SECONDS && score >= ANSWER_FLOOR && Number.isFinite(startedAt) && startedAt <= awaitUntil && startedAt >= quietSince - ANSWER_EARLY_MS;
+  if (answer) who = 'maybe';
   if (who === 'stranger') return { seconds, voice, score, enrolled, who };
   return { seconds, voice, score, enrolled, who, ...(await decode(samples)) };
 }
@@ -263,7 +284,7 @@ async function judge(samples) {
 async function hear(samples, ahead, startedAt, during) {
   const began = performance.now();
   const early = ahead ? await ahead.catch(() => null) : null;
-  const { seconds, voice, score, enrolled, who, text, decodeMs } = early || (await judge(samples));
+  const { seconds, voice, score, enrolled, who, text, decodeMs } = early || (await judge(samples, startedAt));
   if (during !== listens) return;
   const round = (value) => Math.round(value * 1000) / 1000;
   if (who === 'stranger') {
@@ -298,7 +319,7 @@ function readAhead() {
   const during = state;
   const samples = utterance();
   if (!samples.length) return;
-  const read = judge(samples);
+  const read = judge(samples, during.startedAt);
   during.ahead = read;
   read
     .then((got) => {
@@ -504,7 +525,11 @@ port.on('message', async ({ data }) => {
         learned = voiceprint && Array.isArray(data.learned) ? data.learned.map((voice) => Float32Array.from(voice)) : [];
         break;
       case 'speaking':
+        if (speaking && data.on !== true) quietSince = Date.now();
         speaking = data.on === true;
+        break;
+      case 'awaiting':
+        awaitUntil = data.ms > 0 ? Date.now() + Math.min(Number(data.ms), AWAIT_MOST_MS) : 0;
         break;
       case 'teaching':
         teaching = !!data.on;

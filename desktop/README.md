@@ -2889,6 +2889,16 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     eras of the protocol unit-tested; never from Claude's own apps). Settings › Tools and choices › Let other apps
     use Jester's tools, copy the lines into the app's MCP settings, restart it, and ask it to "use Jester to open
     Notes". His log has `mcp: <the app> called use_computer`.
+36. **A spoken yes, and talking to him while he waits** (built 2026-11-21 after "he is unable to register my
+    simple yes" and "I need to hit the stop listening and then start listening for him to hear me"; unit-tested
+    with made-up voices only, never heard with yours). Ask for something that needs leave (a click on the Mac, a
+    text) and answer with a bare "yes" the moment he stops asking: it should go ahead. His log then has
+    `assistant approval: … allowed`, and `a yes in a voice that may be yours, to what he’d just asked: taken`
+    when the clip was too short to be sure of. Then, with a question waiting, say "Jester, what does that do?":
+    he should answer it rather than sit silent for a minute (`said something else while he waited on a yes or a
+    no`). After any answer of his, a follow-up without his name counts for 12 seconds (20 after a question of
+    his). When one is missed, the `heard and let pass` line now says how long after he last spoke it came and
+    whether he was still listening for an answer: send that line.
 
 ## Things learned the hard way
 
