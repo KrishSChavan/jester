@@ -684,7 +684,10 @@ fn entry(id: usize, role: &str, label: Option<String>, element: &IUIAutomationEl
 
 /// The controls in the front window, numbered for `act`. (`pid` is for macOS,
 /// where an app's windows can be read without it being in front.)
-pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: bool) -> Result<Value> {
+pub fn snapshot(_pid: Option<i32>, exclude: Option<i32>, limit: usize, _debug: bool, panel: bool) -> Result<Value> {
+    if panel {
+        return Err("there is no menu-bar panel to read on Windows".into());
+    }
     let started = std::time::Instant::now();
     let automation = automation()?;
     let mut window = unsafe { GetForegroundWindow() };
@@ -1038,7 +1041,10 @@ fn click_point(element: &IUIAutomationElement, window: &IUIAutomationElement) ->
 }
 
 /// Does something to an element of the last snapshot (or, for scrolling, its window).
-pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) -> Result<Value> {
+pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>, _after: Option<&str>) -> Result<Value> {
+    if matches!(action, "insertAfter" | "caretAfter") {
+        return Err("text can't be put after chosen words on Windows yet: add it to the end, or replace the field".into());
+    }
     let (element, window) = LISTED.with(|listed| {
         let listed = listed.borrow();
         if listed.0 != snapshot {
@@ -1413,4 +1419,20 @@ pub fn place_window(pid: i32, (x, y, w, h): (f64, f64, f64, f64), maximize: bool
         std::thread::sleep(std::time::Duration::from_millis(150));
     }
     Ok(window_state(window))
+}
+
+/// macOS asks an app's menu bar what a shortcut stands for; Windows has no
+/// one place to ask, so none is ever found and the keys are pressed.
+pub fn shortcut(_pid: i32, _key: &str, _modifiers: &[crate::protocol::Modifier], _press: bool) -> Result<Value> {
+    Ok(json!({ "found": false }))
+}
+
+/// The notification area isn't read yet.
+pub fn menu_bar(_press: Option<&str>, _exact: bool, _exclude: Option<i32>) -> Result<Value> {
+    Err("the icons by the clock aren't read on Windows yet".into())
+}
+
+/// No fingerprint of the screen on Windows yet: a click is judged by what can be read.
+pub fn glance(_x: f64, _y: f64, _exclude: Option<i32>) -> Result<Value> {
+    Ok(json!({ "allowed": false }))
 }

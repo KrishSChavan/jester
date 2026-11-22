@@ -138,6 +138,9 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
         | Command::Act { .. }
         | Command::Focused
         | Command::Menu { .. }
+        | Command::Shortcut { .. }
+        | Command::MenuBar { .. }
+        | Command::Glance { .. }
         | Command::Window { .. }
         | Command::PlaceWindow { .. }
         | Command::WindowAt { .. }
@@ -170,17 +173,32 @@ fn run_query(command: Command, dry_run: bool) -> Result<Map<String, Value>> {
         Command::Frontmost => platform::frontmost().map(object),
         Command::Wake { pid } => platform::wake(pid).map(object),
         Command::Apps => platform::apps().map(|apps| object(json!({ "apps": apps }))),
-        Command::Snapshot { pid, exclude, limit, debug } => platform::snapshot(pid, exclude, limit.clamp(1, 1000), debug).map(object),
-        Command::Act { snapshot, element, action, value } if dry_run && action != "read" => {
-            Ok(object(json!({ "events": [{ "event": "act", "snapshot": snapshot, "element": element, "action": action, "value": value }] })))
+        Command::Snapshot { pid, exclude, limit, debug, panel } => platform::snapshot(pid, exclude, limit.clamp(1, 1000), debug, panel).map(object),
+        Command::Act { snapshot, element, action, value, after } if dry_run && action != "read" => {
+            let mut event = json!({ "event": "act", "snapshot": snapshot, "element": element, "action": action, "value": value });
+            if let Some(after) = after {
+                event["after"] = json!(after);
+            }
+            Ok(object(json!({ "events": [event] })))
         }
-        Command::Act { snapshot, element, action, value } => platform::act(snapshot, element, &action, value.as_deref()).map(object),
+        Command::Act { snapshot, element, action, value, after } => platform::act(snapshot, element, &action, value.as_deref(), after.as_deref()).map(object),
         Command::Focused => platform::focused().map(object),
         Command::Menu { path, .. } if path.is_empty() || path.len() > 6 || path.iter().any(|part| part.trim().is_empty()) => {
             Err("a menu path has 1 to 6 titles, like [\"File\", \"New Note\"]".into())
         }
         Command::Menu { pid, path, press: true, exact } if dry_run => Ok(object(json!({ "events": [{ "event": "menu", "pid": pid, "path": path, "exact": exact }] }))),
         Command::Menu { pid, path, press, exact } => platform::menu(pid, &path, press, exact).map(object),
+        Command::Shortcut { pid, key, modifiers, press: true } if dry_run => Ok(object(json!({ "events": [{ "event": "shortcut", "pid": pid, "key": key, "modifiers": modifiers }] }))),
+        Command::Shortcut { pid, key, modifiers, press } => {
+            let mut mods = Vec::new();
+            for name in &modifiers {
+                mods.push(protocol::modifier(name).ok_or_else(|| format!("unknown modifier \"{name}\""))?);
+            }
+            platform::shortcut(pid, &key, &mods, press).map(object)
+        }
+        Command::MenuBar { press: Some(name), exact, .. } if dry_run => Ok(object(json!({ "events": [{ "event": "menuBar", "press": name, "exact": exact }] }))),
+        Command::MenuBar { press, exact, exclude } => platform::menu_bar(press.as_deref(), exact, exclude).map(object),
+        Command::Glance { x, y, exclude } => platform::glance(x, y, exclude).map(object),
         Command::Window { pid } => platform::window(pid).map(object),
         Command::PlaceWindow { w, h, .. } if !(w >= 1.0 && h >= 1.0) => Err("a window needs a width and height of at least 1".into()),
         Command::PlaceWindow { pid, x, y, w, h, maximize, fullscreen } if dry_run => Ok(object(json!({

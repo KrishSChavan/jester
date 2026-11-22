@@ -16,6 +16,11 @@ import { chooseMarks, drawMarks } from './agent/marks.js';
 
 /** Wide enough for the numbers to stay legible: the extension's width. */
 export const SHOT_MAX_WIDTH = 1280;
+/**
+ * No taller than a model takes whole: a picture with a longer side is made smaller on its way in, and a place the
+ * model then gives in it (a click by x and y) would be a place in a picture nobody else has.
+ */
+export const SHOT_MAX_HEIGHT = 1568;
 const JPEG_QUALITY = 75;
 /** For the window server to take Jester's hidden windows off the screen before it's captured. */
 const HIDE_MS = 120;
@@ -46,6 +51,22 @@ export function cropFor(region, bounds, size) {
 }
 
 /**
+ * What a picture shows, as the driver places things: the part of the window in it ({x, y, w, h}, in the driver's own
+ * coordinates) and the picture's size in pixels. A place in the picture is then a place on screen (host.js locate).
+ * The window's frame is known both ways (the driver's, and Electron's DIPs), so the part pictured is worked out
+ * as a share of it: no display's scale is needed.
+ * @param {{x:number, y:number, w:number, h:number}} frame  the window, as the driver gave it
+ * @param {{x:number, y:number, w:number, h:number}} dip  the same window in DIPs
+ * @param {{x:number, y:number, w:number, h:number}} region  the part of it pictured, in DIPs
+ * @param {{width:number, height:number}} size  the picture's
+ */
+export function viewOf(frame, dip, region, size) {
+  const kx = frame.w / dip.w;
+  const ky = frame.h / dip.h;
+  return { x: frame.x + (region.x - dip.x) * kx, y: frame.y + (region.y - dip.y) * ky, w: region.w * kx, h: region.h * ky, width: size.width, height: size.height };
+}
+
+/**
  * @param {object} deps
  * @param {{getSources: Function}} deps.capturer  Electron's desktopCapturer
  * @param {{getDisplayMatching: Function}} deps.screen  Electron's screen
@@ -55,9 +76,10 @@ export function cropFor(region, bounds, size) {
  * @param {(frame:object) => object|null} [deps.toDip]  a driver frame in Electron's DIPs (driver.js toDipFrame)
  * @param {(ms:number) => Promise<void>} [deps.wait]
  * @returns {Function & {allowed: () => boolean}}
- *   (snapshot, {goal}) => {ok:true, image:{mimeType, data}, marked:number[], width, height} | {ok:false, detail}
+ *   (snapshot, {goal}) => {ok:true, image:{mimeType, data}, marked:number[], width, height, view} | {ok:false, detail};
+ *   view: what the picture shows, for a place in it to be found on screen (viewOf)
  */
-export function createWindowShot({ capturer, screen, images, allowed, ownWindows = () => [], toDip = (frame) => frame, wait = pause, maxWidth = SHOT_MAX_WIDTH }) {
+export function createWindowShot({ capturer, screen, images, allowed, ownWindows = () => [], toDip = (frame) => frame, wait = pause, maxWidth = SHOT_MAX_WIDTH, maxHeight = SHOT_MAX_HEIGHT }) {
   async function shoot(snapshot, { goal = '' } = {}) {
     if (!allowed()) return { ok: false, detail: 'Pictures of the screen aren’t allowed now: work from the screen text.' };
     const window = toDip(snapshot?.window?.frame);
@@ -88,7 +110,10 @@ export function createWindowShot({ capturer, screen, images, allowed, ownWindows
     if (!capture || capture.isEmpty()) return { ok: false, detail: 'The picture came back empty.' };
 
     const cut = capture.crop(cropFor(region, display.bounds, capture.getSize()));
-    const picture = cut.getSize().width > maxWidth ? cut.resize({ width: maxWidth, quality: 'good' }) : cut;
+    // Made to fit both ways, its shape kept: one scale turns a place in it back into a place on screen.
+    const size = cut.getSize();
+    const fit = Math.min(1, maxWidth / size.width, maxHeight / size.height);
+    const picture = fit < 1 ? cut.resize({ width: Math.max(1, Math.round(size.width * fit)), quality: 'good' }) : cut;
     const { width, height } = picture.getSize();
     // DIPs to the picture's pixels.
     const scale = width / region.w;
@@ -99,7 +124,7 @@ export function createWindowShot({ capturer, screen, images, allowed, ownWindows
     const marks = chooseMarks(items, { width, height, goal });
     const drawn = drawMarks(picture.toBitmap(), width, height, marks);
     const jpeg = images.createFromBitmap(drawn, { width, height }).toJPEG(JPEG_QUALITY);
-    return { ok: true, image: { mimeType: 'image/jpeg', data: jpeg.toString('base64') }, marked: marks.map((mark) => mark.id), width, height };
+    return { ok: true, image: { mimeType: 'image/jpeg', data: jpeg.toString('base64') }, marked: marks.map((mark) => mark.id), width, height, view: viewOf(snapshot.window.frame, window, region, { width, height }) };
   }
   shoot.allowed = allowed;
   return shoot;

@@ -613,6 +613,61 @@ default app (not yet seen).
 `JESTER_LOG_SCREENS=1` keeps the last picture beside the logs as
 `last-picture.jpg` (~/Library/Logs/Jester on a Mac), to see what the model saw.
 
+### What a second look at Atticus added
+
+On 2026-11-22 Jester's hands were set beside [Atticus](https://github.com/SaarthurR/atticus-mac)
+2.0.1's. Jester aimed better (the control held on to between reading and clicking, its place read at
+the moment of the click, what covers it found first, a row's selection read back); Atticus reached
+further and checked more. What it had that Jester didn't is in now, each the way that fits how
+Jester already works:
+
+- **A click checked by eye.** After a checked click, when nothing that can be read changed, the
+  screen is looked at where the click went: a 64 × 40-point grey patch before and after (`glance`,
+  mac.rs; `glanceChanged`, host.js), every window but Jester's own in it. On a canvas, a map or a
+  video a click changes pixels and no control, and before this that read as "Nothing on screen
+  changed", which sends a model to click again. Greys apart by 1.5 of 255 on average count
+  (Atticus's threshold). For a click with the real pointer, the "before" is taken once the pointer
+  is there, so a control's hover look isn't mistaken for the click doing something. The patch is
+  compared in memory and dropped: never written, never sent to a model. It needs Screen Recording,
+  is never asked for, and without it a click is judged by what can be read, as before (Windows:
+  not yet).
+- **A click on a place in a picture.** With a picture of the window (above), a model can click
+  what has no number by its place: `{"action":"click","x":412,"y":230,"what":"the red circle"}`,
+  in the picture's own pixels. `locate` (host.js) finds where that is on screen from what the
+  picture shows (`viewOf`, window-shot.js; pictures are now no taller than 1568 pixels, so a model
+  sees the picture it was sent and not a smaller one). A place inside a listed control that
+  presses becomes a click on that control: judged by its name, pressed its own way. Anywhere else
+  the pointer clicks the spot, its app in front. What accessibility can name there (a small thing's
+  title, or the words themselves) is what it's judged by; a spot nothing can be read of is asked
+  about first ("Click what looks like “the red circle” in Sketchy?"), as Atticus asks before an
+  unidentified point. A place is good in the reply that follows its picture and no later, and a
+  task with one in it is never learned.
+- **Text after words already there.** `type` takes `after`: the text goes in right after those
+  words and the rest of the field stays (`insertAfter`, mac.rs: the caret put there and the text
+  inserted, the whole read back). The words must be in the field exactly once. A web page's field,
+  which only takes typed keys, gets its caret put there (`caretAfter`, read back) and the text
+  typed. Windows: not yet.
+- **A shortcut known by its command.** Before a ⌘ shortcut is judged, the app's menus are read
+  closed for the item that shows it (`shortcut`, mac.rs): ⌘S is File › Save, and ⇧⌘D in Mail is
+  Message › Send, which is now asked about as a send is ("Choose “Send” in Mail?") where before
+  it was pressed as any keys are. The result says what it was ("that's File › Save"). When the
+  app isn't in front, the command itself is chosen through accessibility where the app is; a web
+  page keeps its keys, since it may handle them itself.
+- **The menu bar's icons.** `menu_bar` opens one by name from any app (Wi-Fi, Battery, Control
+  Center, an app's own), through accessibility, and what it opens is read as a window is until it
+  closes (`menuBar` and `snapshot`'s `panel`, mac.rs): a window of its app's, or the icon's own
+  menu. A wrong name comes back with the names there are. Listing them asks every running app
+  for its icons, about two seconds here. Changing anything in Control Center asks first, as System
+  Settings does; a row there is a network to join, so it asks too.
+- **A task stays on its app.** A step done to an app that's behind another (your own window over
+  it, or you've gone to something else) is checked on that app's own window, read by its process,
+  and so are the steps after; before, the check read whatever was in front. Accessibility's own
+  ways (a press, a value set, a menu command, a shortcut's command) need nothing brought forward.
+  Keys and the pointer still bring the app to the front first.
+
+What Jester still doesn't do that Atticus does: send clicks and keys to an app in the background
+through macOS's private SkyLight calls, so that nothing ever comes forward.
+
 ### Models: talking and actions
 
 Settings › Models gives each saved model two boxes, Talking and Actions, and
@@ -2899,6 +2954,19 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     no`). After any answer of his, a follow-up without his name counts for 12 seconds (20 after a question of
     his). When one is missed, the `heard and let pass` line now says how long after he last spoke it came and
     whether he was still listening for an answer: send that line.
+
+37. **What a second look at Atticus added** (built 2026-11-22; on this Mac the driver's side was run for real against
+    a test window and two test menu-bar icons of its own: the glance saw a label change and saw none when nothing
+    did, text went in after words in a field and a text view, ⌘T was found as File › Stamp and chosen with the app
+    behind, and both kinds of icon, a panel and a menu, opened, were read and pressed. Never with a model, never on
+    a real app, and never on Control Center). With Screen Recording allowed and a model that reads pictures: in an
+    app with a canvas (Freeform, Preview's markup, a map), ask for something that needs a click on the canvas; the
+    log's step should end "The screen changed where it was clicked" and not be tried again. "Turn Wi-Fi off": the
+    Wi-Fi icon should open, he should ask before the switch, and it should flip. "Open my battery menu and tell me
+    what's using power." In a note that says "milk, eggs": "add oat after milk in that note". In Mail with a draft
+    open, a task that presses ⇧⌘D should ask "Choose “Send” in Mail?". Give him a job in Notes, click over to
+    another app while he works, and watch whether he carries on in Notes (he will come forward when he has to
+    type).
 
 ## Things learned the hard way
 

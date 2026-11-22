@@ -64,7 +64,7 @@ export function toOsFrame(screen, frame, platform = process.platform) {
  * 3 s default; placing a window may wait out a full-screen animation;
  * scrolling to an end goes a page at a time.
  */
-const SLOW_MS = { snapshot: 8000, act: 8000, menu: 6000, window: 4000, placeWindow: 8000 };
+const SLOW_MS = { snapshot: 8000, act: 8000, menu: 6000, shortcut: 4000, menuBar: 8000, window: 4000, placeWindow: 8000 };
 
 /**
  * @param {object} [options]

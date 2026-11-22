@@ -106,6 +106,9 @@ pub enum Command {
         /// Include every element looked at (`visited`: depth, role, children), for diagnosing.
         #[serde(default)]
         debug: bool,
+        /// Read what the menu-bar icon last pressed (`MenuBar`) opened, instead of a window.
+        #[serde(default)]
+        panel: bool,
     },
     /// Do something to `element` of snapshot `snapshot`: press, focus, read,
     /// setValue and appendValue (with `value`), showMenu, scrollTo,
@@ -120,11 +123,17 @@ pub enum Command {
     /// clicking in turn, and says which worked (`via`); and `point` answers
     /// where a real click would land on the element — its frame read live,
     /// scrolled into view, still, and hit-tested — or what covers it.
+    ///
+    /// After Atticus (github.com/SaarthurR/atticus-mac): `insertAfter` puts
+    /// `value` into a field right after the words `after`, which must be in
+    /// it exactly once, and reads the field back; `caretAfter` only puts the
+    /// caret there, for a field that takes typed keys alone (a web page's).
     Act {
         snapshot: u64,
         element: Option<usize>,
         action: String,
         value: Option<String>,
+        after: Option<String>,
     },
     /// An app's menu-bar command by its titles, ["File", "New Note"], matched
     /// forgivingly ("new note" finds "New Note") unless `exact`. `press:
@@ -139,6 +148,39 @@ pub enum Command {
         press: bool,
         #[serde(default)]
         exact: bool,
+    },
+    /// The menu command a keyboard shortcut stands for in an app (⌘S is
+    /// File › Save), by the key and modifiers its item shows: found, it is
+    /// what the shortcut would do, by name. `press` chooses it through
+    /// accessibility, which reaches an app that isn't in front; `web` says the
+    /// app's keyboard focus is in a web page, which may take the keys itself.
+    Shortcut {
+        pid: i32,
+        key: String,
+        #[serde(default)]
+        modifiers: Vec<String>,
+        #[serde(default)]
+        press: bool,
+    },
+    /// The icons at the right of the menu bar (Wi-Fi, Battery, Control Center,
+    /// apps' own), by name. `press` opens one, matched forgivingly unless
+    /// `exact`; what it opened is then what `Snapshot` reads with `panel`.
+    MenuBar {
+        press: Option<String>,
+        #[serde(default)]
+        exact: bool,
+        /// Leave out this app's icon (Jester's own).
+        exclude: Option<i32>,
+    },
+    /// What the screen looks like round a point, small and grey (64 × 40, a
+    /// byte a pixel, as hex): taken before a click and after, the two say
+    /// whether anything there changed when nothing readable did. Windows of
+    /// `exclude` (Jester's own, which lie over everything) are left out.
+    /// `allowed: false` without Screen Recording; nothing is kept or sent on.
+    Glance {
+        x: f64,
+        y: f64,
+        exclude: Option<i32>,
     },
     /// An app's window: where it is, and whether it's minimized or full screen.
     Window {
@@ -203,6 +245,9 @@ impl Command {
                 | Command::Act { .. }
                 | Command::Focused
                 | Command::Menu { .. }
+                | Command::Shortcut { .. }
+                | Command::MenuBar { .. }
+                | Command::Glance { .. }
                 | Command::Window { .. }
                 | Command::PlaceWindow { .. }
                 | Command::WindowAt { .. }
@@ -321,6 +366,95 @@ pub fn scroll_direction(value: Option<&str>) -> Result<(bool, bool), String> {
         _ => Err("scroll up, down, left or right".into()),
     }
 }
+
+/// The character a menu item shows for a key, as accessibility gives it
+/// (AXMenuItemCmdChar): a letter, a digit or a mark. None for the keys menus
+/// show as a glyph (Return, the arrows, Delete), which are never matched.
+// macOS only: Windows has no menu bar to ask what a shortcut stands for.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn shortcut_char(key: &str) -> Option<String> {
+    let key = canonical_key(key);
+    let named = match key.as_str() {
+        "comma" => ",",
+        "period" => ".",
+        "slash" => "/",
+        "minus" => "-",
+        "equal" => "=",
+        "semicolon" => ";",
+        "quote" => "'",
+        "grave" => "`",
+        "leftbracket" => "[",
+        "rightbracket" => "]",
+        "backslash" => "\\",
+        other if other.chars().count() == 1 && other.chars().all(|c| c.is_ascii_alphanumeric()) => other,
+        _ => return None,
+    };
+    Some(named.to_uppercase())
+}
+
+/// Whether a menu item's shortcut is this one. Its modifiers are bits
+/// (AXMenuItemCmdModifiers): 1 Shift, 2 Option, 4 Control, and 8 for "no
+/// Command", which every other item is taken to have.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn shortcut_matches(item_char: &str, item_modifiers: i64, wanted_char: &str, wanted: &[Modifier]) -> bool {
+    let has = |modifier: Modifier| wanted.contains(&modifier);
+    !item_char.is_empty()
+        && item_char.to_uppercase() == wanted_char.to_uppercase()
+        && (item_modifiers & 8 == 0) == has(Modifier::Meta)
+        && (item_modifiers & 1 != 0) == has(Modifier::Shift)
+        && (item_modifiers & 2 != 0) == has(Modifier::Alt)
+        && (item_modifiers & 4 != 0) == has(Modifier::Control)
+        && !has(Modifier::Fn)
+}
+
+/// Where text goes to follow `anchor` in a field's value: the place just
+/// past it, counted in UTF-16 units as accessibility counts a caret. The
+/// words must be there exactly once — as written, or failing that whatever
+/// their capitals: twice, and which was meant is anyone's guess.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn place_after(value: &str, anchor: &str) -> Result<usize, String> {
+    if anchor.is_empty() {
+        return Err("give the words the text goes after".into());
+    }
+    let ends = |text: &str, wanted: &str| -> Vec<usize> { text.match_indices(wanted).map(|(at, found)| at + found.len()).collect() };
+    let mut found = ends(value, anchor);
+    if found.is_empty() {
+        // Lowercased, a few letters change length: only when the value keeps its own is a place in one a place in the other.
+        let (low_value, low_anchor) = (value.to_lowercase(), anchor.to_lowercase());
+        if low_value.len() == value.len() {
+            found = ends(&low_value, &low_anchor).into_iter().filter(|&end| value.is_char_boundary(end)).collect();
+        }
+    }
+    match found.as_slice() {
+        [] => Err(format!("the field doesn't hold “{anchor}”: read it again")),
+        [end] => Ok(value[..*end].encode_utf16().count()),
+        many => Err(format!("the field holds “{anchor}” {} times: give more of the words before the place", many.len())),
+    }
+}
+
+/// A field's value with `text` put in at a UTF-16 place.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn inserted(value: &str, at: usize, text: &str) -> String {
+    let units: Vec<u16> = value.encode_utf16().collect();
+    let at = at.min(units.len());
+    format!("{}{}{}", String::from_utf16_lossy(&units[..at]), text, String::from_utf16_lossy(&units[at..]))
+}
+
+/// Bytes as hex, two characters each.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    text
+}
+
+/// A fingerprint's size: the screen 64 points by 40 round a point, a grey byte a point.
+#[cfg_attr(windows, allow(dead_code))]
+pub const GLANCE: (usize, usize) = (64, 40);
 
 /// What `act` says of an element that has left the screen since it was
 /// read: its row deleted, its sheet closed. Where it was drawn something else
@@ -527,6 +661,36 @@ mod tests {
         assert_eq!(reply["value"].as_str().unwrap().chars().count(), 2000);
         assert!(reply["tail"].as_str().unwrap().ends_with("LGTM"));
         assert_eq!(read_reply("hello", None).get("contains"), None);
+    }
+
+    #[test]
+    fn a_shortcut_is_its_menu_item_by_key_and_modifiers() {
+        assert_eq!(shortcut_char("s").as_deref(), Some("S"));
+        assert_eq!(shortcut_char(",").as_deref(), Some(","));
+        assert_eq!(shortcut_char("comma").as_deref(), Some(","));
+        assert_eq!(shortcut_char("enter"), None, "menus show Return as a glyph");
+        assert_eq!(shortcut_char("left"), None);
+        assert!(shortcut_matches("S", 0, "s", &[Modifier::Meta]), "⌘S");
+        assert!(!shortcut_matches("S", 1, "s", &[Modifier::Meta]), "⇧⌘S is Save As, not Save");
+        assert!(shortcut_matches("S", 1, "S", &[Modifier::Meta, Modifier::Shift]));
+        assert!(shortcut_matches("v", 3, "V", &[Modifier::Shift, Modifier::Meta, Modifier::Alt]));
+        assert!(!shortcut_matches("S", 8, "S", &[Modifier::Meta]), "an item without Command");
+        assert!(!shortcut_matches("S", 0, "S", &[]), "a bare key is no menu shortcut");
+        assert!(!shortcut_matches("", 0, "", &[Modifier::Meta]));
+    }
+
+    #[test]
+    fn text_goes_after_words_that_are_there_once() {
+        assert_eq!(place_after("milk, eggs", "milk"), Ok(4));
+        assert_eq!(place_after("Milk, eggs", "milk"), Ok(4), "whatever its capitals, when that's the only one");
+        assert_eq!(place_after("naïve 😀 café, then", "café"), Ok(13), "counted as a caret is: 😀 is two");
+        assert!(place_after("milk, more milk", "milk").unwrap_err().contains("2 times"));
+        assert!(place_after("eggs", "milk").unwrap_err().contains("doesn't hold"));
+        assert!(place_after("eggs", "").is_err());
+        assert_eq!(inserted("milk, eggs", 4, " (oat)"), "milk (oat), eggs");
+        assert_eq!(inserted("😀 café", 7, "!"), "😀 café!");
+        assert_eq!(inserted("ab", 99, "c"), "abc");
+        assert_eq!(hex(&[0, 15, 16, 255]), "000f10ff");
     }
 
     #[test]

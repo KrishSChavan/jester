@@ -20,6 +20,16 @@
  * Asked to (`verify`), a step's screen is read again afterwards and compared,
  * so the model learns what its step changed — or that it changed nothing —
  * and that read is the next step's screen.
+ *
+ * After Atticus 2 (github.com/SaarthurR/atticus-mac, 2026-11-22): a click
+ * that changed nothing readable is checked by eye too (a glance at the screen
+ * round it, before and after: a canvas, a map or a video changes pixels and
+ * no control); a spot in a picture of the window can be clicked where no
+ * control is listed; a shortcut is known by the menu command it stands for;
+ * text can go in after words already in a field; and the icons at the right
+ * of the menu bar open, what they open being read as a window is. A task
+ * whose app has gone behind another stays on it: read by its process, and
+ * done to through accessibility, without bringing it forward.
  */
 
 import { parseShortcut } from '../os-actions.js';
@@ -66,9 +76,25 @@ const LINE_INPUTS = new Set(['textfield', 'searchfield', 'combobox']);
 /** Accessibility roles that are text fields themselves, whatever secure input says. */
 const AX_TEXT_ROLES = new Set(['AXTextField', 'AXTextArea', 'AXComboBox', 'AXSearchField']);
 /** Steps whose effect shows on screen, and is worth checking. */
-const VISIBLE = new Set(['click', 'type', 'press', 'scroll', 'menu', 'drag']);
+const VISIBLE = new Set(['click', 'type', 'press', 'scroll', 'menu', 'menu_bar', 'drag']);
 /** Steps whose effect may not show in a snapshot at all (formatting, a toggle, the clipboard). */
 const UNSEEN = new Set(['menu', 'press']);
+/**
+ * How different two glances at the screen must be to count: their greys, 0 to 255, apart by this much on average
+ * (Atticus's threshold for a click). A caret's blink in a 64 × 40 patch is about that; a button's new look is far more.
+ */
+const GLANCE_CHANGE = 1.5;
+/** The pointer on a control, before it's pressed: how it looks hovered over is in the "before", so isn't the change. */
+const HOVER_MS = 60;
+/** Screen Recording refused: not looked for again for this long. */
+const GLANCE_RETRY_MS = 60_000;
+const PIXELS_CHANGED = 'The screen changed where it was clicked, though no control reads differently.';
+/** Controls a place in a picture stands for when it's inside one: pressed as themselves, by name. */
+const PRESSED_ROLES = new Set(['button', 'link', 'checkbox', 'switch', 'radio', 'tab', 'popup', 'menuitem', 'disclosure']);
+/** The most a named thing under a spot may measure for its name to be the spot's (points). */
+const SPOT_NAMED = { w: 480, h: 160 };
+/** The driver's refusal to set text into a field that only takes typed keys (mac.rs insert_after). */
+const TYPE_INSTEAD = /type it instead/;
 /** The driver's refusal when a read came between choosing an element and acting on it. */
 const STALE = /read again since/;
 /** The driver's refusal when the control has left the screen since it was read (protocol.rs GONE). */
@@ -80,6 +106,17 @@ const tidy = (value, max = 240) => String(value ?? '').replace(/\s+/g, ' ').trim
 const quoted = (value) => `“${tidy(value, 60)}”`;
 /** Whether an app is the one read: its process, or (a Windows Store app) the one its frame holds. */
 const sameApp = (pid, app) => pid === app?.pid || (app?.hostedPid !== undefined && pid === app.hostedPid);
+
+/**
+ * Whether two glances at the screen (the driver's `glance`: grey bytes as hex) differ enough to say something
+ * there changed. Not alike in size, or either missing, is no verdict: false.
+ */
+export function glanceChanged(before, after, least = GLANCE_CHANGE) {
+  if (typeof before !== 'string' || typeof after !== 'string' || !before || before.length !== after.length) return false;
+  let apart = 0;
+  for (let at = 0; at < before.length; at += 2) apart += Math.abs(parseInt(before.slice(at, at + 2), 16) - parseInt(after.slice(at, at + 2), 16));
+  return apart / (before.length / 2) >= least;
+}
 
 /**
  * @param {object} deps
@@ -98,18 +135,55 @@ const sameApp = (pid, app) => pid === app?.pid || (app?.hostedPid !== undefined 
  * @param {number} [deps.exclude]  Jester's own process: its windows are never the screen meant
  * @param {number} [deps.pid]  read this app's window instead of the front one (tests)
  * @param {string} [deps.platform]
+ * @param {() => number} [deps.now]
  */
-export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place = null, picture = null, wait = pause, quietly = (task) => task(), exclude, pid, platform = process.platform }) {
+export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place = null, picture = null, wait = pause, quietly = (task) => task(), exclude, pid, platform = process.platform, now = Date.now }) {
   const primary = platform === 'darwin' ? 'cmd' : 'ctrl';
   /** An accessibility action on an element of the snapshot (none: its window). */
-  const act = (snapshot, element, action, value) =>
+  const act = (snapshot, element, action, value, after) =>
     quietly(() =>
-      driver.call('act', { snapshot: snapshot.snapshot, ...(element ? { element: element.id } : {}), action, ...(value !== undefined ? { value } : {}) })
+      driver.call('act', { snapshot: snapshot.snapshot, ...(element ? { element: element.id } : {}), action, ...(value !== undefined ? { value } : {}), ...(after !== undefined ? { after } : {}) })
     );
   const frontPid = async () => (await driver.call('frontmost').catch(() => null))?.app?.pid;
+  /** Until when the screen isn't glanced at: Screen Recording was refused. */
+  let glanceOffUntil = 0;
+  /** The last picture taken: the read it's of, and what of the screen it shows (window-shot.js viewOf). */
+  let shot = null;
+  /** A menu-bar icon's panel is open, as far as is known: it's what's read until it has closed. */
+  let panel = false;
+  /** The app a task is working on behind another (its process): read by that, not by what's in front. */
+  let stay = null;
+
+  /**
+   * The screen round a point, small and grey, for telling whether a click showed (the driver's `glance`). Null when
+   * it can't be had: no Screen Recording (not asked for, and not tried again for a minute), or nothing to look at.
+   */
+  async function glance(at) {
+    if (!at || now() < glanceOffUntil) return null;
+    const reply = await driver.call('glance', { x: at.x, y: at.y, ...(exclude ? { exclude } : {}) }).catch(() => null);
+    if (reply?.allowed === false) glanceOffUntil = now() + GLANCE_RETRY_MS;
+    return typeof reply?.gray === 'string' && reply.gray ? reply.gray : null;
+  }
+
+  /**
+   * A click with the real pointer. Watched (`looked`: a checked step), the pointer goes there first and the screen
+   * is glanced at once it has: a control's hover look is then in the "before", and only what the press does is
+   * the change.
+   */
+  async function pointerClick(at, extra = {}, looked = null) {
+    if (looked) {
+      await driver.call('move', at);
+      await wait(HOVER_MS);
+      const hovered = await glance(at);
+      if (hovered) Object.assign(looked, { spot: at, before: hovered });
+    }
+    await driver.call('click', { ...at, ...extra });
+  }
 
   /** Whether the app the screen was read from is in front, bringing it back if it isn't. */
   async function inFront(snapshot) {
+    // What a menu-bar icon opened is over everything, and its app (Control Center) is never "in front".
+    if (snapshot.panel) return true;
     const want = snapshot.app?.pid;
     if (!want) return false;
     if ((await frontPid()) === want) return true;
@@ -175,7 +249,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
    * between or the control gone (the screen it was chosen from is gone, and
    * something else may be where it was: the loop reads it again).
    */
-  async function press(snapshot, element) {
+  async function press(snapshot, element, looked = null) {
     let reply;
     try {
       reply = await act(snapshot, element, 'press');
@@ -186,23 +260,49 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       if (!(await inFront(snapshot))) return notInFront(snapshot);
       const aimed = await aim(snapshot, element);
       if (!aimed.at) return missed(aimed, 'clicked');
-      await driver.call('click', aimed.at);
+      await pointerClick(aimed.at, {}, looked);
       return { ok: true, detail: 'clicked where it is drawn' };
     }
     return { ok: true, detail: reply?.via === 'select' ? 'selected it' : '', ...(reply?.busy ? { busy: true } : {}) };
   }
 
   /** A click with the real pointer, for what accessibility has no action for: a double or right click. */
-  async function pointer(snapshot, element, { button, count }) {
+  async function pointer(snapshot, element, { button, count }, looked = null) {
     if (!middle(element.frame)) return { ok: false, detail: 'It has no place on screen to click.' };
     if (!(await inFront(snapshot))) return notInFront(snapshot);
     const aimed = await aim(snapshot, element);
     if (!aimed.at) return missed(aimed, 'clicked');
-    await driver.call('click', { ...aimed.at, ...(button === 'left' ? {} : { button }), ...(count > 1 ? { count } : {}) });
+    await pointerClick(aimed.at, { ...(button === 'left' ? {} : { button }), ...(count > 1 ? { count } : {}) }, looked);
     return { ok: true, detail: `${count > 1 ? 'double-clicked' : 'right-clicked'} where it is drawn` };
   }
 
-  async function click(snapshot, element, action) {
+  /**
+   * A click on a spot in a picture of the window, where no control is listed (locate() found the place on screen
+   * and what could be read of it): the real pointer, there. There's no element to check it against, so it's the
+   * one click that's never an accessibility press, and what it did is told by the screen alone.
+   */
+  async function clickSpot(snapshot, action, looked = null) {
+    if (!action.at) return { ok: false, detail: 'x and y are a place in a picture of this screen: take a screenshot first.' };
+    if (!(await inFront(snapshot))) return notInFront(snapshot);
+    const button = action.button || 'left';
+    await pointerClick(action.at, { ...(button === 'left' ? {} : { button }), ...(action.count > 1 ? { count: action.count } : {}) }, looked);
+    return { ok: true, detail: 'clicked that spot' };
+  }
+
+  /**
+   * A click, and (a checked step) what the screen looked like where it went just before: `glanced`, for execute
+   * to compare with after when nothing readable changed.
+   */
+  async function clicked(snapshot, element, action, verify) {
+    const spot = action.at || middle(element?.frame);
+    const before = verify && spot ? await glance(spot) : null;
+    // Only a watched click is worth the pointer's detour (pointerClick); one whose "before" couldn't be had isn't.
+    const looked = before ? { spot, before } : null;
+    const result = await (element ? click(snapshot, element, action, looked) : clickSpot(snapshot, action, looked));
+    return looked && result.ok ? { ...result, glanced: looked } : result;
+  }
+
+  async function click(snapshot, element, action, looked = null) {
     if (action.count === 2 && (action.button || 'left') === 'left') {
       // A double click's meaning, where the element has it (Finder opens a file
       // with AXOpen): no pointer. Busy is done, as a press is.
@@ -214,7 +314,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         if (changed(err)) return { ok: false, detail: 'The screen changed before it could be clicked; nothing was done.' };
       }
     }
-    if (action.count === 2) return pointer(snapshot, element, { button: action.button || 'left', count: 2 });
+    if (action.count === 2) return pointer(snapshot, element, { button: action.button || 'left', count: 2 }, looked);
     if (action.button === 'right') {
       // The control's own menu, where it has one. A menu that opened keeps the
       // app busy until it closes: that's shown, not a reason to right-click again.
@@ -225,9 +325,9 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         if (err?.code === 'timeout') return { ok: true, busy: true, detail: 'its menu is open' };
         if (changed(err)) return { ok: false, detail: 'The screen changed before it could be clicked; nothing was done.' };
       }
-      return pointer(snapshot, element, { button: 'right', count: 1 });
+      return pointer(snapshot, element, { button: 'right', count: 1 }, looked);
     }
-    return press(snapshot, element);
+    return press(snapshot, element, looked);
   }
 
   async function focus(snapshot, element) {
@@ -301,6 +401,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     if (element?.role === 'password') return { ok: false, detail: NO_PASSWORDS };
     // A tab typed is a Tab pressed: what follows it would go into the next field, which may be a password's.
     if (action.text.includes('\t')) return { ok: false, detail: 'Typed text can’t hold a tab (it moves to the next field): type each field on its own.' };
+    if (action.after !== undefined) return typeAfter(snapshot, element, action);
     const shown = typeof element?.value === 'string' ? element.value : '';
     const lines = element?.role === 'textarea' || /[\r\n]/.test(shown);
     let mode = action.mode || (!element ? 'insert' : LINE_INPUTS.has(element.role) && !lines ? 'replace' : element.role === 'textarea' ? 'append' : 'insert');
@@ -365,6 +466,67 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     }
     if (action.enter) await driver.call('key', { key: 'enter', modifiers: [] });
     return landed ? { ok: true, landed: true } : { ok: true };
+  }
+
+  /**
+   * Text put in right after words already in a field (after Atticus's type-after), the rest of the field left as
+   * it is: a correction in the middle of a note, a word added to a sentence. A field of the Mac's own takes it
+   * through accessibility, wherever its app is, and is read back whole. One that only takes typed keys (a web
+   * page's) has its caret put after the words, read back, and the text typed there with its app in front. The
+   * words must be in the field exactly once: twice, and which was meant is anyone's guess, so nothing is typed.
+   */
+  async function typeAfter(snapshot, element, action) {
+    if (!element) return { ok: false, detail: 'after needs the id of the field its words are in.' };
+    const busy = { ok: false, detail: 'The app was busy: the text may have gone in. Check the field before trying again.' };
+    const ready = async () => {
+      if (!(await inFront(snapshot))) return notInFront(snapshot);
+      await focus(snapshot, element);
+      return keysMayGo(snapshot);
+    };
+    // With Enter to come, the app and its focus are checked before the text goes in, not after.
+    if (action.enter) {
+      const keys = await ready();
+      if (!keys.ok) return keys;
+    }
+    let set = null;
+    try {
+      set = await act(snapshot, element, 'insertAfter', action.text, action.after);
+    } catch (err) {
+      if (err?.code === 'timeout') return busy;
+      if (changed(err)) return { ok: false, detail: 'The screen changed before it could be typed; nothing was done.' };
+      if (!TYPE_INSTEAD.test(err?.message)) return { ok: false, detail: tidy(err?.message || err) };
+    }
+    if (set) {
+      if (set.busy) return busy;
+      if (set.landed !== true) return { ok: false, detail: `Put the text in, but the field reads ${quoted(set.value)}: check it before trying again.` };
+    } else {
+      if (!action.enter) {
+        const keys = await ready();
+        if (!keys.ok) return keys;
+      }
+      const before = await readField(snapshot, element, '');
+      try {
+        await act(snapshot, element, 'caretAfter', undefined, action.after);
+      } catch (err) {
+        return { ok: false, detail: changed(err) ? 'The screen changed before it could be typed; nothing was done.' : tidy(err?.message || err) };
+      }
+      await driver.call('text', { text: action.text });
+      let read = null;
+      for (let look = 0; look < READ_BACK_LOOKS; look++) {
+        if (look) await wait(READ_BACK_MS);
+        read = await readField(snapshot, element, `${action.after}${action.text}`);
+        if (!read || (read.contains && (!before || read.length > before.length))) break;
+      }
+      if (read && !(read.contains && (!before || read.length > before.length))) {
+        return { ok: false, detail: `The text didn’t land after ${quoted(action.after)}: the field reads ${quoted(read.value)}${action.enter ? ', so Enter wasn’t pressed' : ''}.` };
+      }
+      if (!read) {
+        if (action.enter) await driver.call('key', { key: 'enter', modifiers: [] });
+        return { ok: true };
+      }
+    }
+    if (action.enter) await driver.call('key', { key: 'enter', modifiers: [] });
+    return { ok: true, landed: true };
   }
 
   /** The wheel, over the element or the window's middle: what scrolls when a scroll area won't by itself. */
@@ -453,6 +615,64 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     }
   }
 
+  /**
+   * An icon at the right of the menu bar, opened by name (Wi-Fi, Battery, Control Center, an app's own), from
+   * whatever app is in front: pressed through accessibility, no pointer. What it opens is then the screen
+   * (observe), until it has closed. A wrong name comes back with the names there are.
+   */
+  async function menuBar(action) {
+    let reply;
+    try {
+      reply = await quietly(() => driver.call('menuBar', { press: action.name, ...(exclude ? { exclude } : {}) }));
+    } catch (err) {
+      if (err?.code === 'timeout') return { ok: false, detail: 'The menu bar took too long to answer.' };
+      return { ok: false, detail: tidy(err?.message || err) };
+    }
+    panel = reply?.opened === true;
+    stay = null;
+    const name = quoted(reply?.pressed || action.name);
+    return panel ? { ok: true, detail: `opened ${name}`, ...(reply.busy ? { busy: true } : {}) } : { ok: true, detail: `pressed ${name}, but nothing opened that can be read` };
+  }
+
+  /**
+   * A key or a shortcut. One that stands for a menu command (prepare found it: `runs`) is chosen as that command
+   * when its app isn't in front: keys would go to whatever is, and bringing the app forward for them takes the
+   * screen from what the user is doing. A web page keeps its keys (it may handle them itself), as does an app in
+   * front, where keys are what a person would press.
+   */
+  async function pressKeys(snapshot, action, signal) {
+    const plan = parseShortcut(action.keys);
+    const runs = Array.isArray(action.runs) && action.runs.length ? action.runs : null;
+    const said = runs ? runs.join(' › ') : '';
+    const front = runs && !action.web && !snapshot.panel ? await frontPid() : undefined;
+    if (front !== undefined && !sameApp(front, snapshot.app)) {
+      let chosen = 0;
+      let busy = false;
+      for (let time = 0; time < (action.times || 1) && !signal?.aborted; time++) {
+        if (time) await wait(KEY_GAP_MS);
+        const reply = await quietly(() => driver.call('shortcut', { pid: snapshot.app.pid, key: plan.key, modifiers: plan.modifiers, press: true })).catch((err) => ({ failed: err }));
+        // No answer: it opened something modal, as a menu command that does (menu()). Never pressed again as keys.
+        if (reply.failed?.code === 'timeout') return { ok: true, busy: true, behind: true, detail: `chose ${said}; the app is busy` };
+        if (reply.failed || reply.pressed !== true) break;
+        chosen += 1;
+        busy ||= reply.busy === true;
+      }
+      // Chosen at least once: the rest aren't made up for with keys, which would bring the app forward mid-way.
+      if (chosen) return { ok: true, behind: true, detail: `chose ${said}`, ...(busy ? { busy: true } : {}) };
+    }
+    if (!(await inFront(snapshot))) return notInFront(snapshot);
+    if (!HARMLESS_KEYS.has(plan.key)) {
+      const keys = await keysMayGo(snapshot);
+      if (!keys.ok) return keys;
+    }
+    for (let time = 0; time < (action.times || 1); time++) {
+      if (time) await wait(KEY_GAP_MS);
+      if (signal?.aborted) break;
+      await driver.call('key', { key: plan.key, modifiers: plan.modifiers });
+    }
+    return said ? { ok: true, detail: `that’s ${said}` } : { ok: true };
+  }
+
   /** Pressed on one control, moved in steps onto another, let go — always let go. */
   async function drag(snapshot, action) {
     const pickup = elementById(snapshot, action.from);
@@ -494,14 +714,34 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     return { ...snapshot, elements: snapshot.elements.map((element) => (lined.has(element.id) ? { ...element, value: lined.get(element.id) } : element)) };
   }
 
+  /** One read of a window (or of what a menu-bar icon opened), its text areas' line breaks back. */
+  const read = (target) => quietly(async () => withLineBreaks(await driver.call('snapshot', { limit: 300, ...target })));
+
+  /**
+   * The screen: what a menu-bar icon opened while it's open; else the app a task is working on behind another,
+   * while it's still behind; else the window in front.
+   */
   async function observe() {
+    if (panel) {
+      const seen = await read({ panel: true }).catch(() => null);
+      if (seen) return { ok: true, snapshot: seen };
+      // Closed (chosen from, clicked away from, Escape): back to the windows.
+      panel = false;
+    }
+    if (stay && !pid) {
+      const front = await frontPid();
+      const seen = front !== undefined && front !== stay ? await read({ pid: stay }).catch(() => null) : null;
+      if (seen) return { ok: true, snapshot: seen };
+      // In front again, or gone: it's read as any window in front is.
+      stay = null;
+    }
     const target = pid ? { pid } : exclude ? { exclude } : {};
     let failed = null;
     // Twice: a window can be mid-change (a sheet closing, a popup going away).
     for (let tries = 0; tries < 2; tries++) {
       if (failed) await wait(OBSERVE_RETRY_MS);
       try {
-        return { ok: true, snapshot: await quietly(async () => withLineBreaks(await driver.call('snapshot', { limit: 300, ...target }))) };
+        return { ok: true, snapshot: await read(target) };
       } catch (err) {
         failed = err;
       }
@@ -521,34 +761,33 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     const refused = pictureRefusal(seen.snapshot);
     if (refused) return { ok: false, detail: refused, snapshot: seen.snapshot };
     // It moves Jester's own windows aside itself, and waits for them to go.
-    const shot = await picture(seen.snapshot, { goal }).catch((err) => ({ ok: false, detail: tidy(err?.message || err, 160) }));
-    if (!shot?.ok) return { ok: false, detail: shot?.detail || 'No picture was taken.', snapshot: seen.snapshot };
-    const count = shot.marked?.length ?? 0;
-    return { ok: true, detail: `a picture of the window comes with the next step, ${count} control${count === 1 ? '' : 's'} numbered`, image: shot.image, marked: shot.marked || [], snapshot: seen.snapshot };
+    const taken = await picture(seen.snapshot, { goal }).catch((err) => ({ ok: false, detail: tidy(err?.message || err, 160) }));
+    if (!taken?.ok) return { ok: false, detail: taken?.detail || 'No picture was taken.', snapshot: seen.snapshot };
+    const count = taken.marked?.length ?? 0;
+    // What it shows is kept with the read it's of: a place in it is a place on that screen, and no other.
+    shot = taken.view ? { snapshot: seen.snapshot.snapshot, view: taken.view } : null;
+    return {
+      ok: true,
+      detail: `a picture of the window comes with the next step, ${count} control${count === 1 ? '' : 's'} numbered`,
+      image: taken.image,
+      ...(taken.view ? { size: { width: taken.view.width, height: taken.view.height } } : {}),
+      marked: taken.marked || [],
+      snapshot: seen.snapshot
+    };
   }
 
-  async function perform(action, snapshot, signal, goal) {
+  async function perform(action, snapshot, signal, goal, verify = false) {
     const element = action.id === undefined ? null : elementById(snapshot, action.id);
     if (action.id !== undefined && !element) return { ok: false, detail: `There is no element ${action.id} on this screen.` };
     switch (action.action) {
       case 'click':
-        return click(snapshot, element, action);
+        return clicked(snapshot, element, action, verify);
       case 'type':
         return type(snapshot, element, action);
-      case 'press': {
-        const plan = parseShortcut(action.keys);
-        if (!(await inFront(snapshot))) return notInFront(snapshot);
-        if (!HARMLESS_KEYS.has(plan.key)) {
-          const keys = await keysMayGo(snapshot);
-          if (!keys.ok) return keys;
-        }
-        for (let time = 0; time < (action.times || 1); time++) {
-          if (time) await wait(KEY_GAP_MS);
-          if (signal?.aborted) break;
-          await driver.call('key', { key: plan.key, modifiers: plan.modifiers });
-        }
-        return { ok: true };
-      }
+      case 'press':
+        return pressKeys(snapshot, action, signal);
+      case 'menu_bar':
+        return menuBar(action);
       case 'scroll':
         return scroll(snapshot, element, action);
       case 'scroll_to':
@@ -563,11 +802,13 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         return { ok: outcome.ok, detail: outcome.text };
       }
       case 'open_app': {
+        stay = null;
         const opened = await openApp(action.name);
         if (opened.ok) await wait(OPENED_MS);
         return { ok: opened.ok, detail: opened.text, ...(opened.ok ? {} : { front: false }) };
       }
       case 'open_url':
+        stay = null;
         await openUrl(action.url);
         await wait(PAGE_MS);
         return { ok: true };
@@ -593,6 +834,40 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
   return {
     observe,
 
+    /** A task begins: nothing of the last one's app is held on to. What a menu-bar icon opened, if still open, is still the screen. */
+    begin() {
+      stay = null;
+      shot = null;
+    },
+
+    /**
+     * A click on a place in a picture of the window (x and y in its pixels), settled before it's judged: where that
+     * is on screen, and what's there. Inside a listed control that presses, it becomes a click on that control, by
+     * its id: judged by its name and pressed its own way. Else the place is kept (`at`) with whatever name
+     * accessibility gives for what's under it (`under`), and it's clicked as a spot. The picture must be of this
+     * very screen: after anything has been done, a place in it is a place in a screen gone by.
+     * @returns {Promise<{ok:true, action:object}|{ok:false, detail:string}>}
+     */
+    async locate(action, snapshot) {
+      if (!shot || shot.snapshot !== snapshot?.snapshot) return { ok: false, detail: 'x and y are a place in a picture of this screen, and there isn’t one: take a screenshot and click in the reply that follows it, or use an id.' };
+      const { view } = shot;
+      if (action.x > view.width || action.y > view.height) return { ok: false, detail: `That’s outside the picture, which is ${view.width} × ${view.height}.` };
+      const at = { x: Math.round(view.x + (action.x / view.width) * view.w), y: Math.round(view.y + (action.y / view.height) * view.h) };
+      const holds = (frame) => frame && frame.w > 0 && frame.h > 0 && at.x >= frame.x && at.y >= frame.y && at.x <= frame.x + frame.w && at.y <= frame.y + frame.h;
+      const inside = (snapshot.elements || []).filter((element) => holds(element.frame));
+      if (inside.some((element) => element.role === 'password')) return { ok: false, detail: NO_PASSWORDS };
+      const control = inside.filter((element) => PRESSED_ROLES.has(element.role)).sort((a, b) => a.frame.w * a.frame.h - b.frame.w * b.frame.h)[0];
+      const { x, y, what, ...rest } = action;
+      if (control) return { ok: true, action: { ...rest, id: control.id } };
+      const under = await quietly(() => driver.call('elementAt', { x: at.x, y: at.y, wait: false })).catch(() => null);
+      if (under?.element?.secure || under?.actionable?.secure) return { ok: false, detail: NO_PASSWORDS };
+      if (under?.app?.pid !== undefined && !sameApp(under.app.pid, snapshot.app)) return { ok: false, detail: `That spot is in ${under.app.name || 'another app'}’s window, not ${snapshot.app?.name || 'this one'}.` };
+      // A name counts when it's the thing's own: a whole canvas or page called "Editor" names nothing at this spot.
+      const named = [under?.actionable, under?.element].find((item) => item?.frame && item.frame.w <= SPOT_NAMED.w && item.frame.h <= SPOT_NAMED.h) || {};
+      const name = tidy(named.title || named.description || (named.role === 'AXStaticText' ? named.value : '') || '', 80);
+      return { ok: true, action: { ...rest, x, y, what, at, ...(name ? { under: name } : {}) } };
+    },
+
     /** Whether a picture of the window can be taken now: a way to take one, and the OS and settings allowing it. */
     canPicture: () => !!picture && (picture.allowed ? picture.allowed() : true),
 
@@ -604,6 +879,19 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
      * word. Mutates `action`: `resolved`.
      */
     async prepare(action, snapshot) {
+      // A shortcut is the menu command it stands for, where the app's menus show one for it: known by name before
+      // it's judged (⇧⌘D in Mail is Message › Send) and said in the result. Not found is no failure: the keys are pressed.
+      if (action.action === 'press' && platform === 'darwin' && snapshot?.app?.pid && !snapshot.panel) {
+        const plan = parseShortcut(action.keys);
+        if (plan?.modifiers.includes('cmd')) {
+          const found = await quietly(() => driver.call('shortcut', { pid: snapshot.app.pid, key: plan.key, modifiers: plan.modifiers })).catch(() => null);
+          if (found?.found === true && Array.isArray(found.path) && found.path.length && found.path.every((title) => typeof title === 'string')) {
+            action.runs = found.path.map((title) => tidy(title, 60));
+            if (found.web === true) action.web = true;
+          }
+        }
+        return { ok: true };
+      }
       if (action.action !== 'menu') return { ok: true };
       if (!snapshot?.app?.pid) return { ok: false, detail: 'No app was read to look in its menus.' };
       try {
@@ -638,13 +926,21 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
      * controls a picture numbers when they can't all be.
      */
     async execute(action, snapshot, { verify = false, signal, patient = false, goal = '' } = {}) {
-      const { front, ...result } = await perform(action, snapshot, signal, goal);
+      // Whose turn the screen was before the step: a task's app behind another is checked where it is, not brought forward to be read.
+      const frontBefore = verify && VISIBLE.has(action.action) && !snapshot?.panel && snapshot?.app?.pid ? await frontPid() : undefined;
+      const { front, glanced, behind, ...result } = await perform(action, snapshot, signal, goal, verify);
       // The app wouldn't come to the front, and macOS's own dialog is what's there: that's why, and it ends the
       // task (`asking`), since trying again can't help until the user has answered it.
       if (!result.ok && front === false && !signal?.aborted && (await systemDialog())) return { ok: false, asking: true, detail: MACOS_ASKING };
       if (!result.ok || !VISIBLE.has(action.action)) return result;
       await wait(result.busy ? BUSY_MS : SETTLE_MS);
       if (!verify || signal?.aborted) return result;
+      // Done to an app that was behind another, and still is (the step brought nothing forward): it's the one read,
+      // now and for the steps after. Anything else in front since is the step's own doing, and is read as it is.
+      if (frontBefore !== undefined && snapshot?.app?.pid) {
+        const wasBehind = !sameApp(frontBefore, snapshot.app);
+        stay = wasBehind && (behind || (await frontPid()) === frontBefore) ? snapshot.app.pid : null;
+      }
       let seen = await observe();
       if (!seen.ok) return result;
       let { changed, summary } = screenChanges(snapshot, seen.snapshot);
@@ -655,6 +951,10 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
           seen = again;
           ({ changed, summary } = screenChanges(snapshot, seen.snapshot));
         }
+      }
+      // Nothing readable changed. A click may still have shown: on a canvas, a map, a video, what changes is pixels.
+      if (!changed && glanced && !signal?.aborted && glanceChanged(glanced.before, await glance(glanced.spot))) {
+        return { ...result, changed: true, seenOnly: true, changes: PIXELS_CHANGED, snapshot: seen.snapshot };
       }
       if (!changed && UNSEEN.has(action.action)) return { ...result, unseen: true, changes: 'No visible change (its effect may not show here).', snapshot: seen.snapshot };
       return { ...result, changed, changes: summary, snapshot: seen.snapshot };

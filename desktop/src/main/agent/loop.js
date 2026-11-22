@@ -45,8 +45,15 @@ const ANSWER_CHARS = 200;
  * user said one in answer. Nothing of it is carried on, typed or kept.
  */
 export const SECRETS_ARE_YOURS = 'I left it there, since passwords, codes and card numbers are yours to type in.';
-/** What the model is told of a picture that comes with its step. */
+/**
+ * What the model is told of a picture that comes with its step: what its numbers are, and (its size known) that a
+ * thing in it with no number can be clicked by its place, which is good in this reply only.
+ */
 const PICTURE_NOTE = 'The attached picture is the window as the screen shows it now. The number in each yellow box is the id of the control it sits on, the same ids as the screen lines.';
+export const pictureNote = (size) =>
+  size?.width > 0 && size?.height > 0
+    ? `${PICTURE_NOTE} It is ${size.width} × ${size.height} pixels: something in it with no number can be clicked in this reply by its middle, as x and y in those pixels from the top left, with what (a few words for it).`
+    : PICTURE_NOTE;
 
 export const tidy = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 
@@ -242,7 +249,7 @@ function sensitiveKey(action, screen) {
   const where = `${screen?.app?.name || ''} / ${screen?.window?.title || ''}`;
   const element = action.id === undefined ? null : elementById(screen, action.id);
   if (action.action === 'type') return `type ${action.text}${action.enter ? ', Enter' : ''} in ${where}`;
-  if (action.action === 'click') return `click ${element?.label || action.id} in ${where}`;
+  if (action.action === 'click') return `click ${element?.label || action.under || action.what || action.id} in ${where}`;
   if (action.action === 'press') return `press ${action.keys} in ${where}`;
   if (action.action === 'menu') return `menu ${(action.resolved || menuPath(action.path)).join(' > ')} in ${where}`;
   if (action.action === 'drag') return `drag ${elementById(screen, action.from)?.label || action.from} onto ${elementById(screen, action.to)?.label || action.to} in ${where}`;
@@ -307,7 +314,8 @@ function traced(action, screen, category, result) {
     const element = elementById(screen, id);
     return element ? { role: element.role, label: element.label || '', ...(element.in ? { in: element.in } : {}) } : null;
   };
-  const { id, resolved, ...rest } = action;
+  // What the host worked out for this screen alone (a shortcut's menu command, a spot's place) isn't the step.
+  const { id, resolved, runs, web, at, under, ...rest } = action;
   // A drag's ends are controls; a scroll's `to` is "end".
   if (action.action === 'drag') {
     delete rest.from;
@@ -442,6 +450,7 @@ export function createRun({ goal, previous = [], host, model, confirm, inquire =
     /** Pictures taken in this task, and the one waiting to go with the next model call. */
     pictures: 0,
     picture: null,
+    pictureSize: null,
     /** Questions put to the user in this task, every one the model has asked (sameWords), and their answers as facts (answerFact). */
     questions: 0,
     asked: new Set(),
@@ -452,8 +461,12 @@ export function createRun({ goal, previous = [], host, model, confirm, inquire =
     said: [],
     /** A choice of the user's decided a step (an answer, or one kept from before): `learnt` then gives no trace. */
     forked: false,
+    /** A step was a click on a place in a picture: where that is next time is anyone's guess, so nothing is learned. */
+    pointed: false,
     end: (ok, say, extra = {}) => ({ ok, say, actions: run.actions, ...(run.chose.length ? { chose: run.chose } : {}), ...extra })
   };
+  // Nothing of the task before (the app it worked on behind another, its picture) is this one's.
+  host.begin?.();
   return run;
 }
 
@@ -495,6 +508,22 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
     remember(memory, label, run.lastResult, true);
     run.failures += 1;
     return { halted: true };
+  }
+  // A click on a place in a picture is settled first: where it is on screen, and what's there. Inside a listed
+  // control it becomes a click on that control, and is judged, guarded and pressed as one.
+  if (action.action === 'click' && action.id === undefined) {
+    const placed = host.locate ? await host.locate(action, seen.snapshot) : { ok: false, detail: 'Places in a picture can’t be clicked here: use an id.' };
+    if (signal?.aborted) return { stop: run.end(false, '', { cancelled: true }) };
+    if (!placed.ok) {
+      const label = describeAction(action, seen.snapshot, platform);
+      onStep({ phase: 'acted', label, ok: false, detail: tidy(placed.detail, 160) });
+      run.lastResult = { action: label, ok: false, detail: tidy(placed.detail, 240) };
+      remember(memory, label, run.lastResult, false);
+      run.failures += 1;
+      return { halted: true };
+    }
+    action = placed.action;
+    run.pointed = true;
   }
   // Which profile or account is the user's to say, before anything's pressed: the step may come back as another.
   const who = await whoFirst(run, action, seen);
@@ -581,9 +610,11 @@ export async function perform(run, chosen, seen, { verify = false, judged = newG
   if (result.ok && result.image) {
     run.pictures += 1;
     run.picture = result.image;
+    run.pictureSize = result.size || null;
   }
   if (action.id !== undefined && (action.action === 'click' || action.action === 'type')) judged.screen = focusOn(judged.screen, action.id);
-  else if (action.action === 'press' || action.action === 'type') judged.focusKnown = false;
+  // A key, text at the cursor, or a click on a spot nothing is known of: where the focus is now is unknown.
+  else if (action.action === 'press' || action.action === 'type' || action.action === 'click') judged.focusKnown = false;
   judged.selectedAll = result.ok === true && selectsAll(action, platform);
   onStep({ phase: 'acted', label, ok: result.ok === true, detail: tidy(result.detail, 160), ...(result.changes ? { changes: tidy(result.changes, 600) } : {}) });
   remember(memory, label, result, READ_ACTIONS.has(action.action));
@@ -657,10 +688,12 @@ export async function lookStep(run, { what = '', done = null, maxCalls = Infinit
       ...(doing ? { doing, ...(info.planned ? { planned: info.planned } : {}) } : {}),
       memory: { subgoal: memory.subgoal, constraints: memory.constraints, facts: memory.facts, ...(doing ? {} : { completed: memory.completed.slice(-4) }), recent: memory.recent },
       ...(run.lastResult ? { lastResult: run.lastResult } : {}),
-      ...(run.picture ? { picture: PICTURE_NOTE } : {})
+      ...(run.picture ? { picture: pictureNote(run.pictureSize) } : {})
     };
     const picture = run.picture;
+    const pictureSize = run.pictureSize;
     run.picture = null;
+    run.pictureSize = null;
     const screen = screenText(seen.snapshot, { goal: [goal, meant, what].filter(Boolean).join(' '), chars: await screenChars(run, rest) });
     onStep({ phase: 'seen', app: seen.snapshot.app?.name, window: seen.snapshot.window?.title, elements: seen.snapshot.elements?.length ?? 0, screen });
     const prompt = JSON.stringify({ ...rest, screen });
@@ -678,6 +711,7 @@ export async function lookStep(run, { what = '', done = null, maxCalls = Infinit
       // Unused, the picture goes with the retry, on the read its numbers are from.
       if (picture) {
         run.picture = picture;
+        run.pictureSize = pictureSize;
         run.next = seen.snapshot;
       }
     }
@@ -759,7 +793,7 @@ export async function lookStep(run, { what = '', done = null, maxCalls = Infinit
  * consults no answers, so "use Sandeep's profile from now on" would change nothing, and the wrong profile would be
  * pressed on its own again. A task with a fork is worked by the model, and their choices as they are, each time.
  */
-export const learnt = (run) => (run.forked ? {} : { trace: run.trace });
+export const learnt = (run) => (run.forked || run.pointed ? {} : { trace: run.trace });
 
 /**
  * @param {object} options  createRun's

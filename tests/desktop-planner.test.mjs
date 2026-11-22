@@ -591,11 +591,14 @@ test('tokens: a plan and a step stay small, and a run’s prompts don’t grow',
     // 2,500 until 2026-11-15, when the prompt gained two lines a real task had needed: Play isn't pressed twice,
     // and a file asked to be opened is opened, not selected. 2,550 until 2026-11-21, when it learned to ask: the
     // `ask` action, when a choice is the user's and never a guess, and what userChoices are (about 220 tokens).
-    assert.ok(estimateTokens(request) <= 2775, `${estimateTokens(request)} tokens`);
+    // 2,775 until 2026-11-22, when it gained what Atticus 2 could do and it couldn't: menu_bar (the icons at the
+    // right of the menu bar) and a type's `after` (about 80 tokens; clicking a place in a picture is told only to
+    // a model that sees).
+    assert.ok(estimateTokens(request) <= 2875, `${estimateTokens(request)} tokens`);
     assert.ok(JSON.parse(request.prompt).screen.length <= SCREEN_LIMITS.chars);
   }
-  // 3,000 until 2026-11-21, for the same lines.
-  for (const request of longest) assert.ok(estimateTokens(request) < 3200, `${estimateTokens(request)} tokens`);
+  // 3,000 until 2026-11-21, and 3,200 until 2026-11-22, for the same lines.
+  for (const request of longest) assert.ok(estimateTokens(request) < 3300, `${estimateTokens(request)} tokens`);
   const without = ({ prompt }) => {
     const { lastResult, memory, ...rest } = JSON.parse(prompt);
     return JSON.stringify(rest).length;

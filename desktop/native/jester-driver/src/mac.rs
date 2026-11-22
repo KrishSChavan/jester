@@ -12,7 +12,7 @@ use objc2_app_kit::{NSApplicationActivationPolicy, NSEvent, NSEventModifierFlags
 use objc2_application_services::{
     AXCopyMultipleAttributeOptions, AXError, AXIsProcessTrusted, AXIsProcessTrustedWithOptions, AXUIElement, AXValue, AXValueType,
 };
-use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize, Type};
+use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFNumber, CFRange, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize, Type};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton,
     CGPreflightPostEventAccess, CGPreflightScreenCaptureAccess, CGScrollEventUnit, CGWindowListCopyWindowInfo, CGWindowListOption,
@@ -632,6 +632,8 @@ fn substantial(window: &WindowInfo) -> bool {
 
 /// One on-screen window, as the window server lists it.
 struct WindowInfo {
+    /// The window server's number for it.
+    id: u32,
     pid: i32,
     layer: i64,
     bounds: Option<(f64, f64, f64, f64)>,
@@ -647,9 +649,9 @@ fn on_screen_windows() -> Result<Vec<WindowInfo>> {
     let list: CFRetained<CFArray<CFDictionary<CFString, CFType>>> = unsafe { CFRetained::cast_unchecked(list) };
     let number = |dict: &CFDictionary<CFString, CFType>, key: &CFString| dict.get(key)?.downcast::<CFNumber>().ok()?.as_f64();
     let text = |dict: &CFDictionary<CFString, CFType>, key: &CFString| dict.get(key)?.downcast::<CFString>().ok().map(|s| s.to_string());
-    let (layer_key, pid_key, owner_key, name_key, bounds_key) = unsafe {
-        use objc2_core_graphics::{kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowOwnerName, kCGWindowOwnerPID};
-        (kCGWindowLayer, kCGWindowOwnerPID, kCGWindowOwnerName, kCGWindowName, kCGWindowBounds)
+    let (layer_key, pid_key, owner_key, name_key, bounds_key, number_key) = unsafe {
+        use objc2_core_graphics::{kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName, kCGWindowOwnerPID};
+        (kCGWindowLayer, kCGWindowOwnerPID, kCGWindowOwnerName, kCGWindowName, kCGWindowBounds, kCGWindowNumber)
     };
     let mut windows = Vec::new();
     for window in list.iter() {
@@ -660,6 +662,7 @@ fn on_screen_windows() -> Result<Vec<WindowInfo>> {
             Some((field("X")?, field("Y")?, field("Width")?, field("Height")?))
         });
         windows.push(WindowInfo {
+            id: number(&window, number_key).unwrap_or(0.0) as u32,
             pid: pid as i32,
             layer: number(&window, layer_key).unwrap_or(0.0) as i64,
             bounds,
@@ -1010,10 +1013,14 @@ fn walk(window: &CFRetained<AXUIElement>, names: &CFArray<CFString>, limit: usiz
     walked
 }
 
-/// The controls in the front window (or `pid`'s), numbered for `act`.
-pub fn snapshot(pid: Option<i32>, exclude: Option<i32>, limit: usize, debug: bool) -> Result<Value> {
+/// The controls in the front window (or `pid`'s), numbered for `act`. With
+/// `panel`, what the menu-bar icon last pressed opened is read instead.
+pub fn snapshot(pid: Option<i32>, exclude: Option<i32>, limit: usize, debug: bool, panel: bool) -> Result<Value> {
     if !unsafe { AXIsProcessTrusted() } {
         return Err("Accessibility permission has not been granted".into());
+    }
+    if panel {
+        return panel_snapshot(limit, debug);
     }
     let started = Instant::now();
     let pid = match pid {
@@ -1175,6 +1182,49 @@ fn insert_at_end(element: &AXUIElement, text: &str) -> Result<Value> {
     let error = set_attribute(element, "AXSelectedText", &CFString::from_str(text));
     let want = crate::protocol::squashed(&format!("{old}{text}"));
     written(element, error, |now| crate::protocol::squashed(now).ends_with(&crate::protocol::squashed(text)) && crate::protocol::squashed(now).len() >= want.len())
+}
+
+/// The caret put just past `anchor` in a field (the words there exactly
+/// once), and read back: the field's value as it was, and the place.
+fn caret_after(element: &AXUIElement, anchor: &str) -> Result<(String, usize)> {
+    if !settable(element, "AXSelectedTextRange") {
+        return Err("this field's caret can't be placed; click where the text goes and type it".into());
+    }
+    let old = full_value(element).ok_or("couldn't read the field")?;
+    let at = crate::protocol::place_after(&old, anchor)?;
+    let mut place = CFRange { location: at as isize, length: 0 };
+    let caret = unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut place).cast()) }.ok_or("couldn't describe the caret")?;
+    match set_attribute(element, "AXSelectedTextRange", &caret) {
+        AXError::Success => {}
+        error => return Err(format!("couldn't put the caret after “{anchor}” (AXError {})", error.0)),
+    }
+    // A field that took the write and kept its caret where it was would have the text go in the wrong place.
+    let now = attribute(element, "AXSelectedTextRange").and_then(|value| value.downcast::<AXValue>().ok()).and_then(|value| {
+        let mut range = CFRange { location: 0, length: 0 };
+        unsafe { value.value(AXValueType::CFRange, NonNull::from(&mut range).cast()) }.then_some(range)
+    });
+    match now {
+        Some(range) if range.location == at as isize && range.length == 0 => Ok((old, at)),
+        _ => Err(format!("the caret didn't go after “{anchor}”; click where the text goes and type it")),
+    }
+}
+
+/// Text put into a field right after words already in it (after Atticus's
+/// type-after): the caret placed past them and the text inserted there, the
+/// rest of the field untouched, and the whole read back. A field that only
+/// takes typed keys (a web page's) is refused, for the caller to type into
+/// once `caretAfter` has placed the caret.
+fn insert_after(element: &AXUIElement, anchor: &str, text: &str) -> Result<Value> {
+    if in_web_page(element) {
+        return Err("web pages don't take text set this way; type it instead".into());
+    }
+    if !settable(element, "AXSelectedText") {
+        return Err("this field can't take added text this way; type it instead".into());
+    }
+    let (old, at) = caret_after(element, anchor)?;
+    let error = set_attribute(element, "AXSelectedText", &CFString::from_str(text));
+    let want = crate::protocol::squashed(&crate::protocol::inserted(&old, at, text));
+    written(element, error, |now| crate::protocol::squashed(now) == want)
 }
 
 /// How long a scroll's effect may take to show, a look at a time.
@@ -1579,7 +1629,7 @@ fn click_point(element: &AXUIElement, window: &AXUIElement) -> Result<Value> {
 }
 
 /// Does something to an element of the last snapshot (or, for scrolling, its window).
-pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) -> Result<Value> {
+pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>, after: Option<&str>) -> Result<Value> {
     let (element, window) = LISTED.with(|listed| {
         let listed = listed.borrow();
         if listed.0 != snapshot {
@@ -1595,7 +1645,7 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) 
     if !alive(&element) {
         return Err(crate::protocol::GONE.into());
     }
-    if is_secure(&element) && matches!(action, "focus" | "setValue" | "appendValue" | "read") {
+    if is_secure(&element) && matches!(action, "focus" | "setValue" | "appendValue" | "insertAfter" | "caretAfter" | "read") {
         return Err("Jester never types into password fields".into());
     }
     let done = |name: &str| match perform(&element, name) {
@@ -1624,6 +1674,8 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>) 
         "read" => Ok(crate::protocol::read_reply(&full_value(&element).unwrap_or_default(), value)),
         "setValue" => write_value(&element, value.unwrap_or("")),
         "appendValue" => insert_at_end(&element, value.unwrap_or("")),
+        "insertAfter" => insert_after(&element, after.unwrap_or(""), value.unwrap_or("")),
+        "caretAfter" => caret_after(&element, after.unwrap_or("")).map(|(_, at)| json!({ "caret": at })),
         "scrollPage" | "scrollEnd" => {
             let (horizontal, forward) = crate::protocol::scroll_direction(value)?;
             let area = scroll_area(&element, &window).ok_or("nothing here scrolls")?;
@@ -1663,6 +1715,125 @@ fn app_focus(app: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
     attribute(app, "AXFocusedUIElement")?.downcast::<AXUIElement>().ok()
 }
 
+/// Before a menu command is chosen for an app: never while a password field
+/// has its focus (Paste, AutoFill and the like would put text into it).
+/// Returns whether one *may* have it — a web page's password field, its tree
+/// not read yet, shows only as secure input — when nothing that puts text
+/// in is chosen.
+fn text_guard(app: &AXUIElement) -> Result<bool> {
+    let focus = app_focus(app);
+    if focus.as_deref().is_some_and(is_secure) {
+        return Err("a password field has the focus, so no menu command was chosen (one could put text into it)".into());
+    }
+    let plain_text_focus = focus.as_deref().is_some_and(|focus| matches!(string_attribute(focus, "AXRole").as_deref(), Some("AXTextField" | "AXTextArea" | "AXComboBox")));
+    Ok(unsafe { IsSecureEventInputEnabled() } != 0 && !plain_text_focus)
+}
+
+/// Read in one call per menu element, looking for a shortcut's item.
+const SHORTCUT_ATTRIBUTES: [&str; 6] = ["AXRole", "AXTitle", "AXEnabled", "AXMenuItemCmdChar", "AXMenuItemCmdModifiers", "AXChildren"];
+/// How much of an app's menus is looked through for one, and for how long.
+const SHORTCUT_VISITS: usize = 2500;
+const SHORTCUT_TIME: Duration = Duration::from_millis(700);
+
+/// Some attributes of an element, from a single round trip to its app: each
+/// as it came, None where the element hasn't got it.
+fn read_values(element: &AXUIElement, names: &CFArray<CFString>) -> Option<Vec<Option<CFRetained<CFType>>>> {
+    let mut values: *const CFArray = std::ptr::null();
+    let error = unsafe {
+        element.copy_multiple_attribute_values(names.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut values))
+    };
+    if error != AXError::Success || values.is_null() {
+        return None;
+    }
+    let values: CFRetained<CFArray<CFType>> = unsafe { CFRetained::from_raw(NonNull::new_unchecked(values as *mut CFArray<CFType>)) };
+    // An attribute the element doesn't have comes back as an AXValue holding the error.
+    Some((0..values.len()).map(|i| values.get(i).filter(|value| value.downcast_ref::<AXValue>().is_none_or(|v| unsafe { v.r#type() } != AXValueType::AXError))).collect())
+}
+
+/// The menu command a keyboard shortcut stands for (after Atticus's
+/// menuShortcut): the app's menus are read closed for the item that shows
+/// this key and these modifiers. What a shortcut does is then known by name
+/// before it's pressed (⇧⌘D in Mail is Message › Send), and `press` chooses
+/// the item itself, which reaches an app that isn't in front where keys
+/// would go to whatever is. Only keys a menu shows as a character are
+/// looked for; `found: false` leaves the keys to be pressed.
+pub fn shortcut(pid: i32, key: &str, modifiers: &[Modifier], press: bool) -> Result<Value> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    let missing = || Ok(json!({ "found": false }));
+    let Some(wanted) = crate::protocol::shortcut_char(key) else { return missing() };
+    if !modifiers.contains(&Modifier::Meta) {
+        return missing();
+    }
+    unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let Some(bar) = attribute(&app, "AXMenuBar").and_then(|value| value.downcast::<AXUIElement>().ok()) else { return missing() };
+    let names = CFArray::from_retained_objects(&SHORTCUT_ATTRIBUTES.map(CFString::from_static_str));
+    let started = Instant::now();
+    // (element, the titles above it). The Apple menu is the system's, not the app's.
+    let mut queue: std::collections::VecDeque<(CFRetained<AXUIElement>, Vec<String>)> =
+        children(&bar).into_iter().filter(|item| title(item) != "Apple").map(|item| (item, Vec::new())).collect();
+    let mut visits = 0;
+    let mut found: Option<(CFRetained<AXUIElement>, Vec<String>, bool)> = None;
+    while let Some((element, above)) = queue.pop_front() {
+        visits += 1;
+        if visits > SHORTCUT_VISITS || started.elapsed() > SHORTCUT_TIME {
+            break;
+        }
+        let Some(values) = read_values(&element, &names) else { continue };
+        let text = |i: usize| values.get(i).and_then(|value| value.as_deref()).and_then(|value| value.downcast_ref::<CFString>()).map(|text| text.to_string());
+        let role = text(0).unwrap_or_default();
+        // A menu is its item's list, with no title of its own.
+        let path = if role == "AXMenu" {
+            above
+        } else {
+            let mut path = above;
+            path.push(text(1).unwrap_or_default());
+            path
+        };
+        let item_char = text(3).unwrap_or_default();
+        let item_modifiers = values.get(4).and_then(|value| value.as_deref()).and_then(number_value).unwrap_or(0.0) as i64;
+        if role == "AXMenuItem" && crate::protocol::shortcut_matches(&item_char, item_modifiers, &wanted, modifiers) {
+            let enabled = values.get(2).and_then(|value| value.as_deref()).and_then(|value| value.downcast_ref::<CFBoolean>()).is_none_or(|flag| flag.as_bool());
+            // One greyed out may have a twin that isn't (Undo and Redo share a key in some apps): the first enabled one wins.
+            if enabled || found.is_none() {
+                found = Some((element.clone(), path.clone(), enabled));
+            }
+            if enabled {
+                break;
+            }
+            continue;
+        }
+        if path.len() >= 6 {
+            continue;
+        }
+        if let Some(kids) = values.get(5).and_then(|value| value.clone()).and_then(|value| value.downcast::<CFArray>().ok()) {
+            let kids: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(kids) };
+            for kid in (0..kids.len().min(CHILDREN)).filter_map(|i| kids.get(i)) {
+                queue.push_back((kid, path.clone()));
+            }
+        }
+    }
+    let Some((item, path, enabled)) = found else { return missing() };
+    let web = app_focus(&app).as_deref().is_some_and(in_web_page);
+    if !press {
+        return Ok(json!({ "found": true, "path": path, "enabled": enabled, "web": web, "pressed": false }));
+    }
+    if !enabled {
+        return Err(format!("“{}” is greyed out right now", crate::protocol::menu_words(&path)));
+    }
+    if text_guard(&app)? && path.last().is_some_and(|title| inserts_text(title)) {
+        return Err("a password field may have the focus, so nothing that puts text in was chosen".into());
+    }
+    match perform(&item, "AXPress") {
+        AXError::Success => Ok(json!({ "found": true, "path": path, "enabled": true, "web": web, "pressed": true })),
+        // It opened something modal: it was chosen.
+        AXError::CannotComplete => Ok(json!({ "found": true, "path": path, "enabled": true, "web": web, "pressed": true, "busy": true })),
+        error => Err(format!("“{}” didn't work (AXError {})", crate::protocol::menu_words(&path), error.0)),
+    }
+}
+
 /// Finds an app's menu-bar command by its titles and, with `press`, chooses
 /// it. Menus are read, not opened (macOS lists them closed). One that fills
 /// itself only as it opens (Open Recent) can't be read so: looked up, its
@@ -1676,13 +1847,7 @@ pub fn menu(pid: i32, path: &[String], press: bool, exact: bool) -> Result<Value
     }
     unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
     let app = unsafe { AXUIElement::new_application(pid) };
-    let focus = app_focus(&app);
-    if press && focus.as_deref().is_some_and(is_secure) {
-        return Err("a password field has the focus, so no menu command was chosen (one could put text into it)".into());
-    }
-    // A web page's password field, its tree not read yet, shows only as secure input: nothing that puts text in goes then.
-    let plain_text_focus = focus.as_deref().is_some_and(|focus| matches!(string_attribute(focus, "AXRole").as_deref(), Some("AXTextField" | "AXTextArea" | "AXComboBox")));
-    let guarded = press && unsafe { IsSecureEventInputEnabled() } != 0 && !plain_text_focus;
+    let guarded = press && text_guard(&app)?;
     let bar = attribute(&app, "AXMenuBar").and_then(|value| value.downcast::<AXUIElement>().ok()).ok_or("this app has no menu bar to read")?;
     let mut current = bar;
     let mut found: Vec<String> = Vec::new();
@@ -1946,6 +2111,239 @@ pub fn focused() -> Result<Value> {
         return Err("nothing has the keyboard focus".into());
     }
     Err(format!("couldn't read what has the keyboard focus (AXError {})", error.0))
+}
+
+// ---------------------------------------------------------------------------
+// The menu bar's icons (Wi-Fi, Battery, Control Center, apps' own) and what
+// they open, after Atticus: macOS lists each app's as its "extras" menu bar
+// ---------------------------------------------------------------------------
+
+/// One icon at the right of the menu bar.
+struct Extra {
+    name: String,
+    pid: i32,
+    app: Option<String>,
+    x: f64,
+    element: CFRetained<AXUIElement>,
+}
+
+/// What the icon last pressed opened: its window as the window server lists
+/// it, whose it is, and the icon.
+struct Panel {
+    name: String,
+    pid: i32,
+    window: u32,
+    item: CFRetained<AXUIElement>,
+}
+
+thread_local! {
+    /// The icons as last listed, and when: pressing one right after it was found doesn't look for them all again.
+    static EXTRAS: RefCell<Option<(Instant, Vec<Extra>)>> = const { RefCell::new(None) };
+    static PANEL: RefCell<Option<Panel>> = const { RefCell::new(None) };
+}
+
+/// Asking every app for its icons takes a couple of seconds (some thirty
+/// milliseconds an app): a list this fresh is used again.
+const EXTRAS_FRESH: Duration = Duration::from_secs(20);
+/// An app that doesn't answer about its icons is passed over after this long.
+const EXTRAS_TIMEOUT_S: f32 = 0.15;
+/// How long what an icon opens may take to show, a look at a time.
+const PANEL_LOOKS: u32 = 12;
+const PANEL_LOOK: Duration = Duration::from_millis(80);
+
+/// Every icon at the right of the menu bar, left to right, each named by
+/// what it says of itself (“Wi‑Fi, connected, 3 bars”) or, saying nothing, by
+/// its app. One with no width is hidden.
+fn extras(exclude: Option<i32>) -> Vec<Extra> {
+    let mut pids = vec![0i32; 8192];
+    let size = (pids.len() * std::mem::size_of::<i32>()) as std::ffi::c_int;
+    let count = unsafe { proc_listallpids(pids.as_mut_ptr().cast(), size) };
+    pids.truncate(count.max(0) as usize);
+    let mut found = Vec::new();
+    for pid in pids {
+        if Some(pid) == exclude {
+            continue;
+        }
+        let Some(running) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else { continue };
+        if running.isTerminated() {
+            continue;
+        }
+        let app = unsafe { AXUIElement::new_application(pid) };
+        unsafe { app.set_messaging_timeout(EXTRAS_TIMEOUT_S) };
+        let Some(bar) = attribute(&app, "AXExtrasMenuBar").and_then(|value| value.downcast::<AXUIElement>().ok()) else { continue };
+        let app_name = running.localizedName().map(|name| name.to_string());
+        for item in children(&bar) {
+            let Some((x, _, w, h)) = frame_rect(&item) else { continue };
+            if !(w > 0.0 && h > 0.0) {
+                continue;
+            }
+            let said = string_attribute(&item, "AXTitle").or_else(|| string_attribute(&item, "AXDescription"));
+            let Some(name) = said.or_else(|| app_name.clone()) else { continue };
+            found.push(Extra { name: clip(&name, 80), pid, app: app_name.clone(), x, element: with_timeout(item) });
+        }
+    }
+    found.sort_by(|a, b| a.x.total_cmp(&b.x));
+    // Two with one name are told apart by their place: "Claude", "Claude 2".
+    for i in 0..found.len() {
+        let twins = found[..i].iter().filter(|other| other.name == found[i].name || other.name.strip_suffix(|c: char| c.is_ascii_digit()).is_some_and(|rest| rest.trim_end() == found[i].name)).count();
+        if twins > 0 {
+            found[i].name = format!("{} {}", found[i].name, twins + 1);
+        }
+    }
+    found
+}
+
+/// The on-screen windows that weren't there `before`: what a press opened.
+fn opened_since(before: &HashSet<u32>, exclude: Option<i32>) -> Vec<WindowInfo> {
+    on_screen_windows().unwrap_or_default().into_iter().filter(|window| !before.contains(&window.id) && Some(window.pid) != exclude && window.bounds.is_some_and(|(_, _, w, h)| w >= 40.0 && h >= 30.0)).collect()
+}
+
+/// The menu bar's icons by name and, with `press`, one of them opened:
+/// matched forgivingly unless `exact`, pressed through accessibility (no
+/// pointer), and what it opened waited for and kept as the panel `snapshot`
+/// reads. `opened: false` when nothing showed.
+pub fn menu_bar(press: Option<&str>, exact: bool, exclude: Option<i32>) -> Result<Value> {
+    if !unsafe { AXIsProcessTrusted() } {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    let fresh = EXTRAS.with(|kept| kept.borrow().as_ref().is_some_and(|(at, _)| at.elapsed() < EXTRAS_FRESH));
+    if !fresh || press.is_none() {
+        let listed = extras(exclude);
+        EXTRAS.with(|kept| *kept.borrow_mut() = Some((Instant::now(), listed)));
+    }
+    EXTRAS.with(|kept| {
+        let kept = kept.borrow();
+        let items = &kept.as_ref().expect("listed just now").1;
+        let listing: Vec<Value> = items.iter().map(|item| json!({ "name": item.name, "app": item.app, "pid": item.pid })).collect();
+        let Some(wanted) = press else { return Ok(json!({ "items": listing })) };
+        let names: Vec<String> = items.iter().map(|item| item.name.clone()).collect();
+        let Some(i) = crate::protocol::title_match(&names, wanted, exact) else {
+            return Err(format!("no “{wanted}” among the menu bar's icons; there is: {}", crate::protocol::listing(&names)));
+        };
+        let item = &items[i];
+        if !alive(&item.element) {
+            return Err("the menu bar changed since it was read; look for the icon again".into());
+        }
+        let before: HashSet<u32> = on_screen_windows()?.into_iter().map(|window| window.id).collect();
+        let busy = match perform(&item.element, "AXPress") {
+            AXError::Success => false,
+            // A menu that opened keeps its app busy until it closes: it was pressed.
+            AXError::CannotComplete => true,
+            error => return Err(format!("“{}” didn't open (AXError {})", item.name, error.0)),
+        };
+        // What it opened: its own app's new window first, else anyone's (the system shows some apps' for them).
+        let mut shown = None;
+        for _ in 0..PANEL_LOOKS {
+            std::thread::sleep(PANEL_LOOK);
+            let new = opened_since(&before, exclude);
+            shown = new.iter().find(|window| window.pid == item.pid).or_else(|| new.iter().find(|window| window.layer != 0)).map(|window| (window.pid, window.id));
+            if shown.is_some() {
+                break;
+            }
+        }
+        PANEL.with(|panel| {
+            *panel.borrow_mut() = shown.map(|(pid, window)| Panel { name: item.name.clone(), pid, window, item: item.element.clone() });
+        });
+        Ok(json!({ "pressed": item.name, "app": item.app, "pid": item.pid, "opened": shown.is_some(), "busy": busy }))
+    })
+}
+
+/// The accessibility element a panel is: its app's window drawn where the
+/// window server has it; else the icon's own menu; else whatever answers at
+/// its middle, climbed to the top of what it's in.
+fn panel_root(panel: &Panel, bounds: (f64, f64, f64, f64)) -> Option<CFRetained<AXUIElement>> {
+    let app = with_timeout(unsafe { AXUIElement::new_application(panel.pid) });
+    let windows: Vec<CFRetained<AXUIElement>> = attribute(&app, "AXWindows")
+        .and_then(|value| value.downcast::<CFArray>().ok())
+        .map(|array| {
+            let array: CFRetained<CFArray<AXUIElement>> = unsafe { CFRetained::cast_unchecked(array) };
+            (0..array.len()).filter_map(|i| array.get(i)).collect()
+        })
+        .unwrap_or_default();
+    if let Some(window) = windows.iter().find(|window| same_window(frame_rect(window), bounds)) {
+        return Some(window.clone());
+    }
+    if let Some(menu) = children(&panel.item).into_iter().find(|kid| string_attribute(kid, "AXRole").as_deref() == Some("AXMenu")) {
+        return Some(menu);
+    }
+    let (x, y) = (bounds.0 + bounds.2 / 2.0, bounds.1 + bounds.3 / 2.0);
+    let mut current = hit(&app, x, y).ok()?;
+    for _ in 0..40 {
+        let Some(above) = parent(&current) else { break };
+        if string_attribute(&above, "AXRole").as_deref() == Some("AXApplication") {
+            break;
+        }
+        current = above;
+    }
+    (string_attribute(&current, "AXRole").as_deref() != Some("AXApplication")).then_some(current)
+}
+
+/// The controls in what the menu-bar icon last pressed opened, numbered for
+/// `act` as a window's are. An error once it has closed.
+fn panel_snapshot(limit: usize, debug: bool) -> Result<Value> {
+    let started = Instant::now();
+    PANEL.with(|kept| {
+        let kept = kept.borrow();
+        let panel = kept.as_ref().ok_or("no menu-bar icon has been opened")?;
+        let bounds = on_screen_windows()?.into_iter().find(|window| window.id == panel.window).and_then(|window| window.bounds).ok_or("what the menu-bar icon opened has closed")?;
+        unsafe { AXUIElement::new_system_wide().set_messaging_timeout(AX_TIMEOUT_S) };
+        let root = panel_root(panel, bounds).ok_or("what the menu-bar icon opened can't be read")?;
+        let names = CFArray::from_retained_objects(&SNAPSHOT_ATTRIBUTES.map(CFString::from_static_str));
+        let walked = walk(&root, &names, limit, debug);
+        let number = LISTED.with(|listed| {
+            let mut listed = listed.borrow_mut();
+            listed.0 += 1;
+            listed.1 = walked.handles;
+            listed.2 = Some(root.clone());
+            listed.0
+        });
+        let (x, y, w, h) = bounds;
+        Ok(json!({
+            "snapshot": number,
+            "panel": true,
+            "app": app_info(panel.pid),
+            "window": { "title": panel.name, "frame": { "x": x, "y": y, "w": w, "h": h } },
+            "elements": walked.elements,
+            "truncated": walked.truncated,
+            "visits": walked.visits,
+            "visited": walked.visited,
+            "ms": started.elapsed().as_millis() as u64,
+        }))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// A glance at the screen round a point (after Atticus's fingerprint): a click
+// on a canvas, a map or a video changes pixels and nothing that can be read
+// ---------------------------------------------------------------------------
+
+/// The screen round a point, 64 points by 40, as grey bytes in hex: every
+/// window drawn there but `exclude`'s (Jester's own lie over everything).
+/// Compared with one from before a click, it says whether the click showed.
+/// Nothing is kept, written or sent on; without Screen Recording nothing is
+/// looked at (and nothing asked for).
+pub fn glance(x: f64, y: f64, exclude: Option<i32>) -> Result<Value> {
+    if !CGPreflightScreenCaptureAccess() {
+        return Ok(json!({ "allowed": false }));
+    }
+    let (wide, high) = crate::protocol::GLANCE;
+    // Front to back, as the window server lists them: the order they're drawn in.
+    let mut ids: Vec<*const std::ffi::c_void> = on_screen_windows()?.into_iter().filter(|window| Some(window.pid) != exclude && window.id != 0).map(|window| window.id as usize as *const std::ffi::c_void).collect();
+    if ids.is_empty() {
+        return Ok(json!({ "allowed": true, "gray": null }));
+    }
+    // Window numbers are the array's values themselves, not objects: no callbacks.
+    let windows = unsafe { CFArray::new(None, ids.as_mut_ptr(), ids.len() as isize, std::ptr::null()) }.ok_or("couldn't list the windows to look at")?;
+    let area = CGRect { origin: CGPoint { x: x - wide as f64 / 2.0, y: y - high as f64 / 2.0 }, size: CGSize { width: wide as f64, height: high as f64 } };
+    #[allow(deprecated)]
+    let image = unsafe { objc2_core_graphics::CGWindowListCreateImageFromArray(area, &windows, objc2_core_graphics::CGWindowImageOption::NominalResolution) };
+    let Some(image) = image else { return Ok(json!({ "allowed": true, "gray": null })) };
+    let mut pixels = vec![0u8; wide * high];
+    let space = objc2_core_graphics::CGColorSpace::new_device_gray().ok_or("couldn't make a grey picture")?;
+    let context = unsafe { objc2_core_graphics::CGBitmapContextCreate(pixels.as_mut_ptr().cast(), wide, high, 8, wide, Some(&space), 0) }.ok_or("couldn't make a grey picture")?;
+    objc2_core_graphics::CGContext::draw_image(Some(&context), CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: wide as f64, height: high as f64 } }, Some(&image));
+    drop(context);
+    Ok(json!({ "allowed": true, "gray": crate::protocol::hex(&pixels), "width": wide, "height": high }))
 }
 
 // ---------------------------------------------------------------------------

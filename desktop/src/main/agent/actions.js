@@ -13,12 +13,13 @@ import { describePlan, parseShortcut } from '../os-actions.js';
 import { elementById, markBreaks } from './screen.js';
 
 const FIELDS = {
-  click: ['id', 'button', 'count'],
-  type: ['id', 'text', 'enter', 'mode'],
+  click: ['id', 'button', 'count', 'x', 'y', 'what'],
+  type: ['id', 'text', 'enter', 'mode', 'after'],
   press: ['keys', 'times'],
   scroll: ['direction', 'id', 'to'],
   scroll_to: ['text'],
   menu: ['path'],
+  menu_bar: ['name'],
   drag: ['from', 'to'],
   place: ['where', 'screen', 'app'],
   open_app: ['name'],
@@ -64,6 +65,11 @@ export const MAX_GROUP = 3;
 export const TYPE_MODES = Object.freeze(['replace', 'append', 'insert']);
 export const PLACES = Object.freeze(['left', 'right', 'full', 'center', 'fullscreen']);
 export const SCREENS = Object.freeze(['current', 'laptop', 'monitor', 'other']);
+/** A place in a picture of the window, in its pixels: no picture is wider or taller than this (window-shot.js). */
+export const PICTURE_MAX = 4000;
+/** The words a type goes after, and what a spot in a picture is called. */
+export const AFTER_CHARS = 120;
+export const WHAT_CHARS = 60;
 /** Menu paths: "File > New Note", at most this many titles. */
 export const MENU_DEPTH = 6;
 
@@ -107,7 +113,17 @@ export function validateAction(input) {
   const action = { ...input };
   if (action.id !== undefined) controlId(action.id, 'id');
   if (action.action === 'click') {
-    if (action.id === undefined) throw new Error('click needs the id of a control.');
+    // A control by its id, or (what has none) a place in the picture of the window: never both, never neither.
+    const placed = action.x !== undefined || action.y !== undefined;
+    if (placed) {
+      if (action.id !== undefined) throw new Error('click takes an id, or x and y in the picture: not both.');
+      const inPicture = (value) => Number.isFinite(value) && value >= 0 && value <= PICTURE_MAX;
+      if (!inPicture(action.x) || !inPicture(action.y)) throw new Error('x and y are a place in the picture of the window, in its pixels from the top left.');
+      text(action.what, 'what', WHAT_CHARS, true);
+    } else {
+      if (action.id === undefined) throw new Error('click needs the id of a control.');
+      if (action.what !== undefined) throw new Error('what goes with x and y only.');
+    }
     oneOf(action.button, 'button', ['left', 'right']);
     oneOf(action.count, 'count', [1, 2]);
   }
@@ -115,6 +131,11 @@ export function validateAction(input) {
     text(action.text, 'text', 2000, true);
     if (action.enter !== undefined && typeof action.enter !== 'boolean') throw new Error('enter must be true or false.');
     oneOf(action.mode, 'mode', TYPE_MODES);
+    if (action.after !== undefined) {
+      text(action.after, 'after', AFTER_CHARS, true);
+      if (action.id === undefined) throw new Error('after needs the id of the field its words are in.');
+      if (action.mode !== undefined) throw new Error('after says where the text goes: leave mode out.');
+    }
   }
   if (action.action === 'press') {
     if (typeof action.keys !== 'string' || action.keys.length > 40 || !parseShortcut(action.keys)) throw new Error('keys must be one key or a shortcut, like "enter" or "cmd+n".');
@@ -131,6 +152,7 @@ export function validateAction(input) {
     const parts = menuPath(action.path);
     if (!parts.length || parts.length > MENU_DEPTH) throw new Error(`path is 1 to ${MENU_DEPTH} menu titles, like "File > New Note".`);
   }
+  if (action.action === 'menu_bar') text(action.name, 'name', 80, true);
   if (action.action === 'drag') {
     controlId(action.from, 'from');
     controlId(action.to, 'to');
@@ -222,15 +244,25 @@ const SCROLL_ENDS = { up: 'the top', down: 'the bottom', left: 'the far left', r
 const PLACE_WORDS = { left: 'on the left', right: 'on the right', full: 'full size', center: 'in the middle', fullscreen: 'full screen' };
 const SCREEN_WORDS = { laptop: ' of the laptop screen', monitor: ' of the monitor', other: ' of the other screen', current: '' };
 
+/**
+ * A click on a spot in a picture (x and y, no id): what it's called. `under` is the name accessibility gave for what
+ * is there (host.js locate), `what` the model's own words for it, which stand in only when nothing could be read.
+ */
+export const spotName = (action) => (action?.id === undefined ? String(action?.under || action?.what || '') : '');
+/** The menu command a shortcut stands for (host.js prepare: `runs`), as one line of titles. */
+const runsTitles = (action) => (Array.isArray(action?.runs) ? action.runs.join(' › ') : '');
+
 /** The action in a few words, for the pill: the control's own name, never its number. */
 export function describeAction(action, screen = null, platform = 'darwin') {
   const element = action.id === undefined ? null : elementById(screen, action.id);
   const named = (item) => (item?.label ? quoted(item.label) : item ? `the ${item.role}` : '');
-  const target = named(element);
+  // A spot in a picture goes by the name read under it, else by what the model called it.
+  const target = named(element) || (action.action === 'click' && spotName(action) ? quoted(spotName(action)) : '');
   switch (action.action) {
     case 'click':
       return `${action.count === 2 ? 'Double-click' : action.button === 'right' ? 'Right-click' : 'Click'} ${target || 'it'}`;
     case 'type':
+      if (action.after !== undefined) return `Type ${quoted(action.text)} after ${quoted(action.after)}${target ? ` in ${target}` : ''}${action.enter ? ', then Enter' : ''}`;
       return `${action.mode === 'append' ? 'Add' : 'Type'} ${quoted(action.text)}${target ? ` ${action.mode === 'append' ? 'to the end of' : 'in'} ${target}` : ''}${action.enter ? ', then Enter' : ''}`;
     case 'press':
       return `Press ${describePlan(parseShortcut(action.keys), platform)}${action.times > 1 ? ` ${action.times} times` : ''}`;
@@ -240,6 +272,8 @@ export function describeAction(action, screen = null, platform = 'darwin') {
       return `Scroll to ${quoted(action.text)}`;
     case 'menu':
       return `Choose ${(action.resolved || menuPath(action.path)).join(' › ')}`;
+    case 'menu_bar':
+      return `Open ${quoted(action.name)} in the menu bar`;
     case 'drag':
       return `Drag ${named(elementById(screen, action.from)) || 'it'} onto ${named(elementById(screen, action.to)) || 'there'}`;
     case 'place':
@@ -278,7 +312,7 @@ const DELETE_DROP = /\b(?:trash|bin|recycle|delete|deleted)\b/i;
 const SENDING_APPS = /^(?:messages|mail|slack|discord|whatsapp|telegram|signal|microsoft teams|teams|outlook|microsoft outlook|messenger|skype|zoom|facetime)$/i;
 const MESSAGE_FIELD = /\b(?:message|reply|comment|chat|post|tweet|compose)\b/i;
 /** Where any change is a change to the computer's own settings: Windows' Settings app is SystemSettings, its Quick Settings ShellExperienceHost (ShellHost from 24H2). */
-const SETTINGS_APPS = /^(?:system settings|system preferences|settings|systemsettings|control panel|shellexperiencehost|shellhost)$/i;
+const SETTINGS_APPS = /^(?:system settings|system preferences|control cent(?:er|re)|settings|systemsettings|control panel|shellexperiencehost|shellhost)$/i;
 /** Windows' own tools for settings: Control Panel opens in Explorer (or control.exe), its applets in rundll32, its consoles in mmc. */
 const SETTINGS_TOOLS = /^(?:rundll32|mmc)$/i;
 const CONTROL_PANEL = /^(?:explorer|control)$/i;
@@ -307,9 +341,12 @@ function settingsScreen(screen) {
 const WAYFINDING_ROLES = new Set(['row', 'cell', 'text', 'heading', 'link', 'tab', 'disclosure']);
 const WAYFINDING_BUTTONS = /^(?:back|forward|show all|go back)$/i;
 /** What leaves the settings window alone altogether: with it in front, "open Calculator" asked first too (2026-11-14). */
-const ELSEWHERE = new Set(['open_app', 'open_url', 'media', 'place']);
-function findsItsWay(action, element, focused) {
+const ELSEWHERE = new Set(['open_app', 'open_url', 'media', 'place', 'menu_bar']);
+function findsItsWay(action, element, focused, screen = null) {
   if (action.action === 'scroll' || ELSEWHERE.has(action.action)) return true;
+  // What a menu-bar icon opens (Wi-Fi's list, Control Center) has no sidebar to get around by: a row there is a
+  // network to join or a device to connect, and pressing it is the change.
+  if (screen?.panel) return false;
   if (action.action === 'click') {
     if (!element || action.button === 'right' || (action.count ?? 1) > 1) return false;
     return WAYFINDING_ROLES.has(element.role) || (element.role === 'button' && WAYFINDING_BUTTONS.test(String(element.label || '').trim()));
@@ -368,12 +405,26 @@ export function classify(action, { screen = null, goal = '' } = {}) {
   if ((action.action === 'menu' && focused?.role === 'password') || (action.action === 'drag' && elementById(screen, action.to)?.role === 'password')) {
     return { category: 'blocked', reason: 'Jester never types into password fields.' };
   }
-  if (settingsScreen(screen) && !findsItsWay(action, element, focused)) return { category: 'sensitive', reason: `it changes ${app || 'the computer’s settings'}` };
+  if (settingsScreen(screen) && !findsItsWay(action, element, focused, screen)) return { category: 'sensitive', reason: `it changes ${app || 'the computer’s settings'}` };
   const sends = { category: 'sensitive', reason: 'it may send, buy or delete something' };
   const deletes = { category: 'sensitive', reason: 'it may delete something' };
   /** Whether pressing this control sends, buys or deletes: by its name, or as the "OK" to a dialog asking to. */
   const pressSends = (control) => SENSITIVE_LABEL.test(control?.label || '') || (GENERIC_YES.test(control?.label || '') && SENSITIVE_LABEL.test(dialogWords(screen, control)));
   if (action.action === 'click' && (pressSends(element) || (element?.role === 'menuitem' && DELETE_DROP.test(element.label || '')))) return sends;
+  // A spot in a picture, with no control to go by: judged by the name read under it, and by what the model called
+  // it (which can only make it more careful, never less). One nothing could be read of is asked about: what it
+  // does is anyone's guess, as Atticus asks before an unidentified point.
+  if (action.action === 'click' && action.id === undefined) {
+    const around = [screen?.window?.title || '', ...elements.filter((item) => item.role === 'text' || item.role === 'heading').map((item) => item.label || '')].join(' ');
+    const sure = (name) => SENSITIVE_LABEL.test(name || '') || (GENERIC_YES.test(name || '') && SENSITIVE_LABEL.test(around));
+    if (sure(action.under) || sure(action.what)) return sends;
+    if (!action.under) return { category: 'sensitive', reason: 'it’s a spot whose name can’t be read' };
+  }
+  // A shortcut is the menu command it stands for (⇧⌘D in Mail is Message › Send): judged by its titles, as a menu is.
+  if (action.action === 'press' && runsTitles(action)) {
+    const titles = runsTitles(action);
+    if (SENSITIVE_LABEL.test(titles) || (/\bmove to\b/i.test(titles) && DELETE_DROP.test(titles))) return sends;
+  }
   if (action.action === 'menu') {
     // Every title counts: "Message › Move to › Bin" deletes as surely as "Delete".
     const titles = (action.resolved || menuPath(action.path)).join(' › ');
@@ -449,11 +500,15 @@ export function askLabel(action, screen = null, { reason = '', platform = 'darwi
       const plan = parseShortcut(action.keys);
       if (reason === 'Enter may send it') return `Send this${where}`;
       if (reason === 'it may delete something' && !TEXT_ROLES.has(focused?.role)) return `Delete what’s selected${where}`;
+      // A shortcut that stands for a command that sends or deletes: the command is what's asked about, by its name.
+      if (runsTitles(action) && SENSITIVE_LABEL.test(runsTitles(action))) return `Choose ${quoted(action.runs.at(-1))}${where}`;
       // Enter on a button that sends is that button, pressed. Any other focus, and Enter may be the dialog's own button: only the key is sure.
       const pressed = ['enter', 'space'].includes(plan.key) && !plan.modifiers.length && ['button', 'link', 'menuitem'].includes(focused?.role) && SENSITIVE_LABEL.test(focused.label || '');
       return `Press ${pressed ? named(focused) : keysSaid(plan, platform)}${action.times > 1 ? ` ${action.times} times` : ''}${where}`;
     }
     case 'click':
+      // A spot nothing could be read of: said as what it looks like, which is all that's known of it.
+      if (action.id === undefined) return action.under ? `Press ${quoted(action.under)}${where}` : `Click what looks like ${quoted(action.what)}${where}`;
       return action.count === 2 || action.button === 'right' ? `${said}${where}` : `Press ${named(elementById(screen, action.id)) || 'this'}${where}`;
     case 'menu': {
       const [menu, ...rest] = action.resolved || menuPath(action.path);
