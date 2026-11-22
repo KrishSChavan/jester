@@ -11,6 +11,8 @@
  *   npm run hear-check -- kept <folder> the same, for recordings somewhere else
  *   npm run hear-check -- pauses        a sentence said at its own speed: read at its last pause (`early`), over 0.6 s
  *                                       after the last word; and one with a pause in the middle, heard whole
+ *   npm run hear-check -- training      training mode's voice side: lines "on camera" kept with their voice, and what
+ *                                       that makes of it heard with after, taught up close first or never taught
  *
  * `kept` reads the user's sealed voiceprint as Jester does (Electron's safeStorage; macOS may ask to let it use
  * "Jester Safe Storage"), prints scores and words, and never the voiceprint. It decodes voices the app itself
@@ -324,6 +326,112 @@ if (!process.versions.electron) {
     return checks.every(([, ok]) => ok);
   }
 
+  // --- training mode ---------------------------------------------------------------------------------------------
+
+  /**
+   * Training mode, its voice's side (voice-training.js), with a made-up voice: everything it says "on camera" is
+   * taken as the camera would take the user talking, and kept, its voice and when it ended coming out with it (a
+   * stranger's too, still undecoded); what that makes of the voice is then what he hears with. Two ways: taught up
+   * close and then trained across the room, and never taught at all, the voiceprint made by training alone. The
+   * camera's side is face-witness.js's, and its tests'.
+   */
+  async function training() {
+    if (process.platform !== 'darwin') throw new Error('this needs macOS’s `say`');
+    const { buildImpression } = await import('../src/main/voice-training.js');
+    const [theirs, other] = ['Daniel', 'Karen'];
+    const ON_CAMERA = ['Jester, what is the weather like outside right now?', 'Can you open my Canvas bookmark and tell me what is due?', 'Remind me to call my mom after class.', 'Turn the volume down a little bit.', 'How long should I boil an egg for?', 'Play some music while I finish this essay.', 'Yes.', 'No, that is okay.', 'Sure, go ahead.', 'What did I have on my calendar for Friday?'];
+    const LATER = ['Jester, what time does my lecture start tomorrow?', 'Write down milk and eggs on my grocery list.', 'What did we talk about yesterday afternoon?', 'Tell me a joke about the ocean.', 'How far is it to the library from here?', 'Set the volume to thirty percent.'];
+    const SHORT = ['Yeah.', 'Okay.', 'No thanks.', 'Yes please.'];
+    const service = startService();
+    const ready = service.next(['ready', 'error'], 60000);
+    service.post({ type: 'start', model: 'parakeet-110m' });
+    console.log(`speech service: ${(await ready).model} loaded`);
+    const trainedOf = (impression) => (impression ? { centroid: Array.from(impression.centroid), exemplars: impression.exemplars.map((voice) => Array.from(voice)) } : null);
+
+    /** How a run of lines is taken, with this voiceprint and what training made. */
+    async function heardAs(label, lines, voice, degrade, print, impression) {
+      service.post({ type: 'voiceprint', print, learned: [], trained: trainedOf(impression) });
+      service.post({ type: 'listen' });
+      await pause(50);
+      const out = [];
+      for (const line of lines) {
+        const heard = await service.hear(degrade(say(voice, line)));
+        out.push(heard);
+        console.log(`   ${verdict(heard).padEnd(12)} ${two(heard.score)}${typeof heard.enrolled === 'number' && heard.score - heard.enrolled > 0.005 ? ` (${two(heard.enrolled)} by the voiceprint alone)` : ''}  ${JSON.stringify(line)}`);
+      }
+      const count = (kind) => out.filter((heard) => verdict(heard) === kind).length;
+      console.log(`${label}: ${count('theirs')} theirs, ${count('maybe theirs')} maybe, ${count('not theirs')} turned away, of ${out.length}`);
+      return { theirs: count('theirs'), maybe: count('maybe theirs'), of: out.length };
+    }
+
+    /** Training on: every line's voice kept, as voice-training.js keeps one the camera saw the user say. */
+    async function train(lines, voice, degrade, print) {
+      service.post({ type: 'voiceprint', print, learned: [] });
+      service.post({ type: 'training', on: true });
+      service.post({ type: 'listen' });
+      await pause(50);
+      const clips = [];
+      let told = 0;
+      for (const line of lines) {
+        const heard = await service.hear(degrade(say(voice, line)));
+        if (Array.isArray(heard.voice) && Number.isFinite(heard.endedAt) && Number.isFinite(heard.startedAt)) {
+          told += 1;
+          clips.push({ v: heard.voice, s: Math.max(0.5, (heard.endedAt - heard.startedAt) / 1000) });
+        }
+      }
+      service.post({ type: 'training', on: false });
+      const impression = buildImpression(clips);
+      console.log(`   ${told} of ${lines.length} lines came with their voice; ${impression?.inliers ?? 0} like the rest, ${impression?.exemplars.length ?? 0} ways of sounding, ${impression?.ready ? 'enough to know the voice by' : 'not yet enough to know it by'}`);
+      return { impression, told };
+    }
+
+    // Taught up close, as Settings has the user read five sentences.
+    service.post({ type: 'teaching', on: true });
+    service.post({ type: 'listen' });
+    const takes = [];
+    for (const line of TEACHING_LINES) {
+      const heard = await service.hear(say(theirs, line));
+      if (heard.voice) takes.push(heard.voice);
+    }
+    service.post({ type: 'teaching', on: false });
+    if (takes.length < TEACHING_LINES.length) throw new Error(`only ${takes.length} of ${TEACHING_LINES.length} lines gave a voice`);
+    const print = averageVoice(takes);
+
+    console.log(`\n${theirs}, taught up close, heard across the room before training:`);
+    const before = await heardAs('before', LATER, theirs, acrossTheRoom, print, null);
+    const shortBefore = await heardAs('a word or two, before', SHORT, theirs, acrossTheRoom, print, null);
+    console.log(`\n${theirs}, training mode on, across the room, ${ON_CAMERA.length} lines on camera:`);
+    const taught = await train(ON_CAMERA, theirs, acrossTheRoom, print);
+    console.log(`\n${theirs}, across the room, after training, other sentences:`);
+    const after = await heardAs('after', LATER, theirs, acrossTheRoom, print, taught.impression);
+    const shortAfter = await heardAs('a word or two, after', SHORT, theirs, acrossTheRoom, print, taught.impression);
+    console.log(`\n${other}, another voice, with what training made:`);
+    const near = await heardAs('another voice, up close', LATER.slice(0, 3), other, (x) => x, print, taught.impression);
+    const far = await heardAs('another voice, across the room', LATER.slice(3), other, acrossTheRoom, print, taught.impression);
+
+    console.log(`\nNever taught: ${theirs}, training mode on, across the room:`);
+    const alone = await train(ON_CAMERA, theirs, acrossTheRoom, null);
+    const made = alone.impression?.ready ? Array.from(alone.impression.centroid) : null;
+    console.log(`\n${theirs}, across the room, with the voiceprint training made:`);
+    const camera = made ? await heardAs('voiceprint from the camera', LATER, theirs, acrossTheRoom, made, alone.impression) : { theirs: 0, maybe: 0, of: LATER.length };
+    const nearAlone = made ? await heardAs('another voice, up close', LATER.slice(0, 3), other, (x) => x, made, alone.impression) : { theirs: 0 };
+    const farAlone = made ? await heardAs('another voice, across the room', LATER.slice(3), other, acrossTheRoom, made, alone.impression) : { theirs: 0 };
+    service.stop();
+
+    const checks = [
+      ['while training, every line comes out with its voice and when it ended', taught.told === ON_CAMERA.length && alone.told === ON_CAMERA.length, `${taught.told} and ${alone.told} of ${ON_CAMERA.length}`],
+      ['trained, the voice is heard as theirs at least as often across the room', after.theirs >= before.theirs && after.theirs + after.maybe >= before.theirs + before.maybe, `before ${before.theirs}, after ${after.theirs}`],
+      ['and a word or two of theirs at least as often', shortAfter.theirs >= shortBefore.theirs, `before ${shortBefore.theirs}, after ${shortAfter.theirs}`],
+      ['never taught, training alone makes a voiceprint', !!made, 'not enough to know it by'],
+      ['and that voiceprint hears them as theirs', camera.theirs >= Math.ceil(LATER.length / 2), `${camera.theirs} of ${LATER.length}`],
+      ['another voice is never taken as theirs, whatever training made', near.theirs + far.theirs + nearAlone.theirs + farAlone.theirs === 0, `${near.theirs + far.theirs + nearAlone.theirs + farAlone.theirs} taken as theirs`]
+    ];
+    console.log('');
+    for (const [name, ok, detail] of checks) console.log(`${ok ? '  ok  ' : ' FAIL '} ${name}${ok ? '' : `: ${detail}`}`);
+    console.log(`\nheard as theirs across the room: ${before.theirs}/${LATER.length} before training, ${after.theirs}/${LATER.length} after; a word or two ${shortBefore.theirs}/${SHORT.length} → ${shortAfter.theirs}/${SHORT.length}; from the camera alone ${camera.theirs}/${LATER.length}`);
+    return checks.every(([, ok]) => ok);
+  }
+
   // --- what was kept ---------------------------------------------------------------------------------------------
 
   async function kept(folder) {
@@ -373,7 +481,7 @@ if (!process.versions.electron) {
   app.whenReady().then(async () => {
     let ok = false;
     try {
-      ok = args[0] === 'kept' ? await kept(args[1]) : args[0] === 'pauses' ? await pauses() : await madeUp();
+      ok = args[0] === 'kept' ? await kept(args[1]) : args[0] === 'pauses' ? await pauses() : args[0] === 'training' ? await training() : await madeUp();
     } catch (err) {
       console.log(`hear-check failed: ${err.message}`);
     }

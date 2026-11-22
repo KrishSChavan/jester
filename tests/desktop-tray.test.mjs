@@ -103,3 +103,15 @@ test('his window is a click away, and so is turning the mic off', () => {
   assert.equal(items.talk.label, 'Talk to Jester…');
   assert.equal(items.continuous.checked, true);
 });
+
+test('training mode is in the menu once the face is scanned, and says the camera’s on for it with Gestures off', () => {
+  const off = mergeSettings({ enabled: true, voiceEnabled: true, gesturesEnabled: false, voiceTraining: true });
+  assert.equal(byId(trayModel({ engine: { state: 'running' }, settings: off, voice: 'ready' })).training, undefined, 'no face scanned: nothing to train with');
+  const items = byId(trayModel({ engine: { state: 'running' }, settings: off, voice: 'ready', face: true }));
+  assert.equal(items.training.checked, true);
+  assert.equal(items.status.label, 'Gestures off · the camera’s on for training');
+  const untrained = byId(trayModel({ engine: { state: 'off' }, settings: { ...off, voiceTraining: false }, voice: 'ready', face: true }));
+  assert.equal(untrained.training.checked, false);
+  assert.equal(untrained.status.label, 'Gestures off');
+  assert.equal(byId(trayModel({ engine: { state: 'running' }, settings: { ...off, voiceEnabled: false }, voice: 'ready', face: true })).training, undefined, 'voice off: nothing to hear');
+});

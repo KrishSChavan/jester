@@ -191,7 +191,7 @@ export function missingNeeded(items) {
 export function missingFor(items, settings) {
   return items.filter((item) => {
     if (item.granted) return false;
-    if (item.id === 'camera') return item.tier === 'needed' && settings?.gesturesEnabled !== false;
+    if (item.id === 'camera') return item.tier === 'needed' && (settings?.gesturesEnabled !== false || settings?.voiceTraining === true);
     if (item.id === 'microphone') return settings?.voiceEnabled !== false;
     return item.tier === 'needed';
   });

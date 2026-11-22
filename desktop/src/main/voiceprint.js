@@ -78,14 +78,29 @@ export const LEARN_SECONDS = 1.5;
 const SAME = 0.8;
 
 /**
- * How like the user a voice is: by the enrolled voiceprint, or, for a voice that half-knows, by the best of what's
- * been learned too.
+ * What training mode taught (voice-training.js): the user's voice as they talked with their face on camera, in their
+ * own room, at their own distance from the mic: `centroid`, all of it, and `exemplars`, the ways it varied. The
+ * centroid counts as the voiceprint does, being theirs as surely; an exemplar, for a voice already this like one of
+ * the two, as a learned voice does for one the voiceprint half-knows. Lower than LEARN_GATE: a word or two ("yes")
+ * scores lower than a sentence against anything, and it's the user's own short words, kept, that it's compared with.
+ */
+export const TRAINED_GATE = 0.3;
+
+/**
+ * How like the user a voice is: by the enrolled voiceprint or what training taught, the better, or, for a voice
+ * that half-knows, by the best of what's been learned and the ways training heard it too.
+ * @param {ArrayLike<number>|null} print  the voiceprint (taught, or made by training)
+ * @param {{centroid?:ArrayLike<number>, exemplars?:ArrayLike<number>[]}|null} [trained]
  * @returns {{score:number, enrolled:number}}  score: what's judged; enrolled: the voiceprint's own word
  */
-export function scored(voice, print, learned = []) {
-  const enrolled = likeness(voice, print);
-  if (enrolled < LEARN_GATE || !learned?.length) return { score: enrolled, enrolled };
-  return { score: Math.max(enrolled, ...learned.map((known) => likeness(voice, known))), enrolled };
+export function scored(voice, print, learned = [], trained = null) {
+  const enrolled = print ? likeness(voice, print) : 0;
+  const own = trained?.centroid?.length ? likeness(voice, trained.centroid) : -Infinity;
+  const base = Math.max(enrolled, own);
+  let score = base;
+  if (base >= LEARN_GATE && learned?.length) score = Math.max(score, ...learned.map((known) => likeness(voice, known)));
+  if (base >= TRAINED_GATE && trained?.exemplars?.length) score = Math.max(score, ...trained.exemplars.map((known) => likeness(voice, known)));
+  return { score, enrolled };
 }
 
 /** Whether a voice heard as the user's is one more way they sound: theirs for sure, long enough, and not already kept. */

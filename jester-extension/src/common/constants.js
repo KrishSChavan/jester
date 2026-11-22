@@ -173,6 +173,8 @@ export const MSG = {
   TELEMETRY: 'jester/telemetry',
   PREVIEW_FRAME: 'jester/preview-frame',
   TRIGGER: 'jester/trigger',
+  // offscreen -> the desktop, while it asks (settings.faceWatch): the face, read off each frame (face-print.js)
+  FACE: 'jester/face',
   // popup -> offscreen
   PREVIEW_PING: 'jester/preview-ping',
   // service worker -> popup

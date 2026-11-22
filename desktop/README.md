@@ -999,6 +999,52 @@ room, it was theirs 2 times in 6 before and 6 in 6 after learning two ways of
 sounding, and another voice was turned away 6 in 6. That says the pipeline does
 what the rule says, not what a real voice's numbers will be.
 
+**Training mode** (2026-11-22, the user: "every voice line it picks up while seeing my face from the camera should
+be used to build the voice impression so when training mode is off he will be more confident that it is me") learns
+the voice from the camera instead, without the "said to him" or "half-knows" rules, which kept it to voices already
+nearly the user's.
+
+- **The face, once.** Settings › Assistant and voice › Your face › Scan my face (also on Getting started): three
+  seconds looking at the camera. `face-witness.js` keeps the mean of its shapes and how much they varied, and
+  nothing else: no picture, sealed with the keys (`faceprint`), never moved to a server. A shape
+  (`jester-extension/src/common/face-print.js`) is the 120 distances between sixteen points that don't move as a
+  face talks, smiles or blinks (eye corners, nose, brow, forehead, the sides of the face), each over their mean,
+  from the face tracker's 3D landmarks. It's the same however near or turned the face is, and it is not Face ID:
+  two people of one build can read alike. Another reading is the same face within four times the scan's own spread,
+  between 0.03 and 0.06 apart.
+- **Training mode on** (Settings, or the menu bar once the face is scanned): the camera stays on, Gestures or not
+  (`faceWatch`: with Gestures off no hand is even looked for). The engine reads the face every frame (shape, how far
+  open the mouth is, which way the head points) and sends the numbers. `face-witness.js` keeps them, and the always-on
+  mic's loudness every 32 ms, for 90 s.
+- **A line, judged.** While it's on, the speech service sends every utterance's voice (TitaNet's numbers),
+  a stranger's too, still undecoded, with when it began and ended. A line is learned from only when the camera says
+  `speaking`: a face in view for 60% of it, the scanned face in 60% of the readings that could tell, its mouth
+  moving (the middle 80% of its opening spanning 0.06), and for a line of 1.5 s or more the mouth moving with the
+  sound (correlation at least 0.1, at the best lag within 0.3 s). A mouth chewing while the television talks moves,
+  but not with what's heard. Never with his own voice over it; never a voice under 0.2 against the voiceprint; once
+  there are five lines, never one under 0.3 against the rest. `voice-training.js` keeps the newest 60
+  (`voiceTrained`, sealed).
+- **What it makes.** All the lines like the rest averaged (the centroid) and up to ten of them as different as they
+  come (exemplars). `voiceprint.js` `scored` counts the centroid as it does the voiceprint, the user's own voice as
+  surely. An exemplar counts for a voice at least 0.3 like either of those, lower than `LEARN_GATE`, so that a bare
+  "yes" can match a "yes" kept on camera. With no voiceprint, six lines and eight seconds of talking make the
+  centroid one: the five sentences are never needed.
+- **In the cloud** the voice is heard on the server, and the face is on the Mac. The Mac says training is on with its
+  hands' state (`switches.training`). For each line the server asks every computer with it on what its camera saw
+  (`remote-hands.js` `face`), as how long ago the line began and how long it lasted, which their clocks agree on.
+  The Mac answers with the verdict alone (`judgeAgo`), and is told how many lines were learned from, for its
+  Settings. The face never leaves the Mac; the voice's numbers are kept where the voiceprint is.
+
+`npm run hear-check -- training` runs his own speech service on a made-up voice heard across a room. Taught up close,
+it was theirs 2 times in 6 before training on ten other lines "on camera" and 6 in 6 after. Words alone ("Yeah",
+"Okay", "No thanks", "Yes please") were 0 in 4 before and 4 in 4 after. Never taught, training alone made a
+voiceprint that took 6 in 6. Another voice was never taken for theirs, its best 0.39 ("maybe": decoded, but only
+with his name). `npm run live-check -- training` runs the real app on a scratch profile with the face tracker
+replaced by a made-up face whose mouth opens with the fake mic's sound. Settings scans it with Gestures off. The
+camera is on for the scan, and with training on, someone else's face is told apart. Lines said while it was in
+front weren't learned from, and lines said with the scanned face talking were, until training had made a
+voiceprint. None of that is a real face or a real voice: README check 40.
+
 For those: Settings › Assistant and voice › Keep what he wasn't sure of (off
 until chosen) keeps the sound of a voice that scored at least 0.2 without being
 taken as theirs, the newest 200, in the app's `heard` folder, each with its
@@ -3024,6 +3070,20 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     ("yes and what's the weather") still needs his name unless your voice is surely yours. The log says `a yes on
     its own, to what he'd just asked: taken` (or `a no…`). A yes after 20 s, or after a line that asked nothing,
     is let pass as before.
+
+40. **Training mode** (built 2026-11-22; run with a made-up voice through his own speech service and in the real app
+    with a made-up face, never with your camera, your face or your voice). Settings › Assistant and voice › Your face
+    › Scan my face: look at the camera for about three seconds. It should say he knows your face, and Training mode
+    becomes something you can turn on (here or in the menu bar). Turn it on and talk to him as you do, facing the
+    laptop. The hint should say "He can see you", and after a while how many things he's learned from. Turn your
+    head away or cover the camera: "He can’t see your face right now". Have someone else sit in front of it: "That
+    isn’t you". If it never says "He can see you", scan again in the light you usually sit in, and tell me: real
+    faces may vary more than the made-up one. The log: `face: scanned, N readings`, then a line per thing said:
+    `training: learned from what you said (face 1, mouth 0.21, in time 0.4)`, or `not learned from:` and why. Send
+    me those numbers (they're only numbers) if few are learned from. Then turn training off and talk to him from
+    where you usually sit, without his name after his question, or across the room: `speech: your voice (0.xx)`
+    should come more often than before, with bare yeses among them. On the cloud setup the same happens with the
+    server's log saying `training:` and the Mac's saying nothing of it.
 
 ## Things learned the hard way
 

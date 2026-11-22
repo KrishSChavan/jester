@@ -347,6 +347,18 @@
                 <button id="voice-print-forget" type="button" hidden>Forget</button>
               </span>
             </div>
+            <div class="row computer-only">
+              <span><strong>Your face</strong><small id="face-hint"></small></span>
+              <span class="buttons">
+                <button id="face-scan" type="button"></button>
+                <button id="face-forget" type="button" hidden>Forget</button>
+              </span>
+            </div>
+            <img id="face-preview" class="computer-only" alt="What the camera sees while it scans your face" hidden />
+            <label class="row computer-only">
+              <span><strong>Training mode</strong><small id="training-hint"></small></span>
+              <input type="checkbox" id="voiceTraining" />
+            </label>
             <label class="row">
               <span><strong>Keep what he wasn’t sure of</strong><small>When a voice sounds nearly like yours but isn’t taken as yours, its sound is kept on this computer, the newest 200, so how he tells your voice can be tuned to it. Never sent anywhere; turning this off stops it, and the folder is yours to delete.</small></span>
               <input type="checkbox" id="keepUnsureSpeech" />

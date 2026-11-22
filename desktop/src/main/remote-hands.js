@@ -306,6 +306,28 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
       return Math.min(Infinity, ...[...macs.values()].map(idleOf));
     },
 
+    /**
+     * Training mode (voice-training.js), when the voice is heard here and the face is on a computer's camera: what
+     * the computers with it on saw while a line was said, told by its time here as how long ago it began and how long
+     * it lasted, which their clocks agree on whatever the time on them is. The one that saw the user talking, if any
+     * did; else whatever one said; null with none on.
+     * @param {{from:number, to:number}} line  on this server's clock
+     */
+    async face({ from, to }) {
+      const watching = [...macs.values()].filter((mac) => mac.state.switches?.training === true);
+      if (!watching.length || !(to > from)) return null;
+      const said = await Promise.all(watching.map((mac) => quick(mac, 'face', { ago: now() - from, lasted: to - from }, null)));
+      const told = said.filter((one) => one && typeof one === 'object' && typeof one.verdict === 'string');
+      return told.find((one) => one.verdict === 'speaking') || told[0] || null;
+    },
+    /** How much training has learned from, for the Settings of the computers with it on. */
+    trained(report = {}) {
+      for (const mac of macs.values()) {
+        if (mac.state.switches?.training !== true) continue;
+        void quick(mac, 'trained', { kept: Number(report.kept) || 0, clips: Number(report.clips) || 0 }, null);
+      }
+    },
+
     /** A chat's own commands and assistant. */
     for: hands,
     /** The first chat's (and the only one's, where there's one). */

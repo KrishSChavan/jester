@@ -130,6 +130,8 @@ import { createVaultMemory, secretIn } from './vault-memory.js';
 import { createVoicePage } from './voice-page.js';
 import { kokoroThreads, VOICES, voiceNamed } from './voice/voices.js';
 import { averageVoice, TEACHING_LINES, TEACHING_SECONDS, withLearned } from './voiceprint.js';
+import { createFaceWitness } from './face-witness.js';
+import { createVoiceTrainer } from './voice-training.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
 import { backToCloud, closeSafely, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
@@ -363,6 +365,18 @@ let voiceprint = null;
 let voiceLearned = [];
 /** Teaching him a voice: the takes so far, and what ends it. */
 let teaching = null;
+/** The user's face, scanned (face-witness.js printFrom): numbers about its shape, this computer's alone, never sent. */
+let faceprint = null;
+/** What the camera and the mic took in, for training mode to judge a line by (face-witness.js). Never on a server. */
+let faceWitness = null;
+/** A scan of the face going on: how far it's got. */
+let faceScan = null;
+/** Why the last scan didn't work, until another begins. */
+let faceProblem = '';
+/** Training mode: the lines learned from, and what they make of the voice (voice-training.js), where it's heard. */
+let voiceTrainer = null;
+/** How much training has learned from, as Settings says it: from here, or as the server tells it. */
+let trainingReport = { kept: 0, clips: 0 };
 let quitting = false;
 let engine = { state: 'off', detail: '' };
 let permissions = [];
@@ -535,6 +549,7 @@ function desktopState() {
       knowsYou: !!voiceprint,
       teaching: teaching ? { line: TEACHING_LINES[teaching.takes.length], done: teaching.takes.length, of: TEACHING_LINES.length } : null
     },
+    face: faceState(),
     chrome: {
       linked: !!chromeLink?.linked,
       version: chromeLink?.version || '',
@@ -612,10 +627,15 @@ async function refresh() {
   speech?.setModel(settings.speechModel);
   speech?.setEnabled(settings.enabled && settings.voiceEnabled);
   watch?.setEnabled(settings.enabled && !!settings.watchEnabled);
-  const { voiceprint: print, voiceLearned: known } = await storage.local.get(['voiceprint', 'voiceLearned']);
+  const { voiceprint: print, voiceLearned: known, faceprint: face } = await storage.local.get(['voiceprint', 'voiceLearned', 'faceprint']);
   voiceprint = print || null;
   voiceLearned = voiceprint && Array.isArray(known) ? known : [];
-  speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned);
+  speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned, voiceTrainer?.impression);
+  if (!SERVER) {
+    faceprint = Array.isArray(face?.shape) ? face : null;
+    faceWitness?.setPrint(faceprint);
+  }
+  syncTraining();
   // Voices he wasn't sure of, kept for tuning only when the user's said to (Settings › Assistant and voice).
   speech?.setKeeping(settings.keepUnsureSpeech === true ? path.join(app.getPath('userData'), 'heard') : '');
   askForWhatsOn(before);
@@ -652,7 +672,7 @@ function toolsState() {
 
 /** His menu, as things stand. */
 function updateTray() {
-  tray?.update(trayModel({ engine, settings, missing: missingFor(permissions, settings), voice: voiceState(), watch: watch?.state, ringing: ring?.ringing || null, scripts: scripts?.menu() || null }));
+  tray?.update(trayModel({ engine, settings, missing: missingFor(permissions, settings), voice: voiceState(), watch: watch?.state, ringing: ring?.ringing || null, scripts: scripts?.menu() || null, face: !!faceprint }));
 }
 
 /**
@@ -694,6 +714,103 @@ function heardAloud(text, heard) {
   // Their voice, or words he took as said to him: they're there, wherever in the room.
   if (turned || (voiceprint && !heard?.unsure)) presence?.seen('voice');
   if (turned && !across && heard?.learn && heard.voice && voiceprint) learnVoice(heard.voice);
+  // Training mode: whatever's said with their face talking on camera teaches him their voice, said to him or not.
+  if (heard?.voice && trainingActive()) void voiceTrainer?.heard(heard, { overlapped: across, print: voiceprint });
+}
+
+/**
+ * Training mode (voice-training.js): with it on, what the user says with their own face talking on camera teaches
+ * him their voice. It's this computer's switch (Settings › Assistant and voice), and its camera that sees; where the
+ * voice is heard, it's learned: here, or, in the cloud, on the server, which asks this computer what it saw.
+ */
+const trainingWanted = () => !SERVER && settings?.enabled !== false && settings?.voiceTraining === true && !!faceprint;
+/** It learns here: on, and this computer hearing for itself. */
+const trainingHere = () => trainingWanted() && !cloudTarget && !teaching;
+/** On a server: a computer linked to it has it on. */
+const trainingThere = () => SERVER && !teaching && !!remoteHands?.list().some((mac) => mac.switches?.training === true);
+const trainingActive = () => (SERVER ? trainingThere() : trainingHere());
+
+/** The camera watches the face while training mode is on, or while it's being scanned; every voice goes out while it learns. */
+function syncTraining() {
+  speech?.setTraining(trainingActive());
+  if (!SERVER) engineHost?.watchFace(!!faceScan || trainingWanted());
+}
+
+/** What training's made of the voice changed: it's what he hears with now. With no voiceprint yet, it may be one. */
+async function trainedVoice(impression) {
+  if (!voiceprint && impression?.ready) {
+    voiceprint = Array.from(impression.centroid);
+    await storage.local.set({ voiceprint });
+    log(`voice: your voiceprint, made from ${impression.inliers} things you said on camera`);
+  }
+  speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned, impression);
+  post(desktopState());
+}
+
+/** Starts scanning the face in front of the camera: '' once begun, or why it can't be. */
+function scanFace() {
+  if (SERVER || !faceWitness) return 'This is the server: scan your face in Jester on your computer.';
+  if (!settings?.enabled) return 'Jester is off: switch him on first.';
+  // Never asked for the camera: macOS asks now, and Scan is pressed again once it's answered.
+  const camera = need('camera');
+  if (camera) return camera.note;
+  faceProblem = '';
+  faceScan = { progress: 0 };
+  syncTraining();
+  post(desktopState());
+  faceWitness
+    .scan({
+      onProgress: (share) => {
+        if (!faceScan) return;
+        faceScan.progress = share;
+        post(desktopState());
+      }
+    })
+    .then(
+      async (print) => {
+        faceprint = { ...print, at: Date.now() };
+        faceWitness.setPrint(faceprint);
+        await storage.local.set({ faceprint });
+        log('face: scanned,', print.reads, 'readings');
+      },
+      (err) => {
+        if (err?.cancelled) return;
+        faceProblem = err.message;
+        log('face: not scanned:', err.message);
+      }
+    )
+    .finally(() => {
+      faceScan = null;
+      refresh();
+    });
+  return '';
+}
+
+/** The face forgotten: training mode can't go on without it, so it's switched off too. What it taught of the voice stays. */
+async function forgetFace() {
+  faceWitness?.cancelScan();
+  faceprint = null;
+  faceWitness?.setPrint(null);
+  await storage.local.remove('faceprint');
+  if (settings?.voiceTraining) await saveSettings({ voiceTraining: false });
+}
+
+/** Training mode, for Settings: the face, the scan, who's in front of the camera, and how much it's learned from. */
+function faceState() {
+  if (SERVER) return null;
+  const watching = !!faceScan || trainingWanted();
+  return {
+    known: !!faceprint,
+    scanning: faceScan ? { progress: Math.round((faceScan.progress || 0) * 100) / 100 } : null,
+    problem: faceProblem,
+    training: trainingWanted(),
+    seen: watching && faceWitness ? faceWitness.seen() : 'none',
+    camera: engine.state,
+    // Heard here, it's only learned while he's listening; in the cloud, the server says how it went.
+    hearing: !!cloudTarget || listening,
+    kept: trainingReport.kept,
+    clips: trainingReport.clips
+  };
 }
 
 async function learnVoice(voice) {
@@ -1338,6 +1455,7 @@ async function setupState(place = {}) {
     ownVoice: (kokoro?.state || 'missing') !== 'missing',
     fetch: modelsState(),
     voiceprint: !!voiceprint,
+    face: !!faceprint,
     vault: !!vault,
     day: !!whereabouts?.connected || !!calendars?.connected,
     phone: phoneReady(),
@@ -1638,7 +1756,7 @@ const inputRefusal = ({ open = true, form = 'say' } = {}) => (canPost() ? '' : n
 function wantedNow(set, also = {}) {
   if (!set?.enabled) return {};
   return {
-    camera: set.gesturesEnabled !== false || !!set.pointerEnabled,
+    camera: set.gesturesEnabled !== false || !!set.pointerEnabled || set.voiceTraining === true,
     microphone: !!set.voiceEnabled && (!!set.continuousAssistant || !!also.teaching),
     // The pointer is the real cursor, moved for them.
     accessibility: !!set.pointerEnabled
@@ -1955,6 +2073,8 @@ async function onTrayAction(id, checked, item) {
       return saveSettings({ watchEnabled: checked });
     case 'continuous':
       return saveSettings({ continuousAssistant: checked });
+    case 'training':
+      return saveSettings({ voiceTraining: checked });
     case 'ring':
       return void ring?.stop('his menu');
     case 'listen':
@@ -2134,7 +2254,23 @@ function listenToPages() {
       case 'jester/desktop-voiceprint':
         if (message.op === 'teach') return { ok: !teachVoice(), error: voiceProblem() };
         if (message.op === 'cancel') await stopTeaching();
-        else if (message.op === 'forget') await storage.local.remove(['voiceprint', 'voiceLearned']);
+        else if (message.op === 'forget') {
+          await storage.local.remove(['voiceprint', 'voiceLearned']);
+          // What training taught is the voice too: forgotten with it.
+          await voiceTrainer?.forget();
+        }
+        await refresh();
+        return { ok: true };
+      // Settings › Assistant and voice: the face, for training mode.
+      case 'jester/desktop-face':
+        if (message.op === 'scan') {
+          const why = scanFace();
+          if (why) faceProblem = why;
+          post(desktopState());
+          return { ok: !why, error: why };
+        }
+        if (message.op === 'cancel') faceWitness?.cancelScan();
+        else if (message.op === 'forget') await forgetFace();
         await refresh();
         return { ok: true };
       // Settings › Tools: how the user likes things done, as he's kept it (ways.js), and one of them forgotten.
@@ -2843,7 +2979,7 @@ function startWebGateway() {
     },
     // A task begun on a computer itself is the chat in front's.
     adopt: () => sessions?.frontKey || 'local',
-    onChange: () => (post(desktopState()), devicesChanged()),
+    onChange: () => (syncTraining(), post(desktopState()), devicesChanged()),
     // The Mac's scripts changed, or the Mac came or went: Controls, on his website, reads them again.
     onScriptsChanged: (change) => post({ type: 'jester/scripts-changed', ...change }),
     log
@@ -3006,7 +3142,7 @@ function startCloudLink() {
       if (frame.ok || frame.already) storage.local.set({ cloudMoved: cloudTarget.origin }).catch(() => undefined);
     },
     handsState: () => ({ running: assistant.running, asking: assistant.asking, abilities: macAbilities, doing: assistant.doing || '', engine: engine.state === ENGINE.SLEEPING ? 'sleeping' : String(engine.state || ''),
-      switches: { enabled: settings?.enabled !== false, gestures: settings?.gesturesEnabled !== false, pointer: settings?.pointerEnabled !== false } }),
+      switches: { enabled: settings?.enabled !== false, gestures: settings?.gesturesEnabled !== false, pointer: settings?.pointerEnabled !== false, training: trainingWanted() } }),
     idleSeconds: () => powerMonitor.getSystemIdleTime(),
     onChange: (connected) => {
       post(desktopState());
@@ -3084,6 +3220,14 @@ async function handsAsked(frame) {
       cloudLink?.stateChanged();
       return { ok: true };
     }
+    // Training mode, the voice heard on the server: what this computer's camera saw while a line was said.
+    case 'face':
+      return faceWitness && trainingWanted() ? faceWitness.judgeAgo({ ago: Number(frame.ago), lasted: Number(frame.lasted) }) : null;
+    // And how much it's learned from, for Settings here.
+    case 'trained':
+      trainingReport = { kept: Math.max(0, Number(frame.kept) || 0), clips: Math.max(0, Number(frame.clips) || 0) };
+      post(desktopState());
+      return true;
     // Controls on his website: this Mac's scripts, within what the server may ask (script-remote.js).
     case 'scripts':
       if (!scriptsRemote) return { ok: false, why: 'Jester is still starting on your Mac.' };
@@ -3207,6 +3351,36 @@ async function start() {
   dispatch = createDispatcher({ driver: input, getSettings: loadSettings, canPost, refused: () => inputRefusal({ open: false, form: 'note' }), onJester, toast: (text, options) => overlays.toast(text, options), log });
   // Switched on by refresh(), from the settings.
   speech = startSpeech({ log });
+  // Training mode: the camera's side is this computer's (a server has none); the voice's, wherever it's heard.
+  if (!SERVER) {
+    faceWitness = createFaceWitness({ onSeen: () => post(desktopState()) });
+    speech.tapAudio((samples) => engineHost?.watchingFace && faceWitness.audio(samples));
+  }
+  voiceTrainer = createVoiceTrainer({
+    storage: storage.local,
+    active: () => trainingActive(),
+    judge: (line) => (SERVER ? remoteHands?.face(line) : faceWitness?.judge(line)) ?? null,
+    apply: trainedVoice,
+    report: (report) => {
+      trainingReport = report;
+      if (SERVER) remoteHands?.trained(report);
+      post(desktopState());
+    },
+    log
+  });
+  voiceTrainer.load().then(
+    () => {
+      trainingReport = { kept: voiceTrainer.state.kept, clips: voiceTrainer.state.clips };
+      speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned, voiceTrainer.impression);
+    },
+    (err) => log('training: couldn’t read what it learned:', err.message)
+  );
+  // Not the user's voice, by the voiceprint, but training mode may say otherwise: the camera saw whose it was.
+  speech.onStranger((line) => {
+    if (!trainingActive()) return;
+    const across = !!conversation && (conversation.speaking || conversation.overlapped(line.startedAt));
+    void voiceTrainer.heard(line, { overlapped: across, print: voiceprint });
+  });
   modelFetcher = createModelFetcher({ dir: MODELS_DIR, log, onChange: modelsChanged, ...(env.JESTER_MODELS_URL ? { models: modelsAt(env.JESTER_MODELS_URL) } : {}) });
   // A dry run describes `open`, `osascript` and `shortcuts` too, rather than running them.
   const runTool = env.JESTER_DRIVER_DRY ? async (file, args) => (log('dry run: would run', file, JSON.stringify(args)), '') : runFile;
@@ -3811,6 +3985,8 @@ async function start() {
   engineHost = startEngineHost({
     screen: primaryScreen,
     context: () => context,
+    // Training mode, or a scan: the face as each frame read it (face-witness.js).
+    onFace: (face) => faceWitness?.read(face),
     onStatus: (status) => {
       const started = status.state === ENGINE.RUNNING && engine.state !== ENGINE.RUNNING;
       const fell = status.state === ENGINE.SLEEPING && engine.state !== ENGINE.SLEEPING;
@@ -3872,6 +4048,8 @@ async function start() {
       cursorFrames = 0;
     }
   });
+  // Training mode or a scan from before the engine was there to ask: the camera watches the face from the start.
+  syncTraining();
   listenToPages();
   onStorageChanged((changes, area) => {
     if (area === 'local' && changes.settings) refresh();

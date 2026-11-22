@@ -6,8 +6,8 @@
  * Float32 chunks; a voice-activity detector decides where the utterance ends,
  * and the recognizer turns it into text. Nothing leaves the machine.
  *
- * Messages in:  start {model} · begin · listen · speaking {on} · awaiting {ms} · voiceprint {print, learned?} · teaching {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
- * Messages out: ready {model, loadMs} · speech/activity {startedAt, interrupt?, verified?, text?} · partial {text} · final {text, decodeMs} · wake · early {text, startedAt, unsure?} · resumed · heard {text, startedAt, decodeMs, afterMs, early?, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {score, enrolled, seconds} · ended {startedAt} · error {detail}
+ * Messages in:  start {model} · begin · listen · speaking {on} · awaiting {ms} · voiceprint {print, learned?, trained?} · teaching {on} · training {on} · keep {dir} · audio {samples} · end · abort · transcribe {samples}
+ * Messages out: ready {model, loadMs} · speech/activity {startedAt, interrupt?, verified?, text?} · partial {text} · final {text, decodeMs} · wake · early {text, startedAt, unsure?} · resumed · heard {text, startedAt, endedAt, decodeMs, afterMs, early?, score, enrolled, seconds, unsure?, voice?, learn?} · stranger {startedAt, endedAt, score, enrolled, seconds, voice?} · ended {startedAt} · error {detail}
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
@@ -23,6 +23,9 @@
  * With a voiceprint set, a voice that isn't the user's is never even decoded:
  * no text of what anyone else says exists, here or anywhere. One that's only
  * maybe theirs (voiceprint.js MAYBE) is, marked `unsure`: it needs his name.
+ * While training mode is on (`training`), every utterance comes out with its
+ * voice, a stranger's too, still undecoded: whether it's kept is the camera's
+ * to say (voice-training.js), and the rest is let go there and then.
  *
  * JESTER_SAVE_SPEECH=folder keeps each utterance as a WAV with what was
  * heard beside it, for comparing models on a real voice. Off unless set.
@@ -138,6 +141,10 @@ let voiceprint = null;
 let keepDir = '';
 /** Other ways the user's been heard to sound, learned from use (voiceprint.js). */
 let learned = [];
+/** What training mode taught of the user's voice (voice-training.js): {centroid, exemplars}, or null. */
+let trained = null;
+/** Training mode: every utterance's voice goes out with it. */
+let training = false;
 /** Reading the lines that make a voiceprint: each utterance comes with its voice. */
 let teaching = false;
 /** Playback is active: only then do the extra low-latency speaker/text checks. */
@@ -249,16 +256,16 @@ function keepUnsure(samples, facts) {
 }
 
 /** Decodes off the audio's path, so nothing said meanwhile is lost. Falling behind keeps only the newest. */
-async function overheard(samples, ahead = null, startedAt = null) {
+async function overheard(samples, ahead = null, startedAt = null, endedAt = null) {
   const during = listens;
   if (decoding) {
-    waiting = { samples, ahead, startedAt, during };
+    waiting = { samples, ahead, startedAt, endedAt, during };
     return;
   }
   decoding = true;
   try {
-    for (let next = { samples, ahead, startedAt, during }; next; ) {
-      await hear(next.samples, next.ahead, next.startedAt, next.during);
+    for (let next = { samples, ahead, startedAt, endedAt, during }; next; ) {
+      await hear(next.samples, next.ahead, next.startedAt, next.during, next.endedAt);
       next = waiting;
       waiting = null;
     }
@@ -270,8 +277,8 @@ async function overheard(samples, ahead = null, startedAt = null) {
 /** Who it was, then, if that's someone to listen to, what they said: a stranger's words aren't read. */
 async function judge(samples, startedAt = null) {
   const seconds = samples.length / SAMPLE_RATE;
-  const voice = voiceprint || teaching ? voiceOf(samples) : null;
-  const { score, enrolled } = voiceprint ? (voice ? scored(voice, voiceprint, learned) : { score: 0, enrolled: 0 }) : { score: null, enrolled: null };
+  const voice = voiceprint || teaching || training ? voiceOf(samples) : null;
+  const { score, enrolled } = voiceprint ? (voice ? scored(voice, voiceprint, learned, trained) : { score: 0, enrolled: 0 }) : { score: null, enrolled: null };
   let who = voiceprint && !teaching ? judged(score, seconds) : 'you';
   // A short answer to what he's just asked, ended once he'd stopped: read, and whoever asked says what it's worth.
   const answer = who === 'stranger' && !speaking && seconds <= ANSWER_SECONDS && score >= ANSWER_FLOOR && Number.isFinite(startedAt) && startedAt <= awaitUntil && startedAt >= quietSince - ANSWER_EARLY_MS;
@@ -280,8 +287,11 @@ async function judge(samples, startedAt = null) {
   return { seconds, voice, score, enrolled, who, ...(await decode(samples)) };
 }
 
-/** An utterance that's over, told. `ahead`: it was read at its last pause (readAhead), and nothing was said after. */
-async function hear(samples, ahead, startedAt, during) {
+/**
+ * An utterance that's over, told. `ahead`: it was read at its last pause (readAhead), and nothing was said after.
+ * `endedAt`: when its last word did, about (the pause that ended it taken off).
+ */
+async function hear(samples, ahead, startedAt, during, endedAt = null) {
   const began = performance.now();
   const early = ahead ? await ahead.catch(() => null) : null;
   const { seconds, voice, score, enrolled, who, text, decodeMs } = early || (await judge(samples, startedAt));
@@ -289,15 +299,18 @@ async function hear(samples, ahead, startedAt, during) {
   const round = (value) => Math.round(value * 1000) / 1000;
   if (who === 'stranger') {
     if (keepDir && score >= KEEP_FLOOR) keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds) });
-    return send({ type: 'stranger', startedAt, score, enrolled, seconds });
+    // Training: its voice, for the camera to say whose it was. Its words are never read.
+    return send({ type: 'stranger', startedAt, endedAt, score, enrolled, seconds, ...(training && voice ? { voice: Array.from(voice) } : {}) });
   }
   if (keepDir && who === 'maybe') keepUnsure(samples, { who, score: round(score), enrolled: round(enrolled), seconds: round(seconds), text });
   if (!text) return send({ type: 'ended', startedAt });
-  // The voice goes along while teaching, and when it's one more way the user sounds: kept only if this was for him.
-  const keep = !!voice && (teaching || (who === 'you' && !!voiceprint && worthLearning(voice, { score, enrolled, seconds }, learned)));
+  // The voice goes along while teaching and training, and when it's one more way the user sounds: kept only if this
+  // was for him.
+  const learns = !!voice && !teaching && who === 'you' && !!voiceprint && worthLearning(voice, { score, enrolled, seconds }, learned);
+  const keep = !!voice && (teaching || training || learns);
   // afterMs: how long after the last word this is: the pause that ended it, then telling whose voice and what it said.
   // early: these are the words told at the pause, so what was begun on them then is this utterance's.
-  return send({ type: 'heard', text, startedAt, decodeMs, afterMs: Math.round(END_SILENCE_S * 1000 + performance.now() - began), ...(early ? { early: true } : {}), score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(teaching ? {} : { learn: true }) } : {}) });
+  return send({ type: 'heard', text, startedAt, endedAt, decodeMs, afterMs: Math.round(END_SILENCE_S * 1000 + performance.now() - began), ...(early ? { early: true } : {}), score, enrolled, seconds, ...(who === 'maybe' ? { unsure: true } : {}), ...(keep ? { voice: Array.from(voice), ...(learns ? { learn: true } : {}) } : {}) });
 }
 
 /** One utterance over, and straight on to the next. */
@@ -306,8 +319,14 @@ function endOverheard() {
   // What was read at the pause is what was said, when nothing was said after it.
   const ahead = state.ahead;
   const startedAt = state.startedAt;
+  // When the last word was, by the audio itself rather than the clock (a decode can hold up what comes after it):
+  // from when speech began, what's been heard since, less the pause that ended it, unless it was cut off at its length.
+  const heardSince = (state.windows.length - Math.max(0, state.speechAt)) * WINDOW;
+  const cutOff = heardSince >= MAX_HEARD_S * SAMPLE_RATE;
+  const spoken = Math.max(MIN_SPEECH_S * SAMPLE_RATE, heardSince + MIN_SPEECH_S * SAMPLE_RATE - (cutOff ? 0 : END_SILENCE_S * SAMPLE_RATE));
+  const endedAt = Number.isFinite(startedAt) ? Math.round(startedAt + (spoken / SAMPLE_RATE) * 1000) : null;
   state = freshState(true);
-  if (samples.length) overheard(samples, ahead, startedAt).catch((err) => send({ type: 'error', startedAt, detail: String(err?.message || err) }));
+  if (samples.length) overheard(samples, ahead, startedAt, endedAt).catch((err) => send({ type: 'error', startedAt, detail: String(err?.message || err) }));
 }
 
 /**
@@ -346,7 +365,7 @@ async function look() {
     if (voiceprint) {
       // Only his name wakes him early, so maybe the user's will do.
       const voice = voiceOf(samples);
-      if (judged(voice ? scored(voice, voiceprint, learned).score : 0, samples.length / SAMPLE_RATE) === 'stranger') return;
+      if (judged(voice ? scored(voice, voiceprint, learned, trained).score : 0, samples.length / SAMPLE_RATE) === 'stranger') return;
     }
     const { text } = await decode(samples);
     if (state !== during || during.woke || !(named(text) || (whole && wakesEarly(text)))) return;
@@ -377,7 +396,7 @@ async function checkInterruption() {
     if (voiceprint) {
       const voice = voiceOf(samples);
       if (!voice) return;
-      const { score, enrolled } = scored(voice, voiceprint, learned);
+      const { score, enrolled } = scored(voice, voiceprint, learned, trained);
       if (!current() || judged(score, seconds) !== 'you') return;
       during.interruptVerified = true;
       send({ type: 'activity', startedAt: during.startedAt, interrupt: true, verified: true, unsure: false, score, enrolled, seconds });
@@ -523,6 +542,12 @@ port.on('message', async ({ data }) => {
       case 'voiceprint':
         voiceprint = data.print ? Float32Array.from(data.print) : null;
         learned = voiceprint && Array.isArray(data.learned) ? data.learned.map((voice) => Float32Array.from(voice)) : [];
+        trained = voiceprint && Array.isArray(data.trained?.centroid)
+          ? { centroid: Float32Array.from(data.trained.centroid), exemplars: (Array.isArray(data.trained.exemplars) ? data.trained.exemplars : []).map((voice) => Float32Array.from(voice)) }
+          : null;
+        break;
+      case 'training':
+        training = !!data.on;
         break;
       case 'speaking':
         if (speaking && data.on !== true) quietSince = Date.now();

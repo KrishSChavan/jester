@@ -242,6 +242,7 @@ function renderVoice() {
   renderModels();
   renderSpeechModel(missing);
   renderContinuous();
+  renderFace();
 }
 
 /**
@@ -294,6 +295,45 @@ function renderPictures() {
   $('pictures-hint').textContent = `When a window’s words aren’t enough, the assistant may send a model that reads pictures one of that window: up to three a task, never with a password field showing.${recording && !recording.granted ? ' Needs Screen Recording, under Permissions.' : ''}`;
 }
 
+/**
+ * The face, scanned so he knows it's the user talking, and training mode, which learns their voice from what they say
+ * facing the camera (main/face-witness.js, main/voice-training.js). The camera's view shows while it scans.
+ */
+let facePreviewTimer = null;
+function renderFace() {
+  const face = desktop?.face;
+  if (!face) return;
+  const scanning = face.scanning;
+  $('face-scan').textContent = scanning ? 'Cancel' : face.known ? 'Scan again' : 'Scan my face';
+  $('face-scan').disabled = !settings.enabled;
+  $('face-forget').hidden = !face.known || !!scanning;
+  $('face-hint').textContent = scanning
+    ? `Look at the camera, and hold still… ${Math.round((scanning.progress || 0) * 100)}%`
+    : face.problem
+      ? face.problem
+      : face.known
+        ? 'He knows your face: the shape of it, as a few numbers kept on this computer, never a picture and never sent anywhere.'
+        : 'A few seconds looking at the camera, so he can tell it’s you talking to him. What’s kept is the shape of your face, as a few numbers on this computer: never a picture, and never sent anywhere.';
+  // The camera's view, while it scans: asked for, as the Activity page asks, and let go once it's done.
+  if (scanning && !facePreviewTimer) {
+    facePreviewTimer = setInterval(askForPreview, 700);
+    askForPreview();
+  } else if (!scanning && facePreviewTimer) {
+    clearInterval(facePreviewTimer);
+    facePreviewTimer = null;
+  }
+  if (!scanning) $('face-preview').hidden = true;
+  $('voiceTraining').checked = !!face.training;
+  $('voiceTraining').disabled = !settings.enabled || (!face.known && !face.training);
+  const learned = face.kept ? ` So far he’s learned from ${face.kept} thing${face.kept === 1 ? '' : 's'} you said.` : '';
+  const seen = { you: 'He can see you.', someone: 'That isn’t you in front of the camera, so nothing it says is learned.', turned: 'Face the camera, so he can tell it’s you.', none: 'He can’t see your face right now.' }[face.seen] || '';
+  $('training-hint').textContent = !face.known
+    ? 'Scan your face first. Then, while this is on, the camera stays on, and what you say facing it teaches him your voice, so he’s surer it’s you when it’s off.'
+    : face.training
+      ? `${!face.hearing ? 'He isn’t listening, so there’s nothing to learn from: turn on Continuous assistant above. ' : ''}${seen}${learned} Talk to him as usual. Only what you say with your own face on camera, mouth moving with it, is learned from.`
+      : `While this is on, the camera stays on, and what you say facing it teaches him your voice, so he’s surer it’s you when it’s off.${learned} Nobody else on camera, and no voice heard while your mouth is still, is learned from.`;
+}
+
 /** The always-on assistant: whether it can listen, and how he sounds. */
 function renderContinuous() {
   const { listening, problem, voice, knowsYou, teaching } = desktop?.continuous || {};
@@ -309,7 +349,7 @@ function renderContinuous() {
     ? `Read this aloud (${teaching.done + 1} of ${teaching.of}): “${teaching.line}”`
     : knowsYou
       ? 'He only listens to you. Anyone else is ignored before their words are even worked out, and you can talk on without saying his name.'
-      : 'Read five sentences so he can tell you from everyone else. What’s kept describes your voice and can’t be played back. It stays on this computer.';
+      : 'Read five sentences so he can tell you from everyone else, or scan your face below and turn on Training mode, and he learns it as you talk. What’s kept describes your voice and can’t be played back. It stays on this computer.';
   const select = $('jesterVoice');
   const there = voice?.state !== 'missing';
   select.replaceChildren(...(voice?.choices || []).map((choice) => new Option(`${choice.name} (${choice.about})`, choice.id)));
@@ -1119,6 +1159,10 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'jester/preview-frame':
       $('camera-preview').src = message.dataUrl;
       $('camera-preview').hidden = false;
+      if (desktop?.face?.scanning) {
+        $('face-preview').src = message.dataUrl;
+        $('face-preview').hidden = false;
+      }
       break;
     default:
       break;
@@ -1390,6 +1434,9 @@ $('jester-voice-hear').addEventListener('click', async () => {
 $('voice-print-teach').addEventListener('click', () =>
   chrome.runtime.sendMessage({ type: 'jester/desktop-voiceprint', op: desktop?.continuous?.teaching ? 'cancel' : 'teach' }));
 $('voice-print-forget').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-voiceprint', op: 'forget' }));
+$('face-scan').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-face', op: desktop?.face?.scanning ? 'cancel' : 'scan' }));
+$('face-forget').addEventListener('click', () => chrome.runtime.sendMessage({ type: 'jester/desktop-face', op: 'forget' }));
+$('voiceTraining').addEventListener('change', (event) => save({ voiceTraining: event.target.checked }));
 $('forget-conversations').addEventListener('click', async (event) => {
   await chrome.runtime.sendMessage({ type: 'jester/desktop-forget' });
   event.target.textContent = 'Forgotten';

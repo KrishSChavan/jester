@@ -60,6 +60,13 @@ export function startSpeech({ log = () => undefined } = {}) {
   let voiceprint = null;
   /** Other ways the user's been heard to sound (voiceprint.js). */
   let learned = [];
+  /** What training mode taught of it (voice-training.js), and whether it's on: every utterance's voice comes out then. */
+  let trained = null;
+  let training = false;
+  /** Told of an utterance that wasn't the user's, with its voice, while training: the camera may say it was. */
+  let stranger = null;
+  /** Told of the always-on mic's audio as it comes (face-witness.js keeps how loud it was). */
+  let tap = null;
   /** Where voices he wasn't sure of are kept for tuning, or '' (the user's choice, off until made). */
   let keepDir = '';
   let teaching = false;
@@ -120,7 +127,10 @@ export function startSpeech({ log = () => undefined } = {}) {
       if (message?.type === 'wake') return void waker?.(message);
       if (message?.type === 'early') return void pauser?.(message.text, message);
       if (message?.type === 'resumed') return void pauser?.(null);
-      if (message?.type === 'stranger') return log(`speech: not your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
+      if (message?.type === 'stranger') {
+        if (message.voice) stranger?.(message);
+        return log(`speech: not your voice (${message.score.toFixed(2)}, ${message.seconds.toFixed(1)} s)`);
+      }
       if (message?.type === 'error') log('speech error:', message.detail);
       if (message?.type === 'final' && current) {
         // Audio heard well short of the time taken means some never arrived.
@@ -147,9 +157,10 @@ export function startSpeech({ log = () => undefined } = {}) {
     });
     // Messages queue behind this one, so audio sent while it loads waits.
     child.postMessage({ type: 'start', model });
-    child.postMessage({ type: 'voiceprint', print: voiceprint, learned });
+    child.postMessage({ type: 'voiceprint', print: voiceprint, learned, trained });
     child.postMessage({ type: 'keep', dir: keepDir });
     child.postMessage({ type: 'teaching', on: teaching });
+    child.postMessage({ type: 'training', on: training });
     child.postMessage({ type: 'speaking', on: speaking });
     return child;
   }
@@ -201,6 +212,7 @@ export function startSpeech({ log = () => undefined } = {}) {
   // The always-on mic, unless a command has it. Only ever the voice page's.
   ipcMain.on('jester:listen-audio', (event, samples) => {
     if (!String(event.senderFrame?.url || event.sender.getURL()).startsWith(VOICE_PAGE)) return;
+    if (samples?.length) tap?.(samples);
     // Using him in the cloud: the server's recognizer hears it (cloud-link.js), not this one.
     if (diverted) return void (samples?.length && diverted(samples));
     if (listener && !current && samples?.length) service?.postMessage({ type: 'audio', samples });
@@ -284,12 +296,31 @@ export function startSpeech({ log = () => undefined } = {}) {
       speaking = next;
       service?.postMessage({ type: 'speaking', on: speaking });
     },
-    /** @param {number[]|null} print */
-    /** `known`: other ways the user's been heard to sound, learned from use; they count only with a voiceprint. */
-    setVoiceprint(print, known = []) {
+    /**
+     * `known`: other ways the user's been heard to sound, learned from use; `taught`: what training mode taught
+     * (voice-training.js buildImpression). Both count only with a voiceprint.
+     * @param {number[]|null} print
+     */
+    setVoiceprint(print, known = [], taught = null) {
       voiceprint = print;
       learned = print ? known : [];
-      service?.postMessage({ type: 'voiceprint', print, learned });
+      trained = print && taught?.centroid ? { centroid: Array.from(taught.centroid), exemplars: (taught.exemplars || []).map((voice) => Array.from(voice)) } : null;
+      service?.postMessage({ type: 'voiceprint', print, learned, trained });
+    },
+    /** Training mode: while on, every utterance comes out with its voice, a stranger's (undecoded) too. */
+    setTraining(on) {
+      const next = on === true;
+      if (next === training) return;
+      training = next;
+      service?.postMessage({ type: 'training', on: training });
+    },
+    /** `onStranger(message)`: an utterance that wasn't the user's, with its voice, while training. */
+    onStranger(fn) {
+      stranger = typeof fn === 'function' ? fn : null;
+    },
+    /** `fn(samples)`: the always-on mic's audio, as it arrives, wherever it then goes. */
+    tapAudio(fn) {
+      tap = typeof fn === 'function' ? fn : null;
     },
     /** Keeps voices he wasn't sure of in `dir`, for tuning; '' stops. */
     setKeeping(dir) {

@@ -27,17 +27,20 @@ export const STATUS_TEXT = {
  * @param {{paired?:boolean}} [state.watch]  the Apple Watch (watch.js)
  * @param {{scripts:{id:string, name:string, summary:string, items:object[]}[], scenes:{id:string, name:string}[]}|null} [state.scripts]
  *   the user's scripts shown in the menu bar, and their scenes (scripts.js menu)
+ * @param {boolean} [state.face]  the user's face is scanned: training mode can be switched on (main.js, face-witness.js)
  * @param {string} [state.platform]
  * @returns {{tooltip:string, title:string, items:object[]}} title: beside the icon, on a Mac
  */
-export function trayModel({ engine, settings, missing = [], voice = 'missing', watch = null, ringing = null, scripts = null, platform = process.platform }) {
+export function trayModel({ engine, settings, missing = [], voice = 'missing', watch = null, ringing = null, scripts = null, face = false, platform = process.platform }) {
   const on = !!settings?.enabled;
   // Off, the camera's closed and voice, the watch and talking to him carry on.
   const gestures = settings?.gesturesEnabled !== false;
   const asleep = on && engine?.state === ENGINE.SLEEPING;
+  // Training mode keeps the camera on with Gestures off: for the face, and nothing a hand does.
+  const training = !!face && settings?.voiceTraining === true;
   const status = asleep
     ? `${STATUS_TEXT[ENGINE.SLEEPING]} — ${wakeHint(resumeGlyphs(settings), platform)}`
-    : !gestures ? 'Gestures off' : STATUS_TEXT[engine?.state] || engine?.state || STATUS_TEXT[ENGINE.OFF];
+    : !gestures ? (training ? 'Gestures off · the camera’s on for training' : 'Gestures off') : STATUS_TEXT[engine?.state] || engine?.state || STATUS_TEXT[ENGINE.OFF];
   const items = [
     // A timer ringing: the first thing in his menu is the way to turn it off.
     ...(ringing ? [{ id: 'ring', label: `Stop the ringing — ${ringing.label}` }, { type: 'separator' }] : []),
@@ -60,6 +63,8 @@ export function trayModel({ engine, settings, missing = [], voice = 'missing', w
     if (on && settings?.voiceEnabled) items.push({ id: 'listen', label: 'Speak a command', accelerator: 'Alt+Shift+J', registerAccelerator: false });
     // The mic stays open with this on: the way to close it is always one click away.
     if (on && settings?.voiceEnabled) items.push({ id: 'continuous', label: 'Continuous assistant', type: 'checkbox', checked: !!settings?.continuousAssistant });
+    // Learning their voice from the camera, once it knows their face: on and off as quickly as the mic.
+    if (on && settings?.voiceEnabled && face) items.push({ id: 'training', label: 'Training mode', type: 'checkbox', checked: training });
   }
   items.push({ type: 'separator' });
   if (missing.length) items.push({ id: 'permissions', label: `Allow ${missing.map((item) => item.label).join(' and ')}…` });

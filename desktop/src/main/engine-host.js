@@ -36,12 +36,15 @@ export async function loadSettings() {
  * @param {(text:string) => void} [hooks.onVoiceCommand]  a finished utterance
  * @param {(status) => void} [hooks.onStatus]
  * @param {(telemetry) => void} [hooks.onTelemetry]
+ * @param {(face:object) => void} [hooks.onFace]  the face, read off a frame, while watched (watchFace)
  */
 export function startEngineHost(hooks) {
   const fromEngine = (sender) => String(sender?.url || '').startsWith(ENGINE_PAGE);
   /** What gestures do for now, when not the app's own: the linked extension's, with Chrome in front. */
   let bindings = null;
-  const forEngine = (stored) => ({ ...desktopSettings(stored), ...(bindings || {}) });
+  /** The face is watched (training mode, or a scan): the camera stays on for it, Gestures off or not. */
+  let watching = false;
+  const forEngine = (stored) => ({ ...desktopSettings(stored), ...(bindings || {}), ...(watching ? { faceWatch: true } : {}) });
 
   onMessage(async (message, sender) => {
     if (!fromEngine(sender)) return undefined;
@@ -72,6 +75,9 @@ export function startEngineHost(hooks) {
       case MSG.TELEMETRY:
         hooks.onTelemetry?.(message.telemetry);
         return undefined;
+      case MSG.FACE:
+        if (watching && message.face && typeof message.face === 'object') hooks.onFace?.(message.face);
+        return undefined;
       default:
         return undefined;
     }
@@ -97,6 +103,18 @@ export function startEngineHost(hooks) {
     async useBindings(next) {
       bindings = next || null;
       post({ type: MSG.ENGINE_SETTINGS, settings: forEngine((await storage.local.get('settings')).settings) });
+    },
+    /**
+     * The face read off every frame and sent here, or no longer: the camera's on for it, Gestures off or not, and
+     * with them off nothing a hand does does anything.
+     */
+    async watchFace(on) {
+      if (!!on === watching) return;
+      watching = !!on;
+      post({ type: MSG.ENGINE_SETTINGS, settings: forEngine((await storage.local.get('settings')).settings) });
+    },
+    get watchingFace() {
+      return watching;
     },
     suspend(suspend) {
       post({ type: MSG.ENGINE_CONFIG, suspend: !!suspend });

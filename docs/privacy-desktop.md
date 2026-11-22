@@ -21,6 +21,18 @@ This is for **Jester Desktop**. The Chrome extension's policy is
   unread.
 - **The camera.** Frames are read on your computer for gestures and the
   pointer, and never kept or sent.
+- **Your face and training mode.** Scanning your face keeps the shape of it
+  as 120 numbers (distances between points on it), sealed on your computer:
+  never a picture, and never sent anywhere, your server included. While
+  training mode is on, the camera stays on, and each frame is turned into
+  those numbers and how open your mouth is, kept for a minute and a half to
+  tell whether something just said was you talking. Each thing said while
+  it's on has its voice's numbers worked out, someone else's too (their words
+  are still never read); only those said with your face talking on camera are
+  kept, the newest 60, sealed where your voiceprint is. On the cloud setup
+  your server asks your computer "was that them?" about each line and is told
+  yes or no; nothing of your face goes with the answer. Forgetting your voice
+  forgets all of it; forgetting your face turns training off.
 - **His voice** is made on your computer.
 - **Your model keys** are stored encrypted with your system's keychain
   (macOS) or data protection (Windows), and never shown again.

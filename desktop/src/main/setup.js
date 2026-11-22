@@ -17,6 +17,7 @@
  * @property {boolean} [hearing]  the recognizer's model is downloaded
  * @property {boolean} [ownVoice]  his own voice's model is downloaded
  * @property {boolean} [voiceprint]  he's been taught the user's voice
+ * @property {boolean} [face]  the user's face is scanned, for training mode
  * @property {boolean} [vault]  an Obsidian vault is chosen
  * @property {boolean} [day]  where they are, or a calendar, is connected
  * @property {boolean} [phone]  their phone is set up and on
@@ -53,7 +54,7 @@ function downloading(fetch, ids, idle) {
  * A computer's own: macOS's permissions, the camera's gestures, and his Chrome extension. A browser has none of
  * them to give, so his website doesn't list them (the user, 2026-11-19, on his app on their phone).
  */
-const COMPUTER_ONLY = ['permissions', 'gestures', 'chrome'];
+const COMPUTER_ONLY = ['permissions', 'gestures', 'chrome', 'face'];
 
 /**
  * In a browser, the phone's step is this device's notifications (main/push.js), turned on there and then, in place
@@ -134,6 +135,16 @@ function allSteps(state) {
       title: 'Teach him your voice',
       why: state.voiceprint ? 'He knows it, and answers you and not the room.' : 'Read five sentences, so he answers you and not anyone who says his name.',
       done: !!state.voiceprint,
+      required: false,
+      go: 'settings/assistant'
+    },
+    {
+      id: 'face',
+      title: 'Show him your face',
+      why: state.face
+        ? 'He knows it. With Training mode on, what you say facing the camera teaches him your voice.'
+        : 'A few seconds in front of the camera. Then, with Training mode on, what you say facing it teaches him your voice, so he’s surer it’s you.',
+      done: !!state.face,
       required: false,
       go: 'settings/assistant'
     },

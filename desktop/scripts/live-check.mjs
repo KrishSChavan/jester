@@ -59,9 +59,14 @@
  *            words are what's said; a question to the user shows its answers, is answered by typing, and the choice
  *            is kept and listed in Settings › Tools and choices; and his tools open to other apps over his own
  *            socket, speaking MCP, only while Settings says so.
+ *   training the face scanned in Settings and training mode on, with Gestures off: the camera is on for the face alone,
+ *            who's in front of it is told, and lines said through the mic (a made-up voice, macOS's `say`, played
+ *            by the fake mic) are learned from only while the scanned face is talking with them, until training has
+ *            made a voiceprint of its own. The camera's face is made up too: the engine page's face tracker is
+ *            replaced by one that sees a face with this script's numbers, its mouth opening with the mic's sound.
  */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -79,7 +84,7 @@ if (!process.versions.electron) {
   const child = spawn(electron, [here, ...process.argv.slice(2)], { stdio: 'inherit', env });
   child.on('exit', (code) => process.exit(code ?? 1));
 } else {
-  const { app, BrowserWindow, dialog, powerMonitor, safeStorage, shell } = await import('electron');
+  const { app, BrowserWindow, dialog, ipcMain, powerMonitor, safeStorage, shell } = await import('electron');
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'jester-live-'));
   // Presence looks every quarter second, and what's held is told half a second after they're back.
   Object.assign(process.env, { JESTER_DATA_DIR: scratch, JESTER_FAKE_MEDIA: '1', JESTER_DRIVER_DRY: '1', JESTER_LOG: '1', JESTER_NO_LINK: '1', JESTER_OPEN_SETTINGS: '1', JESTER_TICK_MS: '250', JESTER_RING_MS: '3000', JESTER_SETTLE_MS: '500', JESTER_MORNING_ENDS: '24', JESTER_ANY_HOUR: '1' });
@@ -1474,8 +1479,148 @@ if (process.argv[2] === 'serve') {
         await uses('paid', ['talk', 'act']);
         await uses('free', ['talk', 'act']);
       }
+    },
+
+    /** Training mode: the face scanned, and what's said with it talking on camera learned from, until it's a voiceprint. */
+    async training() {
+      if (process.platform !== 'darwin') return check('training needs macOS’s `say` for its made-up voice', true);
+      const engine = await until('the engine page', () => BrowserWindow.getAllWindows().find((win) => win.webContents.getURL().startsWith('jester://ext/src/offscreen/offscreen.html') && !win.webContents.isLoading()));
+      const inEngine = (code) => engine.webContents.executeJavaScript(`(async () => { ${code} })()`, true);
+      await inEngine(FAKE_FACE);
+      // The mic's sound, as main.js gets it from the voice page: its loudness, every 32 ms, to the made-up face's mouth.
+      const levels = (event, samples) => {
+        if (!samples?.length) return;
+        const now = Date.now();
+        const out = [];
+        for (let start = 0; start + 512 <= samples.length; start += 512) {
+          let sum = 0;
+          for (let i = start; i < start + 512; i += 1) sum += samples[i] * samples[i];
+          out.push([Math.round(now - ((samples.length - start - 256) / 16000) * 1000), Math.sqrt(sum / 512)]);
+        }
+        void inEngine(`fakeFace.levels.push(...${JSON.stringify(out)}); fakeFace.levels = fakeFace.levels.slice(-200); return true;`).catch(() => undefined);
+      };
+      ipcMain.on('jester:listen-audio', levels);
+      const setting = (patch) => inPage(`const { settings } = await chrome.storage.local.get('settings'); await chrome.storage.local.set({ settings: { ...settings, ...${JSON.stringify(patch)} } });`);
+      const state = () => inPage(`return chrome.runtime.sendMessage({ type: 'jester/desktop-state' });`);
+      const logged = (pattern) => (logLines().match(new RegExp(pattern, 'g')) || []).length;
+      try {
+        await setting({ enabled: true, gesturesEnabled: false, voiceEnabled: true, continuousAssistant: false, voiceTraining: false });
+        await inPage(`window.jesterHome.go('settings/assistant', { instant: true });`);
+        await until('the face’s row', () => inPage(`return document.getElementById('face-scan')?.textContent === 'Scan my face';`));
+        check('Settings offers to scan the face, and training waits for it', await inPage(`return document.getElementById('voiceTraining').disabled === true && /Scan your face first/.test(document.getElementById('training-hint').textContent);`));
+        await inPage(`document.getElementById('face-scan').click();`);
+        await until('a scan under way', async () => (await state()).face?.scanning);
+        check('the scan says how far it’s got', /Look at the camera, and hold still/.test(await inPage(`return document.getElementById('face-hint').textContent;`)));
+        await until('the face, scanned', async () => (await state()).face?.known, 30000);
+        check('the face is scanned in a few seconds', logged('face: scanned') === 1, logLines().split('\n').filter((line) => /face:/.test(line)).join(' | '));
+        await until('Settings saying so', () => inPage(`return document.getElementById('face-scan').textContent === 'Scan again' && document.getElementById('voiceTraining').disabled === false;`));
+        check('Settings says he knows it, and training can be turned on', true);
+        // Gestures off and training off: the camera closes again.
+        await until('the camera closed after the scan', async () => (await state()).face?.camera === 'off', 15000);
+        check('with Gestures off, the camera’s on for the scan alone', true);
+
+        await setting({ voiceTraining: true });
+        await until('the camera on for training', async () => (await state()).face?.camera === 'running', 15000);
+        await until('him seeing them', async () => (await state()).face?.seen === 'you');
+        check('training on: the camera’s on, Gestures still off, and he sees them', true);
+        await inEngine(`fakeFace.build = 'other'; return true;`);
+        await until('someone else in front of it', async () => (await state()).face?.seen === 'someone');
+        check('someone else in front of the camera is told apart', /That isn’t you in front of the camera/.test(await inPage(`return document.getElementById('training-hint').textContent;`)));
+
+        // The mic opens: the made-up voice plays, someone else's face in front of the camera first.
+        await setting({ continuousAssistant: true });
+        await until('a line not learned from, the face not theirs', () => logged('training: not learned from: that wasn’t your face') >= 1, 60000);
+        check('what’s said while someone else’s face is in view isn’t learned from', logged('training: learned from') === 0);
+        await inEngine(`fakeFace.build = 'mine'; return true;`);
+        await until('a voiceprint made by training', () => logged('voice: your voiceprint, made from') === 1, 90000);
+        const learned = logged('training: learned from what you said');
+        check('lines said with their face talking are learned from, until there’s a voiceprint of them', learned >= 6, `${learned} learned`);
+        const now = await state();
+        check('he knows their voice now, and Settings says how much he learned from', now.continuous?.knowsYou === true && now.face?.kept >= 6, JSON.stringify(now.face));
+        check('nothing of the face but its numbers is kept, and they stay on this computer', !fs.readdirSync(scratch).some((name) => /\.(?:png|jpe?g)$/.test(name)));
+        // How each line went, for reading: the camera's numbers beside it.
+        for (const line of logLines().split('\n').filter((text) => /training:|voice: your voiceprint|speech: (?:your|maybe|not your)/.test(text))) console.log(`        ${line.replace(/^.*?(training:|voice:|speech:)/, '$1')}`);
+      } finally {
+        ipcMain.removeListener('jester:listen-audio', levels);
+        await setting({ continuousAssistant: false, voiceTraining: false, enabled: false, voiceEnabled: false }).catch(() => undefined);
+        await inPage(`window.jesterHome.go('main', { instant: true });`).catch(() => undefined);
+      }
     }
   };
+
+  /** Lines a made-up voice says (macOS `say`), a second and a half apart, as one WAV at 16 kHz: what the fake mic plays. */
+  const TRAINING_LINES = ['Yes, please.', 'Okay, that sounds good to me.', 'No thanks, not right now.', 'Can you turn the music down a little?', 'What is the weather like this afternoon?', 'Remind me to call my mom after class.', 'I think I will go for a walk later.', 'Sure, go ahead and do that.', 'How long does it take to boil an egg?', 'Write down milk and eggs on my list.', 'That works for me, thanks a lot.', 'Let me know when the timer is done.', 'I am going to make some tea now.', 'Read me the first line of the news.'];
+  function trainingWav() {
+    const RATE = 16000;
+    const pcm = (file) => {
+      const data = fs.readFileSync(file);
+      let at = 12;
+      while (at + 8 <= data.length) {
+        const size = data.readUInt32LE(at + 4);
+        if (data.toString('ascii', at, at + 4) === 'data') return Array.from({ length: Math.floor(size / 2) }, (_, i) => data.readInt16LE(at + 8 + i * 2));
+        at += 8 + size + (size % 2);
+      }
+      return [];
+    };
+    const samples = [...new Array(RATE * 2).fill(0)];
+    TRAINING_LINES.forEach((line, i) => {
+      const file = path.join(scratch, `line-${i}.wav`);
+      execFileSync('say', ['-v', 'Daniel', '-o', file, `--data-format=LEI16@${RATE}`, line]);
+      samples.push(...pcm(file), ...new Array(Math.round(RATE * 1.5)).fill(0));
+    });
+    const out = Buffer.alloc(44 + samples.length * 2);
+    out.write('RIFF', 0);
+    out.writeUInt32LE(36 + samples.length * 2, 4);
+    out.write('WAVEfmt ', 8);
+    out.writeUInt32LE(16, 16);
+    out.writeUInt16LE(1, 20);
+    out.writeUInt16LE(1, 22);
+    out.writeUInt32LE(RATE, 24);
+    out.writeUInt32LE(RATE * 2, 28);
+    out.writeUInt16LE(2, 32);
+    out.writeUInt16LE(16, 34);
+    out.write('data', 36);
+    out.writeUInt32LE(samples.length * 2, 40);
+    samples.forEach((value, i) => out.writeInt16LE(value, 44 + i * 2));
+    const file = path.join(scratch, 'training.wav');
+    fs.writeFileSync(file, out);
+    return file;
+  }
+  /**
+   * In the engine page: its face tracker replaced by one that sees a made-up face (two builds: the user's and someone
+   * else's), square to the camera, its mouth opening as loud as the mic was a moment before (globalThis.fakeFace).
+   */
+  const FAKE_FACE = `
+    const vision = await import('jester://ext/vendor/tasks-vision/vision_bundle.mjs');
+    const BUILD = { 33: [-4.5, 0, 0], 133: [-1.6, 0, 0.4], 362: [1.6, 0, 0.4], 263: [4.5, 0, 0], 168: [0, -0.6, -0.6], 6: [0, 0.6, -1], 197: [0, 1.8, -1.6], 195: [0, 2.8, -2.1],
+      1: [0, 4.2, -2.8], 98: [-1.4, 4.4, -1.4], 327: [1.4, 4.4, -1.4], 10: [0, -7.5, 0], 151: [0, -5, -0.5], 9: [0, -2, -0.6], 234: [-7, 1, 3], 454: [7, 1, 3] };
+    const OTHER = { ...BUILD, 33: [-5.2, 0, 0], 263: [5.2, 0, 0], 1: [0, 5.4, -3.2], 195: [0, 3.6, -2.4], 234: [-6.2, 1, 3], 454: [6.2, 1, 3], 10: [0, -6.6, 0] };
+    globalThis.fakeFace = { build: 'mine', levels: [], present: true };
+    const loudness = () => {
+      const when = Date.now() - 150;
+      let level = 0;
+      for (const [at, value] of fakeFace.levels) if (at <= when) level = value;
+      return level;
+    };
+    const face = () => {
+      const build = fakeFace.build === 'mine' ? BUILD : OTHER;
+      const open = Math.min(2.4, loudness() * 30);
+      const jitter = () => (Math.random() * 2 - 1) * 0.03;
+      const lips = { 13: [0, 6.2 - open / 2, -1.6], 14: [0, 6.2 + open / 2, -1.6], 78: [-2.2, 6.2, -1], 308: [2.2, 6.2, -1] };
+      const points = Array.from({ length: 478 }, () => ({ x: 0.5, y: 0.5, z: 0 }));
+      for (const [index, [x, y, z]] of Object.entries({ ...build, ...lips })) points[index] = { x: (640 + (x + jitter()) * 10) / 1280, y: (360 + (y + jitter()) * 10) / 720, z: ((z + jitter()) * 10) / 1280 };
+      return points;
+    };
+    const fake = {
+      detectForVideo: () => fakeFace.present
+        ? { faceLandmarks: [face()], faceBlendshapes: [{ categories: [] }], facialTransformationMatrixes: [{ data: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, -50, 1] }] }
+        : { faceLandmarks: [], faceBlendshapes: [], facialTransformationMatrixes: [] },
+      close: () => undefined
+    };
+    vision.FaceLandmarker.createFromOptions = async () => fake;
+    vision.FaceLandmarker.prototype.detectForVideo = fake.detectForVideo;
+    return true;
+  `;
 
   const run = async () => {
     const paid = await modelServer('paid');
@@ -1497,6 +1642,8 @@ if (process.argv[2] === 'serve') {
     fs.mkdirSync(path.join(vaultDir, '.obsidian'), { recursive: true });
     // A line that came due an hour ago, while he wasn't running.
     if (!wanted.length || wanted.includes('clock')) fs.writeFileSync(path.join(scratch, 'jobs.json'), JSON.stringify({ version: 1, jobs: [{ id: 'stretch', kind: 'say', made: Date.now() - 2 * 3600000, at: Date.now() - 3600000, payload: { text: 'Time to stand up and stretch.' } }] }));
+    // Training: the fake mic plays a made-up voice once, from the moment it's first opened (only that scenario opens it).
+    if ((!wanted.length || wanted.includes('training')) && process.platform === 'darwin') process.env.JESTER_FAKE_AUDIO = trainingWav();
     await import(path.join(desktop, 'src/main/main.js'));
     await app.whenReady();
     home = await until('his window', () => BrowserWindow.getAllWindows().find((win) => /\/home\/home\.html/.test(win.webContents.getURL()) && !win.webContents.isLoading()), 30000);

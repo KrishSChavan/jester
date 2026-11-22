@@ -27,6 +27,7 @@ import { GazeModel, makeGazeFilter, makeNoiseTracker, poseDrift, poseSummary } f
 import { usableModel } from '../common/gaze-store.js';
 import { headPose, makeHeadPointer } from '../common/head.js';
 import { readEyes } from './eyes.js';
+import { faceReading } from '../common/face-print.js';
 import { landmarksFromCrop, makeZoom } from './zoom.js';
 import { fromJester } from '../common/senders.js';
 import { createVoice, MIC } from './voice.js';
@@ -909,9 +910,15 @@ function step(now) {
     fit(frameCanvas, frameCtx, W, H);
     frameCtx.drawImage(videoEl, 0, 0, W, H);
     crops = zoomOn ? zoom.crops(now) : NO_CROPS;
-    const raw = recognizer.recognizeForVideo(handInput(crops.hands, W, H), lastTimestamp);
-    lastResult = crops.hands ? { ...raw, landmarks: landmarksFromCrop(raw.landmarks, crops.hands, W, H) } : raw;
-    lastHands = readHands(lastResult);
+    if (handsWatched()) {
+      const raw = recognizer.recognizeForVideo(handInput(crops.hands, W, H), lastTimestamp);
+      lastResult = crops.hands ? { ...raw, landmarks: landmarksFromCrop(raw.landmarks, crops.hands, W, H) } : raw;
+      lastHands = readHands(lastResult);
+    } else {
+      // On for the face alone: no hand is looked for, so none can do anything.
+      lastResult = null;
+      lastHands = [];
+    }
 
     frameCount += 1;
     const delta = now - lastFrameAt;
@@ -932,7 +939,7 @@ function step(now) {
   else if (!lastResult) lastClick = readClickHand(now, hands);
   const click = fresh ? lastClick : { ...lastClick, fired: false };
   if (fresh && faceWanted(now, click)) readFace(now, hands, W, H);
-  const view = processHand(now, click, W, H);
+  const view = handsWatched() ? processHand(now, click, W, H) : NO_VIEW;
   // After the pointer, not before: a cursor raised this frame was decided and
   // anchored through this frame's pictures, and it is those the zoom must
   // hold — not ones it would switch to on what it has just seen.
@@ -1536,6 +1543,33 @@ function readClickHand(now, hands) {
 }
 
 // ---------------------------------------------------------------------------
+// The face, for the desktop's voice training (desktop/src/main/face-witness.js)
+// ---------------------------------------------------------------------------
+
+/** Whether hands are looked for: not while the camera's on only for the face, Gestures being off. */
+const handsWatched = () => settings.gesturesEnabled !== false;
+
+/** No face, said at most this often: what matters is that it's gone, not each frame it stays gone. */
+const NO_FACE_EVERY_MS = 250;
+let noFaceToldAt = 0;
+
+/**
+ * The face as this frame read it, for the desktop watching it: its shape (whose it is, roughly), how far open its
+ * mouth is and which way it points, or that there's none. Numbers only; never the picture.
+ */
+function tellFace(reading) {
+  const at = Date.now();
+  if (!reading) {
+    if (at - noFaceToldAt < NO_FACE_EVERY_MS) return;
+    noFaceToldAt = at;
+    post({ type: MSG.FACE, face: { at, face: false } });
+    return;
+  }
+  noFaceToldAt = 0;
+  post({ type: MSG.FACE, face: { at, face: true, ...reading } });
+}
+
+// ---------------------------------------------------------------------------
 // The face — the eyes for the gaze model, the head for the head pointer
 // ---------------------------------------------------------------------------
 
@@ -1649,6 +1683,8 @@ const pointerUsable = () => pointerBlocker() === null;
  */
 function faceWanted(now, click) {
   if (now < calibrationUntil) return true;
+  // The desktop is watching it: every frame, so a mouth's moving is seen as it moves.
+  if (settings.faceWatch) return true;
   const usable = pointerUsable();
   if (usable) {
     // A tracker that just loaded spends its slow first frame now, not in the
@@ -1805,10 +1841,12 @@ function readFaceFrom(result, now, W, H, hands) {
   const found = result?.faceLandmarks?.[0];
   if (!found) {
     gaze.last = { at: now, seq: gaze.seq, face: false };
+    if (settings.faceWatch) tellFace(null);
     return;
   }
   const points = crops.face ? landmarksFromCrop([found], crops.face, W, H)[0] : found;
   facePointsNow = points;
+  if (settings.faceWatch) tellFace(faceReading(points, { width: W, height: H, matrix: result.facialTransformationMatrixes?.[0] }));
   const cropped = !!crops.face;
   const head = headPose(result.facialTransformationMatrixes?.[0]?.data);
 
@@ -2917,8 +2955,10 @@ async function applySettings(next) {
   }
 
   // The desktop's Gestures switch closes the camera and leaves voice alone. It
-  // wakes a sleeping Jester too: with no camera, nothing could see ✌️.
-  const gesturesOff = settings.gesturesEnabled === false;
+  // wakes a sleeping Jester too: with no camera, nothing could see ✌️. Unless
+  // the desktop is watching the face (training his ear on the user's voice,
+  // or scanning it): then the camera stays on for that, and hands do nothing.
+  const gesturesOff = settings.gesturesEnabled === false && !settings.faceWatch;
   if (!settings.enabled || gesturesOff) {
     // Off is off: switched back on, Jester starts out listening, not paused.
     standby = false;

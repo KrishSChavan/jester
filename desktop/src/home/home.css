@@ -2049,7 +2049,8 @@ code {
   display: none;
 }
 
-/* What the camera sees, small: enough to tell a dark room or a hand out of frame. */
+/* What the camera sees, small: enough to tell a dark room or a hand out of frame. The face's, while it's scanned. */
+#face-preview,
 #camera-preview {
   align-self: flex-start;
   width: 260px;

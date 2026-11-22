@@ -9,14 +9,15 @@
  *
  * What moves: the models' keys, the Gmail sign-in, calendars' links, taught phrases, the user's voiceprint, settings,
  * what's been told and offered, and the files for tasks, reminders, chats and what he recalls of them. What stays:
- * what's the Mac's alone (its scripts and scenes, which run there; the watch's key; the pointer's calibration; ntfy,
- * which his own app replaces; this link itself).
+ * what's the Mac's alone (its scripts and scenes, which run there; the watch's key; the pointer's calibration; the
+ * user's face, scanned for training mode, which only its camera uses; ntfy, which his own app replaces; this link
+ * itself).
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const MOVE_KEYS = Object.freeze(['settings', 'modelConnections', 'modelConnectionConfigured', 'modelSpend', 'calendarFeeds', 'google', 'mail', 'desktopLearned', 'voiceprint', 'voiceLearned', 'briefDays', 'checkinsTold', 'workOffers', 'briefingSnapshots', 'setUpOnce']);
+export const MOVE_KEYS = Object.freeze(['settings', 'modelConnections', 'modelConnectionConfigured', 'modelSpend', 'calendarFeeds', 'google', 'mail', 'desktopLearned', 'voiceprint', 'voiceLearned', 'voiceTrained', 'briefDays', 'checkinsTold', 'workOffers', 'briefingSnapshots', 'setUpOnce']);
 export const MOVE_FILES = Object.freeze(['tasks.json', 'jobs.json', 'chats.json', 'recollections.json', 'chat-learning.json']);
 /** Settings that are a computer's own: the server keeps its own for these. */
 const OWN_SETTINGS = ['cameraDeviceId', 'vaultPath', 'vault'];

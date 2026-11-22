@@ -61,7 +61,7 @@ test('what’s learned is sealed with the voiceprint, forgotten with it, and sta
   const read = (file) => fs.readFileSync(new URL(`../desktop/src/main/${file}`, import.meta.url), 'utf8');
   assert.match(read('chrome-bridge.js'), /PRIVATE_KEYS = Object\.freeze\(\[[^\]]*'voiceprint', 'voiceLearned'/);
   const main = read('main.js');
-  assert.match(main, /op === 'forget'\) await storage\.local\.remove\(\['voiceprint', 'voiceLearned'\]\)/);
+  assert.match(main, /op === 'forget'\) \{\n\s+await storage\.local\.remove\(\['voiceprint', 'voiceLearned'\]\);\n(?:\s+\/\/.*\n)*\s+await voiceTrainer\?\.forget\(\);/);
   assert.match(main, /await storage\.local\.set\(\{ voiceprint: averageVoice\(takes\) \}\);\n\s+await storage\.local\.remove\('voiceLearned'\);/);
   // Kept only from something he took as said to him.
   assert.match(main, /if \(turned && !across && heard\?\.learn && heard\.voice && voiceprint\) learnVoice\(heard\.voice\);/);
