@@ -1110,7 +1110,18 @@ seen, so behind them the pill shows the conversation as well. What a
 task did is then said in his window, never on the pill, so the conversation going
 on with no task at work ends the task's pill (`TASK_OVER`); before that, its last
 step stayed up for 90 s. On another of the window's screens, the pill shows the
-conversation as it would with the window closed. Under the orb is the chat going
+conversation as it would with the window closed.
+
+With his brain on a server, the same holds on the Mac: the server sends the conversation's frames to the computer
+it's being talked through (`{t: 'pill', voice}` over the Mac's link, `web-gateway.js` `tell`), as well as to the
+pages showing that chat, and the Mac puts them on its pill unless his window there (the server's page) is in front
+of the user (`windows.js` `cloudWindow`), where the orb shows him. Endings always reach the pill, so it's never left
+up; his window clicked into, or the server gone, brings it down. Until 2026-11-22 they went to the pages alone, so
+with his window closed the Mac showed nothing while he listened, thought or spoke (the user: "when the on laptop app
+is not open (talk to jester window not open/in view) the pill should be shown"). Talked to through the phone, the
+Mac's pill stays down: the phone's page shows him.
+
+Under the orb is the chat going
 on, from the log (`jester/chat`, sent to this window alone as it changes): once a
 chat starts, the orb glides up and shrinks, and when it's over the orb settles back
 and says the chat is in Chats now. Along the top: Chats, a light for whose voice
@@ -3084,6 +3095,12 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     where you usually sit, without his name after his question, or across the room: `speech: your voice (0.xx)`
     should come more often than before, with bare yeses among them. On the cloud setup the same happens with the
     server's log saying `training:` and the Mac's saying nothing of it.
+
+41. **His pill on the Mac, in the cloud** (built 2026-11-22; the socket's part tested, the Mac's overlay not seen
+    with a real server). With his window closed (or another app in front), say "Jester" and something: the pill at
+    the bottom of the screen should listen, think and speak as it does without the cloud. Click into his window: the
+    pill goes, and the orb shows him. Talk to him through your phone instead: the Mac's pill stays down. Quit the
+    server's Jester mid-sentence: the pill comes down rather than staying up.
 
 ## Things learned the hard way
 

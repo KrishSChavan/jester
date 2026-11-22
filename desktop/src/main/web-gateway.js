@@ -623,6 +623,10 @@ export function createWebGateway({ key, port = 8770, host = '127.0.0.1', onMessa
     stopPlaying() {
       if (voiceClient) send(voiceClient, { t: 'play', stop: true });
     },
+    /** A frame for one client, while it's connected: the conversation for a computer's own pill (main.js showConversation). */
+    tell(client, frame) {
+      if (clients.has(client)) send(client, frame);
+    },
     /** To every client of a role ('mac'), or all. */
     broadcast(frame, role = null) {
       for (const client of clients) if (!role || client.role === role) send(client, frame);

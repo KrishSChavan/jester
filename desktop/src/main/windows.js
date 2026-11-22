@@ -269,6 +269,14 @@ function showCloud({ quiet = false, screen = '', bounds = null } = {}) {
   return cloud;
 }
 
+/**
+ * His window, the server's website, while it's in front of the user: there the orb shows the conversation, and the pill
+ * isn't wanted over it. Focused, as talkWindow() asks: a window covered by other apps' looks just like one that's seen.
+ */
+export function cloudWindow() {
+  return cloud && !cloud.isDestroyed() && cloud.isVisible() && !cloud.isMinimized() && cloud.isFocused() ? cloud : null;
+}
+
 /** The window says what it shows as it changes (jester/home-screen). */
 export function noteHomeScreen(screen) {
   homeScreen = String(screen || 'main');

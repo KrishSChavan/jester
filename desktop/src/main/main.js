@@ -134,7 +134,7 @@ import { createFaceWitness } from './face-witness.js';
 import { createVoiceTrainer } from './voice-training.js';
 import { createVoiceRunner, runFile } from './voice-runner.js';
 import { createWindowShot } from './window-shot.js';
-import { backToCloud, closeSafely, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
+import { backToCloud, closeSafely, cloudWindow, createEngineWindow, homeWindow, noteHomeScreen, onHomeVisibility, reopenHome, setCloudPage, showCalibration, showHome, showSettings, showTalk, talkWindow } from './windows.js';
 import { createScriptsRemote } from './script-remote.js';
 
 const env = process.env;
@@ -872,13 +872,43 @@ function showConversation(voice, key = 'local') {
   if (voice.phase === 'speaking') speech?.setSpeaking(!voice.done);
   else if (voice.active === false || voice.start) speech?.setSpeaking(false);
   const message = { type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } };
-  // On a server, a chat per device: its frames go to the pages showing that chat.
-  if (SERVER) return postRemote(message, (remote) => viewingOf(remote) === key);
+  // On a server, a chat per device: its frames go to the pages showing that chat, and to the computer it's talked
+  // through, for its own pill: there his window may be closed, or behind other apps (the computer says which:
+  // showCloudPill). Before 2026-11-22 they went to the pages alone, and with his window shut the Mac showed nothing
+  // while he listened, thought or spoke.
+  if (SERVER) {
+    postRemote(message, (remote) => viewingOf(remote) === key);
+    const talked = webGateway?.voiceClient;
+    if (talked?.role === 'mac' && viewingOf(talked) === key) webGateway.tell(talked, { t: 'pill', voice: message.voice });
+    return;
+  }
   const talk = talkWindow();
   if (!talk || voice.active === false || voice.done) return post(message);
   postTo(talk.webContents, message);
   postRemote(message);
   if (!assistant.running) for (const win of overlays.windows()) postTo(win.webContents, TASK_OVER);
+}
+
+/**
+ * His conversation, on his server, on this computer's pill while it's the one he's talked to through (showConversation,
+ * there): his window here is the server's page, and shows the orb while it's in front of the user, so then only an
+ * ending comes to the pill, which is never left up. The user, 2026-11-22: "when the on laptop app is not open (talk to
+ * jester window not open/in view) the pill should be shown".
+ */
+function showCloudPill(voice) {
+  if (!voice || typeof voice !== 'object' || Array.isArray(voice)) return;
+  const ending = voice.active === false || voice.done === true;
+  if (cloudWindow() && !ending) return;
+  post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } });
+}
+
+/**
+ * The pill brought down: his window's come to the front, where the orb shows him, or the server's gone. Not while
+ * this Mac's own assistant is at work: its pill, and the × beside it, stay until it's done (showConversation's rule).
+ */
+function endCloudPill() {
+  const endings = assistant?.running ? [{ phase: 'speaking', done: true }] : [{ phase: 'speaking', done: true }, { phase: 'thinking', done: true }, { active: false }];
+  for (const ending of endings) post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...ending } });
 }
 
 /** The conversation going on, as his window shows it: what was said before it was picked up marked so, and a line kept as only that it held a secret, too. */
@@ -3050,7 +3080,7 @@ async function adoptCloudKey(key) {
   if (!next) return false;
   await storage.local.set({ cloudBrain: { link } });
   cloudTarget = next;
-  setCloudPage(next.page, { onFocus: () => cloudLink?.claim() });
+  setCloudPage(next.page, { onFocus: cloudFocused });
   cloudLink?.use(next);
   log('cloud: signed in again: this Mac’s key is the new one');
   post(desktopState());
@@ -3100,8 +3130,14 @@ async function deviceIdentity() {
  * "Use Jester in the cloud": this Mac is the hands, eyes and ears of his brain on a server (cloud-link.js). His window
  * is the server's website; the mic, when the server opens it, is heard there; what the server asks done is done here.
  */
+/** His window here clicked into: it's the Mac he's talked to, and the orb there shows him, so the pill goes. */
+function cloudFocused() {
+  cloudLink?.claim();
+  endCloudPill();
+}
+
 function startCloudLink() {
-  setCloudPage(cloudTarget.page, { onFocus: () => cloudLink?.claim() });
+  setCloudPage(cloudTarget.page, { onFocus: cloudFocused });
   let voiceOpen = false;
   cloudLink = createCloudLink({
     link: cloudTarget,
@@ -3137,6 +3173,8 @@ function startCloudLink() {
     onRefused: () => cloudRefused().catch((err) => log('cloud: couldn’t ask to sign in again:', err.message)),
     // The server's answer to this Mac's Jester moving in: taken, or it has one already. Either way, not sent again.
     onFrame: (frame) => {
+      // His conversation, for this Mac's pill while his window here isn't in front of the user.
+      if (frame?.t === 'pill') return showCloudPill(frame.voice);
       if (frame?.t !== 'moved-in') return;
       log(frame.ok ? 'cloud: this Mac’s Jester moved to the server: it’s starting again with it' : `cloud: nothing moved to the server: ${frame.why || 'it didn’t say why'}`);
       if (frame.ok || frame.already) storage.local.set({ cloudMoved: cloudTarget.origin }).catch(() => undefined);
@@ -3147,6 +3185,8 @@ function startCloudLink() {
     onChange: (connected) => {
       post(desktopState());
       if (connected) moveIn().catch((err) => log('cloud: couldn’t send this Mac’s Jester:', err.message));
+      // The server gone mid-sentence: nothing more will come to end what's on the pill.
+      else endCloudPill();
     }
   });
   refreshMacAbilities();
