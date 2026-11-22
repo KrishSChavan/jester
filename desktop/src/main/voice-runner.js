@@ -15,6 +15,7 @@ import { goalWords, hasWord } from './agent/screen.js';
 import { appCatalog, findApp, installedApps } from './apps.js';
 import { aliasable, asksToBeTold, gist } from './learned.js';
 import { describePlan } from './os-actions.js';
+import { routeOf } from './route.js';
 import { secretIn } from './vault-memory.js';
 import { asksFirst, matchApp, parseSequence } from './voice-commands.js';
 import { timedWords } from './script-words.js';
@@ -194,7 +195,8 @@ export function dictation(text) {
  * @param {(frame:object) => object} [deps.toDipFrame]  the driver's frame in DIPs
  * @param {(task:Function) => Promise} [deps.quietly]  accessibility reads with Jester's overlays hidden
  * @param {{claims:(text:string) => Promise<boolean>, run:(text:string) => Promise<{ok:boolean, text:string}|null>}} [deps.browser]
- *   the linked Chrome extension (chrome-link.js): whether a command is the browser's, and doing it there
+ *   the linked Chrome extension (chrome-link.js): whether a command is the browser's, and doing it there; `linked`,
+ *   when given: whether the extension is there at all, for a command that says outright it's the browser's
  * @param {{match:(text:string) => {steps:object[]}|null, mentions:(text:string) => boolean,
  *   resolve:(text:string) => Promise<{steps:object[]}|null>, runAll:(steps:object[]) => Promise<{ok:boolean, text:string}>,
  *   asksFirst:(steps:object[]) => boolean}} [deps.scripts]
@@ -232,12 +234,12 @@ export function createVoiceRunner({
   const ok = (text, front) => ({ ok: true, text, ...(front ? { front } : {}) });
   const bad = (text) => ({ ok: false, text });
   let catalog = null;
-  /** The last task the assistant or Chrome didn't get done: {text, said, at}, for "keep going". */
+  /** The last task the assistant or Chrome didn't get done: {text, said, where, at}, for "keep going". */
   let failed = null;
   let generation = 0;
-  /** Notes how a task for the assistant or Chrome ended, and gives the outcome back. */
-  const ended = (outcome, text, said) => {
-    if (outcome) failed = outcome.ok ? null : { text, said: said || '', at: Date.now() };
+  /** Notes how a task for the assistant or Chrome ended, and gives the outcome back. `where`: where it was told to be done. */
+  const ended = (outcome, text, said, where = '') => {
+    if (outcome) failed = outcome.ok ? null : { text, said: said || '', ...(where ? { where } : {}), at: Date.now() };
     return outcome;
   };
 
@@ -583,7 +585,7 @@ export function createVoiceRunner({
     if (depth === 0 && failed && AGAIN.test(text) && Date.now() - failed.at < AGAIN_MS) {
       const again = failed;
       log('voice: again:', JSON.stringify(again.said || again.text));
-      return runSentence(again.text, depth + 1, { ...context, talking: true, said: again.said, again: text, runGeneration });
+      return runSentence(again.text, depth + 1, { ...context, ...(again.where ? { where: again.where } : {}), talking: true, said: again.said, again: text, runGeneration });
     }
     // Live information is read before app discovery, browser focus, local
     // search shortcuts or learned UI replay. Research is always fresh.
@@ -662,7 +664,17 @@ export function createVoiceRunner({
         return { steps: [{ kind: 'scripts', steps: resolved.steps }], outcome: await scripts.runAll(resolved.steps) };
       }
     }
-    const chromes = async () => !!browser && ((await browser.claims(text)) || (!!said && (await browser.claims(said))));
+    // Where it belongs, by what it is: said outright by whoever handed it on (`where`: the conversation, choosing
+    // between the computer and the browser), else read from the command and the user's own words for it (route.js).
+    // Chrome being in front is where the user is looking; it settles where a task goes only when the task doesn't.
+    const told = context.where === 'computer' || context.where === 'browser' ? context.where : '';
+    const route = told ? { where: told, why: 'told' } : routeOf(text, { said, steps, apps: apps.flatMap((app) => app.names) });
+    if (unknown && route.where) log('voice: belongs to the', route.where, `(${route.why})`);
+    const chromes = async () => {
+      if (!browser || route.where === 'computer') return false;
+      if (route.where === 'browser' && browser.linked && (await browser.linked())) return true;
+      return (await browser.claims(text)) || (!!said && (await browser.claims(said)));
+    };
     // Something to play on YouTube is the linked Chrome's to find and start, though every word of it is a command
     // known here: the extension reads the page itself, where the laptop's assistant sees a browser window's first
     // few hundred controls. "Play the latest MrBeast video on YouTube" took 24 steps that way and played nothing
@@ -681,7 +693,7 @@ export function createVoiceRunner({
       return { steps, outcome: ended(done && (did ? {
         ...ok(done.text || 'Done.'),
         ...(sources.length ? { sources, ...(typeof done.answer === 'string' && done.answer.trim() ? { answer: done.answer } : {}) } : {})
-      } : bad(done.text || 'That didn’t work in Chrome.')), text, said) };
+      } : bad(done.text || 'That didn’t work in Chrome.')), text, said, told) };
     }
     if (unknown) {
       // The laptop's assistant reads the screen and works it by hand, and so does a way learned from it: neither can
@@ -706,7 +718,7 @@ export function createVoiceRunner({
       }
       if (await assistantReady()) {
         if (superseded()) return cancelled();
-        return { steps, outcome: ended(await assisted(text, note, done, { said }), text, said) };
+        return { steps, outcome: ended(await assisted(text, note, done, { said }), text, said, told) };
       }
       // The assistant could, given a model: say where to add one.
       const partly = done.length ? `The saved way did ${done.length} step${done.length > 1 ? 's' : ''}, then stopped` : 'Nothing was done';
@@ -747,9 +759,11 @@ export function createVoiceRunner({
     },
     /**
      * @param {string} text
-     * @param {{talking?:boolean, said?:string}} [context]  talking: said in conversation (parseCommand);
+     * @param {{talking?:boolean, said?:string, where?:'computer'|'browser'}} [context]  talking: said in conversation (parseCommand);
      *   said: the user's own words, when `text` is the conversation's command for them. When that command
      *   works, the words stand for it from then on, if they can (learned.js aliasable).
+     *   where: where the conversation chose to have it done, when it chose: the computer's own apps, or the
+     *   browser. Without it the command's own words say (route.js), and only then what's in front.
      * @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say
      */
     async run(text, context = {}) {

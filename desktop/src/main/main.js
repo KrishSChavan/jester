@@ -3257,6 +3257,7 @@ async function start() {
     scripts,
     browser: {
       claims: (text) => chromeLink?.claims(text, { browserInFront: browserMode }) ?? false,
+      linked: () => !!chromeLink?.linked,
       run: (text, meant = '', options = {}) => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal, meant, ...options }))
     }
   });

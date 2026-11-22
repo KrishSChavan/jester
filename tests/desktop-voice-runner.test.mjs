@@ -984,3 +984,72 @@ test('dev.log never holds words a shortcut was refused for holding a password, n
   assert.equal(lines.some((line) => /wifi password|Tiger2026/.test(line)), false, lines.join('\n'));
   assert.deepEqual(await learned.list(), []);
 });
+
+/** A runner with Messages installed, a linked Chrome that claims whatever `claims` says, and an assistant that notes what it's given. */
+function routed({ claims = async () => true, linked = undefined, works = true } = {}) {
+  const toChrome = [];
+  const toAssistant = [];
+  const logged = [];
+  const runner = createVoiceRunner({
+    driver: { call: async (cmd) => (cmd === 'apps' ? { apps: RUNNING } : cmd === 'frontmost' ? { app: { name: 'Google Chrome' } } : {}) },
+    dispatch: async () => ({ ok: true }),
+    canPost: () => true,
+    run: async () => '',
+    installed: () => [...INSTALLED, { name: 'Messages', path: '/System/Applications/Messages.app' }, { name: 'Google Chrome', path: '/Applications/Google Chrome.app' }],
+    platform: 'darwin',
+    wait: async () => undefined,
+    log: (...parts) => logged.push(parts.join(' ')),
+    assistant: { ready: async () => true, running: false, cancel() {}, run: async (goal, options) => (toAssistant.push([goal, options?.meant || '']), works ? { ok: true, text: 'The text to Dad is ready.' } : { ok: false, text: 'Messages never opened.' }) },
+    browser: { claims, ...(linked ? { linked } : {}), run: async (text, meant) => (toChrome.push([text, meant]), works ? { ok: true, text: 'Done in Chrome.' } : { ok: false, text: 'A control is not responding.' }) }
+  });
+  return { runner, toChrome, toAssistant, logged };
+}
+
+test('a text to someone is the Mac’s to send from Messages, though Chrome is in front and claims everything', async () => {
+  // 2026-11-21, from the log: "text, dad, how are you doing?" came from the conversation as "open Messages and start a
+  // text to Dad saying: how are you doing?", and all of it went to Chrome, which opened messages.google.com.
+  const { runner, toChrome, toAssistant, logged } = routed();
+  const done = await runner.run('open Messages and start a text to Dad saying: how are you doing?', { talking: true, said: 'text, dad, how are you doing?' });
+  assert.deepEqual(done.outcome, { ok: true, text: 'The text to Dad is ready.' });
+  assert.deepEqual(toChrome, [], 'nothing of it went to the browser');
+  assert.deepEqual(toAssistant, [['text, dad, how are you doing?', 'open Messages and start a text to Dad saying: how are you doing?']]);
+  assert.match(logged.join('\n'), /voice: belongs to the computer \(app\)/);
+  // Said outright, with no app named: still the Mac's, by what it is.
+  await runner.run('text Dad the link to that article');
+  assert.deepEqual(toChrome, []);
+  assert.equal(toAssistant.length, 2);
+});
+
+test('what names a site is still Chrome’s, and what doesn’t say where it belongs still goes by what’s in front', async () => {
+  const { runner, toChrome, toAssistant } = routed();
+  await runner.run('go to Hulu and start playing Modern Family');
+  await runner.run('click the second result');
+  assert.deepEqual(toChrome, [['go to Hulu and start playing Modern Family', ''], ['click the second result', '']]);
+  assert.deepEqual(toAssistant, []);
+  // With Chrome not in front and nothing of the browser's in the words, it's the Mac's assistant's.
+  const away = routed({ claims: async () => false });
+  await away.runner.run('click the second result');
+  assert.deepEqual(away.toChrome, []);
+  assert.equal(away.toAssistant.length, 1);
+});
+
+test('where the conversation says a task goes is where it goes, and “keep going” takes it up in the same place', async () => {
+  // Told it's the computer's, a command full of the web's words isn't Chrome's.
+  const mac = routed();
+  await mac.runner.run('tell me what the Hulu page says about my plan', { talking: true, said: 'what does it say about my plan', where: 'computer' });
+  assert.deepEqual(mac.toChrome, []);
+  assert.equal(mac.toAssistant.length, 1);
+  // Told it's the browser's, a linked Chrome does it though it wouldn't have claimed it.
+  const web = routed({ claims: async () => false, linked: () => true, works: false });
+  const first = await web.runner.run('sign me in with the Krish profile', { talking: true, said: 'use my profile', where: 'browser' });
+  assert.equal(first.outcome.ok, false);
+  assert.deepEqual(web.toChrome, [['use my profile', 'sign me in with the Krish profile']]);
+  await web.runner.run('keep going');
+  assert.deepEqual(web.toChrome.at(-1), ['keep going', 'sign me in with the Krish profile'], 'again, and again in Chrome');
+  assert.deepEqual(web.toAssistant, []);
+  // Told it's the browser's with no Chrome linked: the Mac's assistant does what it can by hand.
+  const alone = routed({ claims: async () => false, linked: () => false });
+  await alone.runner.run('open my bank’s site', { talking: true, said: 'open my bank', where: 'browser' });
+  assert.deepEqual(alone.toChrome, []);
+  assert.equal(alone.toAssistant.length, 1);
+});
