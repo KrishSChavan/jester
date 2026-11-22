@@ -98,9 +98,27 @@ export const LOCAL_KEEP_ALIVE = '2m';
 /** 12 GB of model: on a 24 GB Mac, the 20 GB one has nothing left to work with. */
 const ROOMY_BYTES = 12e9;
 const STOP = /^\W*(?:stop|cancel|never ?mind|stop it|stop talking|shut up|be quiet|quiet|that'?s enough)\W*$/i;
-/** A question's answer is all of what's said: "okay so what" isn't a yes. */
-const YES = /^\W*(?:yes|yeah|yep|yup|sure|ok|okay|do it|go ahead|please do|allow)(?: please)?\W*$/i;
-const NO = /^\W*(?:no|nope|don'?t|do not|cancel|stop|never ?mind)(?: thanks| thank you)?\W*$/i;
+/**
+ * A question's answer is all of what's said: "okay so what" isn't a yes. Said the ways people say it, since he no
+ * longer tells them to "say yes or no" (the user, 2026-11-21, on how he talks: robotic): "yeah, go ahead", "send it".
+ */
+const YES = /^\W*(?:(?:yes|yeah|yep|yup|sure|ok|okay|alright|please|absolutely|definitely|of course)[\s,]+)*(?:yes|yeah|yep|yup|sure|ok|okay|alright|absolutely|definitely|of course|do it|go ahead|go for it|please do|allow(?: it)?|send it|that['’]?s (?:fine|right)|sounds good)(?: please| thanks| thank you)?\W*$/i;
+const NO = /^\W*(?:(?:no|nope|nah|actually|wait)[\s,]+)*(?:no|nope|nah|don['’]?t|do not|cancel|stop|never ?mind|not (?:now|yet)|hold on|leave it|forget it)(?: (?:send|do) (?:it|that))?(?: thanks| thank you| please)?\W*$/i;
+/**
+ * A question of his, as he says it. One that asks leave is just asked: its window and the pill say how it's
+ * answered. One only the user can settle is asked with the ways to answer it, the first being the likeliest: two
+ * as "A or B", more as a list, and never more than a person can hold in their head (assistant.js MOST_OPTIONS).
+ */
+export function questionLine(label, { options = [], open = false, again = false } = {}) {
+  const asked = String(label ?? '').replace(/\s+/g, ' ').trim().replace(/[.?!]+$/, '');
+  const choices = (Array.isArray(options) ? options : []).map((option) => String(option ?? '').trim()).filter(Boolean);
+  if (!open && !choices.length) return again ? `Sorry, was that a yes or a no? ${asked}?` : `${asked}?`;
+  // Named in the question already ("Krish or Sandeep?"), they aren't said twice.
+  const named = choices.length > 0 && choices.every((choice) => asked.toLowerCase().includes(choice.toLowerCase()));
+  const list = choices.length === 2 ? `${choices[0]}, or ${choices[1]}` : choices.length > 2 ? `${choices.slice(0, -1).join(', ')}, or ${choices.at(-1)}` : '';
+  const line = !list || named ? `${asked}?` : `${asked}: ${list}?`;
+  return again ? `Sorry, I didn’t catch which. ${line}` : line;
+}
 /**
  * Typed words long enough to have been pasted: a passage, not a message. Another pasted after one is the same job
  * again (nextPassage, in turn): 2026-11-18, asking for Google Docs comments on an essay's paragraphs, the user's next
@@ -1720,6 +1738,14 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // A question he's waiting on is answered without his name, or the user's
     // yes would have to start with it. Anything else overheard is just that.
     if (assistant.asking) {
+      // A question only they can settle (which profile, which of two people): what they say is the answer, in their
+      // own words, and "never mind" leaves it unanswered. A voice that only may be theirs will do: it chooses, it
+      // doesn't give leave, and anything that sends or buys still asks for a yes of its own.
+      if (assistant.asked?.open) {
+        typing = false;
+        assistant.answer(STOP.test(meant) || TAKEN_BACK.test(meant) ? null : meant);
+        return null;
+      }
       // Answered aloud: what's said about it next is said aloud too. A yes lets a task go ahead, so it must be them.
       if (YES.test(meant) && unsure) log('a yes in a voice only maybe yours: not taken');
       else if (YES.test(meant)) {
@@ -1819,7 +1845,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         // In the conversation first: a question asked again comes after what it's answering.
         typing = true;
         memory.add('you', said);
-        if (assistant.asking) {
+        if (assistant.asking && assistant.asked?.open) {
+          // A question only they can settle: what they typed is the answer.
+          assistant.answer(STOP.test(words) || TAKEN_BACK.test(words) ? null : said);
+        } else if (assistant.asking) {
           // Only a whole yes or no answers it: "ok, what's it sending?" is a question back, and it's asked again.
           if (YES.test(words)) assistant.answer(true);
           else if (NO.test(words) || STOP.test(words)) assistant.answer(false);
@@ -1920,8 +1949,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       keep(ended);
       return told;
     },
-    /** The assistant's question: out loud, or written to someone typing to him. */
-    ask: (label) => (typing ? say(`${label}? Yes or no?`, { written: true }) : say(`${label}? Say yes or no.`)),
+    /**
+     * The assistant's question: out loud, or written to someone typing to him. `options`, `open`: one they answer
+     * in their own words; `again`: asked again, what came back being no answer to it.
+     */
+    ask: (label, more = {}) => say(questionLine(label, more), typing ? { written: true } : {}),
     /** He stops mid-sentence. */
     hush,
     /** Starts over, with nothing kept: what he was answering, or a task's result to come, is dropped with the rest. */

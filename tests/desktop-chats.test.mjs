@@ -365,11 +365,11 @@ test('the assistant’s question about a typed command is written; a command sai
   assert.equal(j.conversation.typing, true);
   await j.conversation.ask('Send the email');
   assert.deepEqual(j.said, []);
-  assert.equal(j.entries.at(-1).text, 'Send the email? Yes or no?');
+  assert.equal(j.entries.at(-1).text, 'Send the email?');
   j.conversation.spoke();
   assert.equal(j.conversation.typing, false);
   await j.conversation.ask('Send the email');
-  assert.deepEqual(j.said, ['Send the email? Say yes or no.']);
+  assert.deepEqual(j.said, ['Send the email?'], 'just asked: its window and the pill say how it’s answered');
 });
 
 test('listening switched off doesn’t cut a typed turn short; it does a spoken one', async () => {

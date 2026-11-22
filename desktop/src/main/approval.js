@@ -1,6 +1,8 @@
 /**
  * The assistant's question — "Type “hello” in “Message”, then Enter?" — as a
  * small window of its own, just above the voice pill, with Allow and Don't.
+ * A question with an answer of the user's own ("Which profile should I use?")
+ * has a button for each way to answer it instead, and one to leave it.
  *
  * The overlay lets every click through to the apps below it, and asking it to
  * take some didn't work: a click on its Allow landed in the app underneath,
@@ -18,25 +20,35 @@ const PRELOAD = path.join(here, '../preload/chrome-shim.cjs');
 const PAGE = 'jester://app/overlay/approval.html';
 const WIDTH = 600;
 const HEIGHT = 64;
+/** With a row of answers under the question. */
+const HEIGHT_OPTIONS = 112;
 /** Its bottom edge above the usable area's: clear of the voice pill (24 + 46 px) and a gap. */
 const ABOVE = 84;
 
 export function createApprovalPrompt() {
   let win = null;
   let text = '';
+  /** The ways to answer it, for a question that isn't a yes or a no; `open`: it is one of those, with or without any. */
+  let options = [];
+  let open = false;
 
   /** Over the display with the pointer, centred, above the Dock. */
   function place() {
     const area = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
-    return { width: WIDTH, height: HEIGHT, x: Math.round(area.x + (area.width - WIDTH) / 2), y: Math.round(area.y + area.height - HEIGHT - ABOVE) };
+    const height = options.length ? HEIGHT_OPTIONS : HEIGHT;
+    return { width: WIDTH, height, x: Math.round(area.x + (area.width - WIDTH) / 2), y: Math.round(area.y + area.height - height - ABOVE) };
   }
+  const told = () => ({ type: 'jester/approval-text', text, options, open });
 
   return {
-    show(question) {
+    /** @param {{options?:string[], open?:boolean}} [more]  a question answered in the user's own words: its options, if it has any */
+    show(question, more = {}) {
       text = question;
+      options = Array.isArray(more?.options) ? more.options.map(String).slice(0, 4) : [];
+      open = more?.open === true || options.length > 0;
       if (win && !win.isDestroyed()) {
         win.setBounds(place());
-        postTo(win.webContents, { type: 'jester/approval-text', text });
+        postTo(win.webContents, told());
         win.showInactive();
         return;
       }
@@ -63,7 +75,7 @@ export function createApprovalPrompt() {
       const shown = win;
       shown.webContents.once('did-finish-load', () => {
         if (shown.isDestroyed()) return;
-        postTo(shown.webContents, { type: 'jester/approval-text', text });
+        postTo(shown.webContents, told());
         shown.showInactive();
       });
       shown.loadURL(PAGE);

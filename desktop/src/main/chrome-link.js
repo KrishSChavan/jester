@@ -13,9 +13,9 @@
  *
  * Messages are JSON objects with a `type`:
  *   from the extension: hello {version, settings}, settings {settings}, pill {voice},
- *     ask {id, label}, done {id, ok, say, trace?}, reply {id, result}, voice {},
+ *     ask {id, label, open?, options?}, done {id, ok, say, trace?}, reply {id, result}, voice {},
  *     scrape {id, request}, scrape-cancel {id}
- *   to it: welcome {version, scraping}, task {id, text, meant?}, answer {id, approved}, cancel {},
+ *   to it: welcome {version, scraping}, task {id, text, meant?, ways?}, answer {id, approved, text?}, cancel {},
  *     scrape-result {id, result},
  *     request {id, op, ...}, op being knows {text}, aim {x, y, radius} or act {action, source, gesture}
  */
@@ -114,11 +114,16 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
           return onChange();
         case 'pill':
           return onPill(message.voice || {});
-        case 'ask':
-          return void onAsk(String(message.label || '')).then(
-            (approved) => send({ type: 'answer', id: message.id, approved: approved === true }),
+        case 'ask': {
+          // A question the extension's task can't settle (which profile, which account): the user's own answer goes
+          // back as `text`. One that asks leave comes back approved or not, as it always has.
+          const options = Array.isArray(message.options) ? message.options.slice(0, 4).map((option) => String(option).slice(0, 80)) : [];
+          const open = message.open === true || options.length > 0;
+          return void Promise.resolve(onAsk(String(message.label || ''), open ? { open: true, options } : {})).then(
+            (answer) => send({ type: 'answer', id: message.id, approved: open ? typeof answer === 'string' && !!answer : answer === true, ...(open && typeof answer === 'string' && answer ? { text: answer.slice(0, 400) } : {}) }),
             () => send({ type: 'answer', id: message.id, approved: false })
           );
+        }
         case 'done':
           if (task?.id === message.id) {
             // What the extension did, step by step (0.2.3 on): the log's only account of a browser task.

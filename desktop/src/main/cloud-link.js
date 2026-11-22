@@ -307,9 +307,13 @@ export function createCloudLink({ link: given, device = null, onVoice, onPlay, o
     status(report) {
       send({ t: 'voice-status', report });
     },
-    /** The Mac's assistant has a question: the server asks it in the conversation. */
-    ask(label) {
-      send({ t: 'hands-ask', label: String(label || '') });
+    /**
+     * The Mac's assistant has a question: the server asks it in the conversation. `more`: one answered in the user's
+     * own words (`open`), with the ways to answer it; `again`: asked again.
+     */
+    ask(label, more = {}) {
+      const options = Array.isArray(more?.options) ? more.options.slice(0, 4).map((option) => String(option).slice(0, 80)) : [];
+      send({ t: 'hands-ask', label: String(label || ''), ...(more?.open || options.length ? { open: true, options } : {}), ...(more?.again ? { again: true } : {}) });
     },
     /** Typed to him in the Mac's own window: said to him on the server. */
     told(text) {

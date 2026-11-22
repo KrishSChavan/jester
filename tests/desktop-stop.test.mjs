@@ -119,7 +119,7 @@ test('asked again, the real assistant shows its question again and listens for t
   const answer = assistant.confirm('Send the email');
   while (!assistant.asking) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(assistant.reask(), true);
-  assert.deepEqual(shown.slice(-1), ['Send the email? Say yes or no.']);
+  assert.deepEqual(shown.slice(-1), ['Send the email?']);
   assert.deepEqual(heard, ['Send the email', 'Send the email']);
   assistant.answer(false);
   assert.equal(await answer, false);

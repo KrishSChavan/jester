@@ -29,6 +29,10 @@ const APPROVAL_MS = 60000;
 const REMEMBERED = 3;
 const STOP = /^\W*(?:stop|cancel|never ?mind|stop it|that'?s enough)\W*$/i;
 const WAITING = 'Waiting for your OK';
+/** A question with an answer of the user's own: which profile, which of two people. */
+const WAITING_ANSWER = 'Waiting for your answer';
+/** The most ways to answer a question that are offered: more can't be taken in by ear. */
+export const MOST_OPTIONS = 4;
 const PLANNING = 'Planning…';
 const REPLANNING = 'Changing the plan…';
 /** How long a plan of a few steps stays on the pill, to be read. */
@@ -40,6 +44,41 @@ const STOPPING = 'Stopping…';
 /** How long a new task waits for one it cancelled to stop acting. */
 const STOP_MS = 3000;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const plainWords = (text) => String(text ?? '').toLowerCase().replace(/[‘’]/g, "'").replace(/[^\p{L}\p{N}' ]+/gu, ' ').replace(/\s+/g, ' ').trim();
+/** Where an option came, as it's said: "the second one" is the second, its "one" no number. */
+const ORDINALS = [/\b(?:first|1st|former|top|(?:number|option) (?:one|1))\b|^(?:one|1)$/, /\b(?:second|2nd|latter|(?:number|option) (?:two|2))\b|^(?:two|2)$/, /\b(?:third|3rd|(?:number|option) (?:three|3))\b|^(?:three|3)$/, /\b(?:fourth|4th|(?:number|option) (?:four|4))\b|^(?:four|4)$/];
+
+/**
+ * Which of the options an answer chose, as that option's own words; or the answer as it was said, when it's none of
+ * them ("neither, use my work one"). An option is chosen by saying it, most of it ("Krish" for "Krish Chavan"), or
+ * where it came ("the first one", "the last"): by one only, so "Chavan", which two of them have, chooses neither.
+ * @param {string} answer  what the user said, typed or clicked
+ * @param {string[]} options
+ */
+export function chosen(answer, options = []) {
+  const said = plainWords(answer);
+  if (!said || !options.length) return String(answer ?? '').trim();
+  const plain = options.map(plainWords);
+  const exact = plain.indexOf(said);
+  if (exact >= 0) return options[exact];
+  const words = new Set(said.split(' '));
+  // Every word of the option said, or every word said one of the option's: "the Krish one", "Krish".
+  const telling = (text) => text.split(' ').filter((word) => word.length > 1 && !['the', 'one', 'my', 'that', 'this', 'use', 'please', 'profile', 'account', 'option'].includes(word));
+  const fits = plain.map((option) => {
+    const theirs = telling(option);
+    const mine = telling(said);
+    return theirs.length > 0 && (theirs.every((word) => words.has(word)) || (mine.length > 0 && mine.every((word) => theirs.includes(word))));
+  });
+  if (fits.filter(Boolean).length === 1) return options[fits.indexOf(true)];
+  if (!fits.some(Boolean)) {
+    const last = /\blast\b/.test(said) ? options.length - 1 : -1;
+    const where = said.replace(/^(?:use |pick |choose |go with |i(?: would|'d) (?:like|say) )?(?:the )?/, '').replace(/ (?:one|option|please)$/g, '').trim();
+    const placed = last >= 0 ? last : ORDINALS.slice(0, options.length).findIndex((ordinal) => ordinal.test(where));
+    if (placed >= 0 && said.split(' ').length <= 5) return options[placed];
+  }
+  return String(answer ?? '').trim();
+}
 
 /**
  * @param {object} deps
@@ -121,24 +160,36 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     show({ phase: 'thinking', task: current?.caption || '', step });
   }
 
-  /** Waits for the user's yes or no on one step. */
-  function ask(label, signal) {
+  /**
+   * Waits for the user's answer on one step. A yes or a no, for leave to do something. Or, `open` (and whenever
+   * there are `options`), an answer in their own words to a question only they can settle: which profile, which of
+   * two people, which app (the user, 2026-11-21: "you see two accounts: stop the task and ask what I would want you
+   * to do"). What was answered is never logged: it may be a name.
+   * @param {{options?:string[], open?:boolean}} [more]
+   * @returns {Promise<boolean|string|null>} yes or no; or, to an open question, the option chosen or their own words,
+   *   null when it went unanswered or was called off
+   */
+  function ask(label, signal, { options = [], open = false } = {}) {
+    const choices = (Array.isArray(options) ? options : []).map((option) => String(option ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)).filter(Boolean).slice(0, MOST_OPTIONS);
+    const which = open === true || choices.length > 0;
     return new Promise((resolve) => {
-      const settle = (yes) => {
+      const settle = (answer) => {
         if (approval?.resolve !== resolve) return;
         clearTimeout(approval.timer);
         approval = null;
         prompt.hide();
-        log('assistant approval:', label, yes ? 'allowed' : 'refused');
-        working(yes ? label : '');
-        resolve(yes);
+        const value = which ? (typeof answer === 'string' && answer.trim() ? chosen(answer, choices) : null) : answer === true;
+        log('assistant approval:', label, which ? (value ? 'answered' : 'left unanswered') : value ? 'allowed' : 'refused');
+        working(value && !which ? label : '');
+        resolve(value);
       };
-      approval = { resolve, label, settle, timer: setTimeout(() => settle(false), APPROVAL_MS) };
-      signal.addEventListener('abort', () => settle(false), { once: true });
-      // The question in its own window (clickable); the pill listens for a spoken yes.
-      prompt.show(`${label}?`);
-      working(WAITING);
-      listen(label);
+      const none = which ? null : false;
+      approval = { resolve, label, settle, choices, open: which, timer: setTimeout(() => settle(none), APPROVAL_MS) };
+      signal.addEventListener('abort', () => settle(none), { once: true });
+      // The question in its own window (clickable); the pill listens for a spoken answer.
+      prompt.show(`${label}?`, { options: choices, open: which });
+      working(which ? WAITING_ANSWER : WAITING);
+      listen(label, { options: choices, open: which });
     });
   }
 
@@ -210,6 +261,28 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
     get asking() {
       return !!approval;
     },
+    /** The question that's waiting, or null: `open`, it wants an answer of their own (one of `options`, when there are any), not a yes or a no. */
+    get asked() {
+      return approval ? { label: approval.label, options: [...approval.choices], open: approval.open } : null;
+    },
+
+    /**
+     * A question only the user can settle, asked on its own: the conversation's (which of two people it means), or
+     * anyone's with no task of the assistant's running. Their answer: one of `options` when they chose one, else
+     * their own words; null when it went unanswered, or they called it off.
+     * @param {{question:string, options?:string[]}} asked
+     * @returns {Promise<string|null>}
+     */
+    async inquire({ question, options = [] } = {}) {
+      const label = String(question ?? '').replace(/\s+/g, ' ').trim().replace(/[.?!]+$/, '').slice(0, 300);
+      if (!label) return null;
+      const task = await begin(taskCaption(label), { kind: 'question' });
+      try {
+        return await ask(label, task.controller.signal, { options, open: true });
+      } finally {
+        end(task);
+      }
+    },
 
     /**
      * The same question, for a command the matcher knows, heard on the always-on mic:
@@ -253,6 +326,8 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
           see,
           signal: task.controller.signal,
           confirm: ({ label }) => ask(label, task.controller.signal),
+          // A fork only the user can settle (which account, which of two people): the task waits on their answer.
+          inquire: ({ question, options }) => ask(String(question ?? '').replace(/[.?!]+$/, ''), task.controller.signal, { options, open: true }),
           onPlan: (labels) => (labels.length > 1 ? pause(PLAN_HOLD_MS) : undefined),
           onStep: (step) => {
             // A task that's been replaced keeps logging, but leaves the pill to the new one.
@@ -335,9 +410,13 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
       if (current) working(String(label || ''));
     },
 
-    /** That task's question for the user: 👍, Allow or a spoken yes, as for the assistant's own. */
-    question(label) {
-      return current ? ask(String(label).replace(/[.?!]+$/, ''), current.controller.signal) : Promise.resolve(false);
+    /**
+     * That task's question for the user: 👍, Allow or a spoken yes, as for the assistant's own. With `options`, or
+     * `open`, it's one they answer in their own words, and what comes back is their answer or null.
+     */
+    question(label, more = {}) {
+      const which = more?.open === true || (Array.isArray(more?.options) && more.options.length > 0);
+      return current ? ask(String(label).replace(/[.?!]+$/, ''), current.controller.signal, which ? { options: more.options, open: true } : {}) : Promise.resolve(which ? null : false);
     },
 
     get running() {
@@ -358,27 +437,36 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
       await Promise.race([task.done, pause(STOP_MS)]);
     },
 
-    /** The pill's Allow / Don't. */
-    answer(yes) {
-      approval?.settle(!!yes);
+    /**
+     * The pill's Allow / Don't, or an answer given any other way. To an open question: their words (or the option
+     * clicked), and null or false to leave it unanswered. A yes is only ever `true`: words aren't one.
+     */
+    answer(value) {
+      if (!approval) return;
+      approval.settle(approval.open ? (typeof value === 'string' ? value : null) : value === true);
     },
 
     /** Its question, asked again: what came back wasn't a yes or a no. @returns {boolean} whether one's waiting */
     reask() {
       if (!approval) return false;
-      prompt.show(`${approval.label}? Say yes or no.`);
-      listen(approval.label);
+      prompt.show(`${approval.label}?`, { options: approval.choices, open: approval.open, again: true });
+      listen(approval.label, { options: approval.choices, open: approval.open, again: true });
       return true;
     },
 
     /** A spoken command, if it's for the assistant: an answer, or "stop". */
     heard(text) {
+      if (approval?.open) {
+        // Their own words are the answer; "never mind" leaves it unanswered.
+        approval.settle(STOP.test(text) ? null : String(text ?? ''));
+        return true;
+      }
       if (approval) {
         const answer = approvalAnswer(text);
         if (answer) approval.settle(answer === 'yes');
         else {
-          prompt.show(`${approval.label}? Say yes or no.`);
-          listen(approval.label);
+          prompt.show(`${approval.label}?`, { again: true });
+          listen(approval.label, { again: true });
         }
         return true;
       }
@@ -391,12 +479,17 @@ export function createAssistant({ driver, openApp, activate, openUrl, dispatch, 
 
     /** The mic, opened for a spoken yes, stopped with none: the pill goes back to waiting, not to "No command heard". */
     micEnded(voice) {
-      if (approval && (voice?.phase === 'answer' || voice?.active === false)) working(WAITING);
+      if (approval && (voice?.phase === 'answer' || voice?.active === false)) working(approval.open ? WAITING_ANSWER : WAITING);
     },
 
-    /** A gesture, if it answers a question: 👍 yes, 👎 no. */
+    /** A gesture, if it answers a question: 👍 yes, 👎 no. A question that wants their own answer takes only 👎, for "leave it". */
     gesture(name) {
       if (!approval || !['Thumb_Up', 'Thumb_Down'].includes(name)) return false;
+      if (approval.open) {
+        if (name !== 'Thumb_Down') return false;
+        approval.settle(null);
+        return true;
+      }
       approval.settle(name === 'Thumb_Up');
       return true;
     },

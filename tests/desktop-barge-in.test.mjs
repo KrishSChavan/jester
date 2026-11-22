@@ -107,7 +107,8 @@ test('a short overlapped playback echo cannot approve his own question after the
   release();
   await question;
   j.advance(2000);
-  await j.conversation.heard('Yes.', { startedAt });
+  // "Allow" is a yes, and a word of his own question: heard across it, it's his voice come back.
+  await j.conversation.heard('Allow.', { startedAt });
   assert.deepEqual(j.assistant.answers, []);
   // A separate answer after playback is still a valid confirmation.
   await j.conversation.heard('Yes.', { startedAt: j.advance(1000) });
@@ -127,7 +128,7 @@ test('playback timing catches a short echo even when its first activity event ar
   await question;
   j.advance(2000);
   assert.equal(j.conversation.overlapped(startedAt), true);
-  await j.conversation.heard('Yes.', { startedAt });
+  await j.conversation.heard('Allow.', { startedAt });
   assert.deepEqual(j.assistant.answers, []);
 });
 

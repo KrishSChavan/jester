@@ -58,7 +58,44 @@ button {
   color: #f5f5f7;
 }
 
-#allow {
+#allow,
+button.primary {
   background: #ffd27a;
   color: #1d1d1f;
+}
+
+/* A question with answers of its own: the question above, a button for each answer below. */
+.answers {
+  display: flex;
+  flex: none;
+  gap: 8px;
+  min-width: 0;
+}
+
+body.stacked .ask {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 12px 14px 12px 20px;
+  border-radius: 26px;
+}
+
+body.stacked .answers {
+  flex-wrap: nowrap;
+}
+
+body.stacked .answers button {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button.quiet {
+  /* Never squeezed out by long answers: it's the way to say none of them. */
+  flex: none;
+  background: transparent;
+  color: rgba(232, 236, 242, 0.7);
+  margin-left: auto;
 }

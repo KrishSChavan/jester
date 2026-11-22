@@ -22,7 +22,8 @@
  *   server → Mac   { t: 'hands', id, op, ...args }            op: knows | risky | scriptsAsk | run | confirm | answer | reask | cancel | scripts | where | set
  *   Mac → server   { t: 'hands-reply', id, result } | { t: 'hands-reply', id, error }
  *   Mac → server   { t: 'hands-state', running, asking, abilities, engine, switches, doing }   whenever any of it changes
- *   Mac → server   { t: 'hands-ask', label }                  its task has a question: asked in the conversation
+ *   Mac → server   { t: 'hands-ask', label, open?, options?, again? }   its task has a question: asked in the conversation.
+ *                                                             open: answered in the user's own words (one of options, if any)
  *   Mac → server   { t: 'presence', idleSeconds }             how long since the user touched it
  *   Mac → server   { t: 'told', text }                        typed in the Mac's own window: said to him here
  *   Mac → server   { t: 'scripts-changed', change }           its scripts or what's on changed: Controls reads them again
@@ -150,17 +151,20 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
       return [...macs.values()].find((mac) => mac.owner === chat || (!mac.owner && adopt() === chat)) || null;
     };
 
-    function askHere(label) {
-      localAsk?.settle(false);
+    /** `more`: a question answered in the user's own words, with its options: resolves to their answer, or null. */
+    function askHere(label, more = null) {
+      localAsk?.settle(localAsk.open ? null : false);
+      const open = !!more;
+      const options = Array.isArray(more?.options) ? more.options.slice(0, 4).map(String) : [];
       return new Promise((resolve) => {
-        const timer = setTimeout(() => settle(false), ASK_MS);
-        const settle = (yes) => {
+        const timer = setTimeout(() => settle(open ? null : false), ASK_MS);
+        const settle = (answer) => {
           clearTimeout(timer);
           if (localAsk?.settle === settle) localAsk = null;
-          resolve(!!yes);
+          resolve(open ? (typeof answer === 'string' && answer.trim() ? answer.trim() : null) : answer === true);
         };
-        localAsk = { label, settle };
-        onAsk(label, chat);
+        localAsk = { label, settle, open, options };
+        onAsk(label, chat, open ? { open: true, options } : {});
       });
     }
 
@@ -188,19 +192,32 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
         get asking() {
           return !!localAsk || !!current()?.state.asking;
         },
+        /** The question waiting, as far as it's known here: `open`, it wants their own words, not a yes or a no. */
+        get asked() {
+          if (localAsk) return { label: localAsk.label, options: [...localAsk.options], open: localAsk.open };
+          const mac = current();
+          return mac?.state.asking ? { label: mac.asked?.label || '', options: [...(mac.asked?.options || [])], open: !!mac.asked?.open } : null;
+        },
         confirm(label) {
           const mac = own(target(''));
           if (!mac) return askHere(String(label));
           return request(mac, 'confirm', { label: String(label) }, ASK_MS + QUICK_MS).then((yes) => !!yes, () => false);
         },
-        answer(yes) {
-          if (localAsk) return localAsk.settle(!!yes);
-          if (current()) request(current(), 'answer', { yes: !!yes }).catch(() => undefined);
+        /** A question only the user can settle (assistant.js inquire): asked on the computer in use, or here with none. */
+        inquire({ question, options = [] } = {}) {
+          const mac = own(target(''));
+          if (!mac) return askHere(String(question ?? ''), { options });
+          return request(mac, 'inquire', { question: String(question ?? ''), options }, ASK_MS + QUICK_MS).then((answer) => (typeof answer === 'string' && answer.trim() ? answer.trim() : null), () => null);
+        },
+        answer(value) {
+          if (localAsk) return localAsk.settle(localAsk.open ? (typeof value === 'string' ? value : null) : value === true);
+          const told = typeof value === 'string' ? { yes: true, text: value } : value === null ? { yes: false, left: true } : { yes: !!value };
+          if (current()) request(current(), 'answer', told).catch(() => undefined);
           return undefined;
         },
         reask() {
           if (localAsk) {
-            onAsk(localAsk.label, chat);
+            onAsk(localAsk.label, chat, { ...(localAsk.open ? { open: true, options: localAsk.options } : {}), again: true });
             return true;
           }
           const mac = current();
@@ -209,7 +226,7 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
           return !!mac.state.asking;
         },
         cancel() {
-          localAsk?.settle(false);
+          localAsk?.settle(localAsk.open ? null : false);
           if (current()) return request(current(), 'cancel').catch(() => undefined);
           return Promise.resolve();
         }
@@ -258,7 +275,12 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
         onChange();
       } else if (frame.t === 'hands-ask') {
         if (!mac.owner) mac.owner = adopt();
-        onAsk(String(frame.label || '').slice(0, 300), mac.owner);
+        const label = String(frame.label || '').slice(0, 300);
+        const options = Array.isArray(frame.options) ? frame.options.slice(0, 4).map((option) => String(option).slice(0, 80)) : [];
+        const open = frame.open === true || options.length > 0;
+        // What kind of answer it wants, for the conversation that hears one before the Mac's state says.
+        mac.asked = { label, open, options };
+        onAsk(label, mac.owner, { ...(open ? { open: true, options } : {}), ...(frame.again === true ? { again: true } : {}) });
       } else if (frame.t === 'told' && typeof frame.text === 'string' && frame.text.trim()) {
         mac.idle = { seconds: 0, at: now() };
         onTold(frame.text.trim().slice(0, 12000), listed(mac));

@@ -1157,7 +1157,7 @@ function startChromeLink() {
       if (!assistant.running) post({ type: MSG.VOICE, voice: { position: 'bottom-center', ...voice } });
       else if (voice.phase === 'thinking') assistant.step(voice.step);
     },
-    onAsk: (label) => assistant.question(label),
+    onAsk: (label, more) => assistant.question(label, more),
     onVoice: () => onJester('voice'),
     onScrape: (request, options) => webScraper.request(request, options),
     log
@@ -2407,7 +2407,8 @@ function listenToPages() {
         return { ok: true };
       // The assistant's question window: Allow / Don't.
       case 'jester/approval-answer':
-        assistant.answer(message.approved === true);
+        // One of a question's own answers clicked, or "Leave it"; else Allow or Don't.
+        assistant.answer('choice' in message ? (typeof message.choice === 'string' ? message.choice.slice(0, 200) : null) : message.approved === true);
         return { ok: true };
       // The × beside the pill, and where the pill is for it to sit beside.
       // The Stop on a ringing timer's pill.
@@ -2793,7 +2794,7 @@ function startWebGateway() {
   webLogin.start().catch((err) => log('sign-in: the password couldn’t be read:', err.message));
   remoteHands = createRemoteHands({
     // A computer's task has a question: asked in the chat that started it, aloud or written, and answered there.
-    onAsk: (label, chat) => sessions?.get(chat && chat !== 'local' ? chat : sessions.frontKey).conversation.ask(label),
+    onAsk: (label, chat, more) => sessions?.get(chat && chat !== 'local' ? chat : sessions.frontKey).conversation.ask(label, more),
     // Typed in a computer's own window: said to him in that computer's chat.
     onTold: (text, computer) => {
       webActiveAt = Date.now();
@@ -3007,8 +3008,12 @@ async function handsAsked(frame) {
     }
     case 'confirm':
       return assistant.confirm(String(frame.label || '').slice(0, 300));
+    // A question only the user can settle, asked by the server's conversation: its window here, its answer theirs.
+    case 'inquire':
+      return assistant.inquire({ question: String(frame.question || '').slice(0, 300), options: Array.isArray(frame.options) ? frame.options.slice(0, 4).map((option) => String(option).slice(0, 80)) : [] });
     case 'answer':
-      assistant.answer(!!frame.yes);
+      // Their own words, to a question that wanted them; left unanswered; or a yes or a no.
+      assistant.answer(typeof frame.text === 'string' ? frame.text.slice(0, 400) : frame.left === true ? null : !!frame.yes);
       return true;
     case 'reask':
       return assistant.reask();
@@ -3178,7 +3183,8 @@ async function start() {
     // A question can be answered aloud: the mic opens for it, or is open, and he asks it.
     // Asked of someone typing to him, it's written, mic or no mic.
     // In the cloud, the conversation is the server's: it asks.
-    listen: (label) => (cloudLink?.connected ? cloudLink.ask(label) : listening || conversation.typing ? conversation.ask(label) : !voiceProblem() && engineHost.voice('start')),
+    // `more`: a question they answer in their own words, and its options (assistant.js ask).
+    listen: (label, more) => (cloudLink?.connected ? cloudLink.ask(label, more) : listening || conversation.typing ? conversation.ask(label, more) : !voiceProblem() && engineHost.voice('start')),
     // macOS reads no app's controls while a Jester overlay is up (README): the pill blinks out meanwhile.
     quietly: (task) => overlays.whileHidden(task),
     // A picture of the window, when its words aren't enough: with Screen Recording allowed, and not turned off in Settings.
