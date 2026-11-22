@@ -13,7 +13,10 @@ This is for **Jester Desktop**. The Chrome extension's policy is
   isn't yours is never turned into text at all, with one exception: for up
   to a minute after he's asked you something, a word or two said then is
   read even when it's too short to tell whose voice it is, because a "yes"
-  always is. In that minute someone else's "yes" would count as yours.
+  always is. In that minute someone else's "yes" would count as yours. The
+  same goes for the 20 seconds after he asks you a question in conversation
+  ("Want me to look it up?"): a yes or a no on its own then is taken as your
+  answer without his name, whoever says it, and with or without a voiceprint.
   Anything longer, and anything that sounds nothing like you, is still left
   unread.
 - **The camera.** Frames are read on your computer for gestures and the

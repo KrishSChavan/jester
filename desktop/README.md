@@ -3017,6 +3017,14 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     forward: that app takes no clicks from behind (tell me which). If anything goes wrong, Settings › Assistant
     and voice › "Work behind your windows" off puts it back as it was.
 
+39. **A bare yes or no to his question** (built 2026-11-22; scripted conversation only, never with your voice). Ask
+    him something he'll answer with a question ("what's on my calendar today?" often ends "Want me to…?"), then,
+    without his name, say just "yes" or "no, that's okay" within 20 seconds. He should take it. His question
+    doesn't have to be last: "Want me to look it up? It only takes a second." counts. More than a yes or a no
+    ("yes and what's the weather") still needs his name unless your voice is surely yours. The log says `a yes on
+    its own, to what he'd just asked: taken` (or `a no…`). A yes after 20 s, or after a line that asked nothing,
+    is let pass as before.
+
 ## Things learned the hard way
 
 - An iPhone gives a page the mic without asking only within a minute of the last time it was capturing, unless

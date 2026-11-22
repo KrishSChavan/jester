@@ -43,6 +43,31 @@ const OPEN_MS = 12000;
  * Words begun this long before he'd finished are still an answer to him: people start on the last word of a question.
  */
 const EARLY_MS = 1500;
+/**
+ * Whether a line of his asks the user something: one of its last two sentences is a question, or begins as one
+ * does ("Want me to…", "Should I…"). Until 2026-11-22 only a line ending in "?" counted, so "Want me to look it up?
+ * It'll take a second." was waited on as any line is, a bare "yes" to it was too short for the voiceprint, and it
+ * took his name.
+ * @param {string} line
+ */
+export function asksYou(line) {
+  const sentences = String(line ?? '').replace(/\s+/g, ' ').trim().match(/[^.!?…]+(?:[.!?…]+["”’')\]]*|$)/g) || [];
+  return sentences
+    .slice(-2)
+    .map((sentence) => sentence.trim())
+    .some((sentence) => /\?["”’')\]]*$/.test(sentence) || /^(?:(?:so|okay|ok|or|and|also|then|now)[, ]+)?(?:(?:do|would) you (?:want|like)|want me to|shall i|should i|can i|may i|could i|is that (?:okay|ok|alright|right)|does that (?:work|sound))\b/i.test(sentence));
+}
+/**
+ * A yes or a no on its own: what answers a question of his whoever's voice it's in, and without his name, in the
+ * seconds after he asked it (ASKED_MS). Anything more than that is said to him only with his name or a voice he
+ * knows, as before.
+ */
+export function bareAnswer(said, question = '') {
+  const text = String(said ?? '').trim();
+  if (!text || text.length > 60 || /\?\s*$/.test(text)) return '';
+  if (agrees(text, question)) return 'yes';
+  return NO.test(text) ? 'no' : '';
+}
 /** How long a question that asks leave is waited on (assistant.js APPROVAL_MS): a short answer is read for as long. */
 const LEAVE_MS = 60000;
 /** And after a question of his, which wants an answer: long enough to think of one. */
@@ -1180,6 +1205,22 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     }
   }
 
+  /**
+   * A question of his, just asked, that a bare yes or no answers without his name or a voiceprint (bareAnswer):
+   * {text, since, until}. Gone once anything's said to him.
+   */
+  let question = null;
+  /**
+   * He's finished a line, spoken: he listens on for what's said next, for longer when it asked something, and a bare
+   * yes or no to that is his whoever says it. Without a voiceprint nothing else is listened on for: his own voice
+   * could carry on from here (2026-11-06), and a "yes" is no line of his.
+   */
+  function waitOnAnswer(line, { offered = false } = {}) {
+    const asked = offered || asksYou(line);
+    question = asked ? { text: String(line ?? ''), since: now(), until: now() + ASKED_MS } : null;
+    if (knowsYou()) stayOpen(asked ? ASKED_MS : OPEN_MS);
+  }
+
   /** The pill listens on, for what's said next. */
   function stayOpen(ms = OPEN_MS) {
     openSince = now();
@@ -1672,8 +1713,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         log('jester:', logged({ say: round.say, calls: round.calls }));
       }
       await spoken;
-      // A question of his is waited on for longer.
-      if (!stale() && knowsYou() && !typed) stayOpen(/\?["”’')\]]*\s*$/.test(lastLine) ? ASKED_MS : OPEN_MS);
+      // A question of his is waited on for longer, and a bare yes or no to it needs no name.
+      if (!stale() && !typed) waitOnAnswer(lastLine);
     } finally {
       acting -= 1;
     }
@@ -1799,8 +1840,9 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // Spoken or typed to, he isn't rung over.
     ring?.stop('their talking to him');
     /** The moment his last line left for an answer: still theirs if these words turn out not to have been to him. */
-    const wasOpen = { since: openSince, until: openUntil };
+    const wasOpen = { since: openSince, until: openUntil, question };
     openUntil = 0;
+    question = null;
     expect(0);
     typing = typed;
     // Quicker to someone in a hurry, slower to someone low: for all he says this turn.
@@ -1966,6 +2008,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       if (unnamed && quietReply(reply)) {
         memory.take?.('you', text);
         passed(text, 'not said to him, his model judged', { theirs: !unsure });
+        if (wasOpen.question?.until > now()) question = wasOpen.question;
         if (wasOpen.until > now()) {
           openSince = wasOpen.since;
           openUntil = wasOpen.until;
@@ -2114,9 +2157,9 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       reply.do = asAsked(reply.do, text);
       if (reply.do) return void (await act(reply.do, { overheard: overheard || theirs || around.untrusted || history.some((entry) => entry.untrusted), stale, before: spoken, said: text, answer, typed, context: researchContext }));
       await spoken;
-      // Without a voiceprint anyone could carry on from here, and he'd answer his own echo. Typed to, nobody's talking.
-      // A question of his is waited on for longer.
-      if (!stale() && knowsYou() && !typed) stayOpen(/\?["”’')\]]*\s*$/.test(whole) ? ASKED_MS : OPEN_MS);
+      // Without a voiceprint anyone could carry on from here, and he'd answer his own echo: only a bare yes or no to a
+      // question of his is taken then (waitOnAnswer). Typed to, nobody's talking.
+      if (!stale() && !typed) waitOnAnswer(whole);
     } catch (err) {
       if (stale()) return;
       log('jester couldn’t answer:', err.message);
@@ -2129,7 +2172,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       keep(ended);
       // What he offered still stands after a question about it, for as long as it did: "okay, do the first one". Not
       // when his answer asked something of its own: a yes is to that.
-      const asksBack = /\?["”’')\]]*\s*$/.test(memory.current(1).at(-1)?.who === 'jester' ? String(memory.current(1).at(-1).text) : '');
+      const asksBack = asksYou(memory.current(1).at(-1)?.who === 'jester' ? String(memory.current(1).at(-1).text) : '');
       if (offerStands && !stale() && !workOffer && !asksBack && offerStands.expiresAt > now()) workOffer = { ...offerStands, askedAt: beganAt, answerBy: now() + ASKED_MS };
     }
   }
@@ -2190,6 +2233,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // An open answer could be anything, so his own voice garbled could pass for one: begun while he was still
     // speaking, it counts only in a voice that's surely theirs.
     const answers = asking && !!meant && (assistant.asked?.open ? sure || !overlapped : agrees(meant, assistant.asked?.label) || NO.test(meant));
+    // A bare yes or no just after a question of his in conversation ("Want me to look it up?"): theirs to him, with no
+    // name and whatever the voiceprint makes of a word. Not one begun while he was still speaking, which could be his
+    // own voice, nor one his question holds the words of.
+    const replies = !asking && !woken && !!question && !overlapped && Number.isFinite(startedAt ?? now()) && (startedAt ?? now()) >= question.since - EARLY_MS && (startedAt ?? now()) < question.until && !!bareAnswer(meant, question.text);
     // Short output echoes such as "yes" still need screening after the quiet
     // guard expires; they must never become an approval of his own question.
     if (overlapped && !cutIn && !sure && playbackEcho(meant)) return passed(text, 'playback echo');
@@ -2210,7 +2257,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         // too: a "yes" is too short for the voiceprint to be sure of, and it comes at once. Until 2026-11-21 both
         // were let pass here for 1.2 s after his last word, and a yes never got through ("he is unable to register
         // my simple yes"). His own voice began while he was speaking (overlapped), and was screened just above.
-        const quick = !talking && !overlapped && (woken || !playbackEcho(meant));
+        const quick = !talking && !overlapped && (woken || replies || !playbackEcho(meant));
         if (answers) {
           // He needn't finish asking what's been answered.
           if (talking) hush();
@@ -2227,7 +2274,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     }
     // His own words, heard back. Not a voice that's surely theirs, nor an answer begun after he'd stopped: "Yes, read
     // it." to "Want me to read it?" shares most of its words with the question (2026-11-21, thrown away as his echo).
-    if (cutIn ? !cutIn.verified && repeatedPlayback(meant) : !sure && !(answers && !overlapped) && echoes(meant)) {
+    if (cutIn ? !cutIn.verified && repeatedPlayback(meant) : !sure && !(answers && !overlapped) && !replies && echoes(meant)) {
       log('that was me:', JSON.stringify(text));
       return null;
     }
@@ -2284,7 +2331,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // Without his name it's for him only just after he's spoken to them. Then a voice that only may be theirs is
     // taken for theirs: it's an answer to him, seconds after he spoke (2026-11-15: every "yes" to a question of his
     // scored as maybe, and went unheard).
-    if (!woken && !cutIn && !instead && !withinWindow(startedAt) && !answersOffer(meant, startedAt)) {
+    if (replies) log(`a ${bareAnswer(meant, question.text)} on its own, to what he’d just asked: taken${unsure ? ', in a voice that may be yours' : ''}`);
+    if (!woken && !cutIn && !instead && !replies && !withinWindow(startedAt) && !answersOffer(meant, startedAt)) {
       // His name within it, though not as a call: all of it goes to his model, which says whether it was to him.
       if (named(meant)) return turn(meant, { overheard: true, unsure, unnamed: true, mentioned: true, lag, startedAt });
       return passed(text, 'not said to him', { theirs: !unsure });
@@ -2293,7 +2341,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       stayOpen();
       return Promise.resolve();
     }
-    return turn(meant, { overheard: true, unsure, unnamed: !woken, mentioned: !woken && named(meant), lead: woken ? lead : '', lag, startedAt });
+    // A bare answer to his question is plainly to him: his model isn't asked whether it was.
+    return turn(meant, { overheard: true, unsure, unnamed: !woken && !replies, mentioned: !woken && named(meant), lead: woken ? lead : '', lag, startedAt });
   }
 
   return {
@@ -2466,7 +2515,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         if (offered && workOffer === offered) offered.answerBy = now() + ASKED_MS;
         if (reset !== resets && !written) return false;
         if (offered) await Promise.resolve(work.asked?.(asks.map((item) => item.id))).catch(() => undefined);
-        if (mine === turns && !written && knowsYou()) stayOpen(offer || offered ? ASKED_MS : OPEN_MS);
+        if (mine === turns && !written) waitOnAnswer(whole, { offered: !!(offer || offered) });
         return true;
       });
       keep(ended);
