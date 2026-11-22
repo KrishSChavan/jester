@@ -210,6 +210,7 @@
             <button class="row go" type="button" data-go="settings/day"><span class="glyph"><svg class="icon-svg"><use href="#i-calendar" /></svg></span><span class="label">Weather and calendars</span><span class="aside" id="sum-day"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/mail"><span class="glyph"><svg class="icon-svg"><use href="#i-mail" /></svg></span><span class="label">Email</span><span class="aside" id="sum-mail"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/models"><span class="glyph"><svg class="icon-svg"><use href="#i-chip" /></svg></span><span class="label">Models</span><span class="aside" id="sum-models"></span><svg class="chev"><use href="#i-forward" /></svg></button>
+            <button class="row go" type="button" data-go="settings/tools"><span class="glyph"><svg class="icon-svg"><use href="#i-hand" /></svg></span><span class="label">Tools and choices</span><span class="aside" id="sum-tools"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/cloud"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Jester in the cloud</span><span class="aside" id="sum-cloud"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go web-only" type="button" data-go="settings/devices"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Devices</span><span class="aside" id="sum-devices"></span><svg class="chev"><use href="#i-forward" /></svg></button>
             <button class="row go" type="button" data-go="settings/chrome"><span class="glyph"><svg class="icon-svg"><use href="#i-link" /></svg></span><span class="label">Chrome</span><span class="aside" id="sum-chrome"></span><svg class="chev"><use href="#i-forward" /></svg></button>
@@ -603,6 +604,37 @@
               <button id="connection-add" type="submit" class="primary">Add model</button>
             </div>
           </form>
+        </div>
+      </section>
+
+      <section id="page-tools" class="screen page" data-screen="settings/tools" aria-labelledby="tools-heading" inert>
+        <header class="top">
+          <button class="icon" type="button" data-go="settings" aria-label="Back to Settings" title="Back to Settings"><svg class="icon-svg"><use href="#i-back" /></svg></button>
+          <h1 id="tools-heading">Tools and choices</h1>
+        </header>
+        <div class="scroll">
+          <div class="cards">
+            <label class="row">
+              <span><strong>Let him choose his own tools</strong><small>He decides where each thing is done (a text in Messages, a show in Chrome, a search in the background), hears how it went and tells you in his own words, and asks you when it’s your choice to make. Needs a Claude model ticked for Talking in Models; with any other model, or with this off, he works the older way.</small></span>
+              <input type="checkbox" id="assistantTools" />
+            </label>
+          </div>
+          <h2 class="group" id="ways-heading">How you like things done</h2>
+          <div class="cards" id="ways-list" aria-labelledby="ways-heading"></div>
+          <p class="note" id="ways-note">When he has to ask which one you mean (which profile, which Dad, which app), he keeps your answer here and doesn’t ask again. Remove one and he’ll ask the next time; or just tell him “use the other profile from now on”.</p>
+          <div id="tools-others" hidden>
+            <h2 class="group">Other apps</h2>
+            <div class="cards">
+              <label class="row">
+                <span><strong>Let other apps use Jester’s tools</strong><small id="tools-others-hint">Apps that speak MCP (Claude’s apps, an editor) can then ask Jester to work this computer, Chrome, the web and your notes. He still shows what he’s doing and asks you before anything is sent, bought or deleted. Off unless you turn it on; only programs running as you, on this computer, can reach it.</small></span>
+                <input type="checkbox" id="toolsForOthers" />
+              </label>
+              <div class="row" id="tools-config-row" hidden>
+                <span><strong>To connect an app</strong><small>Add this to the app’s MCP settings, then restart it.</small><code id="tools-config" class="snippet"></code></span>
+                <button id="tools-copy" type="button">Copy</button>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 

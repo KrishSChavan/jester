@@ -242,7 +242,7 @@ export function createTools({ run = null, inquire = null, recall = null, note = 
   async function task(sentence, where, ctx) {
     if (!run) return { ok: false, text: 'There is no computer to do that on right now.' };
     // overheard: other people's words are in play (a note, a page), so what could do harm is asked about first.
-    const { outcome } = await run(clip(sentence, TOOL_LIMITS.task), { said: ctx.said || '', context: ctx.context || '', ...(where ? { where } : {}), ways: lines(), overheard: ctx.overheard === true, typed: ctx.typed === true });
+    const { outcome } = await run(clip(sentence, TOOL_LIMITS.task), { said: ctx.said || '', context: ctx.context || '', ...(where ? { where } : {}), ways: lines(), overheard: ctx.overheard === true, typed: ctx.typed === true, ...(ctx.signal ? { signal: ctx.signal } : {}) });
     for (const { about, choice } of outcome?.chose || []) await ways?.set(about, choice).catch(() => undefined);
     return { ...outcomeText(outcome), ...(outcome?.sources ? { sources: outcome.sources } : {}), ...(outcome ? {} : { stopped: true }) };
   }

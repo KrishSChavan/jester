@@ -41,6 +41,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { format } from 'node:util';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { ACTIONS, ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
@@ -74,6 +75,9 @@ import { driverPath, startDriver, toDipFrame, toOsFrame } from './driver.js';
 import { desktopSettings, loadSettings, startEngineHost } from './engine-host.js';
 import { createLearned } from './learned.js';
 import { createWays } from './ways.js';
+import { createMcpServer } from './mcp/server.js';
+import { createMcpSocket, mcpSocketPath } from './mcp/socket.js';
+import { createTools } from './mcp/tools.js';
 import { startLink } from './link.js';
 import { installLinkHost, linkOrigins } from './link-host.js';
 import { createModelJob, localUses } from './model-jobs.js';
@@ -264,6 +268,10 @@ let spend = null;
 let learned = null;
 /** How the user likes things done, as they've told him (ways.js): their answers at a fork, kept. */
 let ways = null;
+/** His tools, open to other apps on this computer that speak MCP, while the user's said they may be (mcp/socket.js). */
+let mcpSocket = null;
+/** The bridge a client runs to reach them (desktop/bin/jester-mcp.mjs), beside the app's own files. */
+const MCP_BRIDGE = fileURLToPath(new URL('../../bin/jester-mcp.mjs', import.meta.url));
 /** What his website's Controls may ask of the Mac's scripts (script-remote.js). */
 let scriptsRemote = null;
 /** The Obsidian vault Jester keeps its memory in (vault.js), its search (vault-index.js), and the memory between them. */
@@ -502,6 +510,8 @@ function desktopState() {
   return {
     type: 'jester/desktop-state',
     platform: process.platform,
+    // His tools, for other apps: Settings › Tools.
+    tools: toolsState(),
     engine,
     permissions,
     // What he can't do without as he's set up, and hasn't got (permission-list.js).
@@ -614,8 +624,30 @@ async function refresh() {
   followLocation();
   syncBriefs();
   syncMail();
+  syncTools();
   updateTray();
   post(desktopState());
+}
+
+/** His tools are open to other apps only while Settings › Tools says so: off unless the user turns it on. */
+function syncTools() {
+  if (!mcpSocket) return;
+  const on = settings?.enabled !== false && settings?.toolsForOthers === true;
+  if (on === mcpSocket.listening) return;
+  Promise.resolve(on ? mcpSocket.start() : mcpSocket.stop()).then(() => post(desktopState())).catch((err) => log('mcp:', err.message));
+}
+
+/**
+ * Settings › Tools: whether other apps can reach his tools, and the lines to give one of them. With no Node of the
+ * user's to run the bridge, Jester's own program runs it, as Node.
+ */
+function toolsState() {
+  if (!mcpSocket) return { available: false };
+  return {
+    available: true,
+    open: mcpSocket.listening,
+    config: JSON.stringify({ mcpServers: { jester: { command: process.execPath, args: [MCP_BRIDGE], env: { ELECTRON_RUN_AS_NODE: '1' } } } }, null, 2)
+  };
 }
 
 /** His menu, as things stand. */
@@ -2105,6 +2137,12 @@ function listenToPages() {
         else if (message.op === 'forget') await storage.local.remove(['voiceprint', 'voiceLearned']);
         await refresh();
         return { ok: true };
+      // Settings › Tools: how the user likes things done, as he's kept it (ways.js), and one of them forgotten.
+      case 'jester/ways': {
+        await ways?.ready();
+        if (message.op === 'forget') await ways?.forget(String(message.id ?? '').slice(0, 80));
+        return { ok: true, list: ways?.list() || [] };
+      }
       case 'jester/desktop-forget':
         chatForgotten = true;
         for (const session of sessions.list()) session.conversation.forget();
@@ -3276,6 +3314,34 @@ async function start() {
       run: (text, meant = '', options = {}) => assistant.elsewhere(text, (signal) => chromeLink.task(text, { signal, meant, ...options }))
     }
   });
+  // His tools, for other apps on this computer that speak MCP (Settings › Tools; off until the user turns it on):
+  // the same hands, notes and questions his own model has. A server has no computer of its own to lend.
+  if (!SERVER) {
+    const outside = createTools({
+      run: (text, more = {}) => {
+        // Cancelled by whoever asked: his task is stopped.
+        more.signal?.addEventListener('abort', () => void assistant.cancel(), { once: true });
+        return voiceRunner.run(text, { talking: true, said: text, ...(more.where ? { where: more.where } : {}), ...(more.ways?.length ? { ways: more.ways } : {}) });
+      },
+      inquire: (asked) => assistant.inquire(asked),
+      recall: (query) => vaultMemory.recall(query, { history: [] }),
+      note: (request) => vaultMemory.note(request),
+      remember: ({ text }) => vaultMemory.remember({ text, transcript: [] }),
+      ways,
+      log
+    });
+    mcpSocket = createMcpSocket({
+      file: env.JESTER_MCP_SOCKET || mcpSocketPath(app.getPath('userData'), { user: os.userInfo().username }),
+      server: createMcpServer({
+        tools: outside,
+        state: () => ({ computer: true, mac: process.platform === 'darwin', chrome: !!chromeLink?.linked, web: webReady(), notes: !!vault }),
+        version: app.getVersion(),
+        onCall: ({ name, client }) => log('mcp:', client || 'a client', 'called', name),
+        log
+      }),
+      log
+    });
+  }
   // On a server, the browser being talked to is the voice page (web-gateway.js).
   voicePage = SERVER ? createRemoteVoicePage(webGateway, { log }) : createVoicePage({ log });
   kokoro = startKokoro({
@@ -3852,6 +3918,8 @@ if (!app.requestSingleInstanceLock()) {
     webScraper.close();
     watch?.close();
     linkTransport?.close();
+    // His tools' socket file goes with him: left behind, a client's bridge would wait on nobody.
+    mcpSocket?.stop();
     vaultIndex?.close();
     kokoro?.stop();
     calendars?.stop();

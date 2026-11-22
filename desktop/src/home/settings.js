@@ -999,6 +999,7 @@ function render() {
   renderPermissions();
   renderPictures();
   renderMemory();
+  renderTools();
   renderDay();
   renderControls();
   renderBindings();
@@ -1030,6 +1031,7 @@ function renderIndex() {
   const troubled = vaultDenied(memory) || !!memory.problem;
   // Chosen but not open (macOS keeping Jester out, or the folder gone) is a problem, not "no vault".
   aside('sum-memory', memory.root ? memory.name || 'Vault' : memory.chosen ? 'Can’t open the vault' : 'No vault', troubled ? 'warn' : '');
+  aside('sum-tools', [waysKept.length ? `${waysKept.length} kept` : '', desktop?.tools?.open ? 'open to other apps' : ''].filter(Boolean).join(', '));
   const day = desktop?.day || {};
   const location = day.location || {};
   const source = location.source || settings.locationSource || 'off';
@@ -1092,6 +1094,10 @@ chrome.runtime.onMessage.addListener((message) => {
       drawMail(message.mail);
       render();
       break;
+    // A choice of theirs was kept or forgotten while Settings was open (main.js ways).
+    case 'jester/ways-changed':
+      readWays();
+      break;
     // A download's progress (main.js modelsChanged): the lines that say it, and nothing else redrawn.
     case 'jester/desktop-models':
       if (!desktop) break;
@@ -1147,6 +1153,65 @@ export function showing(screen) {
   if (screen === 'settings' || screen === 'settings/models') renderChatModels();
   // How much he knows about them, counted when the Memory page is opened.
   if (screen === 'settings/memory') vaultOp('known').catch(() => undefined);
+  // What he's kept of how they like things done, read when its page is opened.
+  if (screen === 'settings' || screen === 'settings/tools') readWays();
+}
+
+/** How the user likes things done, as he's kept it (main.js ways): [{id, about, choice, at}], the newest first. */
+let waysKept = [];
+
+async function readWays(forget = '') {
+  const got = await chrome.runtime.sendMessage({ type: 'jester/ways', op: forget ? 'forget' : 'list', id: forget }).catch(() => null);
+  if (!Array.isArray(got?.list)) return;
+  waysKept = got.list;
+  drawWays();
+  renderIndex();
+}
+
+/** Each choice as a row: what it's about, what they chose, and a button that forgets it. */
+function drawWays() {
+  const list = $('ways-list');
+  if (!waysKept.length) {
+    const empty = document.createElement('div');
+    empty.className = 'row';
+    const text = document.createElement('span');
+    const small = document.createElement('small');
+    small.textContent = 'Nothing yet. The first time he has to ask you which one you mean, your answer is kept here.';
+    text.append(small);
+    empty.append(text);
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(
+    ...waysKept.map((way) => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const text = document.createElement('span');
+      const about = document.createElement('strong');
+      about.textContent = way.about;
+      const choice = document.createElement('small');
+      choice.textContent = way.choice;
+      text.append(about, choice);
+      const forget = document.createElement('button');
+      forget.type = 'button';
+      forget.textContent = 'Forget';
+      forget.setAttribute('aria-label', `Forget ${way.about}`);
+      forget.addEventListener('click', () => readWays(way.id));
+      row.append(text, forget);
+      return row;
+    })
+  );
+}
+
+/** Settings › Tools: his own tools on or off, and whether other apps may use them, with the lines to give one. */
+function renderTools() {
+  $('assistantTools').checked = settings.assistantTools !== false;
+  const tools = desktop?.tools || {};
+  // His website has no computer of its own to lend: that's the Mac's page to show.
+  $('tools-others').hidden = !tools.available;
+  $('toolsForOthers').checked = settings.toolsForOthers === true;
+  $('tools-config-row').hidden = !(tools.available && settings.toolsForOthers === true);
+  $('tools-config').textContent = tools.config || '';
 }
 
 $('enabled').addEventListener('change', (event) => save({ enabled: event.target.checked }));
@@ -1160,6 +1225,18 @@ $('keepUnsureSpeech').addEventListener('change', (event) => save({ keepUnsureSpe
 for (const id of ['briefMorning', 'briefEvening', 'checkIns', 'offerWork']) $(id).addEventListener('change', (event) => save({ [id]: event.target.checked }));
 $('eveningAt').addEventListener('change', (event) => /^\d\d:\d\d$/.test(event.target.value) && save({ eveningAt: event.target.value }));
 $('memoryConversations').addEventListener('change', (event) => save({ memoryConversations: event.target.checked }));
+$('assistantTools').addEventListener('change', (event) => save({ assistantTools: event.target.checked }));
+$('toolsForOthers').addEventListener('change', (event) => save({ toolsForOthers: event.target.checked }));
+$('tools-copy').addEventListener('click', async (event) => {
+  const button = event.currentTarget;
+  try {
+    await navigator.clipboard.writeText($('tools-config').textContent);
+    button.textContent = 'Copied';
+  } catch {
+    button.textContent = 'Select it and copy';
+  }
+  setTimeout(() => (button.textContent = 'Copy'), 2000);
+});
 for (const [id, op] of [['vault-choose', 'choose'], ['vault-remove', 'remove'], ['vault-open', 'open'], ['known-open', 'about'], ['vault-privacy', 'privacy'], ['vault-reindex', 'reindex']]) {
   $(id).addEventListener('click', () => vaultOp(op));
 }

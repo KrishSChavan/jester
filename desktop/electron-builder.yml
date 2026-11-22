@@ -25,6 +25,8 @@ directories:
 files:
   - package.json
   - src/**/*
+  # The bridge an MCP client runs to reach his tools (Settings › Tools).
+  - bin/jester-mcp.mjs
   - scraping/worker.py
   - scraping/requirements.txt
   - icons/Jester.ico
