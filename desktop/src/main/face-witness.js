@@ -39,7 +39,7 @@ export const STILL = 0.025;
  * For a line this long, the mouth must move with the sound: their correlation at its best within LAG_MS either way
  * at least SYNC_MIN. A shorter one ("yes") is too few readings to tell, and its mouth moving is enough.
  */
-const SYNC_FROM_MS = 1500;
+export const SYNC_FROM_MS = 1500;
 export const SYNC_MIN = 0.1;
 const LAG_MS = 300;
 const BIN_MS = 50;

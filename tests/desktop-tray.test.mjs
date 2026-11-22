@@ -52,6 +52,11 @@ test('asleep with no gesture to wake it, the menu is the way back, and says so',
   const asleep = trayModel({ engine: { state: 'sleeping' }, settings: on, platform: 'darwin' });
   assert.equal(byId(asleep).status.label, 'Asleep — wake it from the menu bar');
   assert.equal(byId(asleep).wake.label, 'Wake Jester');
+  // Gestures off, the camera on for training alone: a gesture bound to wake it can't be seen.
+  const face = mergeSettings({ enabled: true, gesturesEnabled: false, voiceTraining: true, bindings: { Victory: { action: 'SLEEP', repeat: false } } });
+  const training = trayModel({ engine: { state: 'sleeping' }, settings: face, face: true, platform: 'darwin' });
+  assert.equal(byId(training).status.label, 'Asleep — wake it from the menu bar');
+  assert.equal(byId(training).wake.label, 'Wake Jester');
 });
 
 test('neither is offered while there\'s no engine to put to sleep', () => {

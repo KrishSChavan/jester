@@ -10,6 +10,7 @@
 
 import { BrowserWindow, app, ipcMain, webContents } from 'electron';
 import path from 'node:path';
+import { MSG } from '../../../jester-extension/src/common/constants.js';
 import { createStorageArea } from './storage.js';
 
 export const RUNTIME_ID = 'jester-desktop';
@@ -79,10 +80,18 @@ export function addRemotePage(remote) {
   return () => remotes.delete(remote);
 }
 
+/**
+ * For the worker alone, never another page: the user's face as the camera reads it (offscreen.js tellFace), many
+ * times a second while training mode's on or it's being scanned (face-witness.js), which no page needs or should hear.
+ */
+const WORKER_ONLY = new Set([MSG.FACE]);
+
 /** What a page sent, wherever it is: to every other page, then to the worker's handlers, the first reply answering it. */
 async function deliver(message, sender, { exceptContents = null, exceptRemote = null } = {}) {
-  for (const contents of pages(exceptContents)) contents.send('jester:message', message, { id: RUNTIME_ID, url: sender.url });
-  for (const remote of remotes) if (remote !== exceptRemote) remote.message(message, { id: RUNTIME_ID, url: sender.url });
+  if (!WORKER_ONLY.has(message?.type)) {
+    for (const contents of pages(exceptContents)) contents.send('jester:message', message, { id: RUNTIME_ID, url: sender.url });
+    for (const remote of remotes) if (remote !== exceptRemote) remote.message(message, { id: RUNTIME_ID, url: sender.url });
+  }
   for (const handler of handlers) {
     const reply = await handler(message, sender);
     if (reply !== undefined) return reply;

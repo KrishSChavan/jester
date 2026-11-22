@@ -2968,6 +2968,14 @@ async function applySettings(next) {
     return;
   }
 
+  // Gestures just went off with the camera kept on for the face: from now no hand is looked for, so a cursor up or
+  // a pose half-held is let go (nothing would ever end them), and a sleeping Jester wakes, as Gestures switched off
+  // always woke him: no ✌️ could be seen to wake him with.
+  if (!handsWatched() && previous?.gesturesEnabled !== false) {
+    if (standby) setStandby(false);
+    resetRecognitionState();
+  }
+
   // Paused, with nothing left that could resume it — its binding changed in
   // Settings meanwhile — would be the camera on for good with nothing ever to
   // end it. Resume instead. Otherwise the way to resume may have changed.

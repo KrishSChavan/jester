@@ -338,6 +338,7 @@ if (!process.versions.electron) {
   async function training() {
     if (process.platform !== 'darwin') throw new Error('this needs macOS’s `say`');
     const { buildImpression } = await import('../src/main/voice-training.js');
+    const { SYNC_FROM_MS } = await import('../src/main/face-witness.js');
     const [theirs, other] = ['Daniel', 'Karen'];
     const ON_CAMERA = ['Jester, what is the weather like outside right now?', 'Can you open my Canvas bookmark and tell me what is due?', 'Remind me to call my mom after class.', 'Turn the volume down a little bit.', 'How long should I boil an egg for?', 'Play some music while I finish this essay.', 'Yes.', 'No, that is okay.', 'Sure, go ahead.', 'What did I have on my calendar for Friday?'];
     const LATER = ['Jester, what time does my lecture start tomorrow?', 'Write down milk and eggs on my grocery list.', 'What did we talk about yesterday afternoon?', 'Tell me a joke about the ocean.', 'How far is it to the library from here?', 'Set the volume to thirty percent.'];
@@ -376,12 +377,14 @@ if (!process.versions.electron) {
         const heard = await service.hear(degrade(say(voice, line)));
         if (Array.isArray(heard.voice) && Number.isFinite(heard.endedAt) && Number.isFinite(heard.startedAt)) {
           told += 1;
-          clips.push({ v: heard.voice, s: Math.max(0.5, (heard.endedAt - heard.startedAt) / 1000) });
+          const lasted = heard.endedAt - heard.startedAt;
+          // A line this long has its timing checked by the camera (face-witness.js): only those make a voiceprint.
+          clips.push({ v: heard.voice, s: Math.max(0.5, lasted / 1000), ...(lasted >= SYNC_FROM_MS ? { t: 1 } : {}) });
         }
       }
       service.post({ type: 'training', on: false });
       const impression = buildImpression(clips);
-      console.log(`   ${told} of ${lines.length} lines came with their voice; ${impression?.inliers ?? 0} like the rest, ${impression?.exemplars.length ?? 0} ways of sounding, ${impression?.ready ? 'enough to know the voice by' : 'not yet enough to know it by'}`);
+      console.log(`   ${told} of ${lines.length} lines came with their voice; ${impression?.inliers ?? 0} like the rest (${impression?.timed ?? 0} long enough to check the timing of), ${impression?.exemplars.length ?? 0} ways of sounding, ${impression?.ready ? 'enough to know the voice by' : 'not yet enough to know it by'}`);
       return { impression, told };
     }
 
@@ -411,7 +414,8 @@ if (!process.versions.electron) {
 
     console.log(`\nNever taught: ${theirs}, training mode on, across the room:`);
     const alone = await train(ON_CAMERA, theirs, acrossTheRoom, null);
-    const made = alone.impression?.ready ? Array.from(alone.impression.centroid) : null;
+    // As main.js makes it: of the lines whose timing was checked.
+    const made = alone.impression?.ready ? Array.from(alone.impression.anchor) : null;
     console.log(`\n${theirs}, across the room, with the voiceprint training made:`);
     const camera = made ? await heardAs('voiceprint from the camera', LATER, theirs, acrossTheRoom, made, alone.impression) : { theirs: 0, maybe: 0, of: LATER.length };
     const nearAlone = made ? await heardAs('another voice, up close', LATER.slice(0, 3), other, (x) => x, made, alone.impression) : { theirs: 0 };

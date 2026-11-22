@@ -1525,7 +1525,9 @@ if (process.argv[2] === 'serve') {
         check('training on: the camera’s on, Gestures still off, and he sees them', true);
         await inEngine(`fakeFace.build = 'other'; return true;`);
         await until('someone else in front of it', async () => (await state()).face?.seen === 'someone');
-        check('someone else in front of the camera is told apart', /That isn’t you in front of the camera/.test(await inPage(`return document.getElementById('training-hint').textContent;`)));
+        // The page draws it when it's next told, a frame or so later.
+        const told = await until('Settings saying so', () => inPage(`return /That isn’t you in front of the camera/.test(document.getElementById('training-hint').textContent);`), 3000).catch(() => false);
+        check('someone else in front of the camera is told apart', told, await inPage(`return document.getElementById('training-hint').textContent;`));
 
         // The mic opens: the made-up voice plays, someone else's face in front of the camera first.
         await setting({ continuousAssistant: true });

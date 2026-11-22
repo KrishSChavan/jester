@@ -14,8 +14,11 @@
  *   - the centroid: all of them at once, the user as they sound in their own room, which counts as the voiceprint
  *     does (voiceprint.js `scored`);
  *   - exemplars: up to EXEMPLARS of them, as different from each other as they come, the ways they sound;
- *   - and with no voiceprint yet, the centroid becomes it once there's enough to go on (FIRST_CLIPS lines, FIRST_SECONDS
- *     of talking): reading the five sentences is then never needed.
+ *   - and with no voiceprint yet, one's made once there's enough to go on (FIRST_CLIPS lines, FIRST_SECONDS of
+ *     talking): reading the five sentences is then never needed. Only lines whose timing the camera checked count
+ *     for it (`t`: face-witness.js, a line 1.5 s or longer): on a shorter one it saw only that the user's mouth
+ *     moved, which it might while someone else talked, and with no voiceprint yet nothing else says whose voice it
+ *     was.
  *
  * So that it can't drift to someone else's voice, a line counts only when the camera saw the user's own face talking
  * in time with it, never with his own voice over it, never one that sounds plainly unlike the voiceprint (FLOOR),
@@ -27,7 +30,7 @@ import { averageVoice, likeness } from './voiceprint.js';
 export const TRAINING_KEY = 'voiceTrained';
 /** Kept: the newest this many lines. */
 export const MOST_CLIPS = 60;
-/** With no voiceprint, one's made from what's kept once there are this many lines, this many seconds of talking in all. */
+/** With no voiceprint, one's made from what's kept once there are this many timed lines, this many seconds of them in all. */
 export const FIRST_CLIPS = 6;
 export const FIRST_SECONDS = 8;
 /** Under this much talking (s), a line's voice is mostly the room. */
@@ -43,11 +46,14 @@ const SAME = 0.85;
 
 const valid = (clip) => clip && Array.isArray(clip.v) && clip.v.length > 8 && clip.v.every(Number.isFinite) && Number.isFinite(clip.s);
 const rounded = (voice) => Array.from(voice, (value) => Math.round(value * 1e4) / 1e4);
+/** A line the camera saw the user's mouth move in time with, not only move. */
+const timed = (clip) => clip.t === 1;
 
 /**
  * What the kept lines make of the user's voice: `centroid` (of the ones like the rest: `inliers` of them), the
- * `exemplars`, how many lines and seconds there are, and whether that's enough to stand for a voiceprint (`ready`).
- * @param {{v:number[], s:number}[]} clips
+ * `exemplars`, how many lines and seconds there are, and whether that's enough to stand for a voiceprint (`ready`):
+ * `anchor`, the centroid of the `timed` ones alone, is what would.
+ * @param {{v:number[], s:number, t?:1}[]} clips
  */
 export function buildImpression(clips) {
   const kept = (clips || []).filter(valid);
@@ -77,7 +83,18 @@ export function buildImpression(clips) {
     exemplars.push(left.splice(pick, 1)[0].v);
   }
   const seconds = inliers.reduce((sum, clip) => sum + clip.s, 0);
-  return { centroid, exemplars, clips: kept.length, inliers: inliers.length, seconds, ready: inliers.length >= FIRST_CLIPS && seconds >= FIRST_SECONDS };
+  const sure = inliers.filter(timed);
+  const sureSeconds = sure.reduce((sum, clip) => sum + clip.s, 0);
+  return {
+    centroid,
+    exemplars,
+    clips: kept.length,
+    inliers: inliers.length,
+    seconds,
+    timed: sure.length,
+    anchor: sure.length ? averageVoice(sure.map((clip) => clip.v)) : null,
+    ready: sure.length >= FIRST_CLIPS && sureSeconds >= FIRST_SECONDS
+  };
 }
 
 /**
@@ -149,7 +166,9 @@ export function createVoiceTrainer({ storage, judge, apply, report = () => undef
         log(`training: not learned from: ${worth.why}${facts}`);
         return false;
       }
-      clips = [...clips, { v: rounded(line.voice), s: Math.round(worth.seconds * 100) / 100, at: now() }].slice(-MOST_CLIPS);
+      // `sync`: how the mouth moved with the sound, on a line long enough to tell (face-witness.js judgeLine).
+      const clip = { v: rounded(line.voice), s: Math.round(worth.seconds * 100) / 100, at: now(), ...(Number.isFinite(seen?.sync) ? { t: 1 } : {}) };
+      clips = [...clips, clip].slice(-MOST_CLIPS);
       kept += 1;
       const before = impression;
       impression = buildImpression(clips);

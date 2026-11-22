@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
-import { bindingsFor, mergeSettings, MSG, resumeGlyphs, resumesStandby, swipeBindingsFor } from '../jester-extension/src/common/constants.js';
+import { bindingsFor, mergeSettings, MSG, resumeGlyphs, resumesStandby, swipeBindingsFor, wakeGlyphs } from '../jester-extension/src/common/constants.js';
 
 const source = await readFile(new URL('../jester-extension/src/offscreen/offscreen.js', import.meta.url), 'utf8');
 
@@ -126,4 +126,71 @@ test('a pose bound to sleep in one set does the other set\'s action in that cont
 
 test('the engine takes sleep from outside, for the desktop\'s spoken command and menu', () => {
   assert.match(slice('case MSG.ENGINE_CONFIG:', 'case MSG.ENGINE_QUERY:'), /typeof message\.standby === 'boolean'\) setStandby\(message\.standby\)/);
+});
+
+/** The engine's settings, read from its source: what happens to sleep and a cursor as Gestures goes off. */
+function settingsEngine() {
+  const did = [];
+  const sandbox = vm.createContext({
+    ENGINE: { OFF: 'off', STARTING: 'starting' },
+    RESTART_KEYS: [],
+    NO_CROPS: null,
+    resumeGlyphs,
+    settings: null,
+    standby: false,
+    running: true,
+    starting: false,
+    lastStatus: null,
+    zoom: null,
+    crops: null,
+    recognizer: null,
+    voice: { stop: () => undefined },
+    refreshGazeModel: () => undefined,
+    endPointer: () => did.push('cursor let go'),
+    resetRecognitionState: () => did.push('hands forgotten'),
+    ensureFaceLandmarker: () => undefined,
+    pointerUsable: () => false,
+    stop: (_state, detail) => {
+      sandbox.running = false;
+      did.push(`stopped: ${detail}`);
+    },
+    report: () => undefined,
+    reportRunning: () => did.push(sandbox.standby ? 'asleep' : 'awake'),
+    start: async () => void (sandbox.running = true),
+    dropFaceLandmarker: () => undefined
+  });
+  vm.runInContext(
+    `${slice('const POINTER_KEYS = ', '\n\nasync function applySettings')}\n${slice('async function applySettings(next) {', '/**\n * Settings arrive one at a time')}\n${slice('function setStandby(on) {', '// ---------------------------------------------------------------------------\n// The click hand')}\n${slice('const handsWatched = ', '\n/** No face')}`,
+    sandbox
+  );
+  return { sandbox, did };
+}
+
+test('Gestures off with the camera kept on for the face: no hand’s looked for, so he wakes and a cursor up is let go', async () => {
+  const { sandbox, did } = settingsEngine();
+  const gestures = sleepOnVictory();
+  await sandbox.applySettings(gestures);
+  sandbox.setStandby(true);
+  did.length = 0;
+  const face = { ...gestures, gesturesEnabled: false, faceWatch: true };
+  await sandbox.applySettings(face);
+  assert.equal(sandbox.standby, false, 'no ✌️ could be seen to wake him');
+  assert.deepEqual(did, ['awake', 'hands forgotten']);
+  // Put to sleep since, from the menu or by voice: the menu is the way back, and a setting changing isn't.
+  sandbox.setStandby(true);
+  did.length = 0;
+  await sandbox.applySettings({ ...face, voiceLanguage: 'en-GB' });
+  assert.equal(sandbox.standby, true);
+  assert.deepEqual(did, ['asleep'], 'still asleep, and says so');
+  did.length = 0;
+  // The face no longer watched: the camera closes, as Gestures off always closed it, and he wakes.
+  await sandbox.applySettings({ ...face, faceWatch: false });
+  assert.equal(sandbox.standby, false);
+  assert.deepEqual(did, ['stopped: Gestures off']);
+});
+
+test('how to wake him never names a gesture while Gestures is off', () => {
+  const bound = sleepOnVictory();
+  assert.equal(wakeGlyphs(bound), resumeGlyphs(bound));
+  assert.equal(wakeGlyphs({ ...bound, gesturesEnabled: false }), '');
 });

@@ -44,7 +44,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { ACTIONS, ENGINE, MSG, resumeGlyphs, saveSettings } from '../../../jester-extension/src/common/constants.js';
+import { ACTIONS, ENGINE, MSG, saveSettings, wakeGlyphs } from '../../../jester-extension/src/common/constants.js';
 import { createDesktopHost } from './agent/host.js';
 import { runDesktopAgent } from './agent/loop.js';
 import { screenText } from './agent/screen.js';
@@ -738,10 +738,11 @@ function syncTraining() {
 
 /** What training's made of the voice changed: it's what he hears with now. With no voiceprint yet, it may be one. */
 async function trainedVoice(impression) {
-  if (!voiceprint && impression?.ready) {
-    voiceprint = Array.from(impression.centroid);
+  if (!voiceprint && impression?.ready && impression.anchor) {
+    // From the lines the camera checked the timing of alone (voice-training.js).
+    voiceprint = Array.from(impression.anchor);
     await storage.local.set({ voiceprint });
-    log(`voice: your voiceprint, made from ${impression.inliers} things you said on camera`);
+    log(`voice: your voiceprint, made from ${impression.timed} things you said on camera`);
   }
   speech?.setVoiceprint(teaching ? null : voiceprint, voiceLearned, impression);
   post(desktopState());
@@ -768,9 +769,11 @@ function scanFace() {
     })
     .then(
       async (print) => {
-        faceprint = { ...print, at: Date.now() };
+        // Known once it's kept, not before: Settings says so only of a face he'll still know after a restart.
+        const scanned = { ...print, at: Date.now() };
+        await storage.local.set({ faceprint: scanned });
+        faceprint = scanned;
         faceWitness.setPrint(faceprint);
-        await storage.local.set({ faceprint });
         log('face: scanned,', print.reads, 'readings');
       },
       (err) => {
@@ -815,7 +818,8 @@ function faceState() {
 
 async function learnVoice(voice) {
   voiceLearned = withLearned(voiceLearned, voice);
-  speech.setVoiceprint(teaching ? null : voiceprint, voiceLearned);
+  // What training taught goes with it: left out, it would be what's judged by no longer.
+  speech.setVoiceprint(teaching ? null : voiceprint, voiceLearned, voiceTrainer?.impression);
   log('voice: learned another way you sound,', voiceLearned.length, 'kept');
   await storage.local.set({ voiceLearned }).catch((err) => log('voice: couldn’t keep it:', err.message));
 }
@@ -1931,7 +1935,7 @@ async function scriptsAsked(message) {
 }
 
 /** How to wake Jester, in a few words. */
-const wakeWords = () => wakeHint(resumeGlyphs(settings), process.platform);
+const wakeWords = () => wakeHint(wakeGlyphs(settings), process.platform);
 
 /**
  * Sleep or wake from a spoken command or the menu; a gesture's is done in the

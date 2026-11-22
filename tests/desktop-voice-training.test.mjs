@@ -5,9 +5,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { registerHooks } from 'node:module';
+import { MSG } from '../jester-extension/src/common/constants.js';
 import { faceReading, faceShape, mouthOpening, shapeDistance, SHAPE_POINTS, SHAPE_SIZE } from '../jester-extension/src/common/face-print.js';
 import { correlation, createFaceWitness, isTheirs, judgeLine, mouthMotion, moveWithSound, printFrom, tolerance, TOLERANCE_MIN } from '../desktop/src/main/face-witness.js';
-import { buildImpression, createVoiceTrainer, FIRST_CLIPS, MOST_CLIPS, worthTraining } from '../desktop/src/main/voice-training.js';
+import { buildImpression, createVoiceTrainer, FIRST_CLIPS, FIRST_SECONDS, MOST_CLIPS, worthTraining } from '../desktop/src/main/voice-training.js';
 import { averageVoice, likeness, scored, TRAINED_GATE } from '../desktop/src/main/voiceprint.js';
 import { createRemoteHands } from '../desktop/src/main/remote-hands.js';
 import { setupSteps } from '../desktop/src/main/setup.js';
@@ -217,21 +220,43 @@ function voice(who, seed = 1, wobble = 0.35) {
   const base = Array.from({ length: 16 }, (_, i) => Math.sin((i + 1) * (who + 1) * 1.7));
   return averageVoice([base.map((value) => value + next() * wobble)]);
 }
-const clip = (who, seed, seconds = 2) => ({ v: voice(who, seed), s: seconds });
+/** A line kept: its voice, how long it was, and whether the camera checked its timing (lines 1.5 s or longer). */
+const clip = (who, seed, seconds = 2, timed = seconds >= 1.5) => ({ v: voice(who, seed), s: seconds, ...(timed ? { t: 1 } : {}) });
 
 test('what the kept lines make of a voice: the like ones’ centroid, the ways they vary, and when it’s enough', () => {
   // As a real voice's lines are: alike, and never the same (the speaker model puts one person's at 0.5 to 0.8).
-  const theirs = Array.from({ length: 8 }, (_, i) => ({ v: voice(1, i + 1, 0.9), s: 2 }));
+  const theirs = Array.from({ length: 8 }, (_, i) => ({ v: voice(1, i + 1, 0.9), s: 2, t: 1 }));
   const impression = buildImpression([...theirs, clip(5, 3)]);
   assert.equal(impression.clips, 9);
   assert.equal(impression.inliers, 8, 'the one unlike the rest is left out');
   assert.ok(likeness(impression.centroid, voice(1, 50)) > likeness(impression.centroid, voice(5, 50)) + 0.3);
   assert.ok(impression.exemplars.length >= 2 && impression.exemplars.length <= 10);
   assert.equal(impression.ready, true);
+  assert.equal(impression.timed, 8);
   assert.equal(buildImpression(theirs.slice(0, FIRST_CLIPS - 1)).ready, false, 'too few lines');
-  assert.equal(buildImpression(Array.from({ length: 8 }, (_, i) => clip(1, i + 1, 0.6))).ready, false, 'too little talking');
+  assert.equal(buildImpression(Array.from({ length: 8 }, (_, i) => ({ ...clip(1, i + 1, 0.6), t: 1 }))).ready, false, 'too little talking');
   assert.equal(buildImpression([]), null);
   assert.equal(buildImpression([{ v: [1, 2], s: 1 }]), null, 'nothing that’s a voice');
+});
+
+test('a voiceprint is made only from lines whose timing the camera checked: on a short one it saw only a mouth moving', () => {
+  // Short lines (a word or two): the camera saw the user's mouth move, which it might while the television talked.
+  const short = Array.from({ length: 20 }, (_, i) => clip(1, i + 1, 1.2));
+  const untimed = buildImpression(short);
+  assert.equal(untimed.inliers, 20);
+  assert.ok(untimed.seconds >= FIRST_SECONDS);
+  assert.equal(untimed.timed, 0);
+  assert.equal(untimed.anchor, null);
+  assert.equal(untimed.ready, false, 'never enough alone, however many');
+  // Kept before lines were marked: as untimed.
+  assert.equal(buildImpression(Array.from({ length: 8 }, (_, i) => ({ v: voice(1, i + 1), s: 2 }))).ready, false);
+  // With enough timed ones among them: ready, and the voiceprint it'd be is theirs alone.
+  const timed = Array.from({ length: FIRST_CLIPS }, (_, i) => clip(1, 100 + i));
+  const both = buildImpression([...short, ...timed]);
+  assert.equal(both.ready, true);
+  assert.equal(both.timed, FIRST_CLIPS);
+  assert.ok(likeness(both.anchor, averageVoice(timed.map((one) => one.v))) > 0.9999);
+  assert.equal(buildImpression([...short, ...timed.slice(1)]).ready, false, 'one timed line short');
 });
 
 test('what training taught counts when a voice is scored: its centroid as the voiceprint does, its ways for a voice like them', () => {
@@ -282,15 +307,18 @@ test('the trainer: lines kept as the camera says, his idea of the voice rebuilt 
   const applied = [];
   const reports = [];
   let verdict = 'speaking';
+  // How the mouth moved with the sound: on a line too short to tell, nothing (face-witness.js judgeLine).
+  let sync = 0.4;
   let on = true;
   const asked = [];
-  const trainer = createVoiceTrainer({ storage, active: () => on, judge: (line) => (asked.push(line), { verdict }), apply: (impression) => applied.push(impression), report: (report) => reports.push(report), now: () => 5 });
+  const trainer = createVoiceTrainer({ storage, active: () => on, judge: (line) => (asked.push(line), { verdict, sync }), apply: (impression) => applied.push(impression), report: (report) => reports.push(report), now: () => 5 });
   await trainer.load();
   const heard = (seed, extra = {}) => trainer.heard({ voice: voice(1, seed), startedAt: seed * 10_000, endedAt: seed * 10_000 + 2000, seconds: 3.6, ...extra });
   assert.equal(await heard(1), true);
   assert.deepEqual(asked, [{ from: 10_000, to: 12_000 }], 'asked of the time it was said');
   assert.equal(storage.kept.voiceTrained.clips.length, 1);
   assert.ok(storage.kept.voiceTrained.clips[0].v.every((value) => Math.round(value * 1e4) === value * 1e4), 'kept as plain numbers, rounded');
+  assert.equal(storage.kept.voiceTrained.clips[0].t, 1, 'its timing checked');
   verdict = 'silent';
   assert.equal(await heard(2), false);
   verdict = 'speaking';
@@ -299,14 +327,23 @@ test('the trainer: lines kept as the camera says, his idea of the voice rebuilt 
   on = false;
   assert.equal(await heard(5), false, 'off: nothing is even asked of the camera');
   on = true;
-  for (let seed = 6; applied.at(-1)?.ready !== true; seed += 1) assert.equal(await heard(seed), true);
+  // Its timing unchecked: kept, but it can't help make a voiceprint.
+  sync = null;
+  assert.equal(await heard(6), true);
+  assert.equal(storage.kept.voiceTrained.clips.at(-1).t, undefined);
+  sync = 0.4;
+  for (let seed = 7; applied.at(-1)?.ready !== true; seed += 1) {
+    assert.ok(seed < 50, 'never ready');
+    assert.equal(await heard(seed), true);
+  }
   assert.ok(applied.at(-1).ready, 'enough to know them by');
-  assert.equal(applied.at(-1).inliers, FIRST_CLIPS);
-  assert.deepEqual(reports.at(-1), { kept: FIRST_CLIPS, clips: FIRST_CLIPS });
+  assert.equal(applied.at(-1).timed, FIRST_CLIPS);
+  assert.equal(applied.at(-1).inliers, FIRST_CLIPS + 1);
+  assert.deepEqual(reports.at(-1), { kept: FIRST_CLIPS + 1, clips: FIRST_CLIPS + 1 });
   // Read again, it's the same.
   const again = createVoiceTrainer({ storage, active: () => true, judge: () => ({ verdict }), apply: () => undefined });
   await again.load();
-  assert.deepEqual(again.state, { kept: FIRST_CLIPS, clips: FIRST_CLIPS, ready: true });
+  assert.deepEqual(again.state, { kept: FIRST_CLIPS + 1, clips: FIRST_CLIPS + 1, ready: true });
   // Only the newest are kept.
   for (let seed = 100; seed < 100 + MOST_CLIPS + 5; seed += 1) await again.heard({ voice: voice(1, seed), startedAt: seed, endedAt: seed + 2000 });
   assert.equal(storage.kept.voiceTrained.clips.length, MOST_CLIPS);
@@ -347,4 +384,41 @@ test('getting started: a few seconds in front of the camera, on a computer only'
   assert.match(step.why, /^A few seconds in front of the camera/);
   assert.equal(setupSteps({ face: true }).find((one) => one.id === 'face').done, true);
   assert.equal(setupSteps({ web: true }).some((one) => one.id === 'face'), false, 'his website has no camera to scan with');
+});
+
+// ——— Wired up ———
+
+test('the face readings go to the desktop alone, never to his other pages or a browser elsewhere', async () => {
+  const electron = `data:text/javascript,
+    export const app = {}, BrowserWindow = {}, ipcMain = {};
+    export const webContents = { getAllWebContents: () => globalThis.trainingPages };`;
+  registerHooks({ resolve: (specifier, context, next) => (specifier === 'electron' ? { url: electron, shortCircuit: true } : next(specifier, context)) });
+  const bridge = await import('../desktop/src/main/chrome-bridge.js');
+  const page = [];
+  globalThis.trainingPages = [{ isDestroyed: () => false, getURL: () => 'jester://app/home/home.html', send: (_channel, message) => page.push(message.type) }];
+  const elsewhere = [];
+  const engine = { url: 'jester://ext/src/offscreen/offscreen.html', message: () => undefined };
+  const website = { url: 'https://jester.example/', message: (message) => elsewhere.push(message.type) };
+  const heard = [];
+  const gone = [bridge.addRemotePage(engine), bridge.addRemotePage(website), bridge.onMessage((message) => void heard.push(message.type))];
+  try {
+    await bridge.fromRemote(engine, { type: MSG.FACE, face: { at: 1, face: true, shape: [0.5], mouth: 0.2 } });
+    assert.deepEqual(heard, [MSG.FACE], 'the worker hears it');
+    assert.deepEqual([page, elsewhere], [[], []], 'nothing else does');
+    // Anything else a page says still reaches the rest, as in Chrome.
+    await bridge.fromRemote(engine, { type: MSG.ENGINE_STATUS, state: 'running' });
+    assert.deepEqual([page, elsewhere], [[MSG.ENGINE_STATUS], [MSG.ENGINE_STATUS]]);
+  } finally {
+    gone.forEach((undo) => undo());
+  }
+});
+
+test('what training taught stays with what he hears by when another way they sound is learned', () => {
+  const main = fs.readFileSync(new URL('../desktop/src/main/main.js', import.meta.url), 'utf8');
+  // Every time the voiceprint's sent, what training taught goes with it.
+  for (const call of main.match(/speech\??\.setVoiceprint\([^;]*\);/g)) assert.match(call, /setVoiceprint\(null\)|voiceTrainer\??\.impression\)|, impression\)/, call);
+  // And the first voiceprint it makes is of the lines whose timing was checked.
+  assert.match(main, /voiceprint = Array\.from\(impression\.anchor\);/);
+  const speech = fs.readFileSync(new URL('../desktop/src/main/speech.js', import.meta.url), 'utf8');
+  assert.match(speech, /setVoiceprint\(print, known = \[\], taught = undefined\) \{[^}]*if \(!print\) trained = null;\n\s+else if \(taught !== undefined\) trained =/);
 });

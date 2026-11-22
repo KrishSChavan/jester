@@ -298,13 +298,14 @@ export function startSpeech({ log = () => undefined } = {}) {
     },
     /**
      * `known`: other ways the user's been heard to sound, learned from use; `taught`: what training mode taught
-     * (voice-training.js buildImpression). Both count only with a voiceprint.
+     * (voice-training.js buildImpression), or left out to keep what it last taught. Both count only with a voiceprint.
      * @param {number[]|null} print
      */
-    setVoiceprint(print, known = [], taught = null) {
+    setVoiceprint(print, known = [], taught = undefined) {
       voiceprint = print;
       learned = print ? known : [];
-      trained = print && taught?.centroid ? { centroid: Array.from(taught.centroid), exemplars: (taught.exemplars || []).map((voice) => Array.from(voice)) } : null;
+      if (!print) trained = null;
+      else if (taught !== undefined) trained = taught?.centroid ? { centroid: Array.from(taught.centroid), exemplars: (taught.exemplars || []).map((voice) => Array.from(voice)) } : null;
       service?.postMessage({ type: 'voiceprint', print, learned, trained });
     },
     /** Training mode: while on, every utterance comes out with its voice, a stranger's (undecoded) too. */

@@ -1013,9 +1013,11 @@ nearly the user's.
   two people of one build can read alike. Another reading is the same face within four times the scan's own spread,
   between 0.03 and 0.06 apart.
 - **Training mode on** (Settings, or the menu bar once the face is scanned): the camera stays on, Gestures or not
-  (`faceWatch`: with Gestures off no hand is even looked for). The engine reads the face every frame (shape, how far
-  open the mouth is, which way the head points) and sends the numbers. `face-witness.js` keeps them, and the always-on
-  mic's loudness every 32 ms, for 90 s.
+  (`faceWatch`: with Gestures off no hand is even looked for, so a cursor that was up is let go and a sleeping
+  Jester wakes, as Gestures off always woke him, and the menu says to wake him from it). The engine reads the face every frame (shape, how far
+  open the mouth is, which way the head points) and sends the numbers, to the main process alone, never to his other
+  pages (`chrome-bridge.js` `WORKER_ONLY`). `face-witness.js` keeps them, and the always-on mic's loudness every
+  32 ms, for 90 s.
 - **A line, judged.** While it's on, the speech service sends every utterance's voice (TitaNet's numbers),
   a stranger's too, still undecoded, with when it began and ended. A line is learned from only when the camera says
   `speaking`: a face in view for 60% of it, the scanned face in 60% of the readings that could tell, its mouth
@@ -1027,8 +1029,11 @@ nearly the user's.
 - **What it makes.** All the lines like the rest averaged (the centroid) and up to ten of them as different as they
   come (exemplars). `voiceprint.js` `scored` counts the centroid as it does the voiceprint, the user's own voice as
   surely. An exemplar counts for a voice at least 0.3 like either of those, lower than `LEARN_GATE`, so that a bare
-  "yes" can match a "yes" kept on camera. With no voiceprint, six lines and eight seconds of talking make the
-  centroid one: the five sentences are never needed.
+  "yes" can match a "yes" kept on camera. With no voiceprint, six lines and eight seconds of talking make one: the
+  five sentences are never needed. Only lines whose timing the camera checked (1.5 s or longer, kept with `t`) count
+  for it, and it's their centroid (`anchor`): on a shorter line the camera saw only that the user's mouth moved, which
+  it might while someone else talked, and with no voiceprint nothing else says whose voice that was. What's learned
+  from use since is sent with what training taught each time, never instead of it.
 - **In the cloud** the voice is heard on the server, and the face is on the Mac. The Mac says training is on with its
   hands' state (`switches.training`). For each line the server asks every computer with it on what its camera saw
   (`remote-hands.js` `face`), as how long ago the line began and how long it lasted, which their clocks agree on.

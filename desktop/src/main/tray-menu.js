@@ -3,7 +3,7 @@
  * menu out; tray.js turns it into Electron's menu and routes the clicks.
  */
 
-import { ENGINE, resumeGlyphs } from '../../../jester-extension/src/common/constants.js';
+import { ENGINE, wakeGlyphs } from '../../../jester-extension/src/common/constants.js';
 import { wakeHint } from './os-actions.js';
 
 /** The popup's wording, minus what only makes sense in a browser. */
@@ -39,7 +39,7 @@ export function trayModel({ engine, settings, missing = [], voice = 'missing', w
   // Training mode keeps the camera on with Gestures off: for the face, and nothing a hand does.
   const training = !!face && settings?.voiceTraining === true;
   const status = asleep
-    ? `${STATUS_TEXT[ENGINE.SLEEPING]} — ${wakeHint(resumeGlyphs(settings), platform)}`
+    ? `${STATUS_TEXT[ENGINE.SLEEPING]} — ${wakeHint(wakeGlyphs(settings), platform)}`
     : !gestures ? (training ? 'Gestures off · the camera’s on for training' : 'Gestures off') : STATUS_TEXT[engine?.state] || engine?.state || STATUS_TEXT[ENGINE.OFF];
   const items = [
     // A timer ringing: the first thing in his menu is the way to turn it off.

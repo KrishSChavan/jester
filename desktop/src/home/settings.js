@@ -10,7 +10,7 @@
  * draws from the same two (`state`, `onRender`).
  */
 
-import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings, resumeGlyphs } from '../ext/src/common/constants.js';
+import { ACTIONS, ENGINE, GESTURES, POINTER_AIMS, SWIPES, mergeSettings, wakeGlyphs } from '../ext/src/common/constants.js';
 import { PROVIDERS } from '../ext/src/common/credentials.js';
 import { calibrationGrade, loadCalibration, usableModel } from '../ext/src/common/gaze-store.js';
 import { DESKTOP_LABELS, bindable, describePlan, parseShortcut, wakeHint } from '../main/os-actions.js';
@@ -83,7 +83,7 @@ function renderStatus() {
   const engine = desktop?.engine || { state: ENGINE.OFF };
   const [text, tone] = settings && !settings.enabled ? ['Jester is off', 'idle'] : settings?.gesturesEnabled === false ? ['Gestures off', 'idle'] : STATUS[engine.state] || [engine.state, 'idle'];
   if (engine.state === ENGINE.ERROR && engine.detail) $('status-text').textContent = `${text}: ${engine.detail}`;
-  else if (engine.state === ENGINE.SLEEPING && settings?.enabled) $('status-text').textContent = `${text} — ${wakeHint(resumeGlyphs(settings), platform())}`;
+  else if (engine.state === ENGINE.SLEEPING && settings?.enabled) $('status-text').textContent = `${text} — ${wakeHint(wakeGlyphs(settings), platform())}`;
   else $('status-text').textContent = text;
   $('status').dataset.tone = tone;
   // The last frame rate means nothing once the camera has stopped.

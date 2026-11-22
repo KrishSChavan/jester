@@ -474,6 +474,11 @@ export function resumesStandby(settings, kind, id) {
 export function resumeGlyphs(settings) {
   return [...GESTURES.filter((g) => resumesStandby(settings, 'pose', g.id)), ...SWIPES.filter((g) => resumesStandby(settings, 'swipe', g.id))].map((g) => g.glyph).join(' or ');
 }
+/**
+ * The gestures that could wake it now, for saying how: none with Gestures off, when no hand is looked for (the
+ * desktop may keep the camera on even so, for the face: desktop/src/main/face-witness.js).
+ */
+export const wakeGlyphs = (settings) => (settings?.gesturesEnabled === false ? '' : resumeGlyphs(settings));
 
 export async function loadSettings() {
   const { settings } = await chrome.storage.local.get('settings');
