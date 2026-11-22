@@ -455,8 +455,9 @@ let briefingShelfKey = '';
 const today = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
 function drawBriefings(cards = []) {
   refreshBriefingCards(cards, { replace: true });
-  // Today's, waiting to be read: yesterday's offer left unanswered isn't news any more.
-  const waiting = cards.filter((card) => ['offered', 'later', 'ready'].includes(card.status) && card.day === today()).slice(0, 3);
+  // Today's, waiting to be read: yesterday's offer left unanswered isn't news any more. One put off ("later", said
+  // or clicked) leaves the shelf until he offers it again: it isn't asking anything meanwhile.
+  const waiting = cards.filter((card) => ['offered', 'ready'].includes(card.status) && card.day === today()).slice(0, 3);
   const key = JSON.stringify(waiting);
   if (key === briefingShelfKey) return;
   briefingShelfKey = key;
@@ -465,11 +466,12 @@ function drawBriefings(cards = []) {
 }
 
 // What he's offered to do and is waiting on an answer for, as Duet keeps what needs you: one card, a row each, with
-// Yes, Not now and No. What's been answered leaves the shelf, and stays on the line he offered it on.
+// Yes, Not now and No. What's been answered leaves the shelf, "not now" included (said or clicked: until 2026-11-22
+// a put-off one stayed, still asking), and stays on the line he offered it on. Offered again, it's back.
 let offerShelfKey = '';
 function drawOffers(list = []) {
   tookOffers(list);
-  const waiting = list.filter((offer) => ['open', 'asked', 'later'].includes(offer.status)).slice(0, 3).map((offer) => offer.id);
+  const waiting = list.filter((offer) => ['open', 'asked'].includes(offer.status)).slice(0, 3).map((offer) => offer.id);
   const key = waiting.join(',');
   if (key === offerShelfKey) return;
   offerShelfKey = key;

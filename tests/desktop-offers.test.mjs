@@ -407,3 +407,30 @@ test('with new mail: the question said with it, its card showing the offer; and 
   assert.deepEqual(j.calls.commands.length, 1);
   assert.equal(j.entries.find((entry) => entry.who === 'you').text, 'Yes: Draft a reply to Sam Lee');
 });
+
+test('a no said politely is a no, and its card leaves the shelf (2026-11-22: “No, that’s okay.” left it up)', async () => {
+  const { BARE_POLITE } = await import('../desktop/src/main/offers.js');
+  const { briefingReply } = await import('../desktop/src/main/conversation.js');
+  const one = [{ id: 'r', kind: 'reminder', ask: 'remind you at 9:00 AM to call Rebecca', label: 'Remind you at 9:00 AM: call Rebecca' }];
+  const no = { op: 'no', ids: ['r'] };
+  for (const said of ['No, that’s okay.', 'Nah, I’m good', 'no that’s fine', 'No, I’m okay, thanks', 'no it’s okay thank you', 'Nope, all good', 'No thanks though', 'That’s okay.', 'It’s alright, thanks', 'No, I’ll call her myself', 'nah I got it', 'No, I’ll do it later', 'No, I don’t need that', 'I don’t need a reminder', 'don’t worry about it', 'no, don’t bother', 'No, that won’t be necessary'])
+    assert.deepEqual(offerReply(said, one), no, said);
+  for (const said of ['Not right now, thanks', 'no, maybe later', 'not now thank you']) assert.deepEqual(offerReply(said, one), { op: 'later', ids: ['r'] }, said);
+  // Either way, or more than a no: not an answer to guess at.
+  for (const said of ['That’s fine', 'it’s good', 'no, remind me at 10 instead', 'No, but remind me tomorrow', 'no that’s okay what time is it', 'No, that sounds bad', 'no, not that one'])
+    assert.equal(offerReply(said, one), null, said);
+  assert.deepEqual(offerReply('Yes, that’s fine', one), { op: 'yes', ids: ['r'] });
+  // Without his name too, since it's still only an answer.
+  for (const said of ['No, that’s okay.', 'Nah, I’m good.', 'not right now, thanks']) assert.ok(BARE_POLITE.test(said), said);
+  for (const said of ['No, I’ll call her myself', 'no, remind me at 10']) assert.ok(!BARE_POLITE.test(said), said);
+  // His offer of a briefing, and its card, the same way.
+  assert.equal(briefingReply('No, that’s okay.'), 'dismiss');
+  assert.equal(briefingReply('Nah, I’m good, thanks'), 'dismiss');
+  assert.equal(briefingReply('Not right now, thanks'), 'later');
+
+  const j = rig();
+  await j.conversation.readBriefing('b1');
+  await j.conversation.told('No, that’s okay.', { typed: true });
+  assert.deepEqual(j.calls.answered, [['no', ['d', 'm']]], 'declined, so the card goes');
+  assert.deepEqual(j.calls.ran, []);
+});

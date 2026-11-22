@@ -35,7 +35,7 @@ import { addressed, nameAt, named } from './wake.js';
 import { sourcesOf } from './research-sources.js';
 import { searchRequestIntent } from '../../../jester-extension/src/background/search-routing.js';
 import { timedWords } from './script-words.js';
-import { BARE_ANSWER, offerAsked, offerReply, offersLine } from './offers.js';
+import { BARE_ANSWER, BARE_POLITE, offerAsked, offerReply, offersLine } from './offers.js';
 
 /** How long he waits for more: after just his name, and after answering, with no need to say it again. */
 const OPEN_MS = 12000;
@@ -139,7 +139,11 @@ export function agrees(meant, label = '') {
   const asked = new Set(plainWords(label));
   return asked.size > 0 && words.every((word) => YES_WORD.test(word) || asked.has(word));
 }
-const NO = /^\W*(?:(?:no|nope|nah|actually|wait)[\s,]+)*(?:no|nope|nah|don['’]?t|do not|cancel|stop|never ?mind|not (?:now|yet)|hold on|leave it|forget it)(?: (?:send|do) (?:it|that))?(?: thanks| thank you| please)?\W*$/i;
+/**
+ * A no, said the ways people say it: "no", "don't send it", and with the polite words a no comes with, "no, that's
+ * okay", "nah, I'm good", "no it's fine, thanks" (2026-11-22: "No, that's okay." to an offer was no answer at all).
+ */
+const NO = /^\W*(?:(?:no|nope|nah|actually|wait)[\s,]+)*(?:no|nope|nah|don['’]?t|do not|cancel|stop|never ?mind|not (?:now|yet|right now)|hold on|leave it|forget it)(?: (?:send|do) (?:it|that))?(?:[\s,]+(?:(?:that['’]?s|that is|it['’]?s|it is|i['’]?m|i am|we['’]?re) )?(?:okay|ok|fine|good|alright|all good|all set))?(?:[\s,]+(?:thanks|thank you|please|though|really|for now))*\W*$/i;
 /**
  * A few words for when a tool that takes a while is begun and his model said nothing first: about the thing itself,
  * as far as the call says what that is. A question to the user needs none: it's its own first words.
@@ -191,7 +195,7 @@ const CARRIES_ON = /^\W*(?:(?:ok(?:ay)?|alright|so)[,\s]+)?(?:(?:and|now|also)\s
 export function briefingReply(text) {
   const line = String(text ?? '').replace(/[‘’]/g, "'").replace(/[.!?,]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (YES.test(line) || /^(?:please )?(?:read|play)(?: me)? (?:it|that|the briefing|my briefing)(?: (?:please|aloud|out loud))?$/i.test(line)) return 'read';
-  if (/^(?:later|not now|maybe later|remind me later|in (?:ten|10) minutes)(?: please)?$/i.test(line)) return 'later';
+  if (/^(?:(?:no|nah) )?(?:later|not now|not right now|maybe later|remind me later|in (?:ten|10) minutes)(?: please| thanks| thank you)*$/i.test(line)) return 'later';
   if (NO.test(line) || /^(?:dismiss|skip)(?: (?:it|that|the briefing))?(?: please)?$/i.test(line)) return 'dismiss';
   return '';
 }
@@ -906,7 +910,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     if (briefingOffer && at >= briefingOffer.askedAt && at < (briefingOffer.answerBy ?? briefingOffer.expiresAt) && briefingReply(meant)) return true;
     // Without his name, only a bare yes, later or no: "just the first" or "move the dentist one" needs his name, or
     // the window a voiceprint opens after he's spoken (withinWindow), as anything else said to him does.
-    return !!workOffer && at >= workOffer.askedAt && at < (workOffer.answerBy ?? workOffer.expiresAt) && BARE_ANSWER.test(String(meant).trim()) && !!offerReply(meant, workOffer.list);
+    return !!workOffer && at >= workOffer.askedAt && at < (workOffer.answerBy ?? workOffer.expiresAt) && (BARE_ANSWER.test(String(meant).trim()) || BARE_POLITE.test(String(meant).trim())) && !!offerReply(meant, workOffer.list);
   }
 
   /**

@@ -290,10 +290,20 @@ export function openerLine({ kind, count = 0, offers = 0, at: when = Date.now() 
 
 // ——— What's said back ———
 
-const NO_ALL = /^(?:no|nope|nah|no thanks|no thank you|neither|none|none of (?:them|those|it)|neither of (?:them|those)|not (?:any|either) of (?:them|those)|don't|do not|skip(?: (?:it|them|those|that|both))?|i'm good|i'm fine|all good|no need|leave (?:it|them|those|that)|don't bother|never ?mind)$/;
-const LATER = /^(?:no |nah )?(?:later|not now|not yet|maybe later|ask me later|not right now|another time|remind me later|in a bit|not today|some other time)$/;
+/**
+ * The polite words a no or a not-now comes with, on a line already lowercased and stripped of punctuation: "no,
+ * that's okay", "nah, I'm good", "no it's fine, thank you", "not right now, thanks". 2026-11-22: "No, that's okay."
+ * was no answer at all, so the offer's card stayed up after he'd said "Okay, I won't set the reminder".
+ */
+export const POLITE_TAIL = String.raw`(?: (?:(?:that's|thats|that is|it's|its|it is|i'm|im|i am|we're|were|we are|you're) )?(?:okay|ok|fine|good|alright|all right|all good|all set|cool|ok then|okay then))?(?: (?:thanks|thank you|thanks though|thank you though|really|though|for now|anyway|for today|jester))*`;
+/** Doing it themselves is a no to his doing it: "no, I'll call her myself", "nah, I've got it". */
+const OWN_HANDS = String.raw`(?: (?:i'll|ill|i will|i can|i'd rather) (?:do|handle|call|text|email|take care of|sort|deal with|set|add|look|check) (?:it|that|them|this|her|him|those|one)?(?: myself| later| on my own)?| i(?:'ve|ve)? got (?:it|this|that)| don't bother| don't worry(?: about it)?| (?:i )?don't need (?:it|that|them|one|those|a reminder)| that won't be necessary| not necessary)`;
+const NO_ALL = new RegExp(String.raw`^(?:(?:no|nope|nah|no thanks|no thank you)(?:${OWN_HANDS})?|neither|none|none of (?:them|those|it)|neither of (?:them|those)|not (?:any|either) of (?:them|those)|don't|do not|skip(?: (?:it|them|those|that|both))?|i'm good|im good|i'm fine|i'm okay|i'm all set|all good|no need|leave (?:it|them|those|that)|don't bother|don't worry(?: about it)?|(?:i )?don't need (?:it|that|them|one|those|a reminder)|that won't be necessary|not necessary|never ?mind)${POLITE_TAIL}$`);
+const LATER = new RegExp(String.raw`^(?:(?:no|nah|nope) )?(?:later|not now|not yet|maybe later|ask me later|not right now|not just now|another time|remind me later|in a bit|not today|some other time)${POLITE_TAIL}$`);
 /** A bare answer: what's taken without his name, as a yes to his offer of a briefing is (answersOffer). */
 export const BARE_ANSWER = /^\W*(?:yes|yeah|yep|yup|sure|ok|okay|do it|go ahead|please do|both|do both|all of them|yes please|sure thing|no|nope|no thanks|no thank you|neither|not now|later|maybe later|not yet)\W*$/i;
+/** The same, with a polite no's words after it ("No, that's okay."): still only an answer, never something new. */
+export const BARE_POLITE = new RegExp(String.raw`^\W*(?:no|nope|nah|no thanks|no thank you|not now|not right now|maybe later)(?:[\s,]+(?:(?:that['’]?s|that is|it['’]?s|it is|i['’]?m|i am|we['’]?re) )?(?:okay|ok|fine|good|alright|all good|all set))?(?:[\s,]+(?:thanks|thank you|though|really|for now))*\W*$`, 'i');
 /** Words that say nothing of which: what's left is what has to be one of an offer's own. */
 const FILLER = new Set(['the', 'a', 'an', 'to', 'of', 'for', 'and', 'on', 'at', 'in', 'up', 'it', 'its', 'that', 'this', 'them', 'those', 'these', 'one', 'ones', 'two', 'three', 'me', 'my', 'your', 'you', 'with', 'please', 'thanks', 'thank', 'go', 'ahead', 'do', 'just', 'only', 'both', 'all', 'i', "i'd", 'like', 'love', 'want', 'would', 'could', 'can', 'be', 'nice', 'fine', 'is', 'let', 'lets', "let's", 'also', 'too', 'then', 'so', 'well', 'um', 'uh', 'hmm', 'oh', 'actually', 'number', 'sounds', 'good', 'great', 'cool', 'perfect', 'now', 'thing', 'things', 'jester', 'hey', "that'd"]);
 const AFFIRMS = new Set(['yes', 'yeah', 'yep', 'yup', 'yea', 'ya', 'sure', 'ok', 'okay', 'alright', 'please', 'absolutely', 'definitely']);
@@ -390,6 +400,10 @@ export function offerReply(text, list) {
   const all = list.map((offer) => offer.id);
   const ids = (indexes) => [...new Set(indexes)].sort((a, b) => a - b).map((index) => list[index].id);
   if (NO_ALL.test(line)) return { op: 'no', ids: all };
+  // "That's okay." to "Want me to…?" is a no thanks, though "okay" alone is a yes; "that's fine" could be either,
+  // and is no answer (it was taken as a yes to all of them until 2026-11-22).
+  if (new RegExp(String.raw`^(?:that's|thats|it's|its|that is|it is) (?:okay|ok|alright|all right)${POLITE_TAIL}$`).test(line)) return { op: 'no', ids: all };
+  if (/^(?:that's|thats|it's|its|that is|it is) (?:fine|good)\b/.test(line)) return null;
   if (LATER.test(line)) return { op: 'later', ids: all };
   const affirmed = wordsOf(line).some((word) => AFFIRMS.has(word)) || /\b(?:do (?:it|that|them|those|both|all)|go ahead)\b/.test(line);
   // "All but the second", "not the reply", "everything except the first": the rest. Only that, with nothing after.
