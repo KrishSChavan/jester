@@ -1,6 +1,6 @@
 # Jester privacy policy
 
-_Last updated: November 16, 2026_
+_Last updated: November 21, 2026_
 
 Jester is a Chrome extension that lets you control video and your browser with
 hand gestures, an eye or head cursor, and voice commands. This policy explains
@@ -82,6 +82,16 @@ respective websites.
 **API keys** you enter are stored in your browser profile on this device and
 are sent only to the provider they belong to. Settings never shows a saved key
 again, and **Remove** deletes it.
+
+## Choices you make when Jester asks
+
+When a task can't go on without knowing which one you mean (which profile on a
+streaming site, which account), Jester asks you rather than guess. Your answer
+("Hulu profile: Krish") is kept so you aren't asked again: in the extension's
+own storage on your computer (the newest 30) when it runs by itself, or by
+Jester Desktop when the two are linked. It's sent to your AI provider with
+later tasks, as part of what the task needs to know. Removing the extension, or
+clearing its data, deletes what it kept.
 
 ## Jester Desktop, if you link it
 

@@ -76,6 +76,7 @@ More in [Permissions](docs/permissions.md).
 | [Getting started](docs/first-run.md) | The first five minutes: a model, listening, and what you can add |
 | [Permissions](docs/permissions.md) | Each permission, when it's asked for, and where to change it |
 | [The Chrome extension](docs/chrome-extension.md) | Installing it, linking it to the desktop app |
+| [His tools, and the choices he keeps](docs/tools.md) | Where he does each thing, when he asks you, what he remembers, and lending his tools to other apps |
 | [Troubleshooting](docs/troubleshooting.md) | What to try when he doesn't hear, answer, click or link, and where his log is |
 | [What leaves your computer](docs/privacy-desktop.md) | For the desktop app. The extension's policy is [PRIVACY.md](PRIVACY.md) |
 | [Building from source](docs/building.md) | Running from a checkout, the tests, packaging, making a release |

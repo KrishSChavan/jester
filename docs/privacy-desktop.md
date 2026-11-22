@@ -7,7 +7,10 @@ This is for **Jester Desktop**. The Chrome extension's policy is
 
 - **Your voice.** What you say is turned into text on your computer. The sound
   isn't kept, unless you turn on keeping the clips he wasn't sure of, which
-  stay on your computer too.
+  stay on your computer too. While someone is speaking, the last couple of
+  seconds are read for his name, so he can show he's listening at once; that
+  reading is thrown away. Once you've taught him your voice, a voice that
+  isn't yours is never turned into text at all.
 - **The camera.** Frames are read on your computer for gestures and the
   pointer, and never kept or sent.
 - **His voice** is made on your computer.
@@ -20,7 +23,10 @@ This is for **Jester Desktop**. The Chrome extension's policy is
   them goes what he needs to answer well or do what you asked: the names and
   text of the buttons and fields in the app he's working in (and, if you
   allow Screen Recording, a picture of its window), the parts of your notes
-  that bear on what you said, today's calendar, and the town you're in. With
+  that bear on what you said, today's calendar, the town you're in, and how
+  you've told him you like things done ("Hulu profile: Krish"). When you say
+  his name, what you said in the half minute before goes too, as context:
+  your voice only, held in memory until then, and never kept. With
   [Ollama](https://ollama.com), all of that goes to your own computer and
   nowhere else.
 - **Speech models, once.** The first time he opens, he downloads what he
@@ -50,12 +56,24 @@ to.
 - What he's learned about you, in your Obsidian vault if you gave him one, as
   plain files you can read, change or delete.
 - Your to-do list, reminders and timers.
+- How you like things done: your answers when he's asked which one you mean
+  (which profile, which Dad), until you remove them in Settings › Tools and
+  choices.
 - A log of what he did since he was last opened, and the run before. It
   includes what you asked him. Lines that look like a password or a card
   number are left out.
 
 Where: `~/Library/Application Support/Jester` and `~/Library/Logs/Jester` on a
 Mac; `%APPDATA%\Jester` on Windows.
+
+## Other apps using his tools
+
+Off unless you turn it on (Settings › Tools and choices). While it's on, other
+programs running as you on this computer can ask Jester to work the computer,
+Chrome, the web and your notes for them, and they see what those tools report
+back. It's a socket file in his own folder: nothing on the network can reach
+it. He still shows what he's doing and asks you before anything is sent,
+bought or deleted. [More](tools.md#other-apps-using-his-tools).
 
 ## What he won't do without asking
 

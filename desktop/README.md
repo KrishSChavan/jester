@@ -2857,6 +2857,39 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     and the server says the first piece of the next line while the Mac loads it again (under a second): the same
     voice either way, so you shouldn't hear the switch. If you do, say so.
 
+30. **A text goes to Messages, not a website** (built 2026-11-21 after "text Dad" opened messages.google.com; the
+    routing is unit-tested and the model's choice measured on your Claude Haiku with pretend hands, 10/10; never run
+    against the real Messages). With Chrome in front, say "Jester, text Dad: how are you doing?". He should say a
+    few words ("Texting him now."), Messages should come forward with a new message to Dad and the words in it,
+    and he should ask before it's sent. The log (the server's, in the cloud) has
+    `jester: {"say":…,"tools":["send_message"]}`, and the Mac's has `voice: belongs to the computer (told)`. If
+    several contacts match "Dad", he should ask which, and keep your answer.
+31. **He asks at a fork, and remembers** (built 2026-11-21; scripted pages and a scripted model only: never a real
+    Hulu or Google page). Needs the extension at 0.3.0: load the repo copy, or upload
+    `dist/jester-extension-0.3.0.zip`. Say "Jester, go to Hulu and play Modern Family". At the profile screen a
+    question should appear above his pill with a button for each profile, and he should ask it aloud. Say the name
+    (or "the first one", or click). He should carry on with that profile. Settings › Tools and choices then lists
+    "Hulu profile", and the next time he shouldn't ask. Say "forget my Hulu profile" or press Forget, and he asks
+    again. With the old extension he can't ask from inside Chrome: he should tell you he got stuck at the profile
+    screen and ask you himself.
+32. **He shows he's listening the moment he's named** (built 2026-11-21; measured with six synthetic voices on this
+    Mac: his name heard within a quarter second in 36 of 36 sentences; never with your voice or the server's
+    cores). Say a sentence with his name in the middle ("so I was thinking, Jester, can you set a timer for ten
+    minutes"). His pill should start listening about half a second after his name, not when you finish. With the
+    Mac in the cloud the looking is done on the server and will be slower: say how slow it feels.
+33. **What you said before his name is context** (built 2026-11-21; on your Claude Haiku: "ugh, this playlist is
+    terrible", then "Jester, can you do something about that?" was taken to be about the playlist). Try the same
+    kind of thing. And say something about him to someone else ("I told Jester to play something earlier"): he
+    should stay quiet.
+34. **How he carries himself** (built 2026-11-21; `npm run brain-check` on your Claude Haiku 5.5: 36 of 40, then 10
+    of 10 on the cases changed since). He should never say "On it", "Say yes or no", or read out a task's own
+    words. When something fails he should say what got in the way and offer the next step. Note any line that
+    still sounds like a machine: the words, and what you'd asked.
+35. **His tools, lent to another app** (built 2026-11-21; run for real over his socket by the live check, and both
+    eras of the protocol unit-tested; never from Claude's own apps). Settings › Tools and choices › Let other apps
+    use Jester's tools, copy the lines into the app's MCP settings, restart it, and ask it to "use Jester to open
+    Notes". His log has `mcp: <the app> called use_computer`.
+
 ## Things learned the hard way
 
 - An iPhone gives a page the mic without asking only within a minute of the last time it was capturing, unless

@@ -43,6 +43,7 @@ Other scripts, all run from `desktop/`:
 | `npm run icons` | Redraw every copy of his icon from `scripts/make-icons.mjs` |
 | `npm run scraping:setup -- --browser` | Set up the local page reader for background research (needs Python 3.10+) |
 | `npm run live-check` | The real app on a scratch profile with scripted models, typed to and read back |
+| `npm run brain-check` | Carries real requests through the conversation with your saved Claude model and pretend hands: which tool he chose, what he said, how soon. About a cent a run. See [his tools](tools.md). |
 | `npm run talk-check`, `hear-check`, `speed-check`, `voice-check`, `task-check` | Measure how well and how fast he talks, hears, speaks and acts. `task-check` acts for real. |
 
 Environment variables for tests and development are listed at the top of
