@@ -60,7 +60,7 @@ other app's MCP settings.
 
 ## Checking a model
 
-`npm run brain-check` (in `desktop/`) carries nineteen things people say to him
+`npm run brain-check` (in `desktop/`) carries some twenty things people say to him
 through the real conversation with your saved Claude model and pretend hands:
 nothing is opened, sent or searched. It says which tool was chosen, what he
 said, and how long his first words took. A run costs about a cent.

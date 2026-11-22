@@ -1217,7 +1217,8 @@ if (process.argv[2] === 'serve') {
         check('a cancelled worker cannot append a late research answer', his().length === beforeCancel, JSON.stringify(his().slice(beforeCancel)));
         const beforeManual = requests().length;
         const review = await type('Look up the city budget in its records portal');
-        check('a low scraping score asks before doing it by hand', /12\/100/.test(review) && /by hand/i.test(review) && requests().length === beforeManual, review);
+        // Asked as a person would: the score and the reason are for his log, not for their ears.
+        check('a low scraping score asks before doing it by hand', /^I can’t get that by reading in the background\. Want me to do it by hand in your browser instead\?/.test(review) && !/\d+\/100/.test(review) && /research: asking to do it by hand:.*\(12\/100\)/.test(logLines()) && requests().length === beforeManual, review);
         const declined = await type('No');
         check('declining low-confidence interaction starts no scrape or browser action', requests().length === beforeManual && opened.length === 2 && /won.t|declin|not|left|okay/i.test(declined), declined);
         await type('Search something');
