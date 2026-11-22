@@ -1874,15 +1874,62 @@ test('talked over in the user’s voice he gives way without his name; uncertain
   await tick();
   await b.conversation.heard('Jester, what time is it?');
   assert.deepEqual(theirs(b), []);
-  // Quiet, and not said to him: let pass, with why. His name further in, and said to him: taken.
+  // Quiet, and not said to him: let pass, with why. His name within it, though not as a call, is his model's to
+  // judge (2026-11-21): about him, it says nothing. His name further in, and said to him: taken.
   logs.length = 0;
-  const d = jester({ knowsYou: true, log: (...parts) => logs.push(parts.join(' ')) });
+  const asides = [];
+  const d = jester({ knowsYou: true, chat: async ({ unnamed, aside }) => (asides.push(aside), unnamed ? { say: '', do: '', notFor: true } : { say: 'Hello there.', do: '' }), log: (...parts) => logs.push(parts.join(' ')) });
   await d.conversation.heard('I was telling Trisha about Jester yesterday');
   await d.conversation.heard('the bread is nearly done');
-  assert.deepEqual(logs, ['heard and let pass — not said to him (7 words, his name word 6)', 'heard and let pass — not said to him (5 words, no name in it)']);
+  assert.deepEqual(logs, ['heard and let pass — not said to him, his model judged (7 words, his name word 6)', 'heard and let pass — not said to him (5 words, no name in it)']);
+  assert.match(asides[0], /^Your name was said within these words, not at their start/);
+  assert.deepEqual(theirs(d), [], 'neither is his conversation');
   await d.conversation.heard('The bread is in the oven. Jester, set a timer for forty minutes.');
   assert.deepEqual(theirs(d), ['set a timer for forty minutes.']);
   assert.ok(!logs.join('\n').includes('bread'), 'never the words');
+  // What they said in the same breath before his name, and in the half minute before, goes with it as context.
+  assert.match(asides.at(-1), /Said in the same breath, before your name: “The bread is in the oven\.”/);
+  assert.match(asides.at(-1), /Said by the user in the half minute before, not to you, for context only: “I was telling Trisha about Jester yesterday” “the bread is nearly done”/);
+});
+
+test('what was said before his name is context for half a minute, theirs only, given once and never kept', async () => {
+  const asides = [];
+  const chat = async ({ aside }) => (asides.push(aside), { say: 'Turning it up.', do: '' });
+  const j = jester({ knowsYou: true, chat });
+  await j.conversation.heard('it is freezing in here');
+  await j.conversation.heard('maybe someone left a window open', { unsure: true });
+  j.pass(10 * 1000);
+  await j.conversation.heard('Jester, can you fix that?');
+  assert.equal(asides[0], 'Said by the user in the half minute before, not to you, for context only: “it is freezing in here”', 'a voice only maybe theirs isn’t kept');
+  assert.deepEqual(j.entries.map((entry) => entry.text), ['can you fix that?', 'Turning it up.'], 'the conversation holds only what was said to him');
+  // Given once: the conversation carries it from there.
+  j.pass(20 * 1000);
+  await j.conversation.heard('Jester, and the fan?');
+  assert.equal(asides[1], '');
+  // Past half a minute it's gone.
+  const k = jester({ knowsYou: true, chat });
+  await k.conversation.heard('remind me to tell you about the game');
+  k.pass(31 * 1000);
+  await k.conversation.heard('Jester, what time is it?');
+  assert.equal(asides.at(-1), '');
+  // With no voiceprint there's no telling whose words they were: nothing is kept.
+  const l = jester({ knowsYou: false, chat });
+  await l.conversation.heard('the neighbours are loud again');
+  await l.conversation.heard('Jester, what time is it?');
+  assert.equal(asides.at(-1), '');
+});
+
+test('named in the middle of a sentence, all of it goes to his model, which says whether it was to him', async () => {
+  const seen = [];
+  const j = jester({ knowsYou: true, chat: async (request) => (seen.push(request), /tell me/i.test(request.text) ? { say: 'Kickoff is at eight.', do: '' } : { say: '', do: '', notFor: true }) });
+  await j.conversation.heard('can you tell me Jester what time the game starts tonight');
+  assert.equal(seen[0].text, 'can you tell me Jester what time the game starts tonight', 'the whole of it, his name where it was');
+  assert.equal(seen[0].unnamed, true);
+  assert.match(seen[0].aside, /^Your name was said within these words/);
+  assert.deepEqual(j.said, ['Kickoff is at eight.']);
+  // About him, to someone else: his model says so, and he says nothing.
+  await j.conversation.heard('honestly Jester never gets that right');
+  assert.deepEqual(j.said, ['Kickoff is at eight.']);
 });
 
 test('the line saying why something heard was let pass is never taken for a password by dev.log’s filter (2026-11-18: "pass:" hid every one)', async () => {

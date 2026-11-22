@@ -11,8 +11,9 @@
  *
  * `begin` hears one command. `listen` never stops: every utterance comes out as
  * `heard`, for the continuous assistant, and only a second or so is kept in
- * between. While someone's still talking, the start of it is read twice for
- * his name, and `wake` says it's there: only that, never the words.
+ * between. While someone's still talking, the last couple of seconds of it
+ * are read a few times a second for his name, wherever in a sentence it
+ * comes, and `wake` says it's there: only that, never the words.
  * Nothing heard this way is saved, whatever JESTER_SAVE_SPEECH says, unless the
  * user has turned on keeping what he wasn't sure of (`keep {dir}`, Settings ›
  * Assistant and voice): then a voice that scored near theirs without being
@@ -31,7 +32,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { judged, scored, worthLearning } from '../voiceprint.js';
-import { wakesEarly } from '../wake.js';
+import { named, wakesEarly } from '../wake.js';
 import { modelDir, SPEECH_MODELS, VAD_MODEL, VOICE_MODEL } from './models.js';
 
 const require = createRequire(import.meta.url);
@@ -73,8 +74,24 @@ const ACTIVITY_S = 1;
 const INTERRUPT_CHECK_S = 0.45;
 /** A recent slice can detect the user joining an already-active speaker echo. */
 const INTERRUPT_WINDOW_S = 1.2;
-/** This far into speech, what's been said so far is read for his name. Two reads at most: it comes first. */
-const PEEK_AT_S = [1, 2];
+/**
+ * While someone's talking, the last LOOK_S of it is read for his name every LOOK_EVERY_S, from LOOK_FIRST_S in: so
+ * that he shows he's listening the moment he's named, wherever in a sentence that is (the user, 2026-11-21: "the
+ * listening animation is only shown after my whole sentence is complete… show that he is listening the second his
+ * name is heard"). Before, the start of an utterance was read twice, a second and two seconds in, and only a name
+ * that came first counted: named a moment in, or last, he showed nothing until it was all said.
+ *
+ * Measured that day on this Mac (M4 Pro, two threads), over six synthetic voices saying his name first, in the
+ * middle and last: heard in 36 of 36 within a quarter second of the name ending, and in none of 24 sentences
+ * without it ("the gesture he made at Chester"); a look takes 22 ms with the Light model and 71 ms with Accurate.
+ * A slower computer looks less often: never again sooner than LOOK_BUSY times as long as the last look took.
+ * Past LOOK_FAST_S of one utterance (a television, a long story) it's once a second.
+ */
+const LOOK_S = 2;
+const LOOK_EVERY_S = 0.25;
+const LOOK_FIRST_S = 0.4;
+const LOOK_BUSY = 2;
+const LOOK_FAST_S = 15;
 /** All that's kept before speech while listening: the preroll, and a little. */
 const KEPT_WINDOWS = Math.ceil((PREROLL_S * SAMPLE_RATE) / WINDOW) + 2;
 /** The detector counts samples in 32 bits and finds nothing past 37 hours of them (measured), so it starts over. */
@@ -114,7 +131,8 @@ let speaking = false;
 function freshState(listening = false) {
   // `windows` is everything since `begin`; `speechAt` the window where speech was first detected.
   // `ahead`: what was read at a pause that may be the end (readAhead), until they go on talking.
-  return { carry: new Float32Array(0), windows: [], speechAt: -1, startedAt: null, activityAt: 0, interruptAt: 0, interrupting: false, interruptVerified: false, vadWindows: 0, lastPartialAt: 0, partialBusy: false, done: false, listening, peeks: 0, peeking: false, ahead: null };
+  // `lookAt`: how much must have been said before the next look for his name; `woke`: it's been heard in this one.
+  return { carry: new Float32Array(0), windows: [], speechAt: -1, startedAt: null, activityAt: 0, interruptAt: 0, interrupting: false, interruptVerified: false, vadWindows: 0, lastPartialAt: 0, partialBusy: false, done: false, listening, lookAt: LOOK_FIRST_S * SAMPLE_RATE, lookMs: 0, woke: false, peeking: false, ahead: null };
 }
 
 /** The utterance: from just before speech was detected to now. */
@@ -291,27 +309,31 @@ function readAhead() {
 }
 
 /**
- * Whether what's being said so far starts with his name. Not while teaching,
- * nor while the last utterance is still decoding; and a voiceprint keeps
- * everyone else's words from being decoded here too.
+ * Whether his name is in what's just been said: the last LOOK_S of it. Not while teaching, nor while the last
+ * utterance is still decoding; and a voiceprint keeps everyone else's words from being decoded here too, so the
+ * voice is judged first and a stranger's is left unread. From the start of what's being said, the words that stand
+ * for his name there count as well ("Just open…", "Jay, …": wake.js wakesEarly); further in, only his own name.
  */
-async function peek() {
+async function look() {
   const during = state;
-  during.peeks += 1;
+  const began = performance.now();
   during.peeking = true;
   try {
-    const samples = utterance();
+    const all = utterance();
+    const whole = all.length <= LOOK_S * SAMPLE_RATE;
+    const samples = whole ? all : all.subarray(all.length - LOOK_S * SAMPLE_RATE);
     if (voiceprint) {
       // Only his name wakes him early, so maybe the user's will do.
       const voice = voiceOf(samples);
       if (judged(voice ? scored(voice, voiceprint, learned).score : 0, samples.length / SAMPLE_RATE) === 'stranger') return;
     }
     const { text } = await decode(samples);
-    if (state !== during || !wakesEarly(text)) return;
-    during.peeks = PEEK_AT_S.length;
+    if (state !== during || during.woke || !(named(text) || (whole && wakesEarly(text)))) return;
+    during.woke = true;
     send({ type: 'wake', startedAt: during.startedAt });
   } finally {
     during.peeking = false;
+    during.lookMs = performance.now() - began;
   }
 }
 
@@ -383,8 +405,12 @@ function keepListening() {
       state.vadWindows = recent.length;
       sinceRestart = recent.length;
     }
-    if (!teaching && !decoding && !state.peeking && !state.interrupting && said >= PEEK_AT_S[state.peeks] * SAMPLE_RATE) {
-      peek().catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
+    // Not while he's speaking: what's heard then is mostly him, and talking over him has its own check above.
+    if (!teaching && !speaking && !decoding && !state.woke && !state.peeking && !state.interrupting && said >= state.lookAt) {
+      // The next one no sooner than a slow computer can keep up with, and seldom once this has gone on a while.
+      const gap = Math.max(said >= LOOK_FAST_S * SAMPLE_RATE ? 1 : LOOK_EVERY_S, (state.lookMs / 1000) * LOOK_BUSY);
+      state.lookAt = said + gap * SAMPLE_RATE;
+      look().catch((err) => send({ type: 'error', detail: String(err?.message || err) }));
     }
     return;
   }

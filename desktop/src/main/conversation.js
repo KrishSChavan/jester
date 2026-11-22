@@ -31,7 +31,7 @@ import { spokenLine, writtenLine } from './speaker.js';
 import { ago, askedToForget, mayAskToForget, verbatim } from './vault-memory.js';
 import { PATHS } from './vault.js';
 import { ringStopAsked } from './ring.js';
-import { addressed, nameAt } from './wake.js';
+import { addressed, nameAt, named } from './wake.js';
 import { sourcesOf } from './research-sources.js';
 import { searchRequestIntent } from '../../../jester-extension/src/background/search-routing.js';
 import { timedWords } from './script-words.js';
@@ -365,10 +365,26 @@ ${abilitiesPart({ ...can, notes, tasks, where: !!live.where, calendars: !!live.c
  * floor open for the next). The model judges it, and says nothing when it's someone else's.
  */
 export const UNNAMED_LINE = 'Said without your name, seconds after you spoke: maybe to you, maybe to someone else in the room.';
-const UNNAMED_RULE = `When the brackets say the user's words came without your name, you overheard them, and they may be to someone else: people talk with friends in the room, on calls and to games about the same things they talk with you about. Then begin your reply with "forYou", decided before anything else by asking: do these words answer or follow on from what you just said, or ask you for something? A follow-up on what you just told them ("what about tomorrow?", "how far is that?"), a yes or no to what you offered, or a request ("turn it down a bit") is for you: true. Words aimed at someone else are false: a story about what someone did or said, banter or swearing with friends, telling a person to do something ("pass me that"), talking to someone by name or to a parent, a call, a game. When it's false, reply exactly {"forYou":false,"say":"","do":"","new":false}, and you stay quiet. When it's true, answer as always, and never say or ask whether it was meant for you.`;
+/**
+ * His name said within what was heard, though not as a call: "can you tell me, Jester, what time it is" is to him,
+ * "I told Jester to play something" is about him. The user, 2026-11-21: named mid-sentence he should show he's
+ * listening at once, "and if the rest of it is not for him he can ignore it". So his model reads all of it and says
+ * which, as it does for words overheard without his name.
+ */
+export const MENTIONED_LINE = 'Your name was said within these words, not at their start: they may be asking you for something, or only talking about you to someone else.';
+/**
+ * What the user said in the half minute before they named him, that wasn't to him: context for what they ask then
+ * ("It's freezing in here." … "Jester, can you fix that?"). Their choice, 2026-11-21: the words before his name in
+ * the sentence, and the thirty seconds before; their voice only, held in memory, never kept, and given to his model
+ * only once they say his name.
+ */
+const PASSED_MS = 30 * 1000;
+const PASSED_MOST = 4;
+const PASSED_CHARS = 600;
+const UNNAMED_RULE = `When the brackets say the user's words came without your name, or with your name only said within them, you overheard them, and they may be to someone else or only about you: people talk with friends in the room, on calls and to games about the same things they talk with you about. Then begin your reply with "forYou", decided before anything else by asking: do these words answer or follow on from what you just said, or ask you for something? A follow-up on what you just told them ("what about tomorrow?", "how far is that?"), a yes or no to what you offered, or a request ("turn it down a bit") is for you: true. Words aimed at someone else are false: a story about what someone did or said, banter or swearing with friends, telling a person to do something ("pass me that"), talking to someone by name or to a parent, a call, a game. When it's false, reply exactly {"forYou":false,"say":"","do":"","new":false}, and you stay quiet. When it's true, answer as always, and never say or ask whether it was meant for you.`;
 
 /** The same, for a model with tools: saying nothing is a call of its own (mcp/tools.js stay_quiet). */
-const UNNAMED_TOOLS = `When the brackets say the user's words came without your name, you overheard them, and they may be to someone else: people talk with friends in the room, on calls and to games about the same things they talk with you about. Decide first: do these words answer or follow on from what you just said, or ask you for something? A follow-up on what you just told them ("what about tomorrow?", "how far is that?"), a yes or no to what you offered, or a request ("turn it down a bit") is for you: answer exactly as you would have with your name, with not a word about who it was meant for. Words aimed at someone else are not: a story about what someone did or said, banter or swearing with friends, telling a person to do something ("pass me that"), talking to someone by name or to a parent, a call, a game. Then call stay_quiet and write nothing at all.`;
+const UNNAMED_TOOLS = `When the brackets say the user's words came without your name, or with your name only said within them, you overheard them, and they may be to someone else or only about you: people talk with friends in the room, on calls and to games about the same things they talk with you about. Decide first: do these words answer or follow on from what you just said, or ask you for something? A follow-up on what you just told them ("what about tomorrow?", "how far is that?"), a yes or no to what you offered, or a request ("turn it down a bit") is for you: answer exactly as you would have with your name, with not a word about who it was meant for. Words aimed at someone else are not: a story about what someone did or said, banter or swearing with friends, telling a person to do something ("pass me that"), talking to someone by name or to a parent, a call, a game. Then call stay_quiet and write nothing at all.`;
 
 /**
  * Who he is when the model he talks through can be given tools (brain.js): the lines his other prompt has, said for
@@ -635,8 +651,9 @@ export function firstSaid(raw) {
  * @returns {Promise<{say:string, do:string, new:boolean, remember:string, note:{title:string, add:string, open:boolean}|null}>}
  *   remember: words to keep, word for word, or ''
  */
-export async function askModel({ request, text, history, earlier = [], context = '', situation = '', live = {}, can = {}, notes = true, tasks = false, scripts = null, mood = '', unnamed = false, signal, date = new Date(), onFirst = null }) {
-  const recalled = quoted(situation, context, moodLine(mood), unnamed ? UNNAMED_LINE : '');
+export async function askModel({ request, text, history, earlier = [], context = '', situation = '', live = {}, can = {}, notes = true, tasks = false, scripts = null, mood = '', unnamed = false, aside = '', signal, date = new Date(), onFirst = null }) {
+  // `aside`: how these words reached him, when it isn't plainly: overheard, his name only within them, what was said before.
+  const recalled = quoted(situation, context, moodLine(mood), aside || (unnamed ? UNNAMED_LINE : ''));
   const quiet = !unnamed ? null : /^\s*(?:```(?:json)?\s*)?\{\s*"forYou"\s*:\s*false/;
   let told = false;
   const { json } = await request({
@@ -784,6 +801,8 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   let lately = [];
   /** What was connected the last time it was told (abilities.js). */
   let lastConnected = {};
+  /** What they've said lately that wasn't to him, theirs for sure: [{text, at}], for PASSED_MS, in memory only. */
+  let passedBy = [];
   /** He's shown he's listening, for what's still being said. */
   let wokenEarly = false;
   let wokenStartedAt;
@@ -1429,7 +1448,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * His reply, from a model given his tools: its words, and what it called. Null when it can't be asked that way
    * right now (no such model, or it failed): then he's asked for JSON, as ever.
    */
-  async function withTools({ text, history, earlier, context, situation: known, live, can, notes, tasks: keepsTasks, scripts: scripted, mood, unnamed, signal, onFirst }) {
+  async function withTools({ text, history, earlier, context, situation: known, live, can, notes, tasks: keepsTasks, scripts: scripted, mood, unnamed, aside = '', signal, onFirst }) {
     if (!kit) return null;
     try {
       if (!(await brain.ready())) return null;
@@ -1441,7 +1460,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       .map(({ name, description, input_schema: input }) => ({ name, description, input_schema: input }));
     const system = toolPrompt(date, earlier, { notes, live, can, tasks: keepsTasks, scripts: scripted });
     const how = ways?.lines() || [];
-    const recalled = quoted(known, how.length ? `How they like things done, as they've told you (go by these without asking again): ${how.join('; ')}` : '', context, moodLine(mood), unnamed ? UNNAMED_LINE : '');
+    const recalled = quoted(known, how.length ? `How they like things done, as they've told you (go by these without asking again): ${how.join('; ')}` : '', context, moodLine(mood), aside || (unnamed ? UNNAMED_LINE : ''));
     const prompt = recalled ? `${recalled}\n${stamped(text, date)}` : stamped(text, date);
     const turnsSoFar = history.map((entry) => ({ role: entry.who === 'you' ? 'user' : 'assistant', content: entry.text }));
     let told = false;
@@ -1611,12 +1630,16 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * his first sentence once that's written (and `onFirst` is told it, if set by then); `result` resolves to null
    * when it was called off before the model was asked.
    */
-  function think(text, history, { typed = false, unnamed = false } = {}) {
+  function think(text, history, { typed = false, unnamed = false, mentioned = false, lead = '' } = {}) {
     /** His line before theirs, when he said one: their words may answer a question of his about their list. */
     const hisLast = history.at(-1)?.who === 'jester' ? history.at(-1).text : '';
     const ongoing = new AbortController();
     const lines = history.map(({ who, text: line }) => ({ who, text: line }));
-    const thought = { text, history, unnamed, controller: ongoing, began: now(), at: {}, first: '', onFirst: null, result: null };
+    // How these words reached him, for his model: overheard, or with his name only within them; what was said in
+    // the same breath before his name; and what they'd said just before, to nobody in particular.
+    const before = saidBefore();
+    const aside = [unnamed ? (mentioned ? MENTIONED_LINE : UNNAMED_LINE) : '', lead ? `Said in the same breath, before your name: “${lead}”` : '', before ? `Said by the user in the half minute before, not to you, for context only: ${before}` : ''].filter(Boolean).join('\n');
+    const thought = { text, history, unnamed, lead, controller: ongoing, began: now(), at: {}, first: '', onFirst: null, result: null };
     thought.result = (async () => {
       // With no vault open, the user's notes are the laptop's, as they were before he kept them.
       const notes = !!vaultMemory && vaultMemory.ready?.() !== false;
@@ -1643,7 +1666,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // What the user's scripts said is on, when one did lately, goes with where they are and their calendars.
       const scripted = scripts?.prompt?.() || null;
       const known = [around.block, scripted ? scripts.stateLines?.() : ''].filter(Boolean).join('\n');
-      const asked = { text, history, earlier: recollections.relevant(text), context, situation: known, live, can, notes, tasks: !!tasks, scripts: scripted, mood: moodOf(text, history, now()), unnamed, signal: ongoing.signal, ...(ahead ? { onFirst } : {}) };
+      const asked = { text, history, earlier: recollections.relevant(text), context, situation: known, live, can, notes, tasks: !!tasks, scripts: scripted, mood: moodOf(text, history, now()), unnamed, aside, signal: ongoing.signal, ...(ahead ? { onFirst } : {}) };
       // With tools, when the model he talks through takes them; asked for JSON otherwise, and when that fails.
       const reply = (await withTools(asked)) || (await chat(asked));
       thought.at.reply = now();
@@ -1670,7 +1693,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
   async function ponder(said, { startedAt } = {}) {
     dropPending();
     if ((searchClarification && searchClarification.expiresAt > now()) || (briefingOffer && briefingOffer.expiresAt > now())) return;
-    const { woken, rest } = addressed(said);
+    const { woken, rest, before: lead = '' } = addressed(said);
     const meant = woken ? rest : String(said).trim();
     // As overheard() would take it, and only then: words that turn a ringing timer off are never his model's.
     if (ring?.ringing() && ringStopAsked(meant)) return;
@@ -1686,12 +1709,12 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     if (mine !== ponders || during !== turns) return;
     const history = quietSince() ? [] : memory.current(HISTORY);
     if (keptAsSaid(meant, history)) return;
-    pending = think(meant, history, { unnamed: !woken });
+    pending = think(meant, history, { unnamed: !woken, lead });
     pendingTimer = setTimeout(dropPending, PENDING_MS);
     pendingTimer.unref?.();
   }
 
-  async function turn(text, { overheard, typed = false, unsure = false, unnamed = false, lag = NaN, startedAt, briefingId = '', offerIds = null } = {}) {
+  async function turn(text, { overheard, typed = false, unsure = false, unnamed = false, mentioned = false, lead = '', lag = NaN, startedAt, briefingId = '', offerIds = null } = {}) {
     const beganAt = Number.isFinite(startedAt) ? startedAt : now();
     const clarification = searchClarification && beganAt >= searchClarification.askedAt && searchClarification.expiresAt > beganAt ? searchClarification : null;
     searchClarification = null;
@@ -1856,9 +1879,11 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         return;
       }
       // Begun at the pause, it's this turn's if the conversation it was begun in is still this one.
-      const same = begun && begun.unnamed === unnamed && begun.history.length === history.length && begun.history.at(-1)?.text === history.at(-1)?.text;
+      const same = begun && begun.unnamed === unnamed && begun.lead === lead && !mentioned && begun.history.length === history.length && begun.history.at(-1)?.text === history.at(-1)?.text;
       if (begun && !same) begun.controller.abort();
-      const thought = same ? begun : think(text, history, { typed, unnamed });
+      const thought = same ? begun : think(text, history, { typed, unnamed, mentioned, lead });
+      // Given to his model once: after this the conversation itself carries it.
+      passedBy = [];
       controller = thought.controller;
       clock.began(thought.began);
       // He starts on his first sentence as it's written, unless it says a note was made: one nobody asked for isn't
@@ -1880,7 +1905,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // The moment his last line left for an answer is still there for one.
       if (unnamed && quietReply(reply)) {
         memory.take?.('you', text);
-        passed(text, 'not said to him, his model judged');
+        passed(text, 'not said to him, his model judged', { theirs: !unsure });
         if (wasOpen.until > now()) {
           openSince = wasOpen.since;
           openUntil = wasOpen.until;
@@ -2054,10 +2079,20 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * answer to his name, this is what tells a name that wasn't heard as one from a state he was in. No colon after
    * "pass": dev.log's filter reads "pass:" as a password's label and would hide the whole line (2026-11-18).
    */
-  function passed(text, why) {
+  function passed(text, why, { theirs = false } = {}) {
+    // Theirs for sure, and to nobody: kept half a minute, in case they turn to him about it.
+    if (theirs && knowsYou()) {
+      passedBy = [...passedBy.filter((line) => now() - line.at < PASSED_MS), { text: String(text).replace(/\s+/g, ' ').trim().slice(0, PASSED_CHARS), at: now() }].slice(-PASSED_MOST);
+    }
     const { words, at } = nameAt(text);
     log(`heard and let pass — ${why} (${words} word${words === 1 ? '' : 's'}${at ? `, his name ${at === 1 ? 'first' : `word ${at}`}` : ', no name in it'})`);
     return null;
+  }
+
+  /** What they said in the half minute before, that wasn't to him, oldest first; '' with none, or once it's stale. */
+  function saidBefore() {
+    passedBy = passedBy.filter((line) => now() - line.at < PASSED_MS);
+    return passedBy.map((line) => `“${line.text}”`).join(' ').slice(-PASSED_CHARS * 2);
   }
 
   /**
@@ -2067,7 +2102,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
    * @returns {Promise<void>|null} his turn, or null when it wasn't one
    */
   function overheard(text, { unsure = false, lag = NaN, startedAt } = {}) {
-    const { woken, rest } = addressed(text);
+    const { woken, rest, before: lead = '' } = addressed(text);
     const meant = woken ? rest : String(text).trim();
     if (!meant && !woken) return null;
     // A timer ringing is turned off by saying so, with his name or without: nothing else comes of those words, so a
@@ -2147,12 +2182,16 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     // Without his name it's for him only just after he's spoken to them. Then a voice that only may be theirs is
     // taken for theirs: it's an answer to him, seconds after he spoke (2026-11-15: every "yes" to a question of his
     // scored as maybe, and went unheard).
-    if (!woken && !cutIn && !withinWindow(startedAt) && !answersOffer(meant, startedAt)) return passed(text, 'not said to him');
+    if (!woken && !cutIn && !withinWindow(startedAt) && !answersOffer(meant, startedAt)) {
+      // His name within it, though not as a call: all of it goes to his model, which says whether it was to him.
+      if (named(meant)) return turn(meant, { overheard: true, unsure, unnamed: true, mentioned: true, lag, startedAt });
+      return passed(text, 'not said to him', { theirs: !unsure });
+    }
     if (!meant) {
       stayOpen();
       return Promise.resolve();
     }
-    return turn(meant, { overheard: true, unsure, unnamed: !woken, lag, startedAt });
+    return turn(meant, { overheard: true, unsure, unnamed: !woken, mentioned: !woken && named(meant), lead: woken ? lead : '', lag, startedAt });
   }
 
   return {
@@ -2341,6 +2380,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     /** Starts over, with nothing kept: what he was answering, or a task's result to come, is dropped with the rest. */
     forget() {
       searchClarification = null;
+      passedBy = [];
       briefingOffer = null;
       workOffer = null;
       overlapGeneration += 1;
@@ -2365,6 +2405,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
      */
     reset() {
       searchClarification = null;
+      passedBy = [];
       briefingOffer = null;
       workOffer = null;
       overlapGeneration += 1;
@@ -2384,6 +2425,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     /** The conversation going on is over (another chat's been picked up): nothing more of it is said or written. */
     end() {
       searchClarification = null;
+      passedBy = [];
       briefingOffer = null;
       workOffer = null;
       overlapGeneration += 1;

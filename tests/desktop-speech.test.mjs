@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { judged, scored, worthLearning } from '../desktop/src/main/voiceprint.js';
-import { wakesEarly } from '../desktop/src/main/wake.js';
+import { named, wakesEarly } from '../desktop/src/main/wake.js';
 
 const RATE = 16000;
 const WINDOW = 512;
@@ -58,7 +58,7 @@ function service({ decode = async () => ({ text: 'Jester, the whole response.' }
   vm.runInNewContext(source, {
     fs: { existsSync: () => voice !== null }, path: {},
     createRequire: () => () => ({ Vad, OfflineRecognizer, SpeakerEmbeddingExtractor }),
-    judged, scored, worthLearning, wakesEarly,
+    judged, scored, worthLearning, named, wakesEarly,
     modelDir: () => '', SPEECH_MODELS: { fake: { kind: 'offline', config: () => ({}) } }, VAD_MODEL: '', VOICE_MODEL: '',
     process: { env: {}, parentPort: { postMessage: (message) => messages.push(message), on: (_name, fn) => { receive = fn; } } },
     performance: { now: () => time }, Date: { now: () => time }, Float32Array, console
@@ -66,6 +66,10 @@ function service({ decode = async () => ({ text: 'Jester, the whole response.' }
   const post = (data) => receive({ data });
   return {
     messages, detectors, post,
+    /** How long the harness has run, in seconds: for a decode that answers by what's been said so far. */
+    seconds: () => (time - 100000) / 1000,
+    /** A decode that takes this long on the harness's clock. */
+    spend: (ms) => { time += ms; },
     async feed(seconds, level = 0.7) {
       for (let frames = Math.round(seconds * RATE / WINDOW); frames > 0; frames--) {
         time += WINDOW / RATE * 1000;
@@ -201,7 +205,9 @@ test('interruption probes stay off outside playback and while teaching', async (
     await s.post({ type: 'teaching', on: teaching });
     await s.feed(0.8);
     assert.equal(s.messages.some((m) => m.interrupt), false);
-    assert.equal(decodes, 0);
+    // Outside playback the only reading is the look for his name; teaching, there's none at all.
+    if (teaching) assert.equal(decodes, 0);
+    else assert.ok(decodes >= 1 && decodes <= 3, `${decodes} looks`);
   }
 });
 
@@ -284,4 +290,75 @@ test('speech host forwards interruption metadata and remembers playback across s
   assert.equal(s.sent.filter((m) => m.type === 'speaking').at(-1).on, true);
   s.host.setSpeaking(false);
   assert.equal(s.sent.filter((m) => m.type === 'speaking').at(-1).on, false);
+});
+
+test('his name is heard the moment it’s said, wherever in the sentence: looked for a few times a second, and told once', async () => {
+  // 2026-11-21: "the listening animation is only shown after my whole sentence is complete". The start of an
+  // utterance was read twice, and only a name that came first counted.
+  let looks = 0;
+  let s;
+  // What the recognizer makes of the last couple of seconds: his name comes three seconds in.
+  s = service({ decode: async () => (looks++, { text: s.seconds() >= 3 ? 'so I was thinking, Jester, can you' : 'so I was thinking' }) });
+  await s.post({ type: 'start', model: 'fake' });
+  await s.post({ type: 'listen' });
+  await s.feed(2.9);
+  assert.equal(s.messages.some((m) => m.type === 'wake'), false);
+  assert.ok(looks >= 8 && looks <= 12, `looked ${looks} times in under three seconds`);
+  await s.feed(0.4);
+  const wakes = s.messages.filter((m) => m.type === 'wake');
+  assert.equal(wakes.length, 1, 'within a look or two of his name');
+  assert.equal(wakes[0].startedAt, s.messages.find((m) => m.type === 'speech').startedAt);
+  const after = looks;
+  await s.feed(3);
+  assert.equal(s.messages.filter((m) => m.type === 'wake').length, 1, 'told once');
+  assert.equal(looks, after, 'and not looked for again in the same breath');
+});
+
+test('named first, he’s woken by the first look; words that stand for his name count only from the start', async () => {
+  const first = service({ decode: async () => ({ text: 'Jester, what' }) });
+  await first.post({ type: 'start', model: 'fake' });
+  await first.post({ type: 'listen' });
+  await first.feed(0.7);
+  assert.equal(first.messages.filter((m) => m.type === 'wake').length, 1, 'well inside the first second');
+  // "Just open Spotify" is how some voices' "Jester, open Spotify" is written: from the start, it's him.
+  const just = service({ decode: async () => ({ text: 'Just open Spotify' }) });
+  await just.post({ type: 'start', model: 'fake' });
+  await just.post({ type: 'listen' });
+  await just.feed(1.2);
+  assert.equal(just.messages.filter((m) => m.type === 'wake').length, 1);
+  // Further in, only his own name: "…and I just open Spotify" is talk.
+  let late;
+  late = service({ decode: async () => ({ text: late.seconds() > 3.5 ? 'and then I just open Spotify' : 'and then I' }) });
+  await late.post({ type: 'start', model: 'fake' });
+  await late.post({ type: 'listen' });
+  await late.feed(6);
+  assert.equal(late.messages.some((m) => m.type === 'wake'), false);
+});
+
+test('a voice that isn’t the user’s is never read for his name, and a slow computer looks less often', async () => {
+  let decoded = 0;
+  // A voiceprint set, and the voice heard nothing like it.
+  const stranger = service({ voice: [0, 1, 0], decode: async () => (decoded++, { text: 'Jester, open the door' }) });
+  await stranger.post({ type: 'start', model: 'fake' });
+  await stranger.post({ type: 'voiceprint', print: [1, 0, 0] });
+  await stranger.post({ type: 'listen' });
+  await stranger.feed(3);
+  assert.equal(decoded, 0, 'not a word of it was decoded');
+  assert.equal(stranger.messages.some((m) => m.type === 'wake'), false);
+  // Each look taking 400 ms: the next comes no sooner than twice that after.
+  let looks = 0;
+  let slow;
+  slow = service({ decode: async () => (looks++, slow.spend(400), { text: 'nothing of his in this' }) });
+  await slow.post({ type: 'start', model: 'fake' });
+  await slow.post({ type: 'listen' });
+  await slow.feed(6);
+  assert.ok(looks >= 5 && looks <= 8, `looked ${looks} times in six seconds, where a quick one looks twenty`);
+  // While teaching him their voice, nothing is looked for.
+  let taught = 0;
+  const teaching = service({ decode: async () => (taught++, { text: 'Jester' }) });
+  await teaching.post({ type: 'start', model: 'fake' });
+  await teaching.post({ type: 'listen' });
+  await teaching.post({ type: 'teaching', on: true });
+  await teaching.feed(3);
+  assert.equal(taught, 0);
 });

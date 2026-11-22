@@ -64,6 +64,7 @@ if (!process.versions.electron) {
    * @property {(object|null)[]} [outcomes]  what the hands come to, in order
    * @property {(string|null)[]} [answers]  what the user answers him, in order
    * @property {boolean} [unnamed]  overheard, without his name
+   * @property {boolean} [heard]  said aloud rather than typed, with `before` said first to nobody in particular
    * @property {(seen:object) => string[]} check  what's wrong with how it went, or []
    */
   const first = (seen) => seen.calls[0]?.name || '';
@@ -144,6 +145,9 @@ if (!process.versions.electron) {
     { name: 'a question about what he can do', said: 'can you text people for me?', check: (seen) => [...(seen.calls.length ? [`called ${seen.calls.map((call) => call.name).join(', ')}`] : []), ...(/yes|can|sure|absolutely/i.test(seen.said.join(' ')) ? [] : ['didn’t say he can'])] },
     { name: 'a sum', said: 'what’s 12 times 14?', check: (seen) => [...(seen.calls.length ? [`called ${seen.calls.map((call) => call.name).join(', ')}`] : []), ...(/168/.test(seen.said.join(' ')) ? [] : ['wrong'])] },
     { name: 'overheard, to someone else', said: 'dude pass me the controller, it’s my turn', unnamed: true, history: [{ who: 'you', text: 'what time is it' }, { who: 'jester', text: 'Just after nine.' }], check: (seen) => [...(seen.said.length ? [`answered: ${JSON.stringify(seen.said[0])}`] : [])] },
+    { name: 'named mid-sentence, to him', said: 'can you tell me Jester what twelve times fourteen is', heard: true, check: (seen) => [...(/168|sixty-eight/i.test(seen.said.join(' ')) ? [] : ['didn’t answer'])] },
+    { name: 'named mid-sentence, about him', said: 'yeah I told Jester to play something earlier and it just worked', heard: true, check: (seen) => [...(seen.said.length ? [`answered: ${JSON.stringify(seen.said[0])}`] : [])] },
+    { name: 'what was said just before is context', said: 'Jester, can you do something about that?', heard: true, before: ['ugh, this playlist is terrible'], outcomes: [{ ok: true, text: 'Skipped to the next track on Spotify.' }], check: (seen) => [...(seen.calls.some((call) => call.name === 'use_computer') || /playlist|music|song|skip/i.test(seen.said.join(' ')) ? [] : ['didn’t take “that” to be the playlist'])] },
     { name: 'overheard, a follow-up', said: 'and what about tomorrow?', unnamed: true, history: [{ who: 'you', text: 'what’s the weather today' }, { who: 'jester', text: 'Clear and 38, warming to 63 this afternoon.' }], check: (seen) => [...(seen.said.length || seen.calls.length ? [] : ['stayed quiet at a follow-up'])] }
   ];
 
@@ -214,7 +218,11 @@ if (!process.versions.electron) {
       log: (...parts) => /couldn’t be used/.test(parts.join(' ')) && (seen.error = parts.join(' '))
     });
     try {
-      if (test.unnamed) {
+      if (test.heard) {
+        // By ear, in a voice sure to be theirs: what they said before, to nobody, then the words themselves.
+        for (const line of test.before || []) await conversation.heard(line, { startedAt: Date.now() });
+        await conversation.heard(test.said, { startedAt: Date.now() });
+      } else if (test.unnamed) {
         // As a voice sure to be theirs, seconds after he spoke: open to a follow-up without his name.
         await conversation.announce((test.history || []).at(-1)?.text || 'Yes?');
         entries.pop();

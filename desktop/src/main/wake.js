@@ -37,7 +37,8 @@ const JUST_REQUEST = /^(?:(?:a|to|the)\s+)?(?:please\s+)?(?:say\s+(?!(?:it|that|
 const MEANT = /^(?:(?:a|to|the)\s+)(?=\S)/i;
 
 const tidy = (text) => text.replace(/^[\s,.:;!?-]+/, '').trim();
-const said = (rest, word) => ({ woken: true, rest: tidy(rest), word });
+/** `before`: what was said in the same breath before his name, when anything was: it's context for what follows. */
+const said = (rest, word, before = '') => ({ woken: true, rest: tidy(rest), word, ...(before.trim() ? { before: before.replace(/[\s,;:-]+$/, '').trim() } : {}) });
 const NOT_ADDRESSED = Object.freeze({ woken: false, rest: '', word: '' });
 
 /**
@@ -78,11 +79,19 @@ export function addressed(heard) {
     const asks = REQUEST.test(rest);
     // A new sentence, begun with his name or a turning word and his name.
     const opens = new RegExp(`[.!?]["”’')\\]]*\\s+(?:${TURNING.source.slice(1)})?$`, 'i').test(before);
-    if ((opens && (comma || asks)) || (/,\s*$/.test(before) && comma && asks)) return said(after, match[0].toLowerCase());
+    if ((opens && (comma || asks)) || (/,\s*$/.test(before) && comma && asks)) return said(after, match[0].toLowerCase(), before);
   }
   const ending = text.match(ENDING);
   if (ending && (/,\s*\S+\s*[.?!]*$/.test(text) || ending[3].includes('?') || REQUEST.test(body))) return said(ending[1].slice(opening.length), ending[2].toLowerCase());
   return NOT_ADDRESSED;
+}
+
+/**
+ * Whether his own name is among the words, wherever it comes. Only his own: a word that's also a person's or an
+ * everyday one (Jess, Chester, gesture) is no sign of him, said in the middle of something.
+ */
+export function named(heard) {
+  return (String(heard ?? '').toLowerCase().match(/[a-z]+(?:'[a-z]+)?/g) || []).some((word) => NAME.has(word));
 }
 
 /**
