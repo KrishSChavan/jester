@@ -13,7 +13,7 @@
  *
  * Messages are JSON objects with a `type`:
  *   from the extension: hello {version, settings}, settings {settings}, pill {voice},
- *     ask {id, label, open?, options?}, done {id, ok, say, trace?}, reply {id, result}, voice {},
+ *     ask {id, label, open?, options?}, done {id, ok, say, trace?, chose?}, reply {id, result}, voice {},
  *     scrape {id, request}, scrape-cancel {id}
  *   to it: welcome {version, scraping}, task {id, text, meant?, ways?}, answer {id, approved, text?}, cancel {},
  *     scrape-result {id, result},
@@ -128,7 +128,10 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
           if (task?.id === message.id) {
             // What the extension did, step by step (0.2.3 on): the log's only account of a browser task.
             for (const line of Array.isArray(message.trace) ? message.trace.slice(-40) : []) log('chrome', String(line).slice(0, 220));
-            finishTask({ ok: message.ok === true, text: String(message.say || ''), ...(typeof message.answer === 'string' ? { answer: message.answer.slice(0, 6000) } : {}), ...(Array.isArray(message.sources) ? { sources: message.sources.slice(0, 24) } : {}) });
+            // chose: what the user answered when the task asked them something (which profile), for ways.js to keep.
+            const chose = (Array.isArray(message.chose) ? message.chose : []).filter((one) => one && typeof one.about === 'string' && typeof one.choice === 'string').slice(0, 5)
+              .map(({ about, choice }) => ({ about: about.slice(0, 60), choice: choice.slice(0, 120) }));
+            finishTask({ ok: message.ok === true, text: String(message.say || ''), ...(typeof message.answer === 'string' ? { answer: message.answer.slice(0, 6000) } : {}), ...(Array.isArray(message.sources) ? { sources: message.sources.slice(0, 24) } : {}), ...(chose.length ? { chose } : {}) });
           }
           return undefined;
         case 'reply':
@@ -203,14 +206,16 @@ export function createChromeLink({ send, version, onChange = () => undefined, on
      * @param {{signal?:AbortSignal, meant?:string}} [options]  meant: what the conversation took them to mean
      * @returns {Promise<{ok:boolean, text:string}|null>} null: cancelled
      */
-    task(text, { signal, meant = '', skipResearch = false } = {}) {
+    task(text, { signal, meant = '', skipResearch = false, ways = [] } = {}) {
       if (!linked) return Promise.resolve({ ok: false, text: 'Chrome isn’t linked.' });
       cancel();
       const id = String(++next);
       return new Promise((resolve) => {
         task = { id, resolve };
         signal?.addEventListener('abort', () => task?.id === id && cancel(), { once: true });
-        if (!send({ type: 'task', id, text: String(text).slice(0, 2000), ...(meant ? { meant: String(meant).slice(0, 2000) } : {}), ...(skipResearch ? { skipResearch: true } : {}) })) finishTask({ ok: false, text: 'Chrome isn’t linked.' });
+        // ways: how the user likes things done ("Hulu profile: Krish"), which the extension's agent goes by.
+        const how = (Array.isArray(ways) ? ways : []).filter((line) => typeof line === 'string' && line.trim()).slice(0, 12).map((line) => line.slice(0, 120));
+        if (!send({ type: 'task', id, text: String(text).slice(0, 2000), ...(meant ? { meant: String(meant).slice(0, 2000) } : {}), ...(skipResearch ? { skipResearch: true } : {}), ...(how.length ? { ways: how } : {}) })) finishTask({ ok: false, text: 'Chrome isn’t linked.' });
       });
     },
     get running() {

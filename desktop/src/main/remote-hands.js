@@ -174,9 +174,10 @@ export function createRemoteHands({ onAsk = () => undefined, onTold = () => unde
         knows: (text) => quick(target(text), 'knows', { text }, false),
         risky: (text) => quick(target(text), 'risky', { text }, false),
         scriptsAsk: (text) => quick(target(text), 'scriptsAsk', { text }, false),
-        async run(text, said, context) {
+        /** `more`: where the conversation chose to have it done, and how the user likes things done (voice-runner.js run). */
+        async run(text, said, context, more = {}) {
           try {
-            const result = await request(own(target(`${text} ${said || ''}`)), 'run', { text, said, context: context || {} }, RUN_MS);
+            const result = await request(own(target(`${text} ${said || ''}`)), 'run', { text, said, context: context || {}, ...(more?.where ? { where: more.where } : {}), ...(Array.isArray(more?.ways) && more.ways.length ? { ways: more.ways } : {}) }, RUN_MS);
             return { outcome: result?.outcome ?? null };
           } catch (err) {
             return { outcome: { ok: false, text: err.code === 'no_mac' ? NO_MAC : `I couldn’t get your Mac to do that: ${err.message}.` } };

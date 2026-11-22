@@ -73,6 +73,7 @@ import { createDispatcher } from './dispatch.js';
 import { driverPath, startDriver, toDipFrame, toOsFrame } from './driver.js';
 import { desktopSettings, loadSettings, startEngineHost } from './engine-host.js';
 import { createLearned } from './learned.js';
+import { createWays } from './ways.js';
 import { startLink } from './link.js';
 import { installLinkHost, linkOrigins } from './link-host.js';
 import { createModelJob, localUses } from './model-jobs.js';
@@ -261,6 +262,8 @@ let keeper = null;
 let spend = null;
 /** Taught phrases, learned tasks and shortcuts (learned.js). */
 let learned = null;
+/** How the user likes things done, as they've told him (ways.js): their answers at a fork, kept. */
+let ways = null;
 /** What his website's Controls may ask of the Mac's scripts (script-remote.js). */
 let scriptsRemote = null;
 /** The Obsidian vault Jester keeps its memory in (vault.js), its search (vault-index.js), and the memory between them. */
@@ -3002,7 +3005,10 @@ async function handsAsked(frame) {
     case 'scriptsAsk':
       return voiceRunner.scriptsAsk(text);
     case 'run': {
-      const { outcome } = await voiceRunner.run(text, { talking: true, said: frame.said, context: frame.context || {} });
+      // Where the server's conversation chose to have it done, and how the user likes things done, go with it.
+      const { outcome } = await voiceRunner.run(text, { talking: true, said: frame.said, context: frame.context || {},
+        ...(frame.where === 'computer' || frame.where === 'browser' ? { where: frame.where } : {}),
+        ...(Array.isArray(frame.ways) ? { ways: frame.ways.slice(0, 12).map((line) => String(line).slice(0, 120)) } : {}) });
       // Plain data only: what's said, its card and sources, never a function.
       return { outcome: outcome ? JSON.parse(JSON.stringify(outcome)) : null };
     }
@@ -3206,6 +3212,9 @@ async function start() {
   });
   // Taught phrases, learned tasks and shortcuts, kept with the app's settings, and listed in the vault's Routines note.
   learned = createLearned({ storage: storage.local, onChange: writeRoutinesNote });
+  // Their answers to what he's asked at a fork (which profile, which Dad), kept with the app's settings and listed in Settings.
+  ways = createWays({ storage: storage.local, onChange: () => post({ type: 'jester/ways-changed' }), log });
+  ways.ready().catch(() => undefined);
   // The user's own scripts: Controls' blocks, and his to run when asked. A folder with no jester.json is drafted by
   // the talking model, made a moment below, as are words no phrase of theirs fits.
   scripts = createScripts({
@@ -3460,7 +3469,7 @@ async function start() {
           knows: (text) => voiceRunner.knows(text),
           risky: (text) => voiceRunner.risky(text),
           scriptsAsk: (text) => voiceRunner.scriptsAsk(text),
-          run: (text, said, context) => voiceRunner.run(text, { talking: true, said, context })
+          run: (text, said, context, more = {}) => voiceRunner.run(text, { talking: true, said, context, ...more })
         },
     // What he remembers and the user's notes, for each turn; "remember this"; notes made and opened.
     vaultMemory: {
@@ -3535,6 +3544,10 @@ async function start() {
       os: OS_NAME
     }),
     assistant: SERVER ? hands.assistant : assistant,
+    // The model he talks through, given his tools when it takes them (Claude), unless Settings says not to: then,
+    // and with any other model, he's asked for JSON as ever.
+    brain: { ready: async () => settings?.assistantTools !== false && (await talking.usesTools()), ask: (request) => talking(request) },
+    ways,
     show: (frame) => showConversation(frame, key),
     log
   });

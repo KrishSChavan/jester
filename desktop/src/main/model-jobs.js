@@ -25,7 +25,7 @@
  */
 
 import { createPooledModelClient } from '../../../jester-extension/src/background/model-pool.js';
-import { requestModel, supportsImages } from '../../../jester-extension/src/background/model-client.js';
+import { requestModel, supportsImages, supportsTools } from '../../../jester-extension/src/background/model-client.js';
 import { loadConnections, normaliseConnection } from '../../../jester-extension/src/common/credentials.js';
 
 /** This computer's model does both, unless Settings says otherwise. */
@@ -96,8 +96,10 @@ export function createModelJob({ job, local, keepAlive, saved = loadConnections,
 
   async function ask(options) {
     const picture = options.images?.length > 0;
+    const tooled = options.tools?.length > 0;
     // With a picture, only the models that read one count: this computer's takes it when none of the saved ones can.
-    const fit = (connection) => !!connection && (!picture || supportsImages(connection));
+    // With tools to call, only the models that can be given them: whoever asked falls back to asking for JSON.
+    const fit = (connection) => !!connection && (!picture || supportsImages(connection)) && (!tooled || supportsTools(connection));
     const localFits = async () => fit(await localOne());
     const mine = (await savedOnes()).filter(fit);
     let skip = new Set(mine.filter((connection) => resting.get(connection.id) > now()).map((connection) => connection.id));
@@ -134,6 +136,7 @@ export function createModelJob({ job, local, keepAlive, saved = loadConnections,
     }
     if (!(await localFits())) {
       if (failed) throw failed;
+      if (tooled) throw Object.assign(new Error('None of your models for talking can be given tools.'), { code: 'no_tool_model' });
       if (picture && ((await savedOnes()).length || (await localOne()))) throw Object.assign(new Error('None of your models for actions can read pictures.'), { code: 'no_vision_model' });
       throw Object.assign(new Error(noModel(job, (await local()).uses.includes(job))), { code: 'model_pool_empty' });
     }
@@ -146,6 +149,14 @@ export function createModelJob({ job, local, keepAlive, saved = loadConnections,
   ask.ready = async () => (await savedOnes()).length > 0 || !!(await localOne());
   /** Whether a model for the job can read a picture. */
   ask.canSee = async () => (await savedOnes()).some(supportsImages) || supportsImages((await localOne()) || {});
+  /**
+   * Whether the model that would take the job now can be given tools: the first saved one, when it isn't being left
+   * alone after failing. A turn then goes to it with tools; otherwise it's asked for JSON, as every model can be.
+   */
+  ask.usesTools = async () => {
+    const [first] = await savedOnes();
+    return !!first && supportsTools(first) && !(resting.get(first.id) > now());
+  };
   /** The saved models' per-minute budget; this computer's has none. */
   ask.promptBudget = async () => ((await savedOnes()).length ? savedPool.promptBudget() : null);
   return ask;

@@ -182,10 +182,33 @@ function alternating(history, prompt) {
   return { turns, prompt: unanswered ? `${unanswered}\n${prompt}` : prompt };
 }
 
+/**
+ * Whether a model can be given tools to call (requestModel's `tools`): Claude, whose Messages API this client
+ * speaks tool use for. The others are asked for JSON as they always were.
+ */
+export function supportsTools(connection) {
+  return (connection?.protocol || (connection?.provider === 'anthropic' ? 'anthropic' : '')) === 'anthropic' && /claude/i.test(String(connection?.model || ''));
+}
+
+/** A model asked to use tools it can't be given: the caller asks it the old way, or asks another. */
+export class ToolsUnsupportedError extends Error {
+  constructor(provider = '') {
+    super(`${PROVIDER_NAMES[provider] || 'This model'} can’t be given tools.`);
+    this.name = 'ToolsUnsupportedError';
+    this.code = 'tools_unsupported';
+    this.retryable = false;
+  }
+}
+
 /** `schema`: the reply's shape for Gemini's structured output — the browser agent's unless
- * a caller with other actions (Jester Desktop) passes its own. */
+ * a caller with other actions (Jester Desktop) passes its own.
+ * `tools` ({name, description, input_schema}[]): what the model may call instead of only answering; then its reply
+ * isn't JSON but words and calls, and `messages` carries what's been called and found so far this turn, in the
+ * provider's own blocks, after the prompt. */
 export function buildModelRequest(config, { system, prompt, images = [], maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens,
-  schema = AGENT_RESPONSE_SCHEMA, history = [], stream = false, plain = false }) {
+  schema = AGENT_RESPONSE_SCHEMA, history = [], stream = false, plain = false, tools = null, messages = null }) {
+  const tooled = Array.isArray(tools) && tools.length > 0;
+  if (tooled && config.protocol !== 'anthropic') throw new ToolsUnsupportedError(config.provider);
   if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 8192) {
     throw new Error('Output token limit must be between 1 and 8192.');
   }
@@ -203,15 +226,20 @@ export function buildModelRequest(config, { system, prompt, images = [], maxOutp
     // The 5 generation can be held to a schema; the ones before it that can are told apart by no rule worth keeping.
     // `plain`: not for a reply the prompt already spells out, and that's waited on: held to a schema, Haiku 5.5's
     // first word came at 0.9–1.2 s rather than 0.37 s (measured 2026-11-14, the same prompt, cached).
-    const takes = thinks && !plain ? claudeSchema(schema) : null;
+    const takes = thinks && !plain && !tooled ? claudeSchema(schema) : null;
     const held = takes ? { format: { type: 'json_schema', schema: takes } } : {};
     body = { model: config.model, max_tokens: maxOutputTokens + (thinks ? CLAUDE_THINKING_TOKENS : 0),
+      // Before the system prompt in what Claude reads, so cached with it. Not `strict`: held to a grammar, its first
+      // word comes later (the schema's half second, above), and a call's input is checked by whoever runs it.
+      ...(tooled ? { tools: tools.map(({ name, description, input_schema: input }) => ({ name, description, input_schema: input })) } : {}),
       // The same from one request to the next (a persona, an agent's rules), so it's cached: read back at a tenth
       // of the price for the next five minutes. One too short to cache (512 tokens on the 5 generation) just isn't.
       system: typeof system === 'string' && system.trim() ? [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }] : system,
       messages: [...earlier.turns, { role: 'user', content: pictures.length ? [...pictures.map((image) =>
         ({ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } })),
-      { type: 'text', text: earlier.prompt }] : earlier.prompt }],
+      { type: 'text', text: earlier.prompt }] : earlier.prompt },
+      // This turn's calls and their results, as Claude wrote and was told them: its own blocks, unchanged.
+      ...(tooled && Array.isArray(messages) ? messages : [])],
       // Low effort keeps each step quick and cheap: a step picks one control, not a plan.
       ...(thinks ? { output_config: { effort: 'low', ...held } } : {}) };
   } else if (config.protocol === 'gemini') {
@@ -409,6 +437,10 @@ async function readEvents(response, signal, { config, onText }) {
   let text = '';
   let usage = null;
   let stopped = null;
+  /** Claude's reply as its blocks, put back together: its words, its tool calls, and its thinking, kept as sent. */
+  const blocks = [];
+  /** A tool call's input, as much of it as has been written, by its block. */
+  const partial = new Map();
   const take = (line) => {
     if (!line.startsWith('data:')) return;
     const data = line.slice(5).trim();
@@ -423,8 +455,25 @@ async function readEvents(response, signal, { config, onText }) {
     let more = '';
     if (claude) {
       if (event.type === 'message_start') usage = event.message?.usage || usage;
-      else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') more = event.delta.text || '';
-      else if (event.type === 'message_delta') {
+      else if (event.type === 'content_block_start' && Number.isInteger(event.index)) {
+        blocks[event.index] = { ...(event.content_block || {}) };
+        if (blocks[event.index].type === 'tool_use') partial.set(event.index, '');
+      } else if (event.type === 'content_block_delta') {
+        const block = blocks[event.index];
+        const delta = event.delta || {};
+        if (delta.type === 'text_delta') {
+          more = delta.text || '';
+          if (block) block.text = `${block.text || ''}${more}`;
+        } else if (delta.type === 'input_json_delta') partial.set(event.index, `${partial.get(event.index) || ''}${delta.partial_json || ''}`);
+        else if (delta.type === 'thinking_delta' && block) block.thinking = `${block.thinking || ''}${delta.thinking || ''}`;
+        else if (delta.type === 'signature_delta' && block) block.signature = `${block.signature || ''}${delta.signature || ''}`;
+      } else if (event.type === 'content_block_stop' && partial.has(event.index)) {
+        // A call's input comes as pieces of JSON: read once it's whole. One that isn't JSON is a call with no
+        // input, which whoever runs it refuses, and says so to the model.
+        const written = partial.get(event.index);
+        partial.delete(event.index);
+        try { blocks[event.index].input = written.trim() ? JSON.parse(written) : (blocks[event.index].input || {}); } catch { blocks[event.index].input = {}; }
+      } else if (event.type === 'message_delta') {
         stopped = event.delta?.stop_reason ?? stopped;
         if (event.usage) usage = { ...usage, ...event.usage };
       }
@@ -457,7 +506,8 @@ async function readEvents(response, signal, { config, onText }) {
     reader.releaseLock();
   }
   if (!stopped) throw new ProviderBusyError({ provider: config.provider, status: 502 });
-  return JSON.stringify(claude ? { content: [{ type: 'text', text }], stop_reason: stopped, usage }
+  const content = blocks.filter(Boolean);
+  return JSON.stringify(claude ? { content: content.length ? content : [{ type: 'text', text }], stop_reason: stopped, usage }
     : { choices: [{ message: { content: text }, finish_reason: stopped }], usage });
 }
 
@@ -605,7 +655,7 @@ function httpError(config, status, body) {
  * first word; should what it writes then not be JSON, it's asked once more, held to it.
  */
 export async function requestModel(options = {}) {
-  if (!options.plain) return requestOnce(options);
+  if (!options.plain || options.tools?.length) return requestOnce(options);
   try {
     return await requestOnce(options);
   } catch (error) {
@@ -618,11 +668,12 @@ async function requestOnce({ env, config = normalizeModelConfig(env), system, pr
   fetchImpl = globalThis.fetch, timeoutMs = MODEL_REQUEST_LIMITS.maxElapsedMs,
   maxElapsedMs = MODEL_REQUEST_LIMITS.maxElapsedMs, maxRetryWaitMs = MODEL_REQUEST_LIMITS.maxRetryWaitMs,
   maxRetries = MODEL_REQUEST_LIMITS.maxRetries, maxOutputTokens = MODEL_REQUEST_LIMITS.maxOutputTokens, onRetry, images = [], schema, history,
-  onText = null, plain = false }) {
+  onText = null, plain = false, tools = null, messages = null }) {
   checkAbort(signal);
+  const tooled = Array.isArray(tools) && tools.length > 0;
   // onText(text so far): the reply is read as it's written, from the models that send it so (streams()).
   const stream = typeof onText === 'function' && streams(config) ? { config, onText } : null;
-  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens, schema, history, stream: !!stream, plain });
+  const request = buildModelRequest(config, { system, prompt, images, maxOutputTokens, schema, history, stream: !!stream, plain, tools, messages });
   const bounded = (value, fallback, min, max) => Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
   const elapsedLimit = bounded(maxElapsedMs, MODEL_REQUEST_LIMITS.maxElapsedMs, 1, 60000);
   const attemptLimit = bounded(timeoutMs, elapsedLimit, 1, 60000);
@@ -704,6 +755,15 @@ async function requestOnce({ env, config = normalizeModelConfig(env), system, pr
       }
       const raw = extractText(config, data);
       const usage = data.usage || data.usageMetadata || null;
+      if (tooled) {
+        // Given tools, its reply is words and calls, not JSON: `content` is what goes back to it, unchanged, with
+        // the calls' results after (thinking blocks included: it reads its own).
+        const content = Array.isArray(data.content) ? data.content : [];
+        const calls = content.filter((block) => block?.type === 'tool_use' && typeof block.name === 'string')
+          .map(({ id, name, input }) => ({ id: String(id), name, input: input && typeof input === 'object' && !Array.isArray(input) ? input : {} }));
+        return { json: null, text: raw, content, calls, stopReason: data.stop_reason || '', model: config.model, usage, responseChars: raw.length,
+          timings: timings(usage), rateLimits: readRateLimits(response.headers) };
+      }
       return { json: parseModelJson(raw), model: config.model, usage, responseChars: raw.length, timings: timings(usage),
         rateLimits: readRateLimits(response.headers) };
     }

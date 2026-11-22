@@ -1,6 +1,6 @@
 /** Rotate saved connections only after a provider rate limit; never replay page actions. */
 import { loadConnections, coolDownConnection, PROVIDERS } from '../common/credentials.js';
-import { requestModel, normalizeModelConfig, MODEL_REQUEST_LIMITS, ModelTimeoutError, abortableDelay, supportsImages } from './model-client.js';
+import { requestModel, normalizeModelConfig, MODEL_REQUEST_LIMITS, ModelTimeoutError, abortableDelay, supportsImages, supportsTools } from './model-client.js';
 import { createRateGovernor, estimateTokens, usageInputTokens } from './rate-governor.js';
 
 /** Longest a request waits for a per-minute window; past this the task pauses with a countdown. */
@@ -48,8 +48,8 @@ export function createPooledModelClient({
   now = Date.now, clock = () => performance.now(), onSelected, onLimited, onUnavailable,
   governor = createRateGovernor({ now }), onPacing, maxPaceMs = MAX_PACE_MS, delay = abortableDelay
 } = {}) {
-  // A screenshot goes only to a model that can read one.
-  const fits = (options) => (connection) => !options?.images?.length || supportsImages(connection);
+  // A screenshot goes only to a model that can read one, and tools only to one that can be given them.
+  const fits = (options) => (connection) => (!options?.images?.length || supportsImages(connection)) && (!options?.tools?.length || supportsTools(connection));
   const open = async (options) => (await load()).filter(connection => !(connection.cooldownUntil > now()) && fits(options)(connection));
   /** The soonest a pacing wait ends among these connections, as a cooldown. */
   async function pacedCooldown(connections, estimate) {
@@ -114,7 +114,9 @@ export function createPooledModelClient({
         const connections = await load();
         aborted(signal);
         if (!connections.length) throw Object.assign(new Error('Connect a model in Settings before continuing.'), {code:'model_pool_empty'});
-        if (!connections.some(fits(options))) throw Object.assign(new Error(
+        if (!connections.some(fits(options))) throw options?.tools?.length && !options?.images?.length
+          ? Object.assign(new Error('None of your saved models can be given tools.'), {code:'no_tool_model'})
+          : Object.assign(new Error(
           'None of your saved models can read screenshots. Add one that can, such as Gemini, in Settings.'), {code:'no_vision_model'});
         // `skip`: connections the caller has seen fail and is covering for (Jester Desktop's model-jobs.js).
         const candidates = connections.filter(connection => !tried.has(connection.id) && !options.skip?.has?.(connection.id)

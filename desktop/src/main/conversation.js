@@ -24,6 +24,8 @@
  */
 
 import { abilitiesPart } from './abilities.js';
+import { brainPrompt, firstProse, MAX_ROUNDS, resultBlock } from './brain.js';
+import { createTools } from './mcp/tools.js';
 import { moodLine, moodOf, paceFor } from './mood.js';
 import { spokenLine, writtenLine } from './speaker.js';
 import { ago, askedToForget, mayAskToForget, verbatim } from './vault-memory.js';
@@ -56,6 +58,8 @@ const HISTORY = 20;
 const AHEAD_MS = 60 * 1000;
 /** Room for a cloud model's thinking (Gemini's counts against it), though a reply is a sentence or two. */
 const REPLY_TOKENS = 600;
+/** With tools: a sentence or two, and a call or two with what to do in them. */
+const TOOL_TOKENS = 700;
 const SUMMARY_TOKENS = 400;
 /** This long with nothing said, and whatever comes next is a new conversation: conversation-log.js ends it then. */
 export const NEW_AFTER_MS = 5 * 60 * 1000;
@@ -104,6 +108,28 @@ const STOP = /^\W*(?:stop|cancel|never ?mind|stop it|stop talking|shut up|be qui
  */
 const YES = /^\W*(?:(?:yes|yeah|yep|yup|sure|ok|okay|alright|please|absolutely|definitely|of course)[\s,]+)*(?:yes|yeah|yep|yup|sure|ok|okay|alright|absolutely|definitely|of course|do it|go ahead|go for it|please do|allow(?: it)?|send it|that['’]?s (?:fine|right)|sounds good)(?: please| thanks| thank you)?\W*$/i;
 const NO = /^\W*(?:(?:no|nope|nah|actually|wait)[\s,]+)*(?:no|nope|nah|don['’]?t|do not|cancel|stop|never ?mind|not (?:now|yet)|hold on|leave it|forget it)(?: (?:send|do) (?:it|that))?(?: thanks| thank you| please)?\W*$/i;
+/**
+ * A few words for when a tool that takes a while is begun and his model said nothing first: about the thing itself,
+ * as far as the call says what that is. A question to the user needs none: it's its own first words.
+ */
+export function leadIn(call) {
+  const input = call?.input || {};
+  const who = String(input.to ?? '').replace(/\s+/g, ' ').trim();
+  if (call?.name === 'send_message') return who && who.length <= 30 && !/[^\p{L}\p{N} .'’()+-]/u.test(who) ? `Starting a text to ${/^(?:mom|dad|mum|grandma|grandpa)$/i.test(who) ? who[0].toUpperCase() + who.slice(1).toLowerCase() : who}.` : 'Starting that text.';
+  if (call?.name === 'search_web') return 'Let me look that up.';
+  if (call?.name === 'use_browser' || call?.name === 'use_computer') return 'Give me a moment with that.';
+  return '';
+}
+
+/**
+ * Leave asked for a command, as a person would ask it: "Go ahead and delete the top three messages in Mail?", where
+ * it was "Do “delete the top three messages in Mail”? Say yes or no."
+ */
+export function leaveFor(command) {
+  const what = String(command ?? '').replace(/\s+/g, ' ').trim().replace(/[.!?]+$/, '');
+  return `Go ahead and ${/^[A-Z][a-z]/.test(what) && !/^I\b/.test(what) ? what[0].toLowerCase() + what.slice(1) : what}`;
+}
+
 /**
  * A question of his, as he says it. One that asks leave is just asked: its window and the pill say how it's
  * answered. One only the user can settle is asked with the ways to answer it, the first being the likeliest: two
@@ -341,6 +367,41 @@ ${abilitiesPart({ ...can, notes, tasks, where: !!live.where, calendars: !!live.c
 export const UNNAMED_LINE = 'Said without your name, seconds after you spoke: maybe to you, maybe to someone else in the room.';
 const UNNAMED_RULE = `When the brackets say the user's words came without your name, you overheard them, and they may be to someone else: people talk with friends in the room, on calls and to games about the same things they talk with you about. Then begin your reply with "forYou", decided before anything else by asking: do these words answer or follow on from what you just said, or ask you for something? A follow-up on what you just told them ("what about tomorrow?", "how far is that?"), a yes or no to what you offered, or a request ("turn it down a bit") is for you: true. Words aimed at someone else are false: a story about what someone did or said, banter or swearing with friends, telling a person to do something ("pass me that"), talking to someone by name or to a parent, a call, a game. When it's false, reply exactly {"forYou":false,"say":"","do":"","new":false}, and you stay quiet. When it's true, answer as always, and never say or ask whether it was meant for you.`;
 
+/** The same, for a model with tools: saying nothing is a call of its own (mcp/tools.js stay_quiet). */
+const UNNAMED_TOOLS = `When the brackets say the user's words came without your name, you overheard them, and they may be to someone else: people talk with friends in the room, on calls and to games about the same things they talk with you about. Decide first: do these words answer or follow on from what you just said, or ask you for something? A follow-up on what you just told them ("what about tomorrow?", "how far is that?"), a yes or no to what you offered, or a request ("turn it down a bit") is for you: answer exactly as you would have with your name, with not a word about who it was meant for. Words aimed at someone else are not: a story about what someone did or said, banter or swearing with friends, telling a person to do something ("pass me that"), talking to someone by name or to a parent, a call, a game. Then call stay_quiet and write nothing at all.`;
+
+/**
+ * Who he is when the model he talks through can be given tools (brain.js): the lines his other prompt has, said for
+ * tools rather than for "do". The same from turn to turn, so it's read from Claude's cache: what's overheard is told
+ * every time, and what changes goes before the user's words.
+ * @param {Date} date  now, for the earlier conversations' days
+ * @param {{at:number, summary:string}[]} [earlier]
+ * @param {{notes?:boolean, live?:{where?:boolean, calendars?:boolean}, can?:import('./abilities.js').AbilityState, tasks?:boolean, scripts?:{catalog?:string}|null}} [options]
+ */
+export function toolPrompt(date, earlier = [], { notes = true, live = {}, can = {}, tasks = false, scripts = null } = {}) {
+  const knows = [live.where && 'where the user is and the weather there (and in a place they ask about)', live.calendars && 'their calendars, all of them combined'].filter(Boolean);
+  const searched = can.web ? 'use search_web, never your memory' : 'say you’d have to look it up, and offer to';
+  const liveLine = knows.length
+    ? `The brackets before the user's words hold what's live: ${knows.join(', and ')}. Answer from them as fact. When the user is talking about something else, leave ${live.calendars ? 'the weather and their calendars' : 'the weather'} out of it${live.calendars ? ', unless something on them starts within the hour: then a few words about it at the end' : ''}.${live.calendars ? ' A question about their day, schedule or calendar is yours to answer from them; when what they ask about isn’t there, say it isn’t on their calendars.' : ''}${live.where ? ' Give the weather where they are from them too, never a search for it.' : ''} Beyond that you have no live information: for news, prices, scores or anything else recent, ${searched}.`
+    : `You have no live information of your own: for the weather, news, prices, scores or anything recent, ${searched}.`;
+  const held = knows.length ? `what you know right now (${[live.where && 'where they are and the weather', live.calendars && 'their calendars, which hold invitations from other people'].filter(Boolean).join(', ')}), ` : '';
+  const bracketed = `${held}how they like things done, and anything quoted from your memory and their notes, which may include saved web pages`;
+  const known = `Asked what you know or remember about them, pick the three or four things that matter most from the brackets and say them in two short sentences, the way a friend would, never all of it.${notes ? ' Then, in one more, say it’s all in the About me note in their vault, theirs to read or change, and offer to open it.' : ''} Only when the brackets say you’ve learned nothing about them yet, say so instead, and that you pick things up as you talk.`;
+  return brainPrompt({
+    facts: FACTS,
+    known,
+    live: liveLine,
+    bracketed,
+    // What he can do names "do", the other prompt's way of handing things on: here that's a tool.
+    abilities: abilitiesPart({ ...can, notes, tasks, where: !!live.where, calendars: !!live.calendars }).replaceAll('"do"', 'use_computer'),
+    earlier: earlierPart(earlier, date),
+    scripts: scripts?.catalog || '',
+    notes,
+    tasks,
+    unnamed: UNNAMED_TOOLS
+  });
+}
+
 const FACTS = `Never assume, and never make anything up. Say as fact only what the user has told you, what the brackets hold, and general knowledge you're sure of. What your memory, their notes and earlier conversations hold was true when it was said: never make it something happening now, and never work out a time, a date or a plan from it. Before you call anything upcoming, check its date against the date on the user's words: one that has gone by is over, so say it was then, or ask how it went. Only their calendars say what's on, and only when they're connected. When you don't know or aren't sure, say so plainly or ask, unless it's something the laptop can look up; never fill a gap with a guess. Never say something's been done when it hasn't, and never give what a task was to find when no result of it is in the conversation: if it failed, it found nothing, so say that, or hand it over again.`;
 
 /** When the user said it, as the model is told: it has no clock of its own. */
@@ -348,7 +409,7 @@ export const stamped = (text, date) => `[${date.toLocaleString('en-US', { dateSt
 
 /** A reply that says and does nothing: what the model gives for words it judged weren't said to him (UNNAMED_RULE). */
 export const quietReply = (reply) =>
-  reply?.notFor === true || (!reply?.say && !reply?.do && !reply?.task && !reply?.run && !reply?.note && !reply?.remember && !reply?.forget);
+  reply?.notFor === true || (!reply?.say && !reply?.do && !reply?.task && !reply?.run && !reply?.note && !reply?.remember && !reply?.forget && !reply?.calls?.length);
 
 /**
  * What's known around the user and what was recalled, as one bracketed block, or ''. A note's own brackets (or an
@@ -441,9 +502,11 @@ const whichNote = (asked, given) => (asked ? { ...asked, title: given && noteNam
  * A reply as dev.log has it: what he decided, not the words to keep or add. The log is plain text, and those
  * words may be what he won't keep ("my PIN is 4512").
  */
-const logged = ({ forget, task, ...reply }) =>
+const logged = ({ forget, task, tooled, calls, ...reply }) =>
   JSON.stringify({
     ...reply,
+    // With tools: which he called, never what he put in them (a message's words, a name).
+    ...(calls ? { tools: calls.map((call) => call.name) } : {}),
     ...(task ? { task: { op: task.op, timed: !!(task.at || task.in) } } : {}),
     remember: reply.remember ? '(words to keep)' : '',
     ...(forget ? { forget: '(what to forget)' } : {}),
@@ -681,6 +744,11 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {{ringing:() => boolean, stop:(by:string) => boolean}} [deps.ring]  a timer's ringing (ring.js): turned off
  *   by their saying so, and by their talking to him at all
  * @param {() => void} [deps.warm]  his name's just been heard: whatever a turn waits on that can be got ready, is
+ * @param {{ready:() => Promise<boolean>|boolean, ask:(request:object) => Promise<{text:string, calls:{id:string, name:string, input:object}[], content:object[]}>}} [deps.brain]
+ *   the model he talks through, when it can be given tools (brain.js, mcp/tools.js): `ready`, whether it can right now;
+ *   `ask`, a request with `tools` and this turn's `messages`. Without it, or when it can't, he's asked for JSON as ever
+ * @param {ReturnType<import('./ways.js').createWays>} [deps.ways]  how the user likes things done (ways.js): told to
+ *   his model and to every task, and added to when they answer a question at a fork
  * @param {() => boolean|Promise<boolean>} [deps.thinkAhead]  whether he may start on his reply at a pause that may be
  *   the end of what's being said (paused), before it's known to be: a request to his model that's thrown away when
  *   they go on talking. For a model where that costs nothing that matters; never by default
@@ -688,7 +756,7 @@ export async function warmOllama({ model, fetchImpl = globalThis.fetch }) {
  * @param {() => number} [deps.now]
  * @returns {object}  its `acting`: a command he handed on is at work, or its result being said (conversation-log.js busy)
  */
-export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, work = null, ring = null, scripts = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, log = () => undefined, now = Date.now }) {
+export function createConversation({ chat, speaker, memory, recollections, commands, assistant, show, archive = () => undefined, knowsYou = () => false, vaultMemory = null, situation = null, tasks = null, briefs = null, work = null, ring = null, scripts = null, abilities = () => ({}), warm = () => undefined, thinkAhead = () => false, brain = null, ways = null, log = () => undefined, now = Date.now }) {
   /** Each thing said to him is a turn; one that's been replaced says nothing more. */
   let turns = 0;
   let controller = null;
@@ -1190,7 +1258,7 @@ export function createConversation({ chat, speaker, memory, recollections, comma
     const reset = resets;
     try {
       if (overheard && (await commands.risky(text)) && !stale()) {
-        const allowed = await assistant.confirm(`Do “${text.replace(/[.!?]+$/, '')}”`);
+        const allowed = await assistant.confirm(leaveFor(text));
         if (stale()) return null;
         // Refused the way it was answered: typed, it's written.
         if (!allowed) {
@@ -1209,7 +1277,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
         }
       }
       if (stale()) return null;
-      const { outcome } = await commands.run(text, said, context);
+      // How they like things done goes with it (ways.js), and what they chose on the way is kept.
+      const how = ways?.lines() || [];
+      const { outcome } = await commands.run(text, said, context, how.length ? { ways: how } : {});
+      for (const { about, choice } of outcome?.chose || []) await ways?.set(about, choice).catch(() => undefined);
       await before;
       // What it came to is handed back however it's said, or not: work he offered is marked done by it (offers.js).
       if (mine !== epoch || (stale() && !typed)) return outcome;
@@ -1226,6 +1297,305 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       if (outcome) await answer(outcome.ok !== false && outcome.answer || outcome.text, { ok: outcome.ok !== false, sources, untrusted: sources.length > 0 });
       else if (!stale()) show({ active: false });
       return outcome;
+    } finally {
+      acting -= 1;
+    }
+  }
+
+  /**
+   * A task for the computer or the browser, handed on for one of his tools (mcp/tools.js). As act() asks: one that
+   * could do harm, when the words may not be the user's own (overheard, or with a note's or a page's words in play),
+   * is asked about first; so is a script of theirs with "Ask first" on, said aloud.
+   */
+  async function handOn(command, { said = '', context = '', where = '', ways: how = [], overheard = false, typed = false } = {}) {
+    if (overheard && (await commands.risky(command)) && !(await assistant.confirm(leaveFor(command)))) return { outcome: { ok: false, text: 'The user said no to that.' } };
+    const asks = !typed && commands.scriptsAsk ? await commands.scriptsAsk(command) : null;
+    if (asks && !(await assistant.confirm(`Run ${scripts?.label?.(asks) || `“${command.replace(/[.!?]+$/, '')}”`}`))) return { outcome: { ok: false, text: 'The user said no to that.' } };
+    return commands.run(command, said, context, { ...(where ? { where } : {}), ...(how.length ? { ways: how } : {}) });
+  }
+
+  /**
+   * His tools, when the model he talks through can be given them: the same commands, memory and questions this
+   * conversation has, each under its own name for the model to choose (the user, 2026-11-21: "build an MCP… to help
+   * with his priority of tasks based on what he hears, and if he is uncertain he should ask").
+   */
+  const kit = brain
+    ? createTools({
+        run: (command, more) => handOn(command, more),
+        inquire: assistant.inquire ? (asked) => assistant.inquire(asked) : null,
+        recall: vaultMemory ? (query) => vaultMemory.recall(query, []) : null,
+        ways,
+        log
+      })
+    : null;
+
+  /**
+   * A tool that's his own to do at once (a note, a reminder, a choice kept): done, with what's said of it (`say`) and
+   * its card. What a model claims is still checked against the user's own words: a note or a reminder nobody asked
+   * for isn't made, and the model is told so, rather than the user.
+   * @returns {Promise<{ok:boolean, text:string, say?:string, card?:object|null, kept?:boolean}>}
+   */
+  async function quickly(call, { said, lines, lastHis, typed, keptCard }) {
+    const input = call.input || {};
+    const why = kit.refused(call.name, input);
+    if (why) return { ok: false, text: `That call can’t be taken: ${why}` };
+    switch (call.name) {
+      case 'write_note': {
+        const given = noteIn({ title: input.title, add: input.add, open: input.open });
+        if (!vaultMemory || vaultMemory.ready?.() === false || !given) return { ok: false, text: 'There’s no vault to keep notes in: use use_computer for a note in an app.' };
+        if (!NOTE_ASKED.test(said) && !noteAsked(said)) {
+          log('a note nobody asked for wasn’t made');
+          return { ok: false, text: 'The user didn’t ask for a note, so none was made. Don’t say one was.' };
+        }
+        const taken = await takeNote(whichNote(noteAsked(said), given));
+        return { ok: true, text: taken.text || 'Done.', say: taken.text, card: taken.card };
+      }
+      case 'remember': {
+        const words = String(input.text ?? '').trim();
+        if (!vaultMemory || !askedToRemember(said, words)) {
+          log('not asked to remember anything: the model’s words to keep weren’t kept');
+          return { ok: false, text: 'The user didn’t ask you to remember anything word for word, so nothing was kept. You learn about them on your own.' };
+        }
+        const whyNot = await keepWords(words, [...lines, { who: 'you', text: said }]);
+        return whyNot ? { ok: false, text: whyNot, say: whyNot } : { ok: true, text: 'Kept, word for word.', say: 'Got it. I’ll remember that.', card: keptCard() };
+      }
+      case 'forget': {
+        if (!vaultMemory?.forget || !mayAskToForget(said)) {
+          log('not asked to forget anything: nothing was forgotten');
+          return { ok: false, text: 'The user didn’t ask you to forget anything, so nothing was.' };
+        }
+        const done = await forgetIt(said, askedToForget(said) === 'bare' ? 'bare' : 'named', lines);
+        return { ok: true, text: done, say: done };
+      }
+      case 'set_task': {
+        const task = taskIn(input);
+        if (!tasks || !task) return { ok: false, text: 'That isn’t a change to their list.' };
+        if (['add', 'timer'].includes(task.op) && !tasks.asked(said, lastHis, task.op, task.text)) {
+          log('a task nobody asked for wasn’t made');
+          return { ok: false, text: 'The user didn’t ask for that, so nothing was set. Offer it instead of saying it’s done.' };
+        }
+        tasks.touched?.({ fresh: true });
+        const applied = await tasks.apply(task, { said, last: lastHis });
+        if (applied) return { ok: true, text: applied, say: applied, card: tasks.touched?.() || null };
+        // A change to the list that wasn't made: how it stands is said, not that it's done.
+        const stands = ['done', 'remove', 'move'].includes(task.op) ? tasks.undone?.(task, { said, last: lastHis }) || '' : '';
+        if (stands) log('he asked for a change to the list that wasn’t made: said how it stands instead');
+        return { ok: false, text: stands || 'Nothing on their list was changed.', ...(stands ? { say: stands } : {}) };
+      }
+      case 'run_scripts': {
+        const run = scripts ? scripts.fromModel(runIn(Array.isArray(input.steps) ? input.steps : [])) : null;
+        if (run?.problems?.length) log('scripts: steps that can’t run were left out:', run.problems.join('; ').slice(0, 200));
+        if (!run?.steps.length) return { ok: false, text: `That didn’t match any of their scripts${run?.problems?.[0] ? `: ${run.problems[0]}` : ''}.` };
+        // Asked for at a time, with nothing set for then: not run now.
+        if (timedWords(said) && !input.later) {
+          log('scripts: asked for at a time, with no task given: not run now');
+          return { ok: false, text: 'They asked for it at a time: set_task with that time as well, and it runs then.', say: 'When should I do that? Tell me the time again and I’ll set it.' };
+        }
+        if (!typed && scripts.asksFirst(run.steps) && !(await assistant.confirm(`Run ${scripts.label(run.steps)}`))) return { ok: false, text: 'The user said no.', say: 'Okay, I won’t.' };
+        const outcome = await scripts.runAll(run.steps);
+        return { ok: outcome.ok !== false, text: outcome.text, say: outcome.text };
+      }
+      default: {
+        // A choice kept or forgotten (ways.js): nothing's said of it but what he says himself.
+        const done = await kit.call(call.name, input, { said });
+        return { ...done, kept: done.ok && call.name === 'remember_choice' };
+      }
+    }
+  }
+
+  /**
+   * Scripts asked for at a time: a run_scripts and a set_task for then, called together, are one thing kept on the
+   * clock (tasks.js runs them when it comes), not a run now and a reminder besides.
+   * @returns {Promise<Map<string, object>|null>} each call's outcome by its id, or null when the calls aren't that
+   */
+  async function scriptsLater(calls, { said, lastHis, typed }) {
+    const running = calls.find((call) => call.name === 'run_scripts');
+    const timed = calls.find((call) => call.name === 'set_task' && ['add', 'timer'].includes(call.input?.op) && (call.input.at || call.input.in));
+    if (!running || !timed || !scripts || !tasks) return null;
+    const task = taskIn(timed.input);
+    const run = scripts.fromModel(runIn(Array.isArray(running.input?.steps) ? running.input.steps : []));
+    if (!task || !run?.steps.length || (task.text && !scripts.mentions(task.text))) return null;
+    if (!typed && scripts.asksFirst(run.steps) && !(await assistant.confirm(`Set ${scripts.label(run.steps)} for later`))) {
+      const no = { ok: false, text: 'The user said no.', say: 'Okay, I won’t.' };
+      return new Map([[running.id, no], [timed.id, { ok: false, text: 'Not set.' }]]);
+    }
+    tasks.touched?.({ fresh: true });
+    const applied = await tasks.apply({ ...task, op: 'add', text: task.text || scripts.label(run.steps), run: run.steps }, { said, last: lastHis });
+    const done = applied ? { ok: true, text: applied, say: applied, card: tasks.touched?.() || null } : { ok: false, text: 'It couldn’t be set for then.' };
+    return new Map([[timed.id, done], [running.id, { ok: !!applied, text: applied ? 'Kept with it, to run then: not run now.' : 'Not run.' }]]);
+  }
+
+  /**
+   * His reply, from a model given his tools: its words, and what it called. Null when it can't be asked that way
+   * right now (no such model, or it failed): then he's asked for JSON, as ever.
+   */
+  async function withTools({ text, history, earlier, context, situation: known, live, can, notes, tasks: keepsTasks, scripts: scripted, mood, unnamed, signal, onFirst }) {
+    if (!kit) return null;
+    try {
+      if (!(await brain.ready())) return null;
+    } catch {
+      return null;
+    }
+    const date = new Date();
+    const offered = kit.defs({ computer: can.computer !== false, mac: (can.computer ?? 'Mac') === 'Mac', chrome: !!can.chrome, web: !!can.web, notes, tasks: keepsTasks, scripts: !!scripted?.catalog, unnamed: true }, { internal: true })
+      .map(({ name, description, input_schema: input }) => ({ name, description, input_schema: input }));
+    const system = toolPrompt(date, earlier, { notes, live, can, tasks: keepsTasks, scripts: scripted });
+    const how = ways?.lines() || [];
+    const recalled = quoted(known, how.length ? `How they like things done, as they've told you (go by these without asking again): ${how.join('; ')}` : '', context, moodLine(mood), unnamed ? UNNAMED_LINE : '');
+    const prompt = recalled ? `${recalled}\n${stamped(text, date)}` : stamped(text, date);
+    const turnsSoFar = history.map((entry) => ({ role: entry.who === 'you' ? 'user' : 'assistant', content: entry.text }));
+    let told = false;
+    try {
+      const got = await brain.ask({
+        plain: true,
+        system,
+        prompt,
+        history: turnsSoFar,
+        tools: offered,
+        messages: [],
+        maxOutputTokens: TOOL_TOKENS,
+        signal,
+        ...(onFirst
+          ? {
+              onText: (raw) => {
+                if (told) return;
+                const first = firstProse(raw);
+                if (!first?.text) return;
+                told = true;
+                onFirst(first.text);
+              }
+            }
+          : {})
+      });
+      const all = Array.isArray(got?.calls) ? got.calls : [];
+      // Overheard, and not to him: nothing he'd have said or done of it counts.
+      if (unnamed && all.some((call) => call.name === 'stay_quiet')) return { say: '', do: '', new: false, remember: '', forget: '', note: null, notFor: true };
+      return {
+        say: String(got?.text ?? '').trim(),
+        do: '',
+        new: false,
+        remember: '',
+        forget: '',
+        note: null,
+        calls: all,
+        tooled: { system, prompt, history: turnsSoFar, tools: offered, messages: [{ role: 'assistant', content: Array.isArray(got?.content) ? got.content : [] }] }
+      };
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      log('his tools couldn’t be used, so he was asked the old way:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * A turn of his with tools, carried through: what he says first, his tools done, his model told what each came to,
+   * and what it says and does next, until it has nothing more to do. His own quick ones (a note, a reminder) are
+   * simply done and what came of them said; the ones that take a while (the computer, the browser, a search, a
+   * question to the user) go back to the model, which says how it went in its own words, goes on, or asks.
+   */
+  async function toolTurn(first, { text, history, lines, theirs, around, stale, typed, overheard, sayFirst, answer, keptCard, context }) {
+    const { system, prompt, history: turnsSoFar, tools: offered, messages } = first.tooled;
+    const lastHis = history.at(-1)?.who === 'jester' ? history.at(-1).text : '';
+    /** Their words this turn, with what they've answered him since: what a model's claim is checked against. */
+    let said = text;
+    /** Other people's words are in play (a note, a page, a calendar): what could do harm asks first. */
+    let tainted = overheard || theirs || around.untrusted || history.some((entry) => entry.untrusted);
+    let round = { say: first.say, calls: first.calls };
+    /** Pages an answer was read from, for the line that gives it. */
+    let sources = null;
+    let rounds = 0;
+    let spoken = Promise.resolve();
+    let lastLine = '';
+    /** Nothing's been said by him since they last spoke: this turn's words, or their answer to a question of his. */
+    let unheard = true;
+    const began = epoch;
+    const over = () => began !== epoch || (stale() && !typed);
+    acting += 1;
+    try {
+      for (;;) {
+        const results = (await scriptsLater(round.calls, { said, lastHis, typed })) || new Map();
+        if (over()) return;
+        const told = [];
+        let card = null;
+        let kept = false;
+        const slow = [];
+        for (const call of round.calls) {
+          if (results.has(call.id)) {
+            const done = results.get(call.id);
+            if (done.say) told.push(done.say);
+            card = done.card || card;
+          } else if (!kit.get(call.name)) results.set(call.id, { ok: false, text: 'There is no such tool.' });
+          else if (call.name === 'stay_quiet') results.set(call.id, { ok: false, text: 'These words were said to you: answer them.' });
+          else if (kit.quick(call.name)) {
+            const done = await quickly(call, { said, lines, lastHis, typed, keptCard });
+            if (over()) return;
+            results.set(call.id, done);
+            if (done.say) told.push(done.say);
+            card = done.card || card;
+            kept ||= done.kept === true;
+          } else slow.push(call);
+        }
+        // What he says now. Before tools that take a while: his own few words. With none left: how it came out,
+        // which for his own quick ones is what was really kept or set, not what the model supposed.
+        // A quick one refused, with nothing to say of it (a note nobody asked for): his model is told so and puts it
+        // right itself. What it wrote meanwhile, supposing it done, isn't said.
+        const unsettled = !slow.length && [...results.values()].some((done) => done.ok === false && !done.say);
+        const line = slow.length
+          ? [round.say, ...told].filter(Boolean).join(' ')
+          : unsettled
+            ? told.join(' ')
+            : told.join(' ') || round.say || (kept ? 'Got it. I’ll do it that way from now on.' : rounds ? '' : 'Sorry, I lost my words there.');
+        // Silence while a tool works is what he's not to leave them in (the user, 2026-11-21: "slow, with dead air").
+        // His model is told to say a few words first; when it hasn't, and nothing's been said since they last
+        // spoke, he says what he's started on himself.
+        const started = !line && unheard && slow.length ? leadIn(slow[0]) : '';
+        if (rounds === 0) spoken = sayFirst(line || started, card);
+        else if (line) {
+          spoken = answer(line, { card, ...(sources ? { sources, untrusted: true } : {}) });
+          sources = null;
+        } else if (started) spoken = answer(started);
+        if (line || started) unheard = false;
+        if (line) lastLine = line;
+        if (!slow.length && !unsettled) break;
+        for (const call of slow) {
+          const came = await kit.call(call.name, call.input, { said, context, overheard: tainted, typed });
+          if (over()) return;
+          // Told for him that he'd started: his model is told so, or it says it again when the tool's done.
+          const done = started && call === slow[0] ? { ...came, text: `${came.text} (The user has already heard that you’ve started on this: don’t say so again.)` } : came;
+          results.set(call.id, done);
+          if (done.untrusted || done.sources?.length) tainted = true;
+          if (done.sources?.length) sources = done.sources;
+          if (done.answer) {
+            said = `${said}\n${done.answer}`;
+            // They've spoken again: what he does next isn't begun in silence.
+            unheard = true;
+          }
+          // Stopped, or they've said something else: nothing more is said of it.
+          if (done.stopped) return void (await spoken);
+        }
+        await spoken;
+        if (over()) return;
+        rounds += 1;
+        messages.push({ role: 'user', content: round.calls.map((call) => resultBlock(call.id, results.get(call.id))) });
+        if (rounds >= MAX_ROUNDS) {
+          lastLine = 'I’ve gone round on that a few times without getting there. How would you like me to go on?';
+          spoken = answer(lastLine);
+          break;
+        }
+        show({ phase: 'thinking', task: '', step: '' });
+        const again = new AbortController();
+        controller = again;
+        // As they stand now: what's added after is the next request's.
+        const next = await brain.ask({ plain: true, system, prompt, history: turnsSoFar, tools: offered, messages: [...messages], maxOutputTokens: TOOL_TOKENS, signal: again.signal });
+        if (controller === again) controller = null;
+        if (over()) return;
+        messages.push({ role: 'assistant', content: Array.isArray(next?.content) ? next.content : [] });
+        round = { say: String(next?.text ?? '').trim(), calls: Array.isArray(next?.calls) ? next.calls : [] };
+        log('jester:', logged({ say: round.say, calls: round.calls }));
+      }
+      await spoken;
+      // A question of his is waited on for longer.
+      if (!stale() && knowsYou() && !typed) stayOpen(/\?["”’')\]]*\s*$/.test(lastLine) ? ASKED_MS : OPEN_MS);
     } finally {
       acting -= 1;
     }
@@ -1273,7 +1643,9 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // What the user's scripts said is on, when one did lately, goes with where they are and their calendars.
       const scripted = scripts?.prompt?.() || null;
       const known = [around.block, scripted ? scripts.stateLines?.() : ''].filter(Boolean).join('\n');
-      const reply = await chat({ text, history, earlier: recollections.relevant(text), context, situation: known, live, can, notes, tasks: !!tasks, scripts: scripted, mood: moodOf(text, history, now()), unnamed, signal: ongoing.signal, ...(ahead ? { onFirst } : {}) });
+      const asked = { text, history, earlier: recollections.relevant(text), context, situation: known, live, can, notes, tasks: !!tasks, scripts: scripted, mood: moodOf(text, history, now()), unnamed, signal: ongoing.signal, ...(ahead ? { onFirst } : {}) };
+      // With tools, when the model he talks through takes them; asked for JSON otherwise, and when that fails.
+      const reply = (await withTools(asked)) || (await chat(asked));
       thought.at.reply = now();
       return { reply, theirs, around, notes, lines };
     })();
@@ -1542,6 +1914,13 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // added it" with no note, and has named "C notes", which it had just been shown.
       // And only when they asked for a note: qwen3.5:9b made "Personal Info" of "I'm a junior at Penn State…", and
       // "Parking" of "don't forget I parked on level 3", which was kept word for word as well.
+      // With tools, the turn is his model's to carry through: what it called is done, and it's told what came of it.
+      if (reply.tooled) {
+        // What he began on as it was written is how his first line begins; with nothing more to it, that's all of it.
+        const sayFirst = (line, card) => (early ? early.finish(line, card) : line ? say(line, { written: typed, clock, card }) : Promise.resolve());
+        if (typed) clock.tell(true);
+        return void (await toolTurn(reply, { text, history, lines, theirs, around, stale, typed, overheard, sayFirst, answer, keptCard, context: researchContext }));
+      }
       const given = noteIn(reply.note);
       const wanted = given && !NOTE_ASKED.test(text) ? null : given;
       if (given && !wanted) log('a note nobody asked for wasn’t made');
@@ -1743,7 +2122,10 @@ export function createConversation({ chat, speaker, memory, recollections, comma
       // doesn't give leave, and anything that sends or buys still asks for a yes of its own.
       if (assistant.asked?.open) {
         typing = false;
-        assistant.answer(STOP.test(meant) || TAKEN_BACK.test(meant) ? null : meant);
+        const left = STOP.test(meant) || TAKEN_BACK.test(meant);
+        // In the conversation, after the question it answers.
+        memory.add('you', meant);
+        assistant.answer(left ? null : meant);
         return null;
       }
       // Answered aloud: what's said about it next is said aloud too. A yes lets a task go ahead, so it must be them.

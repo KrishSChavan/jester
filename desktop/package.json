@@ -20,6 +20,7 @@
     "models": "node scripts/fetch-models.mjs vad voice parakeet-110m kokoro",
     "scraping:setup": "node scripts/setup-scraping.mjs",
     "talk-check": "node scripts/talk-check.mjs",
+    "brain-check": "node scripts/brain-check.mjs",
     "live-check": "node scripts/live-check.mjs",
     "hear-check": "node scripts/hear-check.mjs",
     "task-check": "node scripts/task-check.mjs",

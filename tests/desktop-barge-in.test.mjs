@@ -226,7 +226,7 @@ test('an interrupted command still asks before a risky action', async () => {
   j.conversation.hearing({ startedAt, interrupt: true, verified: true });
   await speaking;
   await j.conversation.heard('Quit Safari.', { startedAt });
-  assert.deepEqual(j.questions, ['Do “Quit Safari”']);
+  assert.deepEqual(j.questions, ['Go ahead and quit Safari']);
   assert.deepEqual(j.ran, []);
 });
 

@@ -557,10 +557,11 @@ export function createVoiceRunner({
    * is what comes again, but only if the user asked nothing, and what it typed
    * is in both: their words, and the command's (learned.js learnable).
    */
-  async function assisted(text, note = '', done = [], { pick = false, said = '' } = {}) {
+  async function assisted(text, note = '', done = [], { pick = false, said = '', ways = [] } = {}) {
     const goal = said || text;
     const reworded = gist(goal) !== gist(text);
-    const result = await assistant.run(goal, { ...(note ? { note } : {}), ...(pick ? { pick } : {}), ...(reworded ? { meant: text } : {}) });
+    // `ways`: how the user likes things done, as they've said (ways.js): the assistant goes by them without asking.
+    const result = await assistant.run(goal, { ...(note ? { note } : {}), ...(pick ? { pick } : {}), ...(reworded ? { meant: text } : {}), ...(ways.length ? { ways } : {}) });
     if (!result) return null;
     const { trace, ...outcome } = result;
     if (outcome.ok && trace && learned) {
@@ -668,6 +669,8 @@ export function createVoiceRunner({
     // between the computer and the browser), else read from the command and the user's own words for it (route.js).
     // Chrome being in front is where the user is looking; it settles where a task goes only when the task doesn't.
     const told = context.where === 'computer' || context.where === 'browser' ? context.where : '';
+    /** How the user likes things done, as lines ("Hulu profile: Krish"): they go with a task to whoever does it. */
+    const how = Array.isArray(context.ways) ? context.ways.filter((line) => typeof line === 'string' && line.trim()).slice(0, 12) : [];
     const route = told ? { where: told, why: 'told' } : routeOf(text, { said, steps, apps: apps.flatMap((app) => app.names) });
     if (unknown && route.where) log('voice: belongs to the', route.where, `(${route.why})`);
     const chromes = async () => {
@@ -686,14 +689,17 @@ export function createVoiceRunner({
       const meant = again ? text : said && gist(said) !== gist(text) ? text : '';
       const words = again || said || text;
       log('voice: Chrome’s to do:', JSON.stringify(words), meant ? `(meaning ${JSON.stringify(meant)})` : '');
-      const done = await browser.run(words, meant, { skipResearch: researched });
+      const done = await browser.run(words, meant, { skipResearch: researched, ...(how.length ? { ways: how } : {}) });
       const did = !!done?.ok && !CAME_TO_NOTHING.test(done.text || '');
       log('voice: Chrome', done ? `${did ? 'did it' : 'didn’t'}: ${JSON.stringify(done.text)}` : 'stopped');
       const sources = did ? sourcesOf(done.sources) : [];
+      // What the user chose when Chrome asked them something on the way (which profile): kept by whoever asked for this.
+      const chose = Array.isArray(done?.chose) && done.chose.length ? { chose: done.chose } : {};
       return { steps, outcome: ended(done && (did ? {
         ...ok(done.text || 'Done.'),
+        ...chose,
         ...(sources.length ? { sources, ...(typeof done.answer === 'string' && done.answer.trim() ? { answer: done.answer } : {}) } : {})
-      } : bad(done.text || 'That didn’t work in Chrome.')), text, said, told) };
+      } : { ...bad(done.text || 'That didn’t work in Chrome.'), ...chose }), text, said, told) };
     }
     if (unknown) {
       // The laptop's assistant reads the screen and works it by hand, and so does a way learned from it: neither can
@@ -718,7 +724,7 @@ export function createVoiceRunner({
       }
       if (await assistantReady()) {
         if (superseded()) return cancelled();
-        return { steps, outcome: ended(await assisted(text, note, done, { said }), text, said, told) };
+        return { steps, outcome: ended(await assisted(text, note, done, { said, ways: how }), text, said, told) };
       }
       // The assistant could, given a model: say where to add one.
       const partly = done.length ? `The saved way did ${done.length} step${done.length > 1 ? 's' : ''}, then stopped` : 'Nothing was done';
@@ -739,7 +745,7 @@ export function createVoiceRunner({
       if (assistant && !canPost()) return { steps, outcome: ok(`${outcome.text}. ${noInput()}`) };
       if (await assistantReady()) {
         await wait(SEARCH_LOAD_MS);
-        return { steps, outcome: await assisted(text, '', [], { pick: true, said }) };
+        return { steps, outcome: await assisted(text, '', [], { pick: true, said, ways: how }) };
       }
       if (assistant) return { steps, outcome: ok(`${outcome.text}. To have Jester press Play, choose a model for actions in Settings › Models.`) };
     }
@@ -764,6 +770,8 @@ export function createVoiceRunner({
      *   works, the words stand for it from then on, if they can (learned.js aliasable).
      *   where: where the conversation chose to have it done, when it chose: the computer's own apps, or the
      *   browser. Without it the command's own words say (route.js), and only then what's in front.
+     *   ways: how the user likes things done (ways.js lines): the assistant and Chrome go by them without asking.
+     *   An outcome's `chose` is what they answered when asked on the way: [{about, choice}], for ways to keep.
      * @returns {Promise<{steps:object[], outcome:{ok:boolean, text:string}|null}>} null: nothing to say
      */
     async run(text, context = {}) {
