@@ -181,6 +181,45 @@ pub enum Command {
         x: f64,
         y: f64,
         exclude: Option<i32>,
+        /// Look at this window alone (its number), whatever lies over it.
+        window: Option<u32>,
+    },
+    /// A click in a window of an app that isn't in front, sent to the app
+    /// itself: nothing comes forward and the pointer stays where it is. macOS only, and only where the window
+    /// server's private way in is there; an error means nothing was sent.
+    ClickBehind {
+        pid: i32,
+        x: f64,
+        y: f64,
+        #[serde(default)]
+        button: Button,
+        #[serde(default = "one")]
+        count: u32,
+        /// The window, by the window server's number, when it's known.
+        window: Option<u32>,
+    },
+    /// A key to an app that isn't in front: to its own keyboard focus, in
+    /// its front-most window, which must be `window` when that's given.
+    /// Never a ⌘ shortcut, nor into a password field; with the focus
+    /// unknown, only a key that puts nothing in, unless `sure`.
+    KeyBehind {
+        pid: i32,
+        key: String,
+        #[serde(default)]
+        modifiers: Vec<String>,
+        #[serde(default = "one")]
+        times: u32,
+        window: Option<u32>,
+        /// The caller put the focus where it wants it a moment ago.
+        #[serde(default)]
+        sure: bool,
+    },
+    /// Text to an app that isn't in front: into its own keyboard focus,
+    /// which the caller has just put where it wants it.
+    TextBehind {
+        pid: i32,
+        text: String,
+        window: Option<u32>,
     },
     /// An app's window: where it is, and whether it's minimized or full screen.
     Window {
@@ -248,6 +287,9 @@ impl Command {
                 | Command::Shortcut { .. }
                 | Command::MenuBar { .. }
                 | Command::Glance { .. }
+                | Command::ClickBehind { .. }
+                | Command::KeyBehind { .. }
+                | Command::TextBehind { .. }
                 | Command::Window { .. }
                 | Command::PlaceWindow { .. }
                 | Command::WindowAt { .. }
@@ -438,6 +480,56 @@ pub fn inserted(value: &str, at: usize, text: &str) -> String {
     let units: Vec<u16> = value.encode_utf16().collect();
     let at = at.min(units.len());
     format!("{}{}{}", String::from_utf16_lossy(&units[..at]), text, String::from_utf16_lossy(&units[at..]))
+}
+
+/// The key a character has on a US keyboard, by the driver's name for it,
+/// and whether Shift is held: how text is typed key by key. None for a
+/// character with no key of its own there (é, 😀, a line break's are sent as
+/// Return by the caller).
+#[cfg_attr(windows, allow(dead_code))]
+pub fn us_key(c: char) -> Option<(&'static str, bool)> {
+    const LETTERS: [&str; 26] = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"];
+    const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    Some(match c {
+        'a'..='z' => (LETTERS[(c as u8 - b'a') as usize], false),
+        'A'..='Z' => (LETTERS[(c as u8 - b'A') as usize], true),
+        '0'..='9' => (DIGITS[(c as u8 - b'0') as usize], false),
+        ' ' => ("space", false),
+        '\n' => ("enter", false),
+        '-' => ("minus", false),
+        '=' => ("equal", false),
+        '[' => ("leftbracket", false),
+        ']' => ("rightbracket", false),
+        '\\' => ("backslash", false),
+        ';' => ("semicolon", false),
+        '\'' => ("quote", false),
+        ',' => ("comma", false),
+        '.' => ("period", false),
+        '/' => ("slash", false),
+        '`' => ("grave", false),
+        '!' => ("1", true),
+        '@' => ("2", true),
+        '#' => ("3", true),
+        '$' => ("4", true),
+        '%' => ("5", true),
+        '^' => ("6", true),
+        '&' => ("7", true),
+        '*' => ("8", true),
+        '(' => ("9", true),
+        ')' => ("0", true),
+        '_' => ("minus", true),
+        '+' => ("equal", true),
+        '{' => ("leftbracket", true),
+        '}' => ("rightbracket", true),
+        '|' => ("backslash", true),
+        ':' => ("semicolon", true),
+        '"' => ("quote", true),
+        '<' => ("comma", true),
+        '>' => ("period", true),
+        '?' => ("slash", true),
+        '~' => ("grave", true),
+        _ => return None,
+    })
 }
 
 /// Bytes as hex, two characters each.
@@ -691,6 +783,26 @@ mod tests {
         assert_eq!(inserted("😀 café", 7, "!"), "😀 café!");
         assert_eq!(inserted("ab", 99, "c"), "abc");
         assert_eq!(hex(&[0, 15, 16, 255]), "000f10ff");
+    }
+
+    #[test]
+    fn a_character_is_its_key_on_a_us_keyboard_or_none() {
+        assert_eq!(us_key('a'), Some(("a", false)));
+        assert_eq!(us_key('Q'), Some(("q", true)));
+        assert_eq!(us_key('7'), Some(("7", false)));
+        assert_eq!(us_key('&'), Some(("7", true)));
+        assert_eq!(us_key('?'), Some(("slash", true)));
+        assert_eq!(us_key('\\'), Some(("backslash", false)));
+        assert_eq!(us_key('\''), Some(("quote", false)));
+        assert_eq!(us_key('\n'), Some(("enter", false)));
+        assert_eq!(us_key('é'), None);
+        assert_eq!(us_key('😀'), None);
+        assert_eq!(us_key('\t'), None, "a tab moves to the next field");
+        // Every one of them is a key the keyboard tables know by that name.
+        for c in (32u8..127).map(char::from) {
+            let (name, _) = us_key(c).unwrap_or_else(|| panic!("{c:?} has a key"));
+            assert_eq!(canonical_key(name), name, "{c:?}");
+        }
     }
 
     #[test]

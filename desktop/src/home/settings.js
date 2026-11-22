@@ -277,6 +277,10 @@ function renderModels() {
 /** Pictures of the window for the model: on unless turned off here, and on a Mac only with Screen Recording too. */
 function renderPictures() {
   $('agentScreenshots').checked = settings.agentScreenshots !== false;
+  // Clicks and keys for an app that isn't in front, sent to the app itself: a Mac's alone, and on unless turned off.
+  $('behind-row').hidden = platform() !== 'darwin';
+  $('assistantBehind').checked = settings.assistantBehind !== false;
+  $('behind-hint').textContent = 'When the app he’s working in isn’t in front (his own window is over it, or you’ve gone to something else), he clicks and types in it where it is: nothing comes forward and your pointer stays put. Off, he brings the app to the front first. He still does that for a drag, and for a click that showed nothing the first time.';
   $('keepUnsureSpeech').checked = settings.keepUnsureSpeech === true;
   $('mailWatch').checked = settings.mailWatch !== false;
   $('mailJudge').checked = settings.mailJudge !== false;
@@ -1221,6 +1225,7 @@ $('voiceEnabled').addEventListener('change', (event) => save({ voiceEnabled: eve
 $('speechModel').addEventListener('change', (event) => save({ speechModel: event.target.value }));
 $('continuousAssistant').addEventListener('change', (event) => save({ continuousAssistant: event.target.checked }));
 $('agentScreenshots').addEventListener('change', (event) => save({ agentScreenshots: event.target.checked }));
+$('assistantBehind').addEventListener('change', (event) => save({ assistantBehind: event.target.checked }));
 $('keepUnsureSpeech').addEventListener('change', (event) => save({ keepUnsureSpeech: event.target.checked }));
 for (const id of ['briefMorning', 'briefEvening', 'checkIns', 'offerWork']) $(id).addEventListener('change', (event) => save({ [id]: event.target.checked }));
 $('eveningAt').addEventListener('change', (event) => /^\d\d:\d\d$/.test(event.target.value) && save({ eveningAt: event.target.value }));

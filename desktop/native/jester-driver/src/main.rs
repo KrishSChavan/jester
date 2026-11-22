@@ -141,6 +141,9 @@ fn run_input(input: &mut platform::Input, poster: &mut Poster, command: Command)
         | Command::Shortcut { .. }
         | Command::MenuBar { .. }
         | Command::Glance { .. }
+        | Command::ClickBehind { .. }
+        | Command::KeyBehind { .. }
+        | Command::TextBehind { .. }
         | Command::Window { .. }
         | Command::PlaceWindow { .. }
         | Command::WindowAt { .. }
@@ -198,7 +201,24 @@ fn run_query(command: Command, dry_run: bool) -> Result<Map<String, Value>> {
         }
         Command::MenuBar { press: Some(name), exact, .. } if dry_run => Ok(object(json!({ "events": [{ "event": "menuBar", "press": name, "exact": exact }] }))),
         Command::MenuBar { press, exact, exclude } => platform::menu_bar(press.as_deref(), exact, exclude).map(object),
-        Command::Glance { x, y, exclude } => platform::glance(x, y, exclude).map(object),
+        Command::Glance { x, y, exclude, window } => platform::glance(x, y, exclude, window).map(object),
+        Command::ClickBehind { pid, x, y, button, count, window } if dry_run => Ok(object(json!({
+            "events": [{ "event": "clickBehind", "pid": pid, "x": x, "y": y, "button": format!("{button:?}").to_lowercase(), "count": count, "window": window }],
+            "via": "behind",
+        }))),
+        Command::ClickBehind { pid, x, y, button, count, window } => platform::click_behind(pid, (x, y), button, count, window).map(object),
+        Command::KeyBehind { pid, key, modifiers, times, window, sure } => {
+            let mut mods = Vec::new();
+            for name in &modifiers {
+                mods.push(protocol::modifier(name).ok_or_else(|| format!("unknown modifier \"{name}\""))?);
+            }
+            if dry_run {
+                return Ok(object(json!({ "events": [{ "event": "keyBehind", "pid": pid, "key": protocol::canonical_key(&key), "modifiers": modifiers, "times": times }], "via": "behind" })));
+            }
+            platform::key_behind(pid, &key, &mods, times, window, sure).map(object)
+        }
+        Command::TextBehind { pid, text, .. } if dry_run => Ok(object(json!({ "events": [{ "event": "textBehind", "pid": pid, "text": text }], "via": "behind" }))),
+        Command::TextBehind { pid, text, window } => platform::text_behind(pid, &text, window).map(object),
         Command::Window { pid } => platform::window(pid).map(object),
         Command::PlaceWindow { w, h, .. } if !(w >= 1.0 && h >= 1.0) => Err("a window needs a width and height of at least 1".into()),
         Command::PlaceWindow { pid, x, y, w, h, maximize, fullscreen } if dry_run => Ok(object(json!({

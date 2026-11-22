@@ -663,10 +663,43 @@ Jester already works:
   it, or you've gone to something else) is checked on that app's own window, read by its process,
   and so are the steps after; before, the check read whatever was in front. Accessibility's own
   ways (a press, a value set, a menu command, a shortcut's command) need nothing brought forward.
-  Keys and the pointer still bring the app to the front first.
-
-What Jester still doesn't do that Atticus does: send clicks and keys to an app in the background
-through macOS's private SkyLight calls, so that nothing ever comes forward.
+- **Working behind your windows.** What accessibility can't do for an app that isn't in front
+  used to bring it forward: a click where a control is drawn, a double or right click, a spot in a
+  picture, keys, text for a web page. Those now go to the app itself (`clickBehind`, `keyBehind`,
+  `textBehind`, mac.rs): each event is posted to the app's process with its window written into
+  it, the window told it has the keyboard without being raised, and told again when the click is
+  done. Nothing comes forward, the pointer doesn't move, and what you're typing elsewhere is
+  untouched. This is the window server's private way in (SkyLight's `SLEventPostToPid` and
+  `SLPSPostEventRecordTo`, `GetProcessForPID`, `_AXUIElementGetWindow`), as Atticus and
+  [cua-driver](https://github.com/trycua/cua) use it: undocumented, so every call is looked up
+  when first wanted, and with any missing nothing is tried and the app is brought forward as
+  before. In October this was left out for being private; it's in now because it's the one thing
+  that lets you keep working while he does, and because whatever it can't do falls back to what
+  was there.
+  - A click behind is aimed within its own app (`pointBehind`: only the app's own sheet or
+    popover can cover it, not your window over it) and checked on its own window: read by its
+    process, and glanced at as that window alone, whatever lies over it.
+  - One that showed nothing, read or seen, is said so ("…and nothing changed: asked for again,
+    it's brought to the front and clicked there"), and for the rest of that task the app's clicks
+    are a hand's, in front. It's never clicked a second time unasked.
+  - Keys go to the app's own keyboard focus, so only when the window meant is its front-most one,
+    never into a password field, and never a ⌘ shortcut (an app's menus don't hear keys from
+    behind: a shortcut is its menu command, above, or the keys in front). An app behind others
+    often won't say what has its focus (Chromium never does): then only a key that puts nothing
+    in goes (arrows, Tab, Escape, Return), unless the step before put the focus in a field by
+    its id.
+  - Text for a field of the Mac's own is set through accessibility, as ever. For a web page it's
+    typed: the field focused and all of it selected (or the caret put at its end) through
+    accessibility, read back, then the text sent. WebKit takes the characters themselves.
+    Chromium behind others takes none that way (it sees one key and inserts nothing), so there
+    it's typed key by key, which is only right on a US or ABC keyboard layout and for characters
+    with a key there; "café" on any layout, or anything on another layout, is typed with the app
+    in front. Either way the field is read back before Enter.
+  - Still the pointer's, app in front: a drag (sent this way it never reaches the view it starts
+    in), the wheel when a scroll area won't scroll by accessibility, text where the cursor is with
+    no field named, and anything while macOS's own dialog is up.
+  - Settings › Assistant and voice › "Work behind your windows" turns it off (`assistantBehind`):
+    then, as on Windows, the app comes to the front first.
 
 ### Models: talking and actions
 
@@ -2967,6 +3000,22 @@ Settings' old "Controls" page (Jester on, gestures, cursor, camera, voice comman
     open, a task that presses ⇧⌘D should ask "Choose “Send” in Mail?". Give him a job in Notes, click over to
     another app while he works, and watch whether he carries on in Notes (he will come forward when he has to
     type).
+
+38. **Working behind your windows** (built 2026-11-22; run for real on this Mac, macOS 26.6, against windows of
+    its own sitting behind others: an AppKit window, a WebKit page and a Chromium page. Clicks, double and right
+    clicks landed where aimed and the pointer didn't move; Return, Tab and letters reached the focused field; text
+    went into a text view, a WebKit field and a Chromium field, and after chosen words; a click that changed only
+    pixels was seen on its own window; the app in front stayed in front. The whole of host.js ran against the
+    Chromium page with every real-pointer and real-key command refused. `npm run behind-check` does all of that
+    again whenever you like: it opens two small windows of its own in a corner, touches nothing of yours, and
+    says what worked; run it after a macOS update, since the way in is private. Never with a model, and never on
+    an app of yours). Type to him in his own window: "play some jazz on Spotify", "search Amazon for a desk lamp" with
+    the browser behind his window. The app should do it without coming in front of his window, and your pointer
+    shouldn't jump. Then give him a longer job in Notes or the browser, click into another app and keep typing
+    there: your typing should be untouched and he should finish. The log's steps say "…where it is, behind the
+    window in front" for a click sent that way. Watch for a click that says "nothing changed" and then comes
+    forward: that app takes no clicks from behind (tell me which). If anything goes wrong, Settings › Assistant
+    and voice › "Work behind your windows" off puts it back as it was.
 
 ## Things learned the hard way
 

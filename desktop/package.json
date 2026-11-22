@@ -22,6 +22,7 @@
     "talk-check": "node scripts/talk-check.mjs",
     "brain-check": "node scripts/brain-check.mjs",
     "live-check": "node scripts/live-check.mjs",
+    "behind-check": "node spikes/behind-check.mjs",
     "hear-check": "node scripts/hear-check.mjs",
     "task-check": "node scripts/task-check.mjs",
     "speed-check": "node scripts/speed-check.mjs",

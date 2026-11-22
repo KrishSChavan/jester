@@ -29,7 +29,12 @@
  * text can go in after words already in a field; and the icons at the right
  * of the menu bar open, what they open being read as a window is. A task
  * whose app has gone behind another stays on it: read by its process, and
- * done to through accessibility, without bringing it forward.
+ * done to where it is. Accessibility's own ways reach it there; what they
+ * can't do (a click where it's drawn, keys, text for a web page) is sent to
+ * the app itself (the driver's clickBehind, keyBehind and textBehind:
+ * macOS's private way in, as Atticus uses), so nothing comes forward and
+ * the pointer stays put. Whatever can't be done that way, or showed nothing
+ * when it was, is done as it always was: the app brought to the front.
  */
 
 import { parseShortcut } from '../os-actions.js';
@@ -93,6 +98,9 @@ const PIXELS_CHANGED = 'The screen changed where it was clicked, though no contr
 const PRESSED_ROLES = new Set(['button', 'link', 'checkbox', 'switch', 'radio', 'tab', 'popup', 'menuitem', 'disclosure']);
 /** The most a named thing under a spot may measure for its name to be the spot's (points). */
 const SPOT_NAMED = { w: 480, h: 160 };
+/** How long after a step put the keyboard focus in a field a key is taken to be for that field. */
+const FIELD_FOCUS_MS = 10_000;
+const NOTHING_BEHIND = 'It was clicked where it is, behind the window in front, and nothing changed: asked for again, it’s brought to the front and clicked there.';
 /** The driver's refusal to set text into a field that only takes typed keys (mac.rs insert_after). */
 const TYPE_INSTEAD = /type it instead/;
 /** The driver's refusal when a read came between choosing an element and acting on it. */
@@ -136,8 +144,10 @@ export function glanceChanged(before, after, least = GLANCE_CHANGE) {
  * @param {number} [deps.pid]  read this app's window instead of the front one (tests)
  * @param {string} [deps.platform]
  * @param {() => number} [deps.now]
+ * @param {() => boolean} [deps.behind]  whether an app that isn't in front may be clicked and typed into where it
+ *   is (Settings › Assistant, "Work behind your windows"); off, it's brought to the front first, as before
  */
-export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place = null, picture = null, wait = pause, quietly = (task) => task(), exclude, pid, platform = process.platform, now = Date.now }) {
+export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place = null, picture = null, wait = pause, quietly = (task) => task(), exclude, pid, platform = process.platform, now = Date.now, behind = () => true }) {
   const primary = platform === 'darwin' ? 'cmd' : 'ctrl';
   /** An accessibility action on an element of the snapshot (none: its window). */
   const act = (snapshot, element, action, value, after) =>
@@ -153,14 +163,19 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
   let panel = false;
   /** The app a task is working on behind another (its process): read by that, not by what's in front. */
   let stay = null;
+  /** Apps (their processes) that, in this task, took a click where they were and showed nothing, or couldn't be sent one: brought forward from then on. */
+  const frontOnly = new Set();
+  /** The app whose keyboard focus the last step put in a field it chose, and when: a key that follows goes there. */
+  let fieldFocus = null;
 
   /**
    * The screen round a point, small and grey, for telling whether a click showed (the driver's `glance`). Null when
    * it can't be had: no Screen Recording (not asked for, and not tried again for a minute), or nothing to look at.
    */
-  async function glance(at) {
+  async function glance(at, window = undefined) {
     if (!at || now() < glanceOffUntil) return null;
-    const reply = await driver.call('glance', { x: at.x, y: at.y, ...(exclude ? { exclude } : {}) }).catch(() => null);
+    // One window alone is seen as it is whatever lies over it: how a click behind other windows is checked.
+    const reply = await driver.call('glance', { x: at.x, y: at.y, ...(window ? { window } : exclude ? { exclude } : {}) }).catch(() => null);
     if (reply?.allowed === false) glanceOffUntil = now() + GLANCE_RETRY_MS;
     return typeof reply?.gray === 'string' && reply.gray ? reply.gray : null;
   }
@@ -180,13 +195,31 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     await driver.call('click', { ...at, ...extra });
   }
 
-  /** Whether the app the screen was read from is in front, bringing it back if it isn't. */
-  async function inFront(snapshot) {
+  /**
+   * Where the app the screen was read from is: in front (`front`); or behind another and to be worked where it
+   * is (`behind`): on a Mac, with working behind on, and nothing done to it there in this task having come to
+   * nothing. Neither, and it's brought to the front (inFront).
+   */
+  async function placeOf(snapshot) {
     // What a menu-bar icon opened is over everything, and its app (Control Center) is never "in front".
-    if (snapshot.panel) return true;
+    if (snapshot.panel) return { front: true };
+    const want = snapshot.app?.pid;
+    const app = (await driver.call('frontmost').catch(() => null))?.app;
+    const front = app?.pid;
+    if (want && front === want) return { front: true };
+    // macOS's own dialog is what's in front: it's the user's to answer, and nothing is worked on behind it (execute says so).
+    if (SYSTEM_DIALOGS.test(String(app?.name || ''))) return { front: false, known: false, behind: false };
+    // `known`: something else is in front for sure (the driver said what), which accessibility's own ways need no leave for.
+    const known = !!want && front !== undefined;
+    return { front: false, known, behind: known && platform === 'darwin' && !frontOnly.has(want) && behind() === true };
+  }
+
+  /** Whether the app the screen was read from is in front, bringing it back if it isn't. `place`: where it was just found to be (placeOf). */
+  async function inFront(snapshot, place = null) {
+    if (snapshot.panel || place?.front) return true;
     const want = snapshot.app?.pid;
     if (!want) return false;
-    if ((await frontPid()) === want) return true;
+    if (!place && (await frontPid()) === want) return true;
     await activate(snapshot.app);
     for (let tries = FRONT_TRIES; tries > 0; tries--) {
       await wait(100);
@@ -220,10 +253,10 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
    * say gives the middle of the frame the screen was read with. Asked with
    * the app in front: behind another app's window, everything is covered.
    */
-  async function aim(snapshot, element) {
+  async function aim(snapshot, element, how = 'point') {
     let reply = null;
     try {
-      reply = await act(snapshot, element, 'point');
+      reply = await act(snapshot, element, how);
     } catch (err) {
       if (changed(err)) return { stale: true };
     }
@@ -239,6 +272,36 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       : aimed.stale
         ? { ok: false, detail: `The screen changed before it could be ${done}; nothing was done.` }
         : { ok: false, detail: 'It has no place on screen to click.' };
+
+  /**
+   * A click sent to an app that isn't in front, at a place in one of its windows: the app stays where it is and
+   * the pointer doesn't move. Watched (`looked`), the window alone is glanced at first, since what lies over it
+   * is all a glance at the screen would show. Null when it couldn't be sent (no way to on this macOS, no window
+   * there): nothing was done, the app is brought forward from now on, and the caller clicks as it always did.
+   */
+  async function spotBehind(snapshot, at, extra, looked, done) {
+    const window = snapshot.window?.id || undefined;
+    if (looked) {
+      const seen = window ? await glance(at, window) : null;
+      // No look at the window alone: no verdict from pixels at all (the look at the screen was of what's over it).
+      Object.assign(looked, { spot: at, before: seen, window });
+    }
+    try {
+      await driver.call('clickBehind', { pid: snapshot.app.pid, ...at, ...extra, ...(window ? { window } : {}) });
+    } catch {
+      frontOnly.add(snapshot.app.pid);
+      return null;
+    }
+    fieldFocus = null;
+    return { ok: true, behind: true, detail: `${done} where it is, behind the window in front` };
+  }
+
+  /** A control clicked where it's drawn in a window behind others: aimed within its own app, where only the app's own things can be over it. */
+  async function clickBehind(snapshot, element, extra, looked, done = 'clicked') {
+    const aimed = await aim(snapshot, element, 'pointBehind');
+    if (!aimed.at) return missed(aimed, 'clicked');
+    return spotBehind(snapshot, aimed.at, extra, looked, done);
+  }
 
   /**
    * The accessibility ways of clicking first (the driver tries each in turn):
@@ -257,7 +320,10 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       if (err?.code === 'timeout') return { ok: true, busy: true, detail: 'pressed; the app is busy, perhaps with a dialog' };
       if (changed(err)) return { ok: false, detail: 'The screen changed before it could be pressed; nothing was done.' };
       if (!middle(element.frame)) throw err;
-      if (!(await inFront(snapshot))) return notInFront(snapshot);
+      const place = await placeOf(snapshot);
+      const sent = place.behind ? await clickBehind(snapshot, element, {}, looked) : null;
+      if (sent) return sent;
+      if (!(await inFront(snapshot, place))) return notInFront(snapshot);
       const aimed = await aim(snapshot, element);
       if (!aimed.at) return missed(aimed, 'clicked');
       await pointerClick(aimed.at, {}, looked);
@@ -269,11 +335,16 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
   /** A click with the real pointer, for what accessibility has no action for: a double or right click. */
   async function pointer(snapshot, element, { button, count }, looked = null) {
     if (!middle(element.frame)) return { ok: false, detail: 'It has no place on screen to click.' };
-    if (!(await inFront(snapshot))) return notInFront(snapshot);
+    const extra = { ...(button === 'left' ? {} : { button }), ...(count > 1 ? { count } : {}) };
+    const done = count > 1 ? 'double-clicked' : 'right-clicked';
+    const place = await placeOf(snapshot);
+    const sent = place.behind ? await clickBehind(snapshot, element, extra, looked, done) : null;
+    if (sent) return sent;
+    if (!(await inFront(snapshot, place))) return notInFront(snapshot);
     const aimed = await aim(snapshot, element);
     if (!aimed.at) return missed(aimed, 'clicked');
-    await pointerClick(aimed.at, { ...(button === 'left' ? {} : { button }), ...(count > 1 ? { count } : {}) }, looked);
-    return { ok: true, detail: `${count > 1 ? 'double-clicked' : 'right-clicked'} where it is drawn` };
+    await pointerClick(aimed.at, extra, looked);
+    return { ok: true, detail: `${done} where it is drawn` };
   }
 
   /**
@@ -283,9 +354,13 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
    */
   async function clickSpot(snapshot, action, looked = null) {
     if (!action.at) return { ok: false, detail: 'x and y are a place in a picture of this screen: take a screenshot first.' };
-    if (!(await inFront(snapshot))) return notInFront(snapshot);
     const button = action.button || 'left';
-    await pointerClick(action.at, { ...(button === 'left' ? {} : { button }), ...(action.count > 1 ? { count: action.count } : {}) }, looked);
+    const extra = { ...(button === 'left' ? {} : { button }), ...(action.count > 1 ? { count: action.count } : {}) };
+    const place = await placeOf(snapshot);
+    const sent = place.behind ? await spotBehind(snapshot, action.at, extra, looked, 'clicked that spot') : null;
+    if (sent) return sent;
+    if (!(await inFront(snapshot, place))) return notInFront(snapshot);
+    await pointerClick(action.at, extra, looked);
     return { ok: true, detail: 'clicked that spot' };
   }
 
@@ -340,6 +415,22 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       await driver.call('click', aimed.at);
     }
     await wait(120);
+  }
+
+  /**
+   * A field given its app's keyboard focus while the app is behind another: asked of it through accessibility,
+   * else by a click sent to it where it is. False when neither took, and nothing was done to it.
+   */
+  async function focusBehind(snapshot, element) {
+    try {
+      await act(snapshot, element, 'focus');
+    } catch (err) {
+      if (!middle(element.frame) || changed(err)) throw err;
+      const clicked = await clickBehind(snapshot, element, {}, null);
+      if (!clicked?.ok) return false;
+    }
+    await wait(120);
+    return true;
   }
 
   /**
@@ -418,12 +509,26 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         if (before && before.length > SHOWN_VALUE) return { ok: false, detail: `That field holds more lines than the screen showed (${before.length} characters), so it wasn’t replaced.` };
       }
     }
+    /**
+     * Whether it's typed where the app is, behind another: only into a field named by its id, whose focus is put
+     * there first. Text where the cursor is, in an app that won't say where that is, waits for the app in front.
+     */
+    let there = false;
+    /** The app in front, the focus in the field (when there is one), and nothing secret about it: before any key. */
+    const here = async (place = null) => {
+      if (!(await inFront(snapshot, place))) return notInFront(snapshot);
+      if (element) await focus(snapshot, element);
+      return keysMayGo(snapshot);
+    };
+    const target = { pid: snapshot.app?.pid, ...(snapshot.window?.id ? { window: snapshot.window.id } : {}) };
     // With Enter to come, the app and its focus are checked before the text goes in, not after.
     if (action.enter || !element || mode === 'insert') {
-      if (!(await inFront(snapshot))) return notInFront(snapshot);
-      if (element) await focus(snapshot, element);
-      const keys = await keysMayGo(snapshot);
-      if (!keys.ok) return keys;
+      const place = await placeOf(snapshot);
+      there = place.behind && !!element && mode !== 'insert' && (await focusBehind(snapshot, element));
+      if (!there) {
+        const keys = await here(place);
+        if (!keys.ok) return keys;
+      }
     }
     let typed = false;
     let landed = false;
@@ -441,15 +546,32 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     }
     if (!typed) {
       if (!action.enter && element && mode !== 'insert') {
-        if (!(await inFront(snapshot))) return notInFront(snapshot);
-        await focus(snapshot, element);
-        const keys = await keysMayGo(snapshot);
-        if (!keys.ok) return keys;
+        const place = await placeOf(snapshot);
+        there = place.behind && (await focusBehind(snapshot, element));
+        if (!there) {
+          const keys = await here(place);
+          if (!keys.ok) return keys;
+        }
       }
       const before = element && mode === 'append' ? await readField(snapshot, element, '') : null;
-      if (element && mode === 'replace') await driver.call('key', { key: 'a', modifiers: [primary] });
-      if (element && mode === 'append') await driver.call('key', platform === 'darwin' ? { key: 'down', modifiers: ['cmd'] } : { key: 'end', modifiers: ['ctrl'] });
-      await driver.call('text', { text: action.text });
+      if (there) {
+        // No ⌘A reaches an app behind others: all of the field is selected (or the caret put at its end) through
+        // accessibility, read back, and the text sent to the app itself. Either refused, nothing has been typed,
+        // and it's typed the usual way with the app in front.
+        const sent =
+          (await act(snapshot, element, 'select', mode === 'append' ? 'end' : 'all').then(() => true, () => false)) &&
+          (await driver.call('textBehind', { ...target, text: action.text }).then(() => true, () => false));
+        if (!sent) {
+          there = false;
+          const keys = await here();
+          if (!keys.ok) return keys;
+        }
+      }
+      if (!there) {
+        if (element && mode === 'replace') await driver.call('key', { key: 'a', modifiers: [primary] });
+        if (element && mode === 'append') await driver.call('key', platform === 'darwin' ? { key: 'down', modifiers: ['cmd'] } : { key: 'end', modifiers: ['ctrl'] });
+        await driver.call('text', { text: action.text });
+      }
       if (element) {
         // A web page's value catches up a frame or two late: looked for a few times before it's judged.
         let now = null;
@@ -464,8 +586,21 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         landed = !!now;
       }
     }
-    if (action.enter) await driver.call('key', { key: 'enter', modifiers: [] });
-    return landed ? { ok: true, landed: true } : { ok: true };
+    if (action.enter) {
+      // Sent to the app itself, into the field its focus was just put in. Refused there (another of its windows
+      // has come in front of this one), it's pressed with the app in front, the focus where it was left.
+      const pressed = there && (await driver.call('keyBehind', { ...target, key: 'enter', sure: true }).then(() => true, () => false));
+      if (!pressed) {
+        if (there) {
+          there = false;
+          const keys = await here();
+          if (!keys.ok) return keys;
+        }
+        await driver.call('key', { key: 'enter', modifiers: [] });
+      }
+    }
+    if (element) fieldFocus = { pid: snapshot.app?.pid, at: now() };
+    return { ok: true, ...(landed ? { landed: true } : {}), ...(there ? { behind: true } : {}) };
   }
 
   /**
@@ -478,11 +613,25 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
   async function typeAfter(snapshot, element, action) {
     if (!element) return { ok: false, detail: 'after needs the id of the field its words are in.' };
     const busy = { ok: false, detail: 'The app was busy: the text may have gone in. Check the field before trying again.' };
-    const ready = async () => {
-      if (!(await inFront(snapshot))) return notInFront(snapshot);
+    const target = { pid: snapshot.app?.pid, ...(snapshot.window?.id ? { window: snapshot.window.id } : {}) };
+    /** Typed where the app is, behind another (its focus put in the field through accessibility), not with it in front. */
+    let there = false;
+    const front = async (place = null) => {
+      if (!(await inFront(snapshot, place))) return notInFront(snapshot);
       await focus(snapshot, element);
       return keysMayGo(snapshot);
     };
+    /** Before any key: the field has its app's focus, where the app is if that can be, else with the app in front. */
+    const ready = async () => {
+      const place = await placeOf(snapshot);
+      there = place.behind && (await focusBehind(snapshot, element));
+      return there ? { ok: true } : front(place);
+    };
+    const caret = () =>
+      act(snapshot, element, 'caretAfter', undefined, action.after).then(
+        () => null,
+        (err) => ({ ok: false, detail: changed(err) ? 'The screen changed before it could be typed; nothing was done.' : tidy(err?.message || err) })
+      );
     // With Enter to come, the app and its focus are checked before the text goes in, not after.
     if (action.enter) {
       const keys = await ready();
@@ -496,6 +645,7 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       if (changed(err)) return { ok: false, detail: 'The screen changed before it could be typed; nothing was done.' };
       if (!TYPE_INSTEAD.test(err?.message)) return { ok: false, detail: tidy(err?.message || err) };
     }
+    let landed = true;
     if (set) {
       if (set.busy) return busy;
       if (set.landed !== true) return { ok: false, detail: `Put the text in, but the field reads ${quoted(set.value)}: check it before trying again.` };
@@ -505,12 +655,17 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         if (!keys.ok) return keys;
       }
       const before = await readField(snapshot, element, '');
-      try {
-        await act(snapshot, element, 'caretAfter', undefined, action.after);
-      } catch (err) {
-        return { ok: false, detail: changed(err) ? 'The screen changed before it could be typed; nothing was done.' : tidy(err?.message || err) };
+      const lost = await caret();
+      if (lost) return lost;
+      if (there && !(await driver.call('textBehind', { ...target, text: action.text }).then(() => true, () => false))) {
+        // It can't be typed there (nothing was sent): with the app in front, the caret put after the words again.
+        there = false;
+        const keys = await front();
+        if (!keys.ok) return keys;
+        const again = await caret();
+        if (again) return again;
       }
-      await driver.call('text', { text: action.text });
+      if (!there) await driver.call('text', { text: action.text });
       let read = null;
       for (let look = 0; look < READ_BACK_LOOKS; look++) {
         if (look) await wait(READ_BACK_MS);
@@ -520,13 +675,21 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       if (read && !(read.contains && (!before || read.length > before.length))) {
         return { ok: false, detail: `The text didn’t land after ${quoted(action.after)}: the field reads ${quoted(read.value)}${action.enter ? ', so Enter wasn’t pressed' : ''}.` };
       }
-      if (!read) {
-        if (action.enter) await driver.call('key', { key: 'enter', modifiers: [] });
-        return { ok: true };
+      landed = !!read;
+    }
+    if (action.enter) {
+      const pressed = there && (await driver.call('keyBehind', { ...target, key: 'enter', sure: true }).then(() => true, () => false));
+      if (!pressed) {
+        if (there) {
+          there = false;
+          const keys = await front();
+          if (!keys.ok) return keys;
+        }
+        await driver.call('key', { key: 'enter', modifiers: [] });
       }
     }
-    if (action.enter) await driver.call('key', { key: 'enter', modifiers: [] });
-    return { ok: true, landed: true };
+    fieldFocus = { pid: snapshot.app?.pid, at: now() };
+    return { ok: true, ...(landed ? { landed: true } : {}), ...(there ? { behind: true } : {}) };
   }
 
   /** The wheel, over the element or the window's middle: what scrolls when a scroll area won't by itself. */
@@ -644,8 +807,11 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     const plan = parseShortcut(action.keys);
     const runs = Array.isArray(action.runs) && action.runs.length ? action.runs : null;
     const said = runs ? runs.join(' › ') : '';
-    const front = runs && !action.web && !snapshot.panel ? await frontPid() : undefined;
-    if (front !== undefined && !sameApp(front, snapshot.app)) {
+    const place = await placeOf(snapshot);
+    // The field the step before put the focus in is where a key now goes: said, so a key that types isn't refused for not knowing.
+    const sure = fieldFocus?.pid === snapshot.app?.pid && now() - fieldFocus.at < FIELD_FOCUS_MS;
+    fieldFocus = null;
+    if (!place.front && place.known && runs && !action.web) {
       let chosen = 0;
       let busy = false;
       for (let time = 0; time < (action.times || 1) && !signal?.aborted; time++) {
@@ -660,7 +826,15 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
       // Chosen at least once: the rest aren't made up for with keys, which would bring the app forward mid-way.
       if (chosen) return { ok: true, behind: true, detail: `chose ${said}`, ...(busy ? { busy: true } : {}) };
     }
-    if (!(await inFront(snapshot))) return notInFront(snapshot);
+    // A key that's no shortcut goes to the app itself, into its own keyboard focus. The driver refuses what it
+    // can't be sure of (a password field, a focus it can't read for a key that types, another window in front
+    // of this one): then, as before, the app comes to the front and the focus is checked from here.
+    if (place.behind && !plan.modifiers.some((modifier) => modifier !== 'shift' && modifier !== 'alt')) {
+      const window = snapshot.window?.id;
+      const sent = await driver.call('keyBehind', { pid: snapshot.app.pid, key: plan.key, modifiers: plan.modifiers, times: action.times || 1, ...(window ? { window } : {}), ...(sure ? { sure: true } : {}) }).then(() => true, () => false);
+      if (sent) return { ok: true, behind: true };
+    }
+    if (!(await inFront(snapshot, place))) return notInFront(snapshot);
     if (!HARMLESS_KEYS.has(plan.key)) {
       const keys = await keysMayGo(snapshot);
       if (!keys.ok) return keys;
@@ -838,6 +1012,8 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     begin() {
       stay = null;
       shot = null;
+      fieldFocus = null;
+      frontOnly.clear();
     },
 
     /**
@@ -928,7 +1104,8 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
     async execute(action, snapshot, { verify = false, signal, patient = false, goal = '' } = {}) {
       // Whose turn the screen was before the step: a task's app behind another is checked where it is, not brought forward to be read.
       const frontBefore = verify && VISIBLE.has(action.action) && !snapshot?.panel && snapshot?.app?.pid ? await frontPid() : undefined;
-      const { front, glanced, behind, ...result } = await perform(action, snapshot, signal, goal, verify);
+      const { front, glanced, behind: behind_, ...result } = await perform(action, snapshot, signal, goal, verify);
+      const behind = behind_ === true;
       // The app wouldn't come to the front, and macOS's own dialog is what's there: that's why, and it ends the
       // task (`asking`), since trying again can't help until the user has answered it.
       if (!result.ok && front === false && !signal?.aborted && (await systemDialog())) return { ok: false, asking: true, detail: MACOS_ASKING };
@@ -953,8 +1130,14 @@ export function createDesktopHost({ driver, openApp, activate, openUrl, dispatch
         }
       }
       // Nothing readable changed. A click may still have shown: on a canvas, a map, a video, what changes is pixels.
-      if (!changed && glanced && !signal?.aborted && glanceChanged(glanced.before, await glance(glanced.spot))) {
+      if (!changed && glanced?.before && !signal?.aborted && glanceChanged(glanced.before, await glance(glanced.spot, glanced.window))) {
         return { ...result, changed: true, seenOnly: true, changes: PIXELS_CHANGED, snapshot: seen.snapshot };
+      }
+      // A click sent to an app behind others that showed nothing, read or seen: some apps take none that way. Said,
+      // and from here on in this task its clicks are a hand's, with the app in front.
+      if (!changed && behind && action.action === 'click' && snapshot?.app?.pid) {
+        frontOnly.add(snapshot.app.pid);
+        return { ...result, changed: false, changes: NOTHING_BEHIND, snapshot: seen.snapshot };
       }
       if (!changed && UNSEEN.has(action.action)) return { ...result, unseen: true, changes: 'No visible change (its effect may not show here).', snapshot: seen.snapshot };
       return { ...result, changed, changes: summary, snapshot: seen.snapshot };

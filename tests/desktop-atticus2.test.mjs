@@ -227,9 +227,9 @@ test('a spot is clicked with the pointer, its app in front; and judged by what c
   const twice = scriptedDriver({ frontmost: inFront(70) });
   await hostOn(twice.driver).execute({ ...spot, count: 2, button: 'right' }, SKETCH);
   assert.deepEqual(twice.calls.at(-1), ['click', { x: 600, y: 350, button: 'right', count: 2 }]);
-  const behind = scriptedDriver({ frontmost: inFront(5) });
-  assert.equal((await hostOn(behind.driver).execute(spot, SKETCH)).ok, false, 'it couldn’t be brought forward: nothing is clicked');
-  assert.equal(behind.calls.some(([cmd]) => cmd === 'click'), false);
+  const stuck = scriptedDriver({ frontmost: inFront(5) });
+  assert.equal((await hostOn(stuck.driver, { behind: () => false }).execute(spot, SKETCH)).ok, false, 'it couldn’t be brought forward: nothing is clicked');
+  assert.equal(stuck.calls.some(([cmd]) => cmd === 'click'), false);
   assert.equal((await hostOn(scriptedDriver().driver).execute({ action: 'click', x: 250, y: 150, what: 'unplaced' }, SKETCH)).ok, false, 'a place that was never found is never clicked');
 
   const kind = (action, screen = SKETCH) => classify(action, { screen, goal: '' });
@@ -345,7 +345,7 @@ test('with its app in front a shortcut is the keys; behind another, it is the me
   const saved = { action: 'press', keys: 'cmd+s', runs: ['File', 'Save'] };
   const front = scriptedDriver({ frontmost: inFront(80), focused: { element: { role: 'AXTextArea' }, app: { pid: 80 } } });
   assert.deepEqual(await hostOn(front.driver).execute(saved, MAIL), { ok: true, detail: 'that’s File › Save' });
-  assert.deepEqual(names(front.calls), ['frontmost', 'frontmost', 'focused', 'key']);
+  assert.deepEqual(names(front.calls), ['frontmost', 'focused', 'key']);
   assert.equal(front.calls.some(([cmd]) => cmd === 'shortcut'), false);
 
   let activated = 0;
@@ -514,4 +514,212 @@ test('a picture says what of the screen it shows, and is never taller than a mod
   assert.deepEqual([tall.view.width, tall.view.height], [tall.width, tall.height]);
   // One scale both ways: a place in the picture is a place on screen.
   assert.ok(Math.abs(tall.view.w / tall.width - tall.view.h / tall.height) < 0.01);
+});
+
+/**
+ * Working behind (the app the task is in isn't in front): clicks, keys and a web page's text go to the app itself
+ * (the driver's clickBehind, keyBehind, textBehind), and nothing is brought forward.
+ */
+const PAGE = {
+  snapshot: 50,
+  app: { name: 'Browser', pid: 90 },
+  window: { title: 'Shop', frame: frame(0, 0, 900, 700), id: 4242 },
+  elements: [
+    { id: 0, role: 'searchfield', label: 'Search', value: 'old', depth: 3, frame: frame(100, 40, 300, 30) },
+    { id: 1, role: 'link', label: 'Deals', depth: 3, frame: frame(100, 100, 80, 20) },
+    { id: 2, role: 'textarea', label: 'Review', value: 'Good', depth: 3, frame: frame(100, 200, 400, 100) }
+  ]
+};
+const refusedPress = new Error('none of the accessibility ways of clicking it worked');
+/** A driver for a page behind another app (pid 5 in front), counting what would bring it forward. */
+function behindDriver(answers = {}) {
+  const scripted = scriptedDriver({ frontmost: inFront(5), ...answers });
+  let activated = 0;
+  return { ...scripted, host: (extra = {}) => hostOn(scripted.driver, { activate: async () => (activated += 1), ...extra }), activated: () => activated };
+}
+
+test('behind another app, a click accessibility can’t make is sent to the app itself: nothing comes forward, the pointer stays', async () => {
+  const one = behindDriver({ act: (params) => (params.action === 'pointBehind' ? { x: 140, y: 110, checked: true } : Promise.reject(refusedPress)) });
+  assert.deepEqual(await one.host().execute({ action: 'click', id: 1 }, PAGE), { ok: true, detail: 'clicked where it is, behind the window in front' });
+  assert.deepEqual(names(one.calls), ['act press', 'frontmost', 'act pointBehind', 'clickBehind']);
+  assert.deepEqual(one.calls.at(-1)[1], { pid: 90, x: 140, y: 110, window: 4242 });
+  assert.equal(one.activated(), 0);
+  assert.equal(one.calls.some(([cmd]) => cmd === 'click' || cmd === 'move'), false, 'the real pointer isn’t touched');
+
+  // A double click and a right click carry what they are; a spot in a picture goes the same way.
+  const twice = behindDriver({ act: (params) => (params.action === 'pointBehind' ? { x: 140, y: 110, checked: true } : Promise.reject(refusedPress)) });
+  assert.equal((await twice.host().execute({ action: 'click', id: 1, count: 2 }, PAGE)).detail, 'double-clicked where it is, behind the window in front');
+  assert.deepEqual(twice.calls.at(-1), ['clickBehind', { pid: 90, x: 140, y: 110, count: 2, window: 4242 }]);
+  await twice.host().execute({ action: 'click', id: 1, button: 'right' }, PAGE);
+  assert.deepEqual(twice.calls.at(-1), ['clickBehind', { pid: 90, x: 140, y: 110, button: 'right', window: 4242 }]);
+  const spot = behindDriver();
+  assert.equal((await spot.host().execute({ action: 'click', x: 1, y: 1, what: 'a dot', at: { x: 500, y: 400 } }, PAGE)).detail, 'clicked that spot where it is, behind the window in front');
+  assert.deepEqual(spot.calls.at(-1), ['clickBehind', { pid: 90, x: 500, y: 400, window: 4242 }]);
+  assert.equal(spot.activated(), 0);
+
+  // Something of the app's own is over it (a sheet): not clicked, there or anywhere.
+  const covered = behindDriver({ act: (params) => (params.action === 'pointBehind' ? { covered: 'the sheet “Sign in”' } : Promise.reject(refusedPress)) });
+  assert.deepEqual(await covered.host().execute({ action: 'click', id: 1 }, PAGE), { ok: false, detail: 'It’s covered by the sheet “Sign in”, so it wasn’t clicked.' });
+  assert.equal(covered.calls.some(([cmd]) => cmd === 'clickBehind' || cmd === 'click'), false);
+  assert.equal(covered.activated(), 0);
+});
+
+test('a click behind is checked on its own window: pixels that changed mean it took; nothing at all, and the next is a hand’s in front', async () => {
+  const looks = [grey(40), grey(40), grey(40, { count: 500, level: 200 })];
+  const took = behindDriver({ act: (params) => (params.action === 'pointBehind' ? { x: 140, y: 110, checked: true } : Promise.reject(refusedPress)), snapshot: { ...PAGE, snapshot: 51 }, glance: () => ({ allowed: true, gray: looks.shift() }) });
+  const result = await took.host({ exclude: 999 }).execute({ action: 'click', id: 1 }, PAGE, { verify: true });
+  assert.equal(result.changes, 'The screen changed where it was clicked, though no control reads differently.');
+  const glances = took.calls.filter(([cmd]) => cmd === 'glance').map(([, params]) => params);
+  assert.deepEqual(glances.slice(1), [{ x: 140, y: 110, window: 4242 }, { x: 140, y: 110, window: 4242 }], 'its own window alone, whatever lies over it');
+  assert.deepEqual(took.calls.filter(([cmd]) => cmd === 'snapshot').map(([, params]) => params.pid), [90], 'read where it is');
+  assert.equal(took.activated(), 0);
+
+  // Neither read nor seen to change: said, and asked for again it's clicked with the app in front.
+  let front = 5;
+  const dead = scriptedDriver({ frontmost: () => inFront(front), act: (params) => (/^point/.test(params.action) ? { x: 140, y: 110, checked: true } : Promise.reject(refusedPress)), snapshot: { ...PAGE, snapshot: 51 }, glance: { allowed: true, gray: grey(40) } });
+  let brought = 0;
+  const host = hostOn(dead.driver, { activate: async () => ((brought += 1), (front = 90)) });
+  const nothing = await host.execute({ action: 'click', id: 1 }, PAGE, { verify: true });
+  assert.equal(nothing.changed, false);
+  assert.match(nothing.changes, /behind the window in front, and nothing changed: asked for again, it’s brought to the front/);
+  assert.equal(brought, 0);
+  await host.execute({ action: 'click', id: 1 }, { ...PAGE, snapshot: 51 });
+  assert.equal(brought, 1);
+  assert.deepEqual(dead.calls.at(-1), ['click', { x: 140, y: 110 }]);
+  // The next task starts afresh.
+  front = 5;
+  host.begin();
+  await host.execute({ action: 'click', id: 1 }, { ...PAGE, snapshot: 51 });
+  assert.equal(dead.calls.at(-1)[0], 'clickBehind');
+});
+
+test('what can’t be sent behind is done as it always was: in front', async () => {
+  // This macOS has no way in (or the app has no window there): brought forward and clicked, and not tried again.
+  let front = 5;
+  const none = scriptedDriver({ frontmost: () => inFront(front), act: (params) => (/^point/.test(params.action) ? { x: 140, y: 110, checked: true } : Promise.reject(refusedPress)), clickBehind: new Error('this macOS has no way to click in a window that isn’t in front') });
+  let brought = 0;
+  const host = hostOn(none.driver, { activate: async () => ((brought += 1), (front = 90)) });
+  assert.deepEqual(await host.execute({ action: 'click', id: 1 }, PAGE), { ok: true, detail: 'clicked where it is drawn' });
+  assert.equal(brought, 1);
+  front = 5;
+  await host.execute({ action: 'click', id: 1 }, PAGE);
+  assert.equal(none.calls.filter(([cmd]) => cmd === 'clickBehind').length, 1, 'once was enough to know');
+
+  // Turned off in Settings, on Windows, or with macOS's own dialog in front: never tried.
+  for (const [extra, frontApp] of [[{ behind: () => false }, { pid: 5 }], [{ platform: 'win32' }, { pid: 5 }], [{}, { pid: 5, name: 'SecurityAgent' }]]) {
+    const old = scriptedDriver({ frontmost: { app: frontApp }, act: (params) => (/^point/.test(params.action) ? { x: 140, y: 110, checked: true } : Promise.reject(refusedPress)) });
+    const result = await hostOn(old.driver, extra).execute({ action: 'click', id: 1 }, PAGE);
+    assert.equal(result.ok, false, JSON.stringify(extra));
+    assert.equal(old.calls.some(([cmd]) => cmd === 'clickBehind'), false);
+  }
+  // A drag is always the pointer's.
+  const drag = behindDriver({ act: { x: 1, y: 2, checked: true } });
+  assert.equal((await drag.host().execute({ action: 'drag', from: 0, to: 1 }, PAGE)).ok, false);
+  assert.equal(drag.activated(), 1);
+});
+
+test('text for a web page behind another app: its field focused and selected through accessibility, the text sent to the app, read back', async () => {
+  const webOnly = new Error('web pages don\'t take text set this way; type it instead');
+  const field = (value) => (params) => {
+    if (params.action === 'setValue' || params.action === 'appendValue') return Promise.reject(webOnly);
+    if (params.action === 'read') return params.value ? { contains: true, value, length: value.length } : { value: 'Good', length: 4 };
+    return {};
+  };
+  const typed = behindDriver({ act: field('desk lamp') });
+  assert.deepEqual(await typed.host().execute({ action: 'type', id: 0, text: 'desk lamp', enter: true }, PAGE), { ok: true, landed: true });
+  assert.deepEqual(names(typed.calls), ['frontmost', 'act focus', 'act setValue', 'act select', 'textBehind', 'act read', 'keyBehind']);
+  assert.deepEqual(typed.calls.find(([cmd, params]) => cmd === 'act' && params.action === 'select')[1].value, 'all', 'a one-line field is typed over');
+  assert.deepEqual(typed.calls.find(([cmd]) => cmd === 'textBehind')[1], { pid: 90, window: 4242, text: 'desk lamp' });
+  assert.deepEqual(typed.calls.at(-1)[1], { pid: 90, window: 4242, key: 'enter', sure: true });
+  assert.equal(typed.activated(), 0);
+  assert.equal(typed.calls.some(([cmd]) => cmd === 'key' || cmd === 'text'), false, 'no key goes to whatever is in front');
+
+  // Added to a longer one: the caret put at its end, and read back longer than it was.
+  const added = behindDriver({ act: field('Good and cheap') });
+  assert.deepEqual(await added.host().execute({ action: 'type', id: 2, text: ' and cheap', mode: 'append' }, PAGE), { ok: true, landed: true });
+  assert.equal(added.calls.find(([cmd, params]) => cmd === 'act' && params.action === 'select')[1].value, 'end');
+
+  // It can't be typed there (a keyboard that isn't a US one, a letter with no key): nothing was sent, so it's
+  // typed the usual way, the app brought forward.
+  let front = 5;
+  const usual = scriptedDriver({ frontmost: () => inFront(front), focused: { element: { role: 'AXTextField' }, app: { pid: 90 } }, act: field('café'), textBehind: new Error('“é” has no key of its own to type it behind with') });
+  let brought = 0;
+  const result = await hostOn(usual.driver, { activate: async () => ((brought += 1), (front = 90)) }).execute({ action: 'type', id: 0, text: 'café' }, PAGE);
+  assert.deepEqual(result, { ok: true, landed: true });
+  assert.equal(brought, 1);
+  assert.deepEqual(usual.calls.filter(([cmd]) => cmd === 'key' || cmd === 'text').map(([cmd, params]) => [cmd, params.key || params.text]), [['key', 'a'], ['text', 'café']]);
+
+  // Sent, and the field doesn't read as it should: said, and Enter isn't pressed anywhere.
+  const lost = behindDriver({ act: (params) => (params.action === 'setValue' ? Promise.reject(webOnly) : params.action === 'read' ? { contains: false, value: 'old', length: 3 } : {}) });
+  const missed = await lost.host().execute({ action: 'type', id: 0, text: 'desk lamp', enter: true }, PAGE);
+  assert.match(missed.detail, /The text didn’t land: the field reads “old”, so Enter wasn’t pressed/);
+  assert.equal(lost.calls.some(([cmd]) => cmd === 'keyBehind' || cmd === 'key'), false);
+
+  // A field of the Mac's own is set outright, as ever; its Enter goes to the app too.
+  const native = behindDriver({ act: (params) => (params.action === 'setValue' ? { landed: true, value: 'desk lamp' } : {}) });
+  assert.deepEqual(await native.host().execute({ action: 'type', id: 0, text: 'desk lamp', enter: true }, PAGE), { ok: true, landed: true });
+  assert.deepEqual(names(native.calls), ['frontmost', 'act focus', 'act setValue', 'keyBehind']);
+
+  // Text where the cursor is, in an app that won't say where that is, waits for the app in front; a password field takes none.
+  const cursor = behindDriver();
+  assert.equal((await cursor.host().execute({ action: 'type', text: 'hello' }, PAGE)).ok, false);
+  assert.equal(cursor.calls.some(([cmd]) => cmd === 'textBehind'), false);
+  assert.equal(cursor.activated(), 1);
+  const secret = behindDriver();
+  assert.equal((await secret.host().execute({ action: 'type', id: 0, text: 'hunter2' }, { ...PAGE, elements: [{ id: 0, role: 'password', label: 'Password' }] })).detail, 'Jester never types into password fields.');
+  assert.equal(secret.calls.length, 0);
+});
+
+test('a key for an app behind another goes to the app itself; a shortcut it has no command for, and what the driver won’t vouch for, wait for the front', async () => {
+  const keys = behindDriver();
+  assert.deepEqual(await keys.host().execute({ action: 'press', keys: 'down', times: 3 }, PAGE), { ok: true });
+  assert.deepEqual(keys.calls, [['frontmost', undefined], ['keyBehind', { pid: 90, key: 'down', modifiers: [], times: 3, window: 4242 }]]);
+  assert.equal(keys.activated(), 0);
+
+  // After text was put in a field by its id, the key that follows is for that field: said to the driver.
+  const after = behindDriver({ act: (params) => (params.action === 'setValue' ? { landed: true, value: 'x' } : {}) });
+  const host = after.host();
+  await host.execute({ action: 'type', id: 0, text: 'x' }, PAGE);
+  await host.execute({ action: 'press', keys: 'enter' }, PAGE);
+  assert.deepEqual(after.calls.at(-1), ['keyBehind', { pid: 90, key: 'enter', modifiers: [], times: 1, window: 4242, sure: true }]);
+  await host.execute({ action: 'press', keys: 'enter' }, PAGE);
+  assert.equal(after.calls.at(-1)[1].sure, undefined, 'once: after another step, where the focus is isn’t known');
+
+  // ⌘ with no menu command behind it, and a key the driver refuses (the focus unreadable, a password field): in front.
+  for (const [action, answers] of [[{ action: 'press', keys: 'cmd+k' }, {}], [{ action: 'press', keys: 'x' }, { keyBehind: new Error('the app won’t say what has its keyboard focus while it’s behind') }]]) {
+    let front = 5;
+    const scripted = scriptedDriver({ frontmost: () => inFront(front), focused: { element: { role: 'AXTextField' }, app: { pid: 90 } }, ...answers });
+    let brought = 0;
+    assert.equal((await hostOn(scripted.driver, { activate: async () => ((brought += 1), (front = 90)) }).execute(action, PAGE)).ok, true);
+    assert.equal(brought, 1, action.keys);
+    assert.equal(scripted.calls.at(-1)[0], 'key');
+  }
+});
+
+test('text after words, in a web page behind another app: the caret put there, the text sent to the app, read back', async () => {
+  const typed = behindDriver({
+    act: (params) => {
+      if (params.action === 'insertAfter') return Promise.reject(new Error('web pages don\'t take text set this way; type it instead'));
+      if (params.action === 'read') return params.value ? { contains: true, value: 'Good value', length: 10 } : { value: 'Good', length: 4 };
+      return {};
+    }
+  });
+  assert.deepEqual(await typed.host().execute({ action: 'type', id: 2, text: ' value', after: 'Good', enter: true }, PAGE), { ok: true, landed: true });
+  assert.deepEqual(names(typed.calls), ['frontmost', 'act focus', 'act insertAfter', 'act read', 'act caretAfter', 'textBehind', 'act read', 'keyBehind']);
+  assert.equal(typed.activated(), 0);
+  assert.equal(typed.calls.some(([cmd]) => cmd === 'text' || cmd === 'key'), false);
+
+  // It can't be typed there: the app comes forward, the caret is put after the words again, and it's typed.
+  let front = 5;
+  const usual = scriptedDriver({
+    frontmost: () => inFront(front),
+    focused: { element: { role: 'AXTextArea' }, app: { pid: 90 } },
+    textBehind: new Error('text for a web page behind others is typed key by key, which needs a US keyboard layout'),
+    act: (params) => (params.action === 'insertAfter' ? Promise.reject(new Error('type it instead')) : params.action === 'read' ? (params.value ? { contains: true, value: 'Good value', length: 10 } : { value: 'Good', length: 4 }) : {})
+  });
+  let brought = 0;
+  assert.deepEqual(await hostOn(usual.driver, { activate: async () => ((brought += 1), (front = 90)) }).execute({ action: 'type', id: 2, text: ' value', after: 'Good' }, PAGE), { ok: true, landed: true });
+  assert.equal(brought, 1);
+  assert.equal(usual.calls.filter(([cmd, params]) => cmd === 'act' && params.action === 'caretAfter').length, 2, 'bringing it forward may move the caret');
+  assert.deepEqual(usual.calls.filter(([cmd]) => cmd === 'text').map(([, params]) => params.text), [' value']);
 });

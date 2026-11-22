@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>efix start</title>
+<body style="font:14px system-ui;margin:12px">
+<button id="b" style="width:120px;height:32px">Go</button>
+<form id="f" style="display:inline"><input id="i" aria-label="Words" style="width:260px;height:24px" value="milk, eggs"></form>
+<div style="display:flex;margin-top:12px"><div id="c" style="width:250px;height:120px;background:#bbb"></div><div id="q" style="width:150px;height:120px;background:#444"></div></div>
+<textarea id="t" aria-label="Notes" style="margin-top:8px;width:400px;height:60px">alpha beta</textarea>
+<script>
+const s = { sub: 0, go: 0, trusted: 0, active: 0, canvas: 0, at: '', keys: 0, last: '', dbl: 0, ctx: 0 };
+const show = () => { document.title = `efix sub=${s.sub} go=${s.go} trusted=${s.trusted} active=${s.active} canvas=${s.canvas} at=${s.at} dbl=${s.dbl} ctx=${s.ctx} keys=${s.keys} last=${s.last} i=[${i.value}] t=[${t.value.replace(/\n/g, '⏎')}] focus=${document.activeElement.id || '-'} hasFocus=${document.hasFocus()}`; };
+b.addEventListener('click', (e) => { s.go++; if (e.isTrusted) s.trusted++; if (navigator.userActivation.isActive) s.active++; show(); });
+c.addEventListener('click', (e) => { s.canvas++; s.at = `${e.offsetX},${e.offsetY}`; c.style.background = s.canvas % 2 ? '#333' : '#bbb'; show(); });
+q.addEventListener('click', () => { q.style.background = q.style.background === 'rgb(240, 240, 240)' ? '#444' : 'rgb(240, 240, 240)'; });
+c.addEventListener('dblclick', () => { s.dbl++; show(); });
+c.addEventListener('contextmenu', (e) => { e.preventDefault(); s.ctx++; show(); });
+addEventListener('keydown', (e) => { s.keys++; s.last = e.key; show(); });
+f.addEventListener('submit', (e) => { e.preventDefault(); s.sub++; show(); }); addEventListener('input', show); addEventListener('focusin', show);
+show();
+</script>

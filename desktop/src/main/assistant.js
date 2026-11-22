@@ -103,11 +103,13 @@ export function chosen(answer, options = []) {
  *   and whether it reads pictures (model-jobs.js)
  * @param {Function} [deps.picture]  a picture of the window read, its controls numbered (window-shot.js), for when
  *   the window's words aren't enough
+ * @param {() => boolean} [deps.behind]  whether an app that isn't in front may be clicked and typed into where it is
+ *   (host.js): the user's switch
  * @param {{paidFirst?:Function, onFailed?:Function, onUsed?:Function}} [deps.modelHooks]  model-jobs.js's: the order
  *   the saved models are tried in, one that failed and who covers for it, and what a reply cost
  */
-export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, onChose = () => undefined, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }), modelHooks = {}, web = null, webReady = () => !!web, onVoice = null, onResearch = () => undefined }) {
-  const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, picture, quietly, exclude, platform });
+export function createAssistant({ driver, openApp, activate, openUrl, dispatch, place, listen, prompt, exclude, quietly, picture = null, behind = () => true, onChose = () => undefined, onBusy = () => undefined, log = () => undefined, logScreens = false, platform = process.platform, localModel = async () => ({ model: '', uses: [] }), modelHooks = {}, web = null, webReady = () => !!web, onVoice = null, onResearch = () => undefined }) {
+  const host = createDesktopHost({ driver, openApp, activate, openUrl, dispatch, place, picture, quietly, exclude, platform, behind });
   /** The models set for actions in Settings, and this computer's for when they can't. */
   const model = createModelJob({
     job: 'act',

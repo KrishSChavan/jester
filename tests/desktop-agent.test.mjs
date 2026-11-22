@@ -301,8 +301,10 @@ function fakeDriver({ front = 42, focusedIn = 42, secure = false, comesBack = tr
     }
   };
 }
+// With working behind off (Settings), as on Windows: an app that isn't in front is brought there before keys or a click.
+// What's done to one where it is has its own tests (desktop-atticus2.test.mjs).
 const hostWith = (fake) =>
-  createDesktopHost({ driver: fake.driver, activate: fake.activate, openApp: async () => ({ ok: true, text: 'Opening Notes' }), openUrl: async () => undefined, dispatch: async () => ({ ok: true }), wait: async () => undefined });
+  createDesktopHost({ driver: fake.driver, activate: fake.activate, openApp: async () => ({ ok: true, text: 'Opening Notes' }), openUrl: async () => undefined, dispatch: async () => ({ ok: true }), wait: async () => undefined, behind: () => false });
 
 test('macOS’s own dialog in front ends the task with why, rather than a minute of “isn’t in front any more”', async () => {
   // 2026-11-14: a picture of the window brought up macOS's screen-recording consent, and every step after failed.

@@ -1433,6 +1433,20 @@ pub fn menu_bar(_press: Option<&str>, _exact: bool, _exclude: Option<i32>) -> Re
 }
 
 /// No fingerprint of the screen on Windows yet: a click is judged by what can be read.
-pub fn glance(_x: f64, _y: f64, _exclude: Option<i32>) -> Result<Value> {
+pub fn glance(_x: f64, _y: f64, _exclude: Option<i32>, _window: Option<u32>) -> Result<Value> {
     Ok(json!({ "allowed": false }))
+}
+
+
+/// Windows sends input to whatever is in front; nothing here reaches a window behind.
+pub fn click_behind(_pid: i32, _at: (f64, f64), _button: Button, _count: u32, _window: Option<u32>) -> Result<Value> {
+    Err("clicking in a window that isn't in front isn't available on Windows".into())
+}
+
+pub fn key_behind(_pid: i32, _key: &str, _modifiers: &[Modifier], _times: u32, _window: Option<u32>, _sure: bool) -> Result<Value> {
+    Err("keys for an app that isn't in front aren't available on Windows".into())
+}
+
+pub fn text_behind(_pid: i32, _text: &str, _window: Option<u32>) -> Result<Value> {
+    Err("typing into an app that isn't in front isn't available on Windows".into())
 }

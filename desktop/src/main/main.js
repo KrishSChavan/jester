@@ -3236,6 +3236,8 @@ async function start() {
     quietly: (task) => overlays.whileHidden(task),
     // A picture of the window, when its words aren't enough: with Screen Recording allowed, and not turned off in Settings.
     picture: windowShot(),
+    // An app that isn't in front is clicked and typed into where it is, unless that's turned off in Settings.
+    behind: () => settings?.assistantBehind !== false,
     onBusy: (busy, task) => {
       // A task's beginning: the moment a picture of the window may first be wanted.
       if (busy) void askForPictures().catch(() => undefined);

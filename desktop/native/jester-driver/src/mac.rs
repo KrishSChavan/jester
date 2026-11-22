@@ -1055,7 +1055,7 @@ pub fn snapshot(pid: Option<i32>, exclude: Option<i32>, limit: usize, debug: boo
     Ok(json!({
         "snapshot": number,
         "app": app_info(pid),
-        "window": { "title": string_attribute(&window, "AXTitle"), "frame": frame(&window) },
+        "window": { "title": string_attribute(&window, "AXTitle"), "frame": frame(&window), "id": window_number(&window) },
         "elements": walked.elements,
         "truncated": walked.truncated,
         "visits": walked.visits,
@@ -1199,14 +1199,30 @@ fn caret_after(element: &AXUIElement, anchor: &str) -> Result<(String, usize)> {
         error => return Err(format!("couldn't put the caret after “{anchor}” (AXError {})", error.0)),
     }
     // A field that took the write and kept its caret where it was would have the text go in the wrong place.
-    let now = attribute(element, "AXSelectedTextRange").and_then(|value| value.downcast::<AXValue>().ok()).and_then(|value| {
-        let mut range = CFRange { location: 0, length: 0 };
-        unsafe { value.value(AXValueType::CFRange, NonNull::from(&mut range).cast()) }.then_some(range)
-    });
-    match now {
-        Some(range) if range.location == at as isize && range.length == 0 => Ok((old, at)),
-        _ => Err(format!("the caret didn't go after “{anchor}”; click where the text goes and type it")),
+    if selection_settles(element, place) {
+        Ok((old, at))
+    } else {
+        Err(format!("the caret didn't go after “{anchor}”; click where the text goes and type it"))
     }
+}
+
+/// Whether a field's selection comes to be `wanted`, looked at for a third
+/// of a second: a web page takes a selection set through accessibility a
+/// frame or two late (Chromium, 2026-11-22: read at once, it was the old one).
+fn selection_settles(element: &AXUIElement, wanted: CFRange) -> bool {
+    for look in 0..8 {
+        if look > 0 {
+            std::thread::sleep(Duration::from_millis(45));
+        }
+        let now = attribute(element, "AXSelectedTextRange").and_then(|value| value.downcast::<AXValue>().ok()).and_then(|value| {
+            let mut range = CFRange { location: 0, length: 0 };
+            unsafe { value.value(AXValueType::CFRange, NonNull::from(&mut range).cast()) }.then_some(range)
+        });
+        if now.is_some_and(|range| range.location == wanted.location && range.length == wanted.length) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Text put into a field right after words already in it (after Atticus's
@@ -1225,6 +1241,31 @@ fn insert_after(element: &AXUIElement, anchor: &str, text: &str) -> Result<Value
     let error = set_attribute(element, "AXSelectedText", &CFString::from_str(text));
     let want = crate::protocol::squashed(&crate::protocol::inserted(&old, at, text));
     written(element, error, |now| crate::protocol::squashed(now) == want)
+}
+
+/// A field's text selected, all of it or (`end`) the caret put after its
+/// last character, and read back: for typing over it, or onto its end, with
+/// keys alone, where no ⌘A can be pressed (an app behind others).
+fn select_text(element: &AXUIElement, what: &str) -> Result<Value> {
+    if !settable(element, "AXSelectedTextRange") {
+        return Err("this field's selection can't be set".into());
+    }
+    let length = full_value(element).ok_or("couldn't read the field")?.encode_utf16().count() as isize;
+    let mut wanted = match what {
+        "all" => CFRange { location: 0, length },
+        "end" => CFRange { location: length, length: 0 },
+        _ => return Err("select all, or end".into()),
+    };
+    let range = unsafe { AXValue::new(AXValueType::CFRange, NonNull::from(&mut wanted).cast()) }.ok_or("couldn't describe the selection")?;
+    match set_attribute(element, "AXSelectedTextRange", &range) {
+        AXError::Success => {}
+        error => return Err(format!("couldn't set the selection (AXError {})", error.0)),
+    }
+    if selection_settles(element, wanted) {
+        Ok(json!({ "selected": what, "length": length }))
+    } else {
+        Err("the selection didn't take".into())
+    }
 }
 
 /// How long a scroll's effect may take to show, a look at a time.
@@ -1587,10 +1628,15 @@ fn covering(found: &AXUIElement, target: &AXUIElement) -> String {
 /// fails can't tell. Anything else covers it only when it plainly would
 /// take the click: it's in another window, or it's a control itself — a
 /// label drawn over a checkbox is clicked through as a hand would.
-fn hit_test(target: &AXUIElement, x: f64, y: f64) -> crate::protocol::Hit {
+fn hit_test(target: &AXUIElement, x: f64, y: f64, own: bool) -> crate::protocol::Hit {
     use crate::protocol::Hit;
-    let system = with_timeout(unsafe { AXUIElement::new_system_wide() });
-    let Ok(found) = hit(&system, x, y) else { return Hit::Unknown };
+    // Asked of the app itself (`own`), the answer is what the app has there, whatever other app's window lies over it.
+    let asked = match (own, pid(target)) {
+        (true, Some(pid)) => unsafe { AXUIElement::new_application(pid) },
+        _ => unsafe { AXUIElement::new_system_wide() },
+    };
+    let asked = with_timeout(asked);
+    let Ok(found) = hit(&asked, x, y) else { return Hit::Unknown };
     if inside(&found, target) {
         return Hit::Reaches;
     }
@@ -1612,7 +1658,7 @@ fn hit_test(target: &AXUIElement, x: f64, y: f64) -> crate::protocol::Hit {
 /// Where a real click would land on an element: its frame read now (not
 /// as the snapshot had it) once it stops moving, scrolled into its window
 /// if it's out of it, and hit-tested at up to five points.
-fn click_point(element: &AXUIElement, window: &AXUIElement) -> Result<Value> {
+fn click_point(element: &AXUIElement, window: &AXUIElement, own: bool) -> Result<Value> {
     let gap = Duration::from_millis(crate::protocol::SETTLE_GAP_MS);
     let settle = || crate::protocol::settled_frame(|| frame_rect(element), || std::thread::sleep(gap));
     let mut frame = settle().ok_or("it has no place on screen to click")?;
@@ -1625,7 +1671,7 @@ fn click_point(element: &AXUIElement, window: &AXUIElement) -> Result<Value> {
     if !(frame.2 > 0.0 && frame.3 > 0.0) {
         return Err("it has no size on screen to click".into());
     }
-    Ok(crate::protocol::click_point(frame, |x, y| hit_test(element, x, y)))
+    Ok(crate::protocol::click_point(frame, |x, y| hit_test(element, x, y, own)))
 }
 
 /// Does something to an element of the last snapshot (or, for scrolling, its window).
@@ -1645,7 +1691,7 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>, 
     if !alive(&element) {
         return Err(crate::protocol::GONE.into());
     }
-    if is_secure(&element) && matches!(action, "focus" | "setValue" | "appendValue" | "insertAfter" | "caretAfter" | "read") {
+    if is_secure(&element) && matches!(action, "focus" | "setValue" | "appendValue" | "insertAfter" | "caretAfter" | "select" | "read") {
         return Err("Jester never types into password fields".into());
     }
     let done = |name: &str| match perform(&element, name) {
@@ -1662,7 +1708,10 @@ pub fn act(snapshot: u64, id: Option<usize>, action: &str, value: Option<&str>, 
         "press" => press(&element),
         // A double click's meaning (Finder opens a file with it), where the element has it.
         "open" => done("AXOpen"),
-        "point" => click_point(&element, &window),
+        "point" => click_point(&element, &window, false),
+        // Where a click sent to the app itself would land: only the app's own things can be over it.
+        "pointBehind" => click_point(&element, &window, true),
+        "select" => select_text(&element, value.unwrap_or("")),
         "showMenu" => done("AXShowMenu"),
         "increment" => done("AXIncrement"),
         "decrement" => done("AXDecrement"),
@@ -1816,7 +1865,11 @@ pub fn shortcut(pid: i32, key: &str, modifiers: &[Modifier], press: bool) -> Res
         }
     }
     let Some((item, path, enabled)) = found else { return missing() };
-    let web = app_focus(&app).as_deref().is_some_and(in_web_page);
+    // Behind others a Chromium app won't say what has its focus: taken as its page, which keeps its keys.
+    let web = match app_focus(&app) {
+        Some(focus) => in_web_page(&focus),
+        None => chromium_based(pid),
+    };
     if !press {
         return Ok(json!({ "found": true, "path": path, "enabled": enabled, "web": web, "pressed": false }));
     }
@@ -2318,17 +2371,22 @@ fn panel_snapshot(limit: usize, debug: bool) -> Result<Value> {
 // ---------------------------------------------------------------------------
 
 /// The screen round a point, 64 points by 40, as grey bytes in hex: every
-/// window drawn there but `exclude`'s (Jester's own lie over everything).
+/// window drawn there but `exclude`'s (Jester's own lie over everything), or
+/// with `window` (its number) that window alone.
 /// Compared with one from before a click, it says whether the click showed.
 /// Nothing is kept, written or sent on; without Screen Recording nothing is
 /// looked at (and nothing asked for).
-pub fn glance(x: f64, y: f64, exclude: Option<i32>) -> Result<Value> {
+pub fn glance(x: f64, y: f64, exclude: Option<i32>, window: Option<u32>) -> Result<Value> {
     if !CGPreflightScreenCaptureAccess() {
         return Ok(json!({ "allowed": false }));
     }
     let (wide, high) = crate::protocol::GLANCE;
     // Front to back, as the window server lists them: the order they're drawn in.
-    let mut ids: Vec<*const std::ffi::c_void> = on_screen_windows()?.into_iter().filter(|window| Some(window.pid) != exclude && window.id != 0).map(|window| window.id as usize as *const std::ffi::c_void).collect();
+    // One window alone (`window`) is seen as it is whatever lies over it: how a click in a window behind others is checked.
+    let mut ids: Vec<*const std::ffi::c_void> = match window.filter(|&id| id != 0) {
+        Some(id) => vec![id as usize as *const std::ffi::c_void],
+        None => on_screen_windows()?.into_iter().filter(|window| Some(window.pid) != exclude && window.id != 0).map(|window| window.id as usize as *const std::ffi::c_void).collect(),
+    };
     if ids.is_empty() {
         return Ok(json!({ "allowed": true, "gray": null }));
     }
@@ -2344,6 +2402,304 @@ pub fn glance(x: f64, y: f64, exclude: Option<i32>) -> Result<Value> {
     objc2_core_graphics::CGContext::draw_image(Some(&context), CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: wide as f64, height: high as f64 } }, Some(&image));
     drop(context);
     Ok(json!({ "allowed": true, "gray": crate::protocol::hex(&pixels), "width": wide, "height": high }))
+}
+
+// ---------------------------------------------------------------------------
+// Input for an app that isn't in front (after Atticus 2 and trycua/cua-driver,
+// both MIT): each event goes to the app's own process with its window written
+// into it, so the pointer, the app in front, the order of the windows and the
+// user's typing stay as they are. The window server's own way in is SkyLight,
+// a private framework: every call into it is looked up when first wanted, and
+// with any of them missing nothing here is tried — the caller brings the app
+// forward and clicks as a hand would.
+// ---------------------------------------------------------------------------
+
+extern "C" {
+    fn dlopen(path: *const std::ffi::c_char, mode: std::ffi::c_int) -> *mut std::ffi::c_void;
+    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+    /// Public Core Graphics: an event to one process.
+    fn CGEventPostToPid(pid: i32, event: *const std::ffi::c_void);
+}
+
+type Raw = *const std::ffi::c_void;
+/// The calls background input is made with.
+struct Behind {
+    /// SLEventPostToPid: an event to a process, as the window server hands one over.
+    post: unsafe extern "C" fn(i32, Raw),
+    /// CGEventSetWindowLocation: where in its window an event is.
+    stamp: unsafe extern "C" fn(Raw, CGPoint),
+    /// SLPSPostEventRecordTo and GetProcessForPID: telling an app one of its windows has the keyboard, without raising it.
+    record: unsafe extern "C" fn(Raw, Raw) -> i32,
+    process: unsafe extern "C" fn(i32, *mut std::ffi::c_void) -> i32,
+}
+// Addresses of functions in frameworks that stay loaded.
+unsafe impl Sync for Behind {}
+unsafe impl Send for Behind {}
+
+fn behind() -> Option<&'static Behind> {
+    static CALLS: std::sync::OnceLock<Option<Behind>> = std::sync::OnceLock::new();
+    CALLS
+        .get_or_init(|| unsafe {
+            let sky = dlopen(c"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight".as_ptr(), 1);
+            let services = dlopen(c"/System/Library/Frameworks/ApplicationServices.framework/Frameworks/HIServices.framework/HIServices".as_ptr(), 1);
+            if sky.is_null() || services.is_null() {
+                return None;
+            }
+            let find = |from: *mut std::ffi::c_void, name: &std::ffi::CStr| {
+                let found = dlsym(from, name.as_ptr());
+                (!found.is_null()).then_some(found)
+            };
+            Some(Behind {
+                post: std::mem::transmute::<*mut std::ffi::c_void, unsafe extern "C" fn(i32, Raw)>(find(sky, c"SLEventPostToPid")?),
+                stamp: std::mem::transmute::<*mut std::ffi::c_void, unsafe extern "C" fn(Raw, CGPoint)>(find(sky, c"CGEventSetWindowLocation")?),
+                record: std::mem::transmute::<*mut std::ffi::c_void, unsafe extern "C" fn(Raw, Raw) -> i32>(find(sky, c"SLPSPostEventRecordTo")?),
+                process: std::mem::transmute::<*mut std::ffi::c_void, unsafe extern "C" fn(i32, *mut std::ffi::c_void) -> i32>(find(services, c"GetProcessForPID")?),
+            })
+        })
+        .as_ref()
+}
+
+fn raw(event: &CGEvent) -> Raw {
+    event as *const CGEvent as Raw
+}
+
+/// The app's window a click at a point would reach: its front-most ordinary one drawn there.
+fn window_behind(pid: i32, x: f64, y: f64) -> Option<u32> {
+    on_screen_windows().ok()?.into_iter().find(|window| window.pid == pid && window.layer == 0 && window.id != 0 && window.bounds.is_some_and(|bounds| crate::protocol::holds(bounds, (x, y)))).map(|window| window.id)
+}
+
+/// Tells an app that one of its windows has the keyboard (`on`) or has lost
+/// it, without raising the window, bringing the app forward or taking the
+/// keyboard from the user's own window: an app hands a click to a window's
+/// content only while it counts that window as key (yabai's focus without
+/// raise, by way of cua-driver and Atticus).
+fn key_without_raise(calls: &Behind, pid: i32, window: u32, on: bool) {
+    let mut process = [0u32; 2];
+    if unsafe { (calls.process)(pid, process.as_mut_ptr().cast()) } != 0 {
+        return;
+    }
+    let mut record = [0u8; 0xF8];
+    record[0x04] = 0xF8;
+    record[0x08] = 0x0D;
+    record[0x8A] = if on { 1 } else { 2 };
+    record[0x3C..0x40].copy_from_slice(&window.to_le_bytes());
+    if !on {
+        // What the click queued lands while the window is still key.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    unsafe { (calls.record)(process.as_ptr().cast(), record.as_ptr().cast()) };
+    if on {
+        // The app settles which window is key before the events arrive.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The app's front-most ordinary window, by its number.
+fn top_window(pid: i32) -> Option<u32> {
+    on_screen_windows().ok()?.into_iter().find(|window| window.pid == pid && window.layer == 0).map(|window| window.id)
+}
+
+/// The window server's number for an accessibility window (a private call Rectangle, yabai and AltTab use: accessibility has no attribute for it).
+fn window_number(window: &AXUIElement) -> Option<u32> {
+    static CALL: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let call = (*CALL.get_or_init(|| {
+        let found = unsafe { dlsym(-2isize as *mut std::ffi::c_void, c"_AXUIElementGetWindow".as_ptr()) };
+        (!found.is_null()).then_some(found as usize)
+    }))?;
+    let call: unsafe extern "C" fn(Raw, *mut u32) -> i32 = unsafe { std::mem::transmute(call) };
+    let mut id = 0u32;
+    (unsafe { call(window as *const AXUIElement as Raw, &mut id) } == 0 && id != 0).then_some(id)
+}
+
+/// One mouse event for a window of an app behind others. The fields are the
+/// window server's own (0 the gesture's phase, 1 the click count, 3 the
+/// button, 7 the subtype, 58 one number for the whole gesture; 40 the process
+/// and 51, 91, 92 the window it's for).
+#[allow(clippy::too_many_arguments)]
+fn post_behind(calls: &Behind, source: Option<&CGEventSource>, kind: CGEventType, button: Button, at: (f64, f64), pid: i32, window: u32, phase: i64, count: i64, subtype: i64, gesture: i64, wait_ms: u64) -> Result<()> {
+    let point = CGPoint { x: at.0, y: at.1 };
+    let event = CGEvent::new_mouse_event(source, kind, point, cg_button(button)).ok_or("could not create the click")?;
+    CGEvent::set_flags(Some(&event), CGEventFlags(0));
+    CGEvent::set_location(Some(&event), point);
+    unsafe { (calls.stamp)(raw(&event), point) };
+    let number = if button == Button::Right { 1 } else { 0 };
+    for (field, value) in [(0, phase), (1, count), (3, number), (7, subtype), (58, gesture), (40, pid as i64), (51, window as i64), (91, window as i64), (92, window as i64)] {
+        CGEvent::set_integer_value_field(Some(&event), CGEventField(field), value);
+    }
+    unsafe { (calls.post)(pid, raw(&event)) };
+    std::thread::sleep(Duration::from_millis(wait_ms));
+    Ok(())
+}
+
+/// A click, a double click or a right click in a window of an app that isn't
+/// in front, without bringing it forward or moving the pointer. The window
+/// is the app's front-most one at the point (or `window`, its number, when
+/// the caller knows it). An error means nothing was sent, and the caller may
+/// click in front. (A drag sent this way never reaches the view it starts
+/// in — tried 2026-11-22 — so drags are the pointer's.)
+pub fn click_behind(pid: i32, at: (f64, f64), button: Button, count: u32, window: Option<u32>) -> Result<Value> {
+    let calls = behind().ok_or("this macOS has no way to click in a window that isn't in front")?;
+    if !CGPreflightPostEventAccess() {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    let window = window.filter(|&id| id != 0).or_else(|| window_behind(pid, at.0, at.1)).ok_or("the app has no window at that point to click in")?;
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+    let source = source.as_deref();
+    let gesture = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|since| since.subsec_nanos() as i64).unwrap_or(1);
+    let right = button == Button::Right;
+    let (down, up) = if right { (CGEventType::RightMouseDown, CGEventType::RightMouseUp) } else { (CGEventType::LeftMouseDown, CGEventType::LeftMouseUp) };
+    // A click in a key window brings it in front of its app's other windows: the one that was in front goes back.
+    let top_before = top_window(pid);
+    key_without_raise(calls, pid, window, true);
+    let sent = (|| -> Result<()> {
+        // A move first, for the window to find what's under the point; and for a web page, a click off its edge,
+        // which is what lets Chromium take input from the background as a person's (cua-driver's finding).
+        post_behind(calls, source, CGEventType::MouseMoved, Button::Left, at, pid, window, 2, 0, 3, gesture, 15)?;
+        if !right {
+            post_behind(calls, source, CGEventType::LeftMouseDown, Button::Left, (-1.0, -1.0), pid, window, 1, 1, 3, gesture, 1)?;
+            post_behind(calls, source, CGEventType::LeftMouseUp, Button::Left, (-1.0, -1.0), pid, window, 2, 1, 3, gesture, 100)?;
+        }
+        for n in 1..=count.clamp(1, 2) as i64 {
+            post_behind(calls, source, down, button, at, pid, window, 3, n, 3, gesture, if right { 28 } else { 1 })?;
+            post_behind(calls, source, up, button, at, pid, window, 3, n, 3, gesture, if count >= 2 && n == 1 { 80 } else { 0 })?;
+        }
+        Ok(())
+    })();
+    key_without_raise(calls, pid, window, false);
+    if let (Some(before), Some(after)) = (top_before, top_window(pid)) {
+        if before != after {
+            std::thread::sleep(Duration::from_millis(50));
+            let app = with_timeout(unsafe { AXUIElement::new_application(pid) });
+            if let Some(was) = children(&app).into_iter().find(|kid| window_number(kid) == Some(before)) {
+                perform(&was, "AXRaise");
+            }
+        }
+    }
+    sent?;
+    Ok(json!({ "window": window, "via": "behind" }))
+}
+
+#[link(name = "Carbon", kind = "framework")]
+extern "C" {
+    fn TISCopyCurrentKeyboardLayoutInputSource() -> *const CFType;
+    fn TISGetInputSourceProperty(source: *const CFType, key: *const CFString) -> *const CFType;
+    static kTISPropertyInputSourceID: *const CFString;
+}
+
+/// Whether keys are where a US keyboard has them (the US and ABC layouts):
+/// only then is a character known by its key.
+fn us_layout() -> bool {
+    let source = unsafe { TISCopyCurrentKeyboardLayoutInputSource() };
+    let Some(source) = NonNull::new(source as *mut CFType) else { return false };
+    let source = unsafe { CFRetained::from_raw(source) };
+    let id = unsafe { TISGetInputSourceProperty(&*source, kTISPropertyInputSourceID) };
+    // Owned by the source: borrowed, never released here.
+    let Some(id) = (unsafe { (id as *const CFString).as_ref() }) else { return false };
+    matches!(id.to_string().as_str(), "com.apple.keylayout.US" | "com.apple.keylayout.ABC")
+}
+
+/// Keys with nothing to put into a field: sent even when the app won't say what has its focus.
+const HARMLESS_BEHIND: &[&str] = &["tab", "escape", "up", "down", "left", "right", "pageup", "pagedown", "home", "end", "enter"];
+
+/// Before keys go to an app that isn't in front. They land in the app's own
+/// keyboard focus, in its front-most window: so that window must be the one
+/// meant (`window`, its number), and the focus must not be a password
+/// field. An app in the background often won't say what has its focus
+/// (Chromium never does): then only keys that put nothing in go, unless the
+/// caller put the focus there itself a moment ago (`sure`).
+fn keys_may_go_behind(pid: i32, window: Option<u32>, sure: bool, harmless: bool) -> Result<()> {
+    if !CGPreflightPostEventAccess() {
+        return Err("Accessibility permission has not been granted".into());
+    }
+    let front = top_window(pid).ok_or("the app has no window on screen for keys to go to")?;
+    if window.is_some_and(|window| window != 0 && window != front) {
+        return Err("another of the app's windows is in front of that one, and keys would go to it".into());
+    }
+    let app = with_timeout(unsafe { AXUIElement::new_application(pid) });
+    match app_focus(&app) {
+        Some(focus) if is_secure(&focus) => Err("a password field has the focus there".into()),
+        Some(_) => Ok(()),
+        None if sure || harmless => Ok(()),
+        None => Err("the app won't say what has its keyboard focus while it's behind".into()),
+    }
+}
+
+/// A key, with its modifiers, to an app that isn't in front: it goes to that
+/// app's own keyboard focus and nowhere else (tried on an AppKit text view
+/// and on a Chromium page, 2026-11-22: Return submits, Tab moves on, letters
+/// type, Delete deletes). A shortcut's command is not run by this — an app's
+/// menus don't hear keys from the background — so ⌘ is refused: that's
+/// `shortcut`'s to choose, or the keys' with the app in front.
+pub fn key_behind(pid: i32, key: &str, modifiers: &[Modifier], times: u32, window: Option<u32>, sure: bool) -> Result<Value> {
+    let key = crate::protocol::canonical_key(key);
+    let code = keycode(&key).ok_or_else(|| format!("unknown key \"{key}\""))?;
+    if modifiers.iter().any(|modifier| matches!(modifier, Modifier::Meta | Modifier::Control | Modifier::Fn)) {
+        return Err("a shortcut's keys don't reach an app that isn't in front".into());
+    }
+    keys_may_go_behind(pid, window, sure, modifiers.is_empty() && HARMLESS_BEHIND.contains(&key.as_str()))?;
+    let source = CGEventSource::new(CGEventSourceStateID::Private);
+    let flags = modifiers.iter().fold(implied_flags(&key).0, |flags, modifier| flags | modifier_flag(*modifier).0);
+    for _ in 0..times.clamp(1, 50) {
+        for down in [true, false] {
+            let event = CGEvent::new_keyboard_event(source.as_deref(), code, down).ok_or("could not create the key")?;
+            CGEvent::set_flags(Some(&event), CGEventFlags(flags));
+            unsafe { CGEventPostToPid(pid, raw(&event)) };
+            std::thread::sleep(Duration::from_millis(4));
+        }
+    }
+    Ok(json!({ "via": "behind" }))
+}
+
+/// Text to an app that isn't in front: into that app's own keyboard focus,
+/// which the caller has just put where it wants it (so it's never a field
+/// nobody chose). An app of the Mac's own takes the characters themselves,
+/// in any script. A Chromium page behind others takes no text that way (it
+/// sees one key and inserts nothing): it's typed key by key, which is only
+/// right where the keyboard is a US one and every character has a key
+/// there. Anything else is an error, nothing sent, and the caller types it
+/// with the app in front. A line break is Return; a tab is never sent.
+pub fn text_behind(pid: i32, text: &str, window: Option<u32>) -> Result<Value> {
+    if text.contains('\t') {
+        return Err("typed text can't hold a tab".into());
+    }
+    keys_may_go_behind(pid, window, true, false)?;
+    let source = CGEventSource::new(CGEventSourceStateID::Private);
+    let send = |code: u16, flags: u64, unicode: Option<&[u16]>| -> Result<()> {
+        for down in [true, false] {
+            let event = CGEvent::new_keyboard_event(source.as_deref(), code, down).ok_or("could not create the text")?;
+            CGEvent::set_flags(Some(&event), CGEventFlags(flags));
+            if let Some(units) = unicode {
+                unsafe { CGEvent::keyboard_set_unicode_string(Some(&event), units.len() as _, units.as_ptr()) };
+            }
+            unsafe { CGEventPostToPid(pid, raw(&event)) };
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        Ok(())
+    };
+    if chromium_based(pid) {
+        if !us_layout() {
+            return Err("text for a web page behind others is typed key by key, which needs a US keyboard layout".into());
+        }
+        let mut strokes = Vec::new();
+        for c in text.chars() {
+            let (name, shift) = crate::protocol::us_key(c).ok_or_else(|| format!("“{c}” has no key of its own to type it behind with"))?;
+            strokes.push((keycode(name).ok_or("unknown key")?, shift));
+        }
+        for (code, shift) in strokes {
+            send(code, if shift { CGEventFlags::MaskShift.0 } else { 0 }, None)?;
+        }
+        return Ok(json!({ "via": "behind", "keys": true }));
+    }
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            send(0x24, 0, None)?;
+        }
+        let units: Vec<u16> = line.encode_utf16().collect();
+        for chunk in units.chunks(UNICODE_CHUNK) {
+            send(0, 0, Some(chunk))?;
+        }
+    }
+    Ok(json!({ "via": "behind" }))
 }
 
 // ---------------------------------------------------------------------------
